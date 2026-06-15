@@ -180,7 +180,7 @@ Y = implemented, partial = present but incomplete, - = absent (a gap), n/a = not
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
-| Field generators (waiting_reason) | Y (online) | - (blocked: no event) | n/a (no prompt) | - (doable, unimpl) | Y (online) |
+| Field generators (waiting_reason) | Y (online) | - (blocked: no event) | n/a (no prompt) | Y (online) | Y (online) |
 | Installation management | Y | - | Y | - (no version pinning) | partial (mngr-side update notify + opt-in auto-update; no pinning) |
 | Extra agent subtypes | Y (guardian/fairy/headless) | - | - | - | - (app-server variant deferred) |
 
@@ -982,13 +982,36 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   runs tools, including shell commands, without a confirmation prompt by design
   (`mngr_pi_coding/README.md`). There is no blocked-on-permission state, so `PERMISSIONS` can
   never apply, and `END_OF_TURN` alone adds nothing over RUNNING/WAITING.
-- **opencode** -- **status: should be done (unimplemented work, not blocked).** opencode *does*
-  prompt interactively (its per-tool `ask` policy, e.g. `"edit": "ask"`), and -- unlike agy -- it
-  exposes the signal: the event bus emits `permission.asked` when a tool blocks on approval and
-  `permission.replied` when it is answered. The in-process extension already subscribes to that
-  bus (the `event` hook in `mngr_opencode_plugin.ts`), so it could maintain a `permissions_waiting`
-  marker on those two events exactly as codex's `PermissionRequest`/`PostToolUse` hooks do -- no
-  upstream change required. Simply not yet implemented.
+- **opencode** -- **status: implemented (online)** (both `PERMISSIONS` and `END_OF_TURN`), via
+  `agent_field_generators`. opencode prompts interactively (its per-tool `ask` policy, e.g.
+  `"edit": "ask"`) and -- unlike agy -- exposes the signal on the event bus: `permission.asked`
+  fires when a tool blocks on approval (carrying the request `id`) and `permission.replied` when it
+  is answered (carrying `requestID`). The in-process extension already subscribes to that bus (the
+  `event` hook in `mngr_opencode_plugin.ts`), so it tracks the set of pending request ids and keeps
+  a `permissions_waiting` marker present while any prompt is open -- the multi-session analog of
+  codex's single touch/remove flag (opencode is a server with concurrent subagent sessions).
+  Root-session idle clears any stranded marker as a safety net (codex uses the root `Stop`), and a
+  fresh server clears a marker left by a prior killed/crashed server at startup (codex clears at a
+  fresh root turn; claude has a startup reset). The gating rule lives in one shared
+  `_classify_waiting_reason` routed through both the lifecycle promotion and the field generator, so
+  the two cannot drift (mirrors codex). Notably opencode does **not** inherit codex's cancelled-dialog
+  limitation: codex's hook model fires no terminal hook on Esc/No, stranding both markers until the
+  next turn, but opencode's event bus emits `permission.replied` (on deny) and/or `session.idle` (on
+  deny *and* abort), each of which clears the marker promptly -- verified live against 1.17.7.
+  `OpenCodeAgent.get_lifecycle_state` promotes RUNNING -> WAITING while the marker is present,
+  mirroring claude/codex; `END_OF_TURN` follows from the `active` marker being absent. Covered live
+  by a release test (`test_opencode_waiting_reason_reports_permissions`): a real `bash: ask` agent
+  blocks on an approval prompt and the marker appears -- the one check that exercises the real event
+  wiring against the binary. (Caveat / **revisit**: the `@opencode-ai/sdk` type stubs are out of sync
+  with the shipped binary -- they name the events `permission.updated`/`permissionID`, but the
+  running server emits `permission.asked`/`requestID`, verified by inspecting the binary at **both**
+  1.16.2 and 1.17.7. This is a known class of opencode bug -- the SDK permission types drifted from
+  the binary in the permissions rework, e.g. opencode issue #7006 (a `permission.ask` plugin hook
+  defined in the SDK but never triggered at runtime) -- and community plugins consume
+  `permission.asked`/`permission.replied`, matching the binary, not the SDK's `permission.updated`.
+  The plugin accepts **both** names since opencode self-upgrades; once the SDK and binary reconverge
+  -- or opencode documents which is canonical -- the dead `permission.updated` branch can be dropped.)
+  No upstream change was required.
 - **codex** -- **status: implemented** (both `PERMISSIONS` and `END_OF_TURN`), via
   `agent_field_generators`. `PermissionRequest` touches a `permissions_waiting` marker (inline
   hook command) and `PostToolUse` clears it; the root `Stop` clears any stranded marker as a
@@ -1003,12 +1026,11 @@ Note: core has no first-class "WAITING reason" -- WAITING is binary (marker abse
 `waiting_reason` field is a plugin-specific embellishment that surfaces *why* a WAITING agent is
 blocked (PERMISSIONS vs END_OF_TURN). Implementing `PERMISSIONS` needs two things: (a) the CLI
 actually prompts interactively for tool approval, and (b) it exposes a signal mngr can read while
-the agent is blocked. claude and codex have both (implemented). opencode has both too -- its
-`ask` policy prompts and the event bus emits `permission.asked`/`permission.replied` -- so it is
-doable in the in-process extension, just unimplemented. agy has (a) but not (b): it prompts but
-fires no event while blocked, so it is blocked on an upstream signal. pi has neither -- no
-tool-approval gate at all -- so `PERMISSIONS` is inapplicable. In every unimplemented case
-`END_OF_TURN` alone is derivable but adds nothing over the existing RUNNING/WAITING state.
+the agent is blocked. claude, codex, and opencode have both (implemented): opencode's `ask` policy
+prompts and the event bus emits `permission.asked`/`permission.replied`. agy has (a) but not (b):
+it prompts but fires no event while blocked, so it is blocked on an upstream signal. pi has neither
+-- no tool-approval gate at all -- so `PERMISSIONS` is inapplicable. In the remaining unimplemented
+cases `END_OF_TURN` alone is derivable but adds nothing over the existing RUNNING/WAITING state.
 
 ### Q. Installation management & version pinning
 
@@ -1131,9 +1153,8 @@ so on.
 
 Then the claude features no port has matched yet, in roughly descending value: **session
 preservation on destroy**, **deploy/scheduling contributions**, and the **streaming
-snapshot**. (`waiting_reason` is matched by codex; still worth doing for opencode -- doable
-in-process via its `permission.asked`/`permission.replied` events -- and for agy once it exposes
-a permission signal; inapplicable to pi, which has no approval prompt. See dimension P.)
+snapshot**. (`waiting_reason` is matched by codex and opencode; still worth doing for agy once
+it exposes a permission signal; inapplicable to pi, which has no approval prompt. See dimension P.)
 
 Correctness hardening (shell-quoting of args, onboarding edge cases, etc.) is continuous,
 not a milestone -- expect it throughout. For a concrete worked example of this whole

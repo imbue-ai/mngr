@@ -54,6 +54,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
@@ -72,11 +73,9 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
-from imbue.mngr_claude.plugin import WaitingReason
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
-from imbue.mngr_claude.plugin import _classify_waiting_reason
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _claude_preserved_items
 from imbue.mngr_claude.plugin import _compute_keychain_label_suffix
@@ -967,24 +966,6 @@ def test_agent_field_generators_returns_correct_structure() -> None:
     assert plugin_name == "claude"
     assert "waiting_reason" in generators
     assert callable(generators["waiting_reason"])
-
-
-@pytest.mark.parametrize(
-    "is_active, is_blocked, expected",
-    [
-        # Idle (turn over): END_OF_TURN regardless of a stranded permission marker.
-        (False, False, WaitingReason.END_OF_TURN),
-        (False, True, WaitingReason.END_OF_TURN),
-        # In a turn: PERMISSIONS only while genuinely blocked, else actively running.
-        (True, True, WaitingReason.PERMISSIONS),
-        (True, False, None),
-    ],
-)
-def test_classify_waiting_reason(is_active: bool, is_blocked: bool, expected: WaitingReason | None) -> None:
-    """The shared gating rule used by both get_lifecycle_state and the waiting_reason
-    field generator: PERMISSIONS is gated on is_active, so a stranded marker (active
-    absent) never yields PERMISSIONS."""
-    assert _classify_waiting_reason(is_active, is_blocked) == expected
 
 
 def test_agent_field_generators_waiting_reason_returns_permissions(
