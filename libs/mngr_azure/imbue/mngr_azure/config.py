@@ -222,7 +222,7 @@ class AzureProviderConfig(VpsDockerProviderConfig):
             "Whether the VM syncs its host_dir to the Blob state bucket so it is readable while the VM "
             "is deallocated (a Lima-style offline host_dir; mirrors Lima's is_host_data_volume_exposed). "
             "On by default. When on (and a bucket exists), the create path attaches the prepare-provisioned "
-            "user-assigned managed identity, an on-box daemon periodically `az storage blob sync`s host_dir "
+            "user-assigned managed identity, an on-box daemon periodically `azcopy sync`s host_dir "
             "to hosts/<host_id>/host_dir/, and get_volume_for_host serves offline reads from the bucket. Set "
             "False to disable the host_dir sync entirely (offline host metadata still works via the bucket)."
         ),
