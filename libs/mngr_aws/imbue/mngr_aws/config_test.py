@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.config.data_types import ScalarTuple
-from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay_with_narrowings
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
@@ -136,7 +135,5 @@ def _provider_narrowing_paths(base: AwsProviderConfig, override: AwsProviderConf
     """The narrowing paths the production overlay merge surfaces for one provider config
     over another -- the same path the loader's cross-scope guard uses, exercised at the
     provider-config level."""
-    _, narrowings = merge_models_via_overlay_with_narrowings(
-        base, override, settings_patch_field_names=get_settings_patch_field_names(type(override))
-    )
+    _, narrowings = merge_models_via_overlay_with_narrowings(base, override)
     return narrowings

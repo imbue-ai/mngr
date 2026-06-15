@@ -21,7 +21,6 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import SettingsPatchField
-from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import get_registry_field_names
@@ -84,9 +83,7 @@ def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
         narrowings = base.merge_with_narrowings(override)[1]
     else:
         container_field_names = frozenset()
-        narrowings = merge_models_via_overlay_with_narrowings(
-            base, override, settings_patch_field_names=override_patch_field_names
-        )[1]
+        narrowings = merge_models_via_overlay_with_narrowings(base, override)[1]
     base_fields = dict(base)
     override_fields = dict(override)
     container_entry_classes: dict[str, dict[Any, type[Any]]] = {
@@ -1069,32 +1066,12 @@ def test_detect_settings_narrowing_allows_agent_type_cli_args_superset(mngr_test
     assert detect_settings_narrowing(base, override) == []
 
 
-def test_detect_settings_narrowing_exempts_string_derived_tuple_override(mngr_test_prefix: str) -> None:
-    """A ``StringDerivedTuple`` override over a non-empty list/tuple base is
-    exempt from narrowing detection even when the tokens differ.
-
-    Locks in the marker exemption through the overlay narrowing path directly so a
-    future refactor that breaks the marker discrimination is caught here, not just by
-    the loader-level integration test.
-    """
-    base = MngrConfig(
-        prefix=mngr_test_prefix,
-        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
-    )
-    override = MngrConfig.model_construct(
-        prefix=mngr_test_prefix,
-        agent_types={
-            AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=StringDerivedTuple(("--verbose",)))
-        },
-    )
-    assert detect_settings_narrowing(base, override) == []
-
-
 def test_detect_settings_narrowing_still_flags_plain_tuple_override(mngr_test_prefix: str) -> None:
-    """Sanity check that ``StringDerivedTuple`` is the actual discriminator: the
+    """Sanity check that the ``ScalarTuple`` marker is the actual discriminator: the
     same shape with a plain ``tuple`` override is still flagged as narrowing.
-    Together with the exemption test above, this proves the marker is what gates
-    the exemption rather than some incidental shape property.
+    Together with ``test_detect_settings_narrowing_exempts_scalar_tuple_override``, this
+    proves the marker is what gates the exemption rather than some incidental shape
+    property.
     """
     base = MngrConfig(
         prefix=mngr_test_prefix,
@@ -1107,30 +1084,22 @@ def test_detect_settings_narrowing_still_flags_plain_tuple_override(mngr_test_pr
     assert detect_settings_narrowing(base, override) == ["agent_types.my_claude.cli_args"]
 
 
-def test_would_assignment_narrow_exempts_string_derived_tuple() -> None:
+def test_would_assignment_narrow_exempts_scalar_tuple() -> None:
     """``would_assignment_narrow`` mirrors the leaf-level marker exemption: a
-    ``StringDerivedTuple`` override over a non-empty list/tuple base reports no
-    narrowing, while a plain-tuple override with the same tokens still does. This is
-    the rule the template-application guard in ``apply_create_template`` relies on.
+    ``ScalarTuple`` override (e.g. a string-derived ``cli_args``) over a non-empty
+    list/tuple base reports no narrowing, while a plain-tuple override with the same
+    tokens still does. This is the rule the template-application guard in
+    ``apply_create_template`` relies on.
     """
     base: tuple[str, ...] = ("--debug",)
-    assert would_assignment_narrow(base, StringDerivedTuple(("--verbose",))) is False
+    assert would_assignment_narrow(base, ScalarTuple(("--verbose",))) is False
     assert would_assignment_narrow(base, ("--verbose",)) is True
 
 
-def test_string_derived_tuple_is_a_scalar_tuple() -> None:
-    """``StringDerivedTuple`` specializes ``ScalarTuple`` so the single
-    ``isinstance(_, ScalarTuple)`` check in both narrowing guards covers it and
-    every other replace-by-default field (e.g. ``allowed_ssh_cidrs``) at once.
-    """
-    assert isinstance(StringDerivedTuple(("--verbose",)), ScalarTuple)
-
-
-def test_string_derived_tuple_is_a_static_tuple() -> None:
-    """``StringDerivedTuple`` is now (transitively, via ``ScalarTuple``) a
-    ``StaticTuple``, so the generalized ``Static*`` exemption covers it -- its
-    prior narrowing-exemption behavior is unchanged."""
-    assert isinstance(StringDerivedTuple(("--verbose",)), StaticTuple)
+def test_scalar_tuple_is_a_static_tuple() -> None:
+    """``ScalarTuple`` is a ``StaticTuple``, so the generalized ``Static*`` exemption
+    covers a string-derived ``cli_args`` value -- its narrowing-exemption behavior is
+    unchanged."""
     assert isinstance(ScalarTuple(("--verbose",)), StaticTuple)
 
 

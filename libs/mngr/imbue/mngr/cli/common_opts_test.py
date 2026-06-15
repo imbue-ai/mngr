@@ -863,14 +863,13 @@ def test_apply_create_template_scalar_overrides_default_param(mngr_test_prefix: 
     assert result["type"] == "codex"
 
 
-def test_apply_template_extend_dict_shallow_merges_keys() -> None:
-    """``key__extend = {...}`` on a dict-typed value shallow-merges keys, with the
-    extend value's keys winning on collision (matches the resolver's dict semantics).
+def test_apply_template_extend_dict_merges_keys() -> None:
+    """``key__extend = {...}`` on a dict-typed value merges keys, preserving siblings
+    not mentioned in the extend value (matches the shared ``apply_extend`` semantics).
 
     No CreateCliOptions field is dict-typed today, so this exercises
-    ``_apply_template_extend`` directly: the helper is shared with the rest of
-    the merge story and must stay shape-correct for the dict branch in case a
-    future option uses one.
+    ``_apply_template_extend`` directly: the helper delegates to ``apply_extend``
+    and must stay shape-correct for the dict branch in case a future option uses one.
     """
     result = _apply_template_extend(
         {"a": "1"},
@@ -879,6 +878,18 @@ def test_apply_template_extend_dict_shallow_merges_keys() -> None:
         param_name="example_dict_field",
     )
     assert result == {"a": "1", "b": "2"}
+
+
+def test_apply_template_extend_dict_recurses_into_nested_extend() -> None:
+    """A nested ``key__extend`` inside the dict extend value recurses rather than
+    shallow-replacing the nested value (the recursive fix over the prior shallow merge)."""
+    result = _apply_template_extend(
+        {"allow": ["old"], "defaultMode": "acceptEdits"},
+        {"allow__extend": ["new"]},
+        template_name="dev",
+        param_name="permissions",
+    )
+    assert result == {"allow": ["old", "new"], "defaultMode": "acceptEdits"}
 
 
 # =============================================================================

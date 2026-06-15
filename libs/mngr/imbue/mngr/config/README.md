@@ -140,8 +140,9 @@ the dropped value. There is no separate model-walker.
 The overlay's `narrowing_paths` does the detection (in `imbue.overlay.merge`):
 
 - An override that is a superset, a no-op, or a `Static*` atomic aggregate does **not**
-  narrow. A `ScalarTuple` / `StringDerivedTuple` (a string-shaped TOML value coerced to
-  a tuple) is a `Static*`, so replacing it is a value-set, not narrowing. Because
+  narrow. A `ScalarTuple` (a string-shaped TOML value coerced to a tuple, e.g. a
+  string-written `cli_args`) is a `Static*`, so replacing it is a value-set, not
+  narrowing. Because
   `model_dump` strips the `Static*` subclass back to a plain aggregate, the pipeline
   re-marks those values on the override before merging (see `_collect_static_marker_paths`
   / `_remark_static_leaves`) -- which relies on the markers' proven-pure round-trip.

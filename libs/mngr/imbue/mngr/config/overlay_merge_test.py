@@ -106,7 +106,7 @@ def _agent(**fields: Any) -> AgentTypeConfig:
     """Build a base ``AgentTypeConfig`` the way the loader does: sparse
     ``model_construct`` (only the written keys land in ``model_fields_set``), with
     the same tuple/string normalization the loader applies before construct so a
-    string-written ``cli_args`` becomes a ``StringDerivedTuple``.
+    string-written ``cli_args`` becomes a ``ScalarTuple``.
     """
     return AgentTypeConfig.model_construct(**_normalize_tuple_fields_for_construct(fields))
 
@@ -1324,7 +1324,7 @@ _NARROWING_CASES: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = [
     ("list_field_unchanged", [{"unset_vars": ["A", "B"]}], {"unset_vars": ["A", "B"]}),
     # --- enabled_backends list narrowed / replaced ---
     ("backends_replaced", [{"enabled_backends": ["docker", "modal"]}], {"enabled_backends": ["docker"]}),
-    # --- cli_args as a STRING (-> StringDerivedTuple, EXEMPT) over a list ---
+    # --- cli_args as a STRING (-> ScalarTuple, EXEMPT) over a list ---
     (
         "cli_args_string_over_list_exempt",
         [{"agent_types": {"a": {"cli_args": ["x", "y", "z"]}}}],

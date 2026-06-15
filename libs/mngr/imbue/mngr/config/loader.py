@@ -34,7 +34,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
-from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import resolve_extends
@@ -58,6 +57,7 @@ from imbue.mngr.utils.env_utils import parse_bool_env
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.overlay.markers import ScalarTuple
 from imbue.overlay.operators import EXTEND_SUFFIX
 from imbue.overlay.operators import bare_key
 from imbue.overlay.operators import is_extend_key
@@ -661,17 +661,16 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
     cli_args gets special shell-splitting behavior for single strings.
     All other tuple fields just convert list -> tuple.
 
-    When the source value is a string, the result is a ``StringDerivedTuple`` (a
-    ``Static*`` marker) so the overlay narrowing detector recognises the
-    scalar-replacement intent and exempts it from the per-entry narrowing check
-    against the lower-precedence layer.
+    When the source value is a string, the result is a ``ScalarTuple`` (a ``Static*``
+    marker) so the overlay narrowing detector recognises the scalar-replacement intent
+    and exempts it from the per-entry narrowing check against the lower-precedence layer.
     """
     result = raw_config
     if "cli_args" in result:
         cli_args = result["cli_args"]
         if isinstance(cli_args, str):
             tokens = split_cli_args_string(cli_args) if cli_args else ()
-            normalized: Any = StringDerivedTuple(tokens)
+            normalized: Any = ScalarTuple(tokens)
         elif isinstance(cli_args, (list, tuple)):
             normalized = tuple(cli_args)
         else:
@@ -684,7 +683,7 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
         value = result[field_name]
         if isinstance(value, str):
             # Single string -> wrap in a one-element tuple (no shell splitting for these fields)
-            result = {**result, field_name: StringDerivedTuple((value,))}
+            result = {**result, field_name: ScalarTuple((value,))}
         elif isinstance(value, (list, tuple)):
             result = {**result, field_name: tuple(value)}
         else:

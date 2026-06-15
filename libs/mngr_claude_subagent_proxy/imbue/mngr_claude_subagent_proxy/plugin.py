@@ -313,6 +313,28 @@ def _write_proxy_skill(host: OnlineHostInterface, work_dir: Path) -> None:
     host.write_text_file(skill_path, content)
 
 
+def _load_settings_dict(host: OnlineHostInterface, path: Path) -> dict[str, Any] | None:
+    """Read and parse a Claude settings JSON file, returning the dict or None.
+
+    Returns None (logging a warning) when the file is missing, not valid JSON,
+    or whose top-level value is not a JSON object. Callers handle the None case
+    by skipping their pass.
+    """
+    try:
+        content = host.read_text_file(path)
+    except FileNotFoundError:
+        return None
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("Could not parse Claude settings at {}; skipping", path)
+        return None
+    if not isinstance(data, dict):
+        logger.warning("Claude settings at {} is not a JSON object; skipping", path)
+        return None
+    return data
+
+
 def _merge_hooks_into_settings(host: OnlineHostInterface, settings_path: Path, hooks_config: dict[str, Any]) -> None:
     """Layer ``hooks_config`` onto the agent's Claude settings file.
 
@@ -356,12 +378,8 @@ def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_d
     the file to be gitignored -- the one place that requirement still applies.
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
-    try:
-        settings: dict[str, Any] = json.loads(host.read_text_file(settings_path))
-    except FileNotFoundError:
-        return
-    except json.JSONDecodeError:
-        logger.warning("Could not parse {}; skipping user Stop-hook guard pass", settings_path)
+    settings = _load_settings_dict(host, settings_path)
+    if settings is None:
         return
     if guard_user_stop_hooks_against_proxy_children(settings):
         check_settings_local_gitignored(host, work_dir)
@@ -426,16 +444,8 @@ def _guard_stop_hooks_in_file(host: OnlineHostInterface, path: Path) -> None:
     file back. No-op if the file is missing, malformed, or already fully
     guarded.
     """
-    try:
-        content = host.read_text_file(path)
-    except FileNotFoundError:
-        return
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse {}; skipping Stop-hook guard pass", path)
-        return
-    if not isinstance(data, dict):
+    data = _load_settings_dict(host, path)
+    if data is None:
         return
     if not guard_user_stop_hooks_against_proxy_children(data):
         return
@@ -525,14 +535,8 @@ def _check_subagent_hooks_compat(host: OnlineHostInterface, agent: AgentInterfac
     not at all? -- so we fail loudly rather than silently strip or duplicate.
     """
     settings_path = agent.work_dir / ".claude" / "settings.local.json"
-    try:
-        content = host.read_text_file(settings_path)
-    except FileNotFoundError:
-        return
-    try:
-        settings: dict[str, Any] = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse settings.local.json at {}; assuming no stop hooks", settings_path)
+    settings = _load_settings_dict(host, settings_path)
+    if settings is None:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -574,14 +578,8 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     if os.environ.get(_OPT_OUT_PROJECT_STOP_CHECK_ENV, "") == "1":
         return
     settings_path = work_dir / ".claude" / "settings.json"
-    try:
-        content = host.read_text_file(settings_path)
-    except FileNotFoundError:
-        return
-    try:
-        settings: dict[str, Any] = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse {}; skipping project stop-hook check", settings_path)
+    settings = _load_settings_dict(host, settings_path)
+    if settings is None:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -713,14 +711,8 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
     (the compat check has already rejected ambiguous user Stop/SubagentStop hooks).
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
-    try:
-        content = host.read_text_file(settings_path)
-    except FileNotFoundError:
-        return
-    try:
-        settings: dict[str, Any] = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse settings.local.json at {}; not stripping user hooks", settings_path)
+    settings = _load_settings_dict(host, settings_path)
+    if settings is None:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):

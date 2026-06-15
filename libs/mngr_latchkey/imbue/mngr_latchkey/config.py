@@ -11,10 +11,9 @@ opaque permissions handles, the gateway record, etc.) lives below
 The CLI reads these values through :func:`resolve_latchkey_settings`,
 which applies the documented precedence chain (CLI flag > env var >
 settings.toml > built-in default). Both fields are modelled as
-``... | None`` because, on the override side of ``merge_with``, a
-``None`` value means "user did not set this field in their TOML", not
-"clear it" -- preserving the standard ``mngr`` merge semantics where
-later configs only override fields that were explicitly set.
+``... | None`` because a ``None`` value means "user did not set this
+field in their TOML", not "clear it" -- when an override config is
+assigned over a base, only fields that were explicitly set take effect.
 """
 
 from pathlib import Path

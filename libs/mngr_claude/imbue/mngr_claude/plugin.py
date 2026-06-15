@@ -95,6 +95,7 @@ from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_claude_config
+from imbue.mngr_claude.claude_config import fold_hook_configs
 from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
 from imbue.mngr_claude.claude_config import get_claude_config_dir
@@ -103,7 +104,6 @@ from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import is_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import is_onboarding_completed
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
-from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
@@ -360,6 +360,21 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
 
 
+def build_mngr_hook_configs(config: ClaudeAgentConfig) -> list[dict[str, Any]]:
+    """Build the list of mngr hook configs to fold into a Claude settings file.
+
+    Always includes the readiness hooks. Adds the macOS keychain credential-sync
+    hook when ``sync_credentials_on_login`` is set (on macOS), and the permission
+    auto-allow hook when ``auto_allow_permissions`` is set.
+    """
+    hook_configs = [build_readiness_hooks_config()]
+    if config.sync_credentials_on_login and is_macos():
+        hook_configs.append(build_credential_sync_hooks_config())
+    if config.auto_allow_permissions:
+        hook_configs.append(build_permission_auto_allow_hooks_config())
+    return hook_configs
+
+
 class ProvisioningContext(FrozenModel):
     """Runtime context derived from host type and transfer mode."""
 
@@ -556,13 +571,7 @@ def _build_settings_json(
 
     # Fold in mngr's own hooks (concatenated into the hook event lists by
     # merge_hooks_config).
-    hook_configs = [build_readiness_hooks_config()]
-    if config.sync_credentials_on_login and is_macos():
-        hook_configs.append(build_credential_sync_hooks_config())
-    if config.auto_allow_permissions:
-        hook_configs.append(build_permission_auto_allow_hooks_config())
-    for hook_config in hook_configs:
-        data = merge_hooks_config(data, hook_config) or data
+    data = fold_hook_configs(data, build_mngr_hook_configs(config))
 
     # Normalize the base ``B``: lift any ``__extend`` a user may have placed in
     # their home settings.json into nodes and finalize against nothing
@@ -1877,15 +1886,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """
         # The always-on readiness hooks, plus the optional credential-sync
         # (macOS) and permission auto-allow hooks.
-        hook_configs = [build_readiness_hooks_config()]
-        if self.agent_config.sync_credentials_on_login and is_macos():
-            hook_configs.append(build_credential_sync_hooks_config())
-        if self.agent_config.auto_allow_permissions:
-            hook_configs.append(build_permission_auto_allow_hooks_config())
-
-        settings: dict[str, Any] = {}
-        for hook_config in hook_configs:
-            settings = merge_hooks_config(settings, hook_config) or settings
+        settings = fold_hook_configs({}, build_mngr_hook_configs(self.agent_config))
 
         settings_path = get_managed_settings_path(self._get_agent_dir())
         # The plugin/claude/ parent may not exist yet (in use_env_config_dir

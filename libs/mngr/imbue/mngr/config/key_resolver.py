@@ -4,7 +4,7 @@ suffixes (``__extend`` / ``__assign``) across every surface -- env vars, TOML,
 
 Runs before ``parse_config`` and resolves each marker against the current config state
 into a plain assignment, except on the deferred-resolution paths (see
-``_DEFERRED_EXTEND_MATCHERS``), whose markers are preserved for a runtime base. The raw
+``is_deferred_extend_path``), whose markers are preserved for a runtime base. The raw
 dict it returns is otherwise marker-free, so the parser never sees the operators.
 
 For the operator semantics themselves (concat / recursive dict-merge / set-union, the
@@ -15,7 +15,6 @@ end-to-end see ``config/README.md``.
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
-from typing import Final
 
 from pydantic import BaseModel
 
@@ -136,7 +135,7 @@ def _resolve_extends(
     against ``base`` traverse pydantic model attributes and Mapping keys interchangeably,
     so the same function works whether ``base`` is a parsed ``MngrConfig``, a nested
     config object, or a raw dict. On a deferred-resolution path (see
-    ``_DEFERRED_*_MATCHERS``) a marker whose base lookup yields ``None`` is preserved
+    ``is_deferred_extend_path`` / ``is_deferred_assign_path``) a marker whose base lookup yields ``None`` is preserved
     verbatim rather than collapsed, so it resolves later against a concrete runtime base
     (a new template's ``env__extend`` against the ``mngr create`` params; a
     ``settings_overrides`` marker against the provision base).
@@ -187,61 +186,30 @@ def _resolve_extends(
     return result
 
 
-class _ExactDepthMatcher(BaseModel):
-    """Matches a path of an exact length whose leading segments equal ``prefix``.
+# Paths whose markers are *deferred*: preserved verbatim at config-load (when the
+# base has no value to extend) and resolved later against a concrete runtime base.
+# Each deferred path has a wired consumer:
+#   - ``create_templates.<name>`` (exactly two segments) -> ``apply_create_template``
+#     (cli/common_opts.py); deeper paths are structurally invalid template bodies and
+#     are not deferred.
+#   - ``agent_types.<name>.settings_overrides`` (and anything under it) ->
+#     ``_build_settings_json`` (mngr_claude/plugin.py), folded against the provision
+#     base ``B``. The ``<name>`` segment is dynamic.
 
-    The path must be exactly ``len(prefix) + 1`` segments long (the trailing
-    segment is the dynamic container name). Used for ``create_templates``, whose
-    options live exactly one level inside the container --
-    ``('create_templates', '<name>')`` -- so deeper paths (structurally invalid
-    template bodies) are not given the preserve-extend treatment.
+
+def _is_settings_overrides_path(path: tuple[str, ...]) -> bool:
+    """Return True for any path inside an ``agent_types.<name>.settings_overrides`` subtree.
+
+    ``<name>`` (path[1]) is a user-chosen agent-type name and matches any value; the
+    marker may sit directly inside ``settings_overrides`` (path of length 3) or nested
+    at any depth under it (length > 3).
     """
-
-    prefix: tuple[str, ...]
-
-    def matches(self, path: tuple[str, ...]) -> bool:
-        return len(path) == len(self.prefix) + 1 and path[: len(self.prefix)] == self.prefix
+    return len(path) >= 3 and path[0] == "agent_types" and path[2] == "settings_overrides"
 
 
-class _PrefixMatcher(BaseModel):
-    """Matches any path at or below ``prefix``.
-
-    Used for ``settings_overrides``: a marker living directly inside, or at any
-    depth under, ``('agent_types', '<name>', 'settings_overrides')`` is deferred
-    to the provision-time fold, so the match is on the prefix rather than an exact
-    depth. ``resolve_extends`` passes the path of the dict *containing* the marker,
-    which equals the prefix when the marker sits directly inside settings_overrides
-    -- hence ``>=`` rather than ``>``. The ``<name>`` segment is dynamic, matched
-    by the ``__wildcard__`` sentinel below.
-    """
-
-    prefix: tuple[str, ...]
-
-    def matches(self, path: tuple[str, ...]) -> bool:
-        if len(path) < len(self.prefix):
-            return False
-        return all(_segment_matches(expected, actual) for expected, actual in zip(self.prefix, path, strict=False))
-
-
-# Sentinel marking a path segment whose concrete value is a user-chosen name
-# (e.g. the agent-type name or the template name) and so matches any segment.
-_WILDCARD_SEGMENT: Final[str] = "__wildcard__"
-
-
-def _segment_matches(expected: str, actual: str) -> bool:
-    return expected == _WILDCARD_SEGMENT or expected == actual
-
-
-# Registry of paths whose ``__extend`` markers are *deferred*: preserved verbatim
-# at config-load (when the base has no value to extend) and resolved later
-# against a concrete runtime base. Each entry must have a wired consumer:
-#   - ``create_templates.<name>`` -> ``apply_create_template`` (cli/common_opts.py)
-#   - ``agent_types.<name>.settings_overrides`` -> ``_build_settings_json``
-#     (mngr_claude/plugin.py), folded against the provision base ``B``.
-_DEFERRED_EXTEND_MATCHERS: Final[tuple[_ExactDepthMatcher | _PrefixMatcher, ...]] = (
-    _ExactDepthMatcher(prefix=("create_templates",)),
-    _PrefixMatcher(prefix=("agent_types", _WILDCARD_SEGMENT, "settings_overrides")),
-)
+def _is_create_template_option_path(path: tuple[str, ...]) -> bool:
+    """Return True for a ``create_templates.<name>`` option key (exactly two segments)."""
+    return len(path) == 2 and path[0] == "create_templates"
 
 
 def is_deferred_extend_path(path: tuple[str, ...]) -> bool:
@@ -249,21 +217,11 @@ def is_deferred_extend_path(path: tuple[str, ...]) -> bool:
 
     Used by ``resolve_extends`` to recognise leaf keys that should keep their
     ``__extend`` suffix for deferred runtime resolution rather than being eagerly
-    resolved against the config-load-time base. See ``_DEFERRED_EXTEND_MATCHERS``
-    for the registry of deferred paths and their consumers.
+    resolved against the config-load-time base. The two deferred subtrees are
+    ``create_templates.<name>`` (resolved at ``mngr create`` time) and
+    ``agent_types.<name>.settings_overrides`` (resolved at provision time).
     """
-    return any(matcher.matches(path) for matcher in _DEFERRED_EXTEND_MATCHERS)
-
-
-# Deferred paths where a ``__assign`` marker (not only ``__extend``) is also
-# preserved for runtime resolution. Scoped to ``settings_overrides``, whose consumer
-# (``_build_settings_json``) re-lifts the stored patch and honours the no-warn
-# ``Assign``. ``create_templates`` is intentionally excluded: its consumer
-# (``apply_create_template``) reads only ``__extend``, so a preserved ``__assign``
-# there would surface as a literal option key.
-_DEFERRED_ASSIGN_MATCHERS: Final[tuple[_PrefixMatcher, ...]] = (
-    _PrefixMatcher(prefix=("agent_types", _WILDCARD_SEGMENT, "settings_overrides")),
-)
+    return _is_create_template_option_path(path) or _is_settings_overrides_path(path)
 
 
 def is_deferred_assign_path(path: tuple[str, ...]) -> bool:
@@ -271,7 +229,10 @@ def is_deferred_assign_path(path: tuple[str, ...]) -> bool:
     deferred runtime resolution rather than collapsed to a bare assign at load.
 
     Distinct from ``is_deferred_extend_path``: deferred ``__assign`` preservation is
-    limited to consumers that re-lift the stored patch and understand the no-warn
-    assign (``settings_overrides``), so the no-warn intent survives to provision.
+    limited to ``settings_overrides``, whose consumer (``_build_settings_json``)
+    re-lifts the stored patch and honours the no-warn ``Assign``, so the no-warn
+    intent survives to provision. ``create_templates`` is intentionally excluded: its
+    consumer (``apply_create_template``) reads only ``__extend``, so a preserved
+    ``__assign`` there would surface as a literal option key.
     """
-    return any(matcher.matches(path) for matcher in _DEFERRED_ASSIGN_MATCHERS)
+    return _is_settings_overrides_path(path)

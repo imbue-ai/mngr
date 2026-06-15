@@ -8,7 +8,6 @@ from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
@@ -108,11 +107,9 @@ def _apply_custom_overrides_to_parent_config(
     ``settings_overrides`` narrowing here is intentionally not surfaced (deferred with the
     broader narrowing-philosophy decision).
     """
-    settings_patch_field_names = get_settings_patch_field_names(type(parent_config))
     return merge_models_via_overlay(
         parent_config,
         custom_config,
-        settings_patch_field_names=settings_patch_field_names,
         drop_field_names=frozenset(_METADATA_FIELDS),
         serialize_as_any=True,
     )

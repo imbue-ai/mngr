@@ -323,19 +323,34 @@ def remove_claude_trust_for_path(config_path: Path, path: Path) -> bool:
     return True
 
 
-def is_effort_callout_dismissed(config_path: Path) -> bool:
-    """Check whether the effort callout has been dismissed in the given config file.
-
-    Returns True if effortCalloutDismissed is true in the config file.
-    """
+def _get_boolean_flag(config_path: Path, key: str) -> bool:
+    """Return whether the given boolean flag is set to true in the config file."""
     config = read_claude_config(config_path)
-    return bool(config.get("effortCalloutDismissed", False))
+    return bool(config.get(key, False))
+
+
+def _set_boolean_flag(config_path: Path, key: str, log_message: str) -> None:
+    """Set the given boolean flag to true in the config file. No-op if already set.
+
+    Acquires the config lock, reads, and atomically writes the updated config.
+    """
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
+        if config.get(key, False):
+            return
+        config[key] = True
+        _write_claude_config_atomic(config_path, config)
+
+    logger.trace(log_message)
+
+
+def is_effort_callout_dismissed(config_path: Path) -> bool:
+    """Check whether the effort callout has been dismissed in the given config file."""
+    return _get_boolean_flag(config_path, "effortCalloutDismissed")
 
 
 def check_effort_callout_dismissed(config_path: Path) -> None:
     """Check that the effort callout has been dismissed in the given config file.
-
-    Reads the config file and verifies that effortCalloutDismissed is true.
 
     Raises ClaudeEffortCalloutNotDismissedError if the effort callout has not
     been dismissed.
@@ -345,24 +360,13 @@ def check_effort_callout_dismissed(config_path: Path) -> None:
 
 
 def dismiss_effort_callout(config_path: Path) -> None:
-    """Set effortCalloutDismissed=true in the given config file.
-
-    Acquires the config lock and sets the field. No-op if already set.
-    """
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("effortCalloutDismissed", False):
-            return
-        config["effortCalloutDismissed"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Dismissed effort callout in Claude config")
+    """Set effortCalloutDismissed=true in the given config file. No-op if already set."""
+    _set_boolean_flag(config_path, "effortCalloutDismissed", "Dismissed effort callout in Claude config")
 
 
 def is_onboarding_completed(config_path: Path) -> bool:
     """Check whether onboarding has been completed in the given config file."""
-    config = read_claude_config(config_path)
-    return bool(config.get("hasCompletedOnboarding", False))
+    return _get_boolean_flag(config_path, "hasCompletedOnboarding")
 
 
 def check_onboarding_completed(config_path: Path) -> None:
@@ -373,20 +377,12 @@ def check_onboarding_completed(config_path: Path) -> None:
 
 def complete_onboarding(config_path: Path) -> None:
     """Set hasCompletedOnboarding=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("hasCompletedOnboarding", False):
-            return
-        config["hasCompletedOnboarding"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Marked onboarding as completed in Claude config")
+    _set_boolean_flag(config_path, "hasCompletedOnboarding", "Marked onboarding as completed in Claude config")
 
 
 def is_bypass_permissions_accepted(config_path: Path) -> bool:
     """Check whether the bypass permissions prompt has been accepted in the given config file."""
-    config = read_claude_config(config_path)
-    return bool(config.get("bypassPermissionsModeAccepted", False))
+    return _get_boolean_flag(config_path, "bypassPermissionsModeAccepted")
 
 
 def check_bypass_permissions_accepted(config_path: Path) -> None:
@@ -397,26 +393,12 @@ def check_bypass_permissions_accepted(config_path: Path) -> None:
 
 def accept_bypass_permissions(config_path: Path) -> None:
     """Set bypassPermissionsModeAccepted=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("bypassPermissionsModeAccepted", False):
-            return
-        config["bypassPermissionsModeAccepted"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Accepted bypass permissions in Claude config")
+    _set_boolean_flag(config_path, "bypassPermissionsModeAccepted", "Accepted bypass permissions in Claude config")
 
 
 def acknowledge_cost_threshold(config_path: Path) -> None:
     """Set hasAcknowledgedCostThreshold=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("hasAcknowledgedCostThreshold", False):
-            return
-        config["hasAcknowledgedCostThreshold"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Acknowledged cost threshold in Claude config")
+    _set_boolean_flag(config_path, "hasAcknowledgedCostThreshold", "Acknowledged cost threshold in Claude config")
 
 
 def check_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
@@ -864,3 +846,15 @@ def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str
                 any_added = True
 
     return merged if any_added else None
+
+
+def fold_hook_configs(base: dict[str, Any], hook_configs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fold a sequence of hook configs onto a base settings dict via ``merge_hooks_config``.
+
+    Each config is merged in order, skipping duplicates. Returns the resulting
+    settings dict (the base unchanged if every hook already existed).
+    """
+    data = base
+    for hook_config in hook_configs:
+        data = merge_hooks_config(data, hook_config) or data
+    return data

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import shlex
-from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
 from typing import Annotated
@@ -14,7 +13,6 @@ from uuid import uuid4
 
 import pluggy
 from pydantic import AfterValidator
-from pydantic import BaseModel
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
 from pydantic import field_validator
@@ -25,6 +23,16 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+
+# Re-exported from ``field_markers`` (the leaf module that owns them) so existing
+# ``from ...config.data_types import SettingsPatchField / get_*`` imports keep working.
+# The redundant ``as`` aliases mark these as intentional re-exports.
+from imbue.mngr.config.field_markers import RegistryField as RegistryField
+from imbue.mngr.config.field_markers import SettingsPatchField as SettingsPatchField
+from imbue.mngr.config.field_markers import get_registry_field_names as get_registry_field_names
+from imbue.mngr.config.field_markers import get_settings_patch_field_names as get_settings_patch_field_names
+from imbue.mngr.config.field_markers import is_registry_field as is_registry_field
+from imbue.mngr.config.field_markers import is_settings_patch_field as is_settings_patch_field
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay_with_narrowings
 from imbue.mngr.errors import ConfigParseError
@@ -57,92 +65,6 @@ _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 # === Helper Functions ===
 
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
-
-
-class SettingsPatchField:
-    """Marker attached (via ``Annotated[dict[str, Any], SettingsPatchField()]``) to
-    a dict field whose cross-layer merge **accumulates** as a settings *patch*
-    rather than assigning by default.
-
-    ``merge_with`` (config-scope merge) and ``_apply_custom_overrides_to_parent_config``
-    (agent-type ``parent_type`` inheritance) read this marker off the field's
-    ``model_fields[name].metadata``. A marked field is combined via
-    ``combine_patches`` (the four-rule, recursive, marker-preserving combine) so a
-    lower/parent layer's contribution is never dropped wholesale -- even for
-    non-overlapping keys, which an assign would clobber. Every other field stays
-    assign-by-default.
-
-    The field carrying this marker (``ClaudeAgentConfig.settings_overrides``) lives
-    on a plugin subclass; the base ``merge_with`` reads the marker generically, so
-    core never has to know the field's name. Because such a field accumulates
-    (combine, never assign), a higher layer that merely adds keys is a superset and
-    cannot narrow; only a bare assign that drops a non-empty aggregate *inside* the
-    patch is surfaced as a narrowing (by the overlay merge, at any depth).
-    """
-
-
-def is_settings_patch_field(metadata: Sequence[Any]) -> bool:
-    """Return True if a field's ``metadata`` contains a ``SettingsPatchField`` marker."""
-    return any(isinstance(item, SettingsPatchField) for item in metadata)
-
-
-def get_settings_patch_field_names(model_class: type[BaseModel]) -> frozenset[str]:
-    """Return the ``SettingsPatchField``-marked field names of a model class.
-
-    Read off the pydantic field metadata so the overlay merge pipeline marks exactly
-    the accumulate-not-assign fields, without hard-coding any field name. A class with
-    no such fields (every config model except the settings-bearing ``AgentTypeConfig``
-    subclass) yields an empty set.
-    """
-    return frozenset(
-        name for name, field in model_class.model_fields.items() if is_settings_patch_field(field.metadata)
-    )
-
-
-class RegistryField:
-    """Marker attached (via ``Annotated[dict[K, V], RegistryField()]``) to a top-level
-    dict-of-models *registry* field whose cross-scope merge is **per key** (instead of
-    assign-by-default).
-
-    The five ``MngrConfig`` registries (``agent_types``, ``providers``, ``plugins``,
-    ``commands``, ``create_templates``) carry it. The overlay merge reads the marker off
-    the field metadata (``get_registry_field_names``) and merges each marked dict per key:
-    a key present in one scope carries through, a key present in both has its entries
-    merged field-by-field (the entry's own merge). A same-named dict nested *inside* a
-    sub-model (e.g. a plugin config's own ``commands`` dict) carries no marker and so is an
-    ordinary assign-by-default aggregate, narrowing-checked as a leaf. Parallel to
-    ``SettingsPatchField`` but a distinct concept: a settings patch *accumulates* keys; a
-    registry merges its entries per key.
-    """
-
-
-def is_registry_field(metadata: Sequence[Any]) -> bool:
-    """Return True if a field's ``metadata`` contains a ``RegistryField`` marker."""
-    return any(isinstance(item, RegistryField) for item in metadata)
-
-
-def get_registry_field_names(model_class: type[BaseModel]) -> frozenset[str]:
-    """Return the ``RegistryField``-marked field names of a model class.
-
-    Read off the pydantic field metadata so the overlay merge marks exactly the
-    per-key-merging registries without hard-coding any field name. A class with no such
-    fields yields an empty set.
-    """
-    return frozenset(name for name, field in model_class.model_fields.items() if is_registry_field(field.metadata))
-
-
-class StringDerivedTuple(ScalarTuple):
-    """Marker for a tuple value originally provided as a single string in user
-    settings.
-
-    Some tuple-typed fields (most notably ``cli_args``) accept either a list/tuple
-    or a single string in TOML. When the user writes a string, the natural unit is
-    the whole string -- so a higher-precedence layer that replaces one string with
-    another is scalar replacement, not aggregate narrowing. A specialization of
-    ``ScalarTuple`` (it inherits the narrowing exemption); this subclass exists so
-    the loader can mark *only* the string-shaped writes of fields that otherwise
-    merge additively.
-    """
 
 
 def _coerce_to_scalar_tuple(value: tuple[str, ...]) -> ScalarTuple:
@@ -312,12 +234,7 @@ class AgentTypeConfig(FrozenModel):
         # Computed via the overlay pipeline (behavior-identical to the old
         # field-by-field merge); see ``overlay_merge.merge_models_via_overlay``
         # and ``config/README.md``.
-        settings_patch_field_names = get_settings_patch_field_names(type(override))
-        return merge_models_via_overlay(
-            self,
-            override,
-            settings_patch_field_names=settings_patch_field_names,
-        )
+        return merge_models_via_overlay(self, override)
 
 
 class ProviderInstanceConfig(FrozenModel):
@@ -587,15 +504,11 @@ class MngrConfig(FrozenModel):
         whole list into its flag-gated narrowing aggregation. ``merge_with`` delegates
         here and discards the paths for callers that only need the merged value.
         """
-        settings_patch_field_names = get_settings_patch_field_names(type(override))
         return merge_models_via_overlay_with_narrowings(
             self,
             override,
-            settings_patch_field_names=settings_patch_field_names,
             serialize_as_any=True,
             drop_none_values=True,
-            settings_patch_field_names_for_class=get_settings_patch_field_names,
-            registry_field_names_for_class=get_registry_field_names,
         )
 
 
