@@ -60,12 +60,10 @@ The base config (`VpsDockerProviderConfig`) provides these settings:
 | `default_idle_timeout` | 800 | Idle timeout in seconds |
 | `default_idle_mode` | `IO` | Idle detection mode |
 | `ssh_connect_timeout` | 60.0 | SSH connection timeout in seconds |
-| `vps_boot_timeout` | 300.0 | VPS provisioning timeout in seconds |
+| `instance_boot_timeout` | 300.0 | Timeout for the cloud instance to become reachable, in seconds |
 | `docker_install_timeout` | 300.0 | Docker installation timeout in seconds |
 | `container_ssh_port` | 2222 | Container sshd port exposed on VPS |
-| `default_region` | `ewr` | Default VPS region |
-| `default_plan` | `vc2-1c-1gb` | Default VPS plan |
-| `default_os_id` | 2136 | Default OS image (Debian 12 x64) |
+| `default_region` | `ewr` | Default cloud region (provider subclasses override the default) |
 | `default_start_args` | `()` | Default `docker run` arguments |
 | `btrfs_mount_path` | `/mngr-btrfs` | Outer-host path where the loop-mounted btrfs filesystem holding the per-host unified volume is mounted |
 | `btrfs_loop_file_path` | `/var/lib/mngr-btrfs.img` | Outer-host path of the loop-backed btrfs image file (allocated with `fallocate`, persisted across reboots via `/etc/fstab`) |
@@ -75,24 +73,29 @@ The base config (`VpsDockerProviderConfig`) provides these settings:
 
 Build args (`-b`) serve two purposes: VPS provisioning and Docker image building.
 
-**VPS-specific args** use the `--vps-` prefix and are consumed by the provider:
+**Provider-specific args** use a per-provider prefix (`--aws-`, `--vultr-`, `--ovh-`) and are consumed by the provider. Example shape for the common knobs:
+
 ```
---vps-region=ewr          # VPS region
---vps-plan=vc2-2c-4gb     # VPS plan (CPU/RAM)
---vps-os=2136             # VPS OS ID
+--<provider>-region=REGION       # Cloud region (aws / vultr / ovh)
+--<provider>-instance-type=TYPE  # AWS only — EC2 instance type
+--<provider>-plan=PLAN           # Vultr / OVH plan
+--ovh-datacenter=DC              # OVH-specific alias for --ovh-region=
+--git-depth=N                    # Shared — git clone depth (about the *local* mngr build context)
 ```
 
-**All other build args** are passed through to `docker build` on the VPS. This follows the same pattern as the Docker provider:
+The old shared `--vps-*` prefix is no longer accepted. Migration: rename `--vps-region=` to `--aws-region=` / `--vultr-region=` / `--ovh-region=` for the relevant provider; rename `--vps-plan=` to `--aws-instance-type=` (AWS) / `--vultr-plan=` / `--ovh-plan=`.
+
+**All other build args** are passed through to `docker build` on the VPS:
 ```
 --file=Dockerfile     # Use a specific Dockerfile
 .                     # Build context (local directory, uploaded to VPS)
 ```
 
-VPS provider implementations must not use any flags that conflict with Docker build flags. All VPS-specific flags must use the `--vps-` prefix.
+Provider implementations must not use flags that conflict with Docker build flags. All provider-specific flags must use their provider prefix.
 
-**Example**: Create a host with a custom Dockerfile on a specific VPS plan:
+**Example**: Create a host with a custom Dockerfile on a specific Vultr plan:
 ```bash
-mngr create my-agent --provider vultr -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
+mngr create my-agent --provider vultr -b --vultr-plan=vc2-2c-4gb -b --file=Dockerfile -b .
 ```
 
 **Start args** (`-s`) are passed to `docker run`:
@@ -117,7 +120,11 @@ To add support for a new VPS provider (e.g., DigitalOcean, Hetzner):
 
 1. Create a new package (e.g., `mngr_digitalocean`)
 2. Implement `VpsClientInterface` with the provider's API
-3. Subclass `VpsDockerProvider` and override `_discover_host_records()` and `_find_host_record()` to use the provider's instance listing API
+3. Subclass `VpsDockerProvider` and override the two discovery extension points:
+   - `_list_provider_vps_hostnames()` — return SSH-reachable hostnames (public IPv4 or provider DNS name like OVH's `serviceName`) for VPSes tagged with `mngr-provider=<self.name>`
+   - `_credentials_configured()` — return whether the provider's API credentials are resolvable
+   The shared discovery flow (SSH-into-each-VPS, read state container, fall back to cache on failure)
+   lives on `VpsDockerProvider` itself; subclasses only need to wire up these two hooks.
 4. Create a `ProviderBackendInterface` implementation and register via pluggy entry points
 
 The btrfs loop-file setup is provided by the base class (`_prepare_btrfs_on_outer`, called at the top of `_setup_container_on_vps`); new providers do not need to install `btrfs-progs` or wire up the loop mount themselves as long as the outer host is a Debian-family Linux with `apt-get` available.

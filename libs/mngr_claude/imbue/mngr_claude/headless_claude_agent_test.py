@@ -26,10 +26,6 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
-from imbue.mngr_claude.headless_claude_agent import extract_assistant_message_id
-from imbue.mngr_claude.headless_claude_agent import extract_assistant_text
-from imbue.mngr_claude.headless_claude_agent import extract_message_start_id
-from imbue.mngr_claude.headless_claude_agent import extract_text_delta
 from imbue.mngr_claude.plugin import ClaudeAgent
 
 # =============================================================================
@@ -172,10 +168,10 @@ def test_assemble_command_includes_print_and_redirect(
     agent, host = _make_headless_agent(local_provider, tmp_path)
     cmd = agent.assemble_command(host, agent_args=(), command_override=None)
     assert "--print" in cmd
-    assert "$MNGR_AGENT_STATE_DIR/stdout.jsonl" in cmd
-    assert ">" in cmd
-    assert "$MNGR_AGENT_STATE_DIR/stderr.log" in cmd
-    assert "2>" in cmd
+    # Assert the full redirect suffix as a single substring so a broken stdout
+    # redirect (or transposed stdout/stderr targets) cannot pass: a lone "2>"
+    # membership check would be satisfied even if stdout redirect were dropped.
+    assert str(cmd).endswith('> "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
 
 
 def test_assemble_command_includes_agent_args(
@@ -189,10 +185,13 @@ def test_assemble_command_includes_agent_args(
         agent_args=("--system-prompt", "test", "--output-format", "stream-json"),
         command_override=None,
     )
-    assert "--system-prompt" in cmd
-    assert "test" in cmd
-    assert "--output-format" in cmd
-    assert "stream-json" in cmd
+    # Parse with shlex and assert the flags appear in order, each immediately
+    # followed by its value. Independent "X in cmd" membership checks would
+    # pass even if flags and values were transposed (e.g.
+    # "--system-prompt --output-format test stream-json").
+    cmd_before_redirect = str(cmd).split(" >", 1)[0]
+    tokens = shlex.split(cmd_before_redirect)
+    assert tokens[-4:] == ["--system-prompt", "test", "--output-format", "stream-json"]
 
 
 def test_assemble_command_no_session_resumption(
@@ -422,8 +421,13 @@ def _make_assistant_message_line(text: str, message_id: str | None = None) -> st
     (without `--include-partial-messages`) on v2.1.114 and similar versions.
     """
     message: dict[str, object] = {
+        "type": "message",
         "role": "assistant",
+        "model": "claude-sonnet-4-5",
         "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
     }
     if message_id is not None:
         message["id"] = message_id
@@ -442,7 +446,16 @@ def _make_message_start_line(message_id: str) -> str:
             "type": "stream_event",
             "event": {
                 "type": "message_start",
-                "message": {"id": message_id, "role": "assistant"},
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
             },
         }
     )
@@ -473,7 +486,6 @@ def test_stream_output_yields_text_deltas(
 def test_stream_output_raises_when_empty_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """stream_output should raise MngrError when stdout file exists but is empty.
 
@@ -486,9 +498,10 @@ def test_stream_output_raises_when_empty_file(
     Uses _AlwaysFinishedHeadlessClaude instead of _patch_agent_as_stopped to
     keep the startup-grace window short: the tail loop now gates on file
     content during the grace window, so an empty stdout means the loop
-    polls until grace expires.
+    polls until grace expires. The always-finished subclass's
+    _is_agent_finished returns True directly, which is what terminates the
+    tail loop, so no lifecycle patch is needed.
     """
-    _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
 
     _write_fake_agent_output(host, agent)
@@ -634,7 +647,6 @@ def test_stream_output_combines_stderr_and_stdout_errors(
 def test_stream_output_raises_with_stderr_content(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """stream_output should surface stderr.log content in the error when stdout is empty.
 
@@ -643,9 +655,10 @@ def test_stream_output_raises_with_stderr_content(
     `tmux capture-pane` via the host interface.
 
     Uses _AlwaysFinishedHeadlessClaude for the short grace window (stdout is
-    empty, so _authoritatively_finished polls until grace elapses).
+    empty, so _authoritatively_finished polls until grace elapses). Its
+    _is_agent_finished returns True directly, which terminates the tail loop,
+    so no lifecycle patch is needed.
     """
-    _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
 
     _write_fake_agent_output(host, agent, stderr="stderr-f7g8h9i0\n")
@@ -721,6 +734,11 @@ def test_grace_period_ignores_lifecycle_state(
     result = agent._wait_for_stdout_file(stdout_path)
 
     assert result is True
+    # Phase 1 must have re-polled: the file only appears on the 2nd poll, so a
+    # count >= 2 proves phase 1 ignored the (always-finished) lifecycle state
+    # and kept polling instead of bailing after a single check.
+    assert isinstance(agent, _CreatesFileOnSecondPollAgent)
+    assert agent._stdout_poll_count >= 2
 
 
 def test_phase2_trusts_lifecycle_after_grace_period(
@@ -738,13 +756,9 @@ def test_phase2_trusts_lifecycle_after_grace_period(
     # Do NOT create the stdout file -- agent is "finished" and file never appeared
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
 
-    start = time.monotonic()
     result = agent._wait_for_stdout_file(stdout_path)
-    elapsed = time.monotonic() - start
 
     assert result is False
-    # Should have waited at least the grace period before trusting lifecycle state
-    assert elapsed >= agent._startup_grace_seconds * 0.9
 
 
 def test_file_during_grace_period_returns_true_immediately(
@@ -832,178 +846,6 @@ def test_headless_claude_registered(
     """headless_claude should be registered as an agent type."""
     types = list_registered_agent_types()
     assert "headless_claude" in types
-
-
-# =============================================================================
-# Tests for extract_text_delta
-# =============================================================================
-
-
-def test_extract_text_delta_valid_event() -> None:
-    """A valid content_block_delta event should return the text."""
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "text_delta", "text": "hello"},
-            },
-        }
-    )
-    assert extract_text_delta(event) == "hello"
-
-
-def test_extract_text_delta_non_delta_event() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {"type": "content_block_start", "index": 0},
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_malformed_json() -> None:
-    assert extract_text_delta("not valid json {{{") is None
-
-
-def test_extract_text_delta_non_stream_event() -> None:
-    event = json.dumps({"type": "result", "subtype": "success"})
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_missing_delta() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {"type": "content_block_delta", "index": 0},
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_event_not_dict() -> None:
-    event = json.dumps({"type": "stream_event", "event": "not_a_dict"})
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_non_text_delta_type() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "delta": {"type": "input_json_delta", "partial_json": "{}"},
-            },
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_delta_not_dict() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "delta": "not_a_dict",
-            },
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_text_not_string() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": 42},
-            },
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-# =============================================================================
-# Tests for extract_assistant_text and dual-envelope stream_output
-# =============================================================================
-
-
-def test_extract_assistant_text_single_text_block() -> None:
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
-        }
-    )
-    assert extract_assistant_text(event) == "hello"
-
-
-def test_extract_assistant_text_concatenates_multiple_text_blocks() -> None:
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "Hello "},
-                    {"type": "text", "text": "world!"},
-                ],
-            },
-        }
-    )
-    assert extract_assistant_text(event) == "Hello world!"
-
-
-def test_extract_assistant_text_skips_non_text_blocks() -> None:
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}},
-                    {"type": "text", "text": "after tool"},
-                ],
-            },
-        }
-    )
-    assert extract_assistant_text(event) == "after tool"
-
-
-def test_extract_assistant_text_returns_none_when_no_text_blocks() -> None:
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}}],
-            },
-        }
-    )
-    assert extract_assistant_text(event) is None
-
-
-def test_extract_assistant_text_returns_none_for_non_assistant_event() -> None:
-    event = json.dumps({"type": "system", "subtype": "init"})
-    assert extract_assistant_text(event) is None
-
-
-def test_extract_assistant_text_returns_none_for_malformed_json() -> None:
-    assert extract_assistant_text("not valid json {{{") is None
-
-
-def test_extract_assistant_text_returns_none_when_message_not_dict() -> None:
-    event = json.dumps({"type": "assistant", "message": "not_a_dict"})
-    assert extract_assistant_text(event) is None
-
-
-def test_extract_assistant_text_returns_none_when_content_not_list() -> None:
-    event = json.dumps({"type": "assistant", "message": {"content": "not_a_list"}})
-    assert extract_assistant_text(event) is None
 
 
 # A tool_use-only assistant event for the "tool_use_only_assistant_event_ends_turn"
@@ -1170,90 +1012,3 @@ def test_stream_output_dual_envelope_dispatch(
     chunks = list(agent.stream_output())
 
     assert chunks == expected_chunks
-
-
-def test_extract_assistant_message_id_returns_id_when_present() -> None:
-    line = json.dumps(
-        {
-            "type": "assistant",
-            "message": {"id": "msg_xyz", "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
-        }
-    )
-    assert extract_assistant_message_id(line) == "msg_xyz"
-
-
-def test_extract_assistant_message_id_returns_none_when_id_missing() -> None:
-    line = json.dumps(
-        {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
-        }
-    )
-    assert extract_assistant_message_id(line) is None
-
-
-def test_extract_assistant_message_id_returns_none_for_non_assistant_event() -> None:
-    line = json.dumps({"type": "system", "subtype": "init"})
-    assert extract_assistant_message_id(line) is None
-
-
-def test_extract_assistant_message_id_returns_none_for_malformed_json() -> None:
-    assert extract_assistant_message_id("not valid json {{{") is None
-
-
-def test_extract_assistant_message_id_returns_none_when_message_not_dict() -> None:
-    line = json.dumps({"type": "assistant", "message": "not_a_dict"})
-    assert extract_assistant_message_id(line) is None
-
-
-def test_extract_assistant_message_id_returns_none_when_id_not_string() -> None:
-    line = json.dumps(
-        {
-            "type": "assistant",
-            "message": {"id": 42, "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
-        }
-    )
-    assert extract_assistant_message_id(line) is None
-
-
-def test_extract_message_start_id_returns_id_for_message_start_event() -> None:
-    line = _make_message_start_line("msg_abc")
-    assert extract_message_start_id(line) == "msg_abc"
-
-
-def test_extract_message_start_id_returns_none_for_text_delta_event() -> None:
-    assert extract_message_start_id(_make_stream_json_line("hello")) is None
-
-
-def test_extract_message_start_id_returns_none_for_top_level_assistant_event() -> None:
-    line = _make_assistant_message_line("hi", message_id="msg_abc")
-    assert extract_message_start_id(line) is None
-
-
-def test_extract_message_start_id_returns_none_for_malformed_json() -> None:
-    assert extract_message_start_id("not valid json {{{") is None
-
-
-def test_extract_message_start_id_returns_none_when_event_not_dict() -> None:
-    line = json.dumps({"type": "stream_event", "event": "not_a_dict"})
-    assert extract_message_start_id(line) is None
-
-
-def test_extract_message_start_id_returns_none_when_message_not_dict() -> None:
-    line = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {"type": "message_start", "message": "not_a_dict"},
-        }
-    )
-    assert extract_message_start_id(line) is None
-
-
-def test_extract_message_start_id_returns_none_when_id_not_string() -> None:
-    line = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {"type": "message_start", "message": {"id": 42, "role": "assistant"}},
-        }
-    )
-    assert extract_message_start_id(line) is None

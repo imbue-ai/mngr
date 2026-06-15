@@ -433,6 +433,29 @@ def setup_mngr_test_environment(
     assert_home_is_temp_directory()
 
 
+@contextmanager
+def capture_log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages, yielding the list they accumulate in.
+
+    Core logic shared by all log_warnings fixtures (in mngr/conftest.py and
+    plugin_testing.py). This is the single source of truth so the fixtures stay
+    thin delegation wrappers rather than duplicating the handler bookkeeping.
+
+    Tolerates handler removal during the test (e.g. setup_logging() calls
+    logger.remove() which clears all handlers, so the handler we added may no
+    longer exist by the time teardown runs).
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
+
+
 def get_subprocess_test_env(
     root_name: str = "mngr-test",
     prefix: str | None = None,
@@ -1518,6 +1541,19 @@ def local_sshd(
     authorized_keys_path = sshd_dir / "authorized_keys"
     authorized_keys_path.write_text(authorized_keys_content)
 
+    # Isolate git's global/system config for sessions on this sshd. mngr runs
+    # `git config --global ...` over SSH when preparing a remote target (e.g.
+    # `git config --global --add safe.directory <target>` in
+    # Host._transfer_git_repo and add_safe_directory_on_remote). That command
+    # runs inside the SSH login, which sees the real user's $HOME -- the
+    # HOME-redirection done by isolate_home()/setup_git_config cannot reach
+    # across the SSH hop, so without this those writes would land in the
+    # developer's real ~/.gitconfig. Point GIT_CONFIG_GLOBAL at a throwaway file
+    # inside the sshd sandbox and GIT_CONFIG_SYSTEM at /dev/null so the session
+    # git is fully isolated from the host's real config.
+    git_global_config_path = sshd_dir / "git_global_config"
+    git_global_config_path.touch()
+
     # Create sshd_config
     sshd_config_path = etc_dir / "sshd_config"
     current_user = os.environ.get("USER", "root")
@@ -1534,6 +1570,7 @@ PidFile {run_dir}/sshd.pid
 StrictModes no
 Subsystem sftp {_sftp_server_path()}
 AllowUsers {current_user}
+SetEnv GIT_CONFIG_GLOBAL={git_global_config_path} GIT_CONFIG_SYSTEM=/dev/null
 """
     sshd_config_path.write_text(sshd_config)
 
@@ -1639,6 +1676,18 @@ def write_discovery_snapshot_to_path(
         "hosts": hosts,
     }
     events_path.write_text(json.dumps(event) + "\n")
+
+
+class FakeTtyStream(StringIO):
+    """A StringIO that reports itself as a TTY, for exercising color logic.
+
+    Used by tests that need ``should_use_color`` (and the code paths gated on it,
+    e.g. ``MngrError.show``) to take the colored branch even though the test's
+    real streams are not terminals.
+    """
+
+    def isatty(self) -> bool:
+        return True
 
 
 def walk_concrete_subclasses(cls: type) -> list[type]:

@@ -4,6 +4,69 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+`mngr create --adopt-session <session-id>` now resolves a bare session ID against more locations. In addition to the current and user-scope Claude config dirs (`$CLAUDE_CONFIG_DIR/projects/` and `~/.claude/projects/`), it now also searches every live local mngr agent's per-agent config dir and the preserved session files of destroyed agents (see `preserve_sessions_on_destroy`). Passing a full `.jsonl` path is unchanged. Only the local host dir is scanned for mngr agent and preserved sessions.
+
+Clarified the `--adopt-session` help text and behavior: the option is repeatable, but when multiple sessions are named, every named session is made available in the new agent while only the last one is resumed on startup (Claude can only resume one session at a time).
+
+Internal: routed the plugin's `host_dir / "agents"` path constructions through the shared `get_agents_root_dir` / `get_agent_state_dir_path` helpers (now defined in `imbue.mngr.hosts.common`). No behavior change.
+
+The `.claude/settings.local.json` gitignore preflight/provisioning check now delegates to the shared `check_path_gitignore_status` helper in `mngr.api.git` rather than implementing the git-check-ignore logic inline. No user-visible behavior change.
+
+Added a conformance test asserting that claude's real emitted common-transcript records
+validate against the new canonical envelope schema
+(`imbue.mngr.agents.common_transcript_records`), so the claude emitter and the shared
+contract cannot drift apart.
+
+## 2026-06-11
+
+### Fixed
+
+- Fixed: Provisioning a local Claude agent no longer creates self-referential symlink loops inside the user's shared `~/.claude/` (e.g. `~/.claude/skills/skills -> ~/.claude/skills`, `~/.claude/commands/commands`, `~/.claude/plugins/cache/cache`). `_sync_user_resources` used plain `ln -sf` as an idempotent command; on the second and later provisions the destination was already a symlink-to-directory, so `ln` dereferenced it and nested a new link inside the shared source. All sync symlinks (directory, child, and individual-file, including credentials and `keybindings.json`) now use `ln -sfn` (`--no-dereference`), which replaces the existing destination symlink instead of following it.
+
+### Changed
+
+- Changed: A skill-provisioned agent's primary skill (e.g. `code-guardian`, `fixme-fairy`) is now installed into that agent's own per-agent config dir (`$CLAUDE_CONFIG_DIR/skills/<name>/SKILL.md`) instead of the user's global `~/.claude/skills/`. Previously the local install wrote to global `~/.claude/skills/`, which `_sync_user_resources` then symlinked into every local agent's config dir, so a `code-guardian`/`fixme-fairy` skill leaked into the skill list of every local agent. To support this, `skills/` is now synced via child-level symlinks (one symlink per skill, mirroring how `plugins/` is already handled) so the agent's own skill can live as a real file alongside the symlinked user skills without leaking back into the shared source. The local install is now silent (no interactive install/update prompt), matching the always-silent remote install.
+
+## 2026-06-10
+
+Test-quality hardening across the mngr_claude test suite (no user-visible behavior change). Replaced assertions that passed without verifying correctness with ones that check real effects:
+
+- Seven `on_before_provisioning` tests that asserted nothing ("did not raise") now assert observable effects (config left untouched, missing-credentials warning present/absent, untrusted worktree rejected).
+- `does-not-extend-trust` provisioning tests now assert the exact set of trusted projects instead of the presence of a key the test itself wrote.
+- Transcript-converter truncation tests now assert exact lengths and the ellipsis marker (not just an upper bound), and the "skips event" tests now prove only the bad event is dropped (a known-good event survives) plus cover the missing-`timestamp` branch.
+- Command-assembly and install-command tests now assert on shlex-parsed tokens / load-bearing flags instead of hand-rebuilt exact shell strings.
+- Skill-install skip tests assert file content is unchanged instead of relying on mtime equality; added remote-install coverage. Custom-agent-type resolution test now sets a non-default field to prove it survives the merge.
+- Grace-period headless test asserts the poll actually re-checked; removed dead `_patch_agent_as_stopped` calls and a fragile wall-clock timing assertion.
+- claude_config no-op tests assert content is byte-for-byte unchanged; effort-callout check test isolated to the effort dialog.
+- Removed an introduced `unittest.mock.patch` of the function under test in favor of the real no-credentials environment, and a duplicate local `temp_source_dir` fixture (now inherited from the shared modal conftest).
+- Release/acceptance tests: the Modal provisioning test destroys the agent and asserts a non-empty preserved session JSONL; the adopt-session and modal tests drop brittle "Done." log-string checks; the no-dialog send_message test matches the specific downstream timeout; the background-tasks prefix-collision test asserts the script reached its gone-session exit; magic `sleep` literals replaced with a named constant.
+
+- `ClaudeAgent` now supplies its own "message accepted" probe to the shared submission-confirm path: a shell command that reads the latest `enqueue` event from Claude's transcript event log (`logs/claude_transcript/events.jsonl`) and prints its ISO-8601 timestamp. This is the Claude-specific knowledge that previously lived (hardcoded) in the shared `tui_utils` module; moving it into the plugin keeps `tui_utils` agent-neutral while preserving the existing fast-confirm-on-enqueue behavior for Claude agents.
+
+Raised the stale coverage floor from 24% to 80% to match the coverage CI already measures (~83%), and removed the now-obsolete comment referencing per-package offload coverage drift (the offload bug that caused that drift has since been fixed).
+
+## 2026-06-09
+
+- Readiness hooks: a Claude agent restarted/resumed mid-turn no longer reports the RUNNING lifecycle state forever. The `active` marker is set on UserPromptSubmit and only removed by the Stop / idle Notification hooks, so a turn abandoned by an abnormal exit (container restart, OOM, crash) left it stale and the agent stuck at RUNNING. The SessionStart hook now clears `active`/`permissions_waiting` on `startup`/`resume` (a fresh, not-mid-turn process), so the lifecycle state self-heals on the next (re)start; `compact` is excluded because auto-compaction fires mid-turn while Claude is genuinely active. The same hook touches a new `claude_process_started` marker whose mtime gives consumers a restart boundary to compare transcript timestamps against (any transcript event older than it belongs to a turn the current process did not run). The shared "clear active markers and emit an activity event" shell snippet is extracted into a constant reused by the Notification idle hook and the new SessionStart hook so the two stay byte-identical.
+
+Claude session preservation on destroy was rewritten onto the new shared
+`preserve_agent_data` machinery in core mngr. Behavior is unchanged in substance -- session
+JSONLs, the raw and common transcripts, and the session-id history are still preserved before
+the agent state directory is deleted, and `projects/` is still skipped in `use_env_config_dir`
+mode -- but the implementation is now a single declarative list of files preserved through one
+code path for both online and offline (volume-backed) hosts, replacing the previously
+duplicated SSH and Volume implementations.
+
+The on-disk layout of preserved sessions changed: files now live at
+`<local_host_dir>/preserved/<agent-name>--<agent-id>/` and mirror the agent state directory
+verbatim (e.g. `plugin/claude/anthropic/projects/...`, `logs/claude_transcript/...`,
+`events/claude/common_transcript/...`, `claude_session_id_history`), instead of the old
+`<local_host_dir>/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/` location
+with renamed subdirectories. This is a switch-forward change; previously preserved sessions in
+the old location are left in place.
+
 ## 2026-06-08
 
 Internal refactor (no behavior change): the `claude` agent's `assemble_command` now shell-quotes its extra `agent_args` via the shared `quote_agent_args` helper instead of an inline `shlex.quote` loop. This is the same quoting the plugin already performed; it now shares one implementation (and one explanatory comment) with `BaseAgent`, so the two cannot drift.

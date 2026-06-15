@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.api.cel_context import agent_to_cel_context
 from imbue.mngr.api.create import CreateAgentOptions
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_config_registry import register_agent_config
@@ -23,44 +23,14 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
 
 
-@pytest.mark.tmux
-def test_agent_to_cel_context_returns_expected_fields(
-    temp_work_dir: Path,
-    local_provider: LocalProviderInstance,
-) -> None:
-    """Test that agent_to_cel_context returns the expected fields."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-
-    agent = host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("cel-test-agent"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 1"),
-        ),
-    )
-
-    context = agent_to_cel_context(agent, LOCAL_HOST_NAME, "local")
-
-    assert context["id"] == str(agent.id)
-    assert context["name"] == "cel-test-agent"
-    assert context["type"] == "generic"
-    assert context["state"] == AgentLifecycleState.STOPPED.value
-    assert context["host"]["provider"] == "local"
-    assert context["host"]["name"] == LOCAL_HOST_NAME
-    assert context["host"]["id"] == str(agent.host_id)
-
-
-def test_send_message_to_agents_returns_empty_result_when_no_agents_match(
+def test_send_message_to_agents_returns_empty_result_when_no_agents(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Test that send_message returns empty result when no agents match filters."""
+    """Test that send_message returns empty result when no agents are provided."""
     result = send_message_to_agents(
         mngr_ctx=temp_mngr_ctx,
         message_content="Hello",
-        include_filters=('name == "nonexistent-agent"',),
-        all_agents=False,
+        agents_to_message=[],
     )
 
     assert result.successful_agents == []
@@ -92,10 +62,17 @@ def test_send_message_to_agents_calls_success_callback(
     success_agents: list[str] = []
     error_agents: list[tuple[str, str]] = []
 
+    matches = find_all_agents(
+        addresses=(),
+        filter_all=True,
+        target_state=None,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
     result = send_message_to_agents(
         mngr_ctx=temp_mngr_ctx,
         message_content="Hello from test",
-        all_agents=True,
+        agents_to_message=matches,
         on_success=lambda name: success_agents.append(name),
         on_error=lambda name, err: error_agents.append((name, err)),
     )
@@ -128,10 +105,17 @@ def test_send_message_to_agents_fails_for_stopped_agent(
 
     # Don't start the agent - it should be stopped
 
+    matches = find_all_agents(
+        addresses=(),
+        filter_all=True,
+        target_state=None,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
     result = send_message_to_agents(
         mngr_ctx=temp_mngr_ctx,
         message_content="Hello",
-        all_agents=True,
+        agents_to_message=matches,
         error_behavior=ErrorBehavior.CONTINUE,
     )
 
@@ -169,10 +153,17 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
     success_agents: list[str] = []
     error_agents: list[tuple[str, str]] = []
 
+    matches = find_all_agents(
+        addresses=(),
+        filter_all=True,
+        target_state=None,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
     result = send_message_to_agents(
         mngr_ctx=temp_mngr_ctx,
         message_content="Hello with auto-start",
-        all_agents=True,
+        agents_to_message=matches,
         is_start_desired=True,
         on_success=lambda name: success_agents.append(name),
         on_error=lambda name, err: error_agents.append((name, err)),
@@ -195,17 +186,17 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
 @pytest.mark.tmux
 # real agent setup/teardown occasionally exceeds the 10s default.
 @pytest.mark.timeout(30)
-def test_send_message_to_agents_with_include_filter(
+def test_send_message_to_agents_only_messages_requested_agents(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Test that send_message respects include filters.
+    """Test that send_message only delivers to the agents in agents_to_message.
 
     Locally runs in ~5s. On offload it occasionally exceeds the default 10s
     pytest-timeout during tmux kill-session cleanup under CI load (the hang
-    is inside loguru's sink during log_span, not in the actual kill). Marked
-    flaky so offload retries rather than the whole sandbox failing.
+    is inside loguru's sink during log_span, not in the actual kill).
+    Bumped to 30s rather than marked flaky so failures stay loud.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
@@ -231,12 +222,20 @@ def test_send_message_to_agents_with_include_filter(
     # Start both agents
     host.start_agents([agent1.id, agent2.id])
 
-    # Send message only to agent1 using filter
+    # Resolve only agent1 and send to that one
+    matches = find_all_agents(
+        addresses=(),
+        filter_all=True,
+        target_state=None,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    matches_for_agent1 = [m for m in matches if str(m.agent_name) == "filter-test-1"]
+    assert len(matches_for_agent1) == 1
+
     result = send_message_to_agents(
         mngr_ctx=temp_mngr_ctx,
         message_content="Hello filtered",
-        include_filters=('name == "filter-test-1"',),
-        all_agents=False,
+        agents_to_message=matches_for_agent1,
     )
 
     # Clean up
@@ -306,10 +305,17 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
 
     host.start_agents([agent1.id, agent2.id])
 
+    matches = find_all_agents(
+        addresses=(),
+        filter_all=True,
+        target_state=None,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
     result = send_message_to_agents(
         mngr_ctx=temp_mngr_ctx,
         message_content="Hello",
-        all_agents=True,
+        agents_to_message=matches,
         error_behavior=ErrorBehavior.CONTINUE,
     )
 

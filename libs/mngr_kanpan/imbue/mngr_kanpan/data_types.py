@@ -5,6 +5,7 @@ from typing import Any
 from typing import Literal
 
 from pydantic import Field
+from pydantic import SerializeAsAny
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -28,6 +29,41 @@ class BoardSection(UpperCaseStrEnum):
     MUTED = auto()
 
 
+# Section labels split into a leading phrase and a clarifying suffix. The TUI
+# heading renderer colors the prefix; the JSON output path joins them into a
+# plain human label.
+SECTION_PREFIX: dict[BoardSection, str] = {
+    BoardSection.PR_MERGED: "Done",
+    BoardSection.PR_CLOSED: "Cancelled",
+    BoardSection.PR_BEING_REVIEWED: "In review",
+    BoardSection.PR_DRAFT: "In progress",
+    BoardSection.STILL_COOKING: "In progress",
+    BoardSection.PRS_FAILED: "In progress",
+    BoardSection.MUTED: "Muted",
+}
+
+SECTION_SUFFIX: dict[BoardSection, str] = {
+    BoardSection.PR_MERGED: "PR merged",
+    BoardSection.PR_CLOSED: "PR closed",
+    BoardSection.PR_BEING_REVIEWED: "PR pending",
+    BoardSection.PR_DRAFT: "draft PR",
+    BoardSection.STILL_COOKING: "no PR yet",
+    BoardSection.PRS_FAILED: "PRs not loaded",
+    BoardSection.MUTED: "",
+}
+
+
+def section_label(section: BoardSection) -> str:
+    """Human-readable label for a board section, e.g. ``Done - PR merged``.
+
+    Mirrors the text the TUI heading shows (minus the agent count). Sections
+    with no suffix (e.g. MUTED) return just the prefix.
+    """
+    prefix = SECTION_PREFIX[section]
+    suffix = SECTION_SUFFIX[section]
+    return f"{prefix} - {suffix}" if suffix else prefix
+
+
 class AgentBoardEntry(FrozenModel):
     """A single agent entry on the kanpan board."""
 
@@ -37,7 +73,12 @@ class AgentBoardEntry(FrozenModel):
     work_dir: Path | None = Field(default=None, description="Local work directory (None for remote agents)")
     branch: str | None = Field(default=None, description="Git branch for this agent")
     is_muted: bool = Field(default=False, description="Whether the agent is muted (relegated to bottom)")
-    fields: dict[str, FieldValue] = Field(default_factory=dict, description="Field values from data sources")
+    fields: dict[str, SerializeAsAny[FieldValue]] = Field(
+        default_factory=dict,
+        description="Field values from data sources. SerializeAsAny so model_dump emits each "
+        "FieldValue subclass's full payload (incl. its `kind` discriminator) rather than only "
+        "the FieldValue base fields.",
+    )
     cells: dict[str, CellDisplay] = Field(
         default_factory=dict,
         description="Pre-computed cell displays from field.display(), keyed by field key",
