@@ -1,0 +1,7 @@
+Added a VM-level stop/start lifecycle for Azure hosts. `mngr stop` now **deallocates** the VM (`AzureVpsClient.deallocate_instance`) -- which actually halts compute billing, unlike an OS-level shutdown that leaves the VM "Stopped (not deallocated)" still billing -- preserving the OS disk so a paused agent costs only disk storage; `mngr start` re-allocates it (`start_instance`). The public IP is static, so it (and the SSH host keys) survive the stop, and resume needs no known_hosts rebind.
+
+A deallocated VM stays discoverable: its host name and per-agent records are mirrored into VM tags, so `mngr list` and `mngr start <agent>` keep working while the VM is deallocated.
+
+Idle agents self-deallocate (true cost parity with AWS/GCP). Because an Azure guest shutdown does not halt billing, each VM is created with a system-assigned managed identity and the in-VM idle watcher calls the ARM `deallocate` API (via its IMDS token) when idle. `mngr azure prepare` creates a least-privilege custom role (`mngr-self-deallocate`) and each VM gets a role assignment scoped to itself. This degrades gracefully: if the operator lacks the role-assignment privilege (Owner / User Access Administrator), idle self-deallocate is disabled with a clear warning and `mngr stop`/`start` plus the in-VM shutdown circuit-breaker still work.
+
+Adds the `azure-mgmt-authorization` dependency (for the custom role + role assignment).

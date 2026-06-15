@@ -463,8 +463,8 @@ def test_get_instance_ip_raises_when_not_assigned() -> None:
 def test_list_instances_filters_by_provider_tag() -> None:
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure"}),
-        SimpleNamespace(name="vm-b", tags={"mngr-provider": "other"}),
+        SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure"}, instance_view=None),
+        SimpleNamespace(name="vm-b", tags={"mngr-provider": "other"}, instance_view=None),
     ]
     network = FakeNetworkClient()
     network.public_ip_addresses.list_result = [SimpleNamespace(name="vm-a-ip", ip_address="203.0.113.7")]
@@ -486,9 +486,9 @@ def test_list_mngr_managed_vms_spans_provider_names() -> None:
     """Returns every managed-by=mngr VM across provider names, excluding untagged VMs."""
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure-west"}),
-        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr", "mngr-provider": "azure-east"}),
-        SimpleNamespace(name="vm-c", tags={"team": "infra"}),
+        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure-west"}, instance_view=None),
+        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr", "mngr-provider": "azure-east"}, instance_view=None),
+        SimpleNamespace(name="vm-c", tags={"team": "infra"}, instance_view=None),
     ]
     client = _make_client(compute=compute)
     managed = client.list_mngr_managed_vms()
