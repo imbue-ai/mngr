@@ -27,7 +27,7 @@
 
 * New package `libs/mngr_vps_docker/` containing:
   * Base config class extending `ProviderInstanceConfig` with common VPS Docker settings (default idle timeout, idle mode, activity sources, default image, SSH connect timeout, cloud-init support)
-  * Abstract VPS client interface that concrete providers implement (create_instance, destroy_instance, get_instance_status, get_instance_ip, wait_for_instance_active, create_snapshot, list_snapshots, delete_snapshot, upload_ssh_key, delete_ssh_key)
+  * Abstract VPS client interface that concrete providers implement (create_instance, destroy_instance, get_instance_status, get_instance_ip, wait_for_instance_active, upload_ssh_key, delete_ssh_key)
   * `VpsDockerProvider(BaseProviderInstance)` -- manages VPS lifecycle + Docker containers. Treats container as host. Uses Docker state volume + state container on the remote VPS for host record persistence. Snapshots via `docker commit` over SSH.
   * Shared utilities: SSH key generation/injection via cloud-init, Docker installation script, container setup (sshd, direct SSH config), known_hosts management (add on create, remove on destroy)
   * Remote Docker helpers: running Docker commands over SSH (since the Docker daemon is on the VPS, not local)

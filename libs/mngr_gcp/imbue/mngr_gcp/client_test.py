@@ -23,11 +23,9 @@ from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 
 def _present_firewalls() -> FakeFirewallsClient:
@@ -619,37 +617,9 @@ def test_list_mngr_managed_instances_translates_api_error() -> None:
 # =============================================================================
 
 
-def test_ssh_key_lifecycle_in_memory() -> None:
+def test_delete_ssh_key_is_tolerant_of_absent_key() -> None:
     client = _make_client()
-    assert client.upload_ssh_key("k1", "pub1") == "k1"
-    assert client.upload_ssh_key("k2", "pub2") == "k2"
-    keys = client.list_ssh_keys()
-    assert {k.id for k in keys} == {"k1", "k2"}
+    client.upload_ssh_key("k1", "pub1")
     client.delete_ssh_key("k1")
-    assert {k.id for k in client.list_ssh_keys()} == {"k2"}
     # Deleting an absent key is a tolerant no-op (fresh-process delete).
     client.delete_ssh_key("nonexistent")
-
-
-# =============================================================================
-# Snapshots
-# =============================================================================
-
-
-def test_create_snapshot_raises_unavailable() -> None:
-    """Disk snapshot support is intentionally unwired; any caller fails loudly."""
-    client = _make_client()
-    with pytest.raises(VpsDockerError, match="disk snapshot support is not implemented"):
-        client.create_snapshot(VpsInstanceId("i"), "irrelevant")
-
-
-def test_delete_snapshot_raises_unavailable() -> None:
-    client = _make_client()
-    with pytest.raises(VpsDockerError, match="disk snapshot support is not implemented"):
-        client.delete_snapshot(VpsSnapshotId("mngr-snap-1"))
-
-
-def test_list_snapshots_raises_unavailable() -> None:
-    client = _make_client()
-    with pytest.raises(VpsDockerError, match="disk snapshot support is not implemented"):
-        client.list_snapshots()

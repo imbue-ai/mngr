@@ -33,14 +33,10 @@ from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 # Tag key/value that ``create_instance`` adds to every VM launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses this
@@ -873,33 +869,6 @@ class AzureVpsClient(VpsClientInterface):
         return self.resource_group
 
     # =========================================================================
-    # Snapshot Operations
-    # =========================================================================
-
-    # Managed-disk snapshot wiring (create / delete / list) was written
-    # speculatively to satisfy the shared ``VpsClientInterface`` abstractmethods,
-    # but the Azure provider has no host snapshot workflow today -- nothing in
-    # ``mngr_azure`` or the broader ``mngr`` CLI calls these methods. Stubbed out
-    # with the same "unavailable" shape as ``ExternallyManagedVpsClient`` (and
-    # ``AwsVpsClient``) so any future caller fails loudly instead of running real
-    # snapshot API calls that nothing else expects.
-    def _snapshots_unavailable(self, operation: str) -> VpsDockerError:
-        return VpsDockerError(
-            f"VPS API operation '{operation}' is unavailable: managed-disk snapshot support "
-            "is not implemented in mngr_azure. The Azure provider currently has no host "
-            "snapshot workflow; restore from a fresh `mngr create` instead."
-        )
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        raise self._snapshots_unavailable("create_snapshot")
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        raise self._snapshots_unavailable("delete_snapshot")
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        raise self._snapshots_unavailable("list_snapshots")
-
-    # =========================================================================
     # SSH Key Operations (no native Azure per-key resource; in-memory map)
     # =========================================================================
 
@@ -919,7 +888,3 @@ class AzureVpsClient(VpsClientInterface):
         """Drop the in-memory key entry. Tolerant of an absent key (fresh-process delete)."""
         self._ssh_public_keys_by_id.pop(key_id, None)
         logger.debug("Dropped in-memory SSH public key {}", key_id)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        """List the in-memory keys. Azure keys live only in per-VM config, not as a resource."""
-        return [VpsSshKeyInfo(id=key_id, name=key_id) for key_id in self._ssh_public_keys_by_id]

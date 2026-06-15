@@ -141,10 +141,10 @@ def _build_operator_client(
 
 
 def _perform_cleanup(client: AwsVpsClient) -> str | None:
-    """Core of ``mngr aws cleanup``: refuse if instances exist, else delete the SG.
+    """Core of ``mngr aws cleanup``: refuse if any instance exists, else delete the SG.
 
-    Returns the deleted security group id, or ``None`` when there was nothing
-    to delete. Raises ``click.ClickException`` when any mngr-managed instance
+    Returns the deleted security-group id, or ``None`` when it was already absent
+    (idempotent). Raises ``click.ClickException`` when any mngr-managed instance
     still exists in the region, so cleanup never strands a running agent. Split
     from the click callback so the refuse/delete decision is unit-testable
     against a stubbed client, without the click runtime or real credentials.
@@ -265,13 +265,17 @@ def aws_cli_group() -> None:
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
-    """Create (or reuse) the AWS security group for mngr-managed instances.
+    """Provision the AWS security group for mngr-managed instances.
 
-    Idempotent: re-running re-authorizes any missing ingress rules but does
-    not duplicate. Needs ec2:DescribeSecurityGroups + ec2:CreateSecurityGroup
-    + ec2:AuthorizeSecurityGroupIngress. After this succeeds, `mngr create
+    Creates (or reuses) the `mngr-aws` security group (ingress on tcp/22 +
+    tcp/<container_ssh_port> per allowed_ssh_cidrs). Idempotent: re-running
+    re-authorizes any missing ingress rules without duplicating. Needs
+    ec2:DescribeSecurityGroups + ec2:CreateSecurityGroup +
+    ec2:AuthorizeSecurityGroupIngress. After this succeeds, `mngr create
     --provider aws` only needs RunInstances + DescribeSecurityGroups +
-    DescribeInstances + ImportKeyPair etc. (no SG-management permissions).
+    DescribeInstances + ImportKeyPair etc. (no SG-management permissions, and no
+    IAM at all -- idle self-stop powers the host off rather than calling the EC2
+    API, so it needs no instance profile).
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -334,18 +338,18 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     The safe inverse of `prepare`. Refuses (non-zero exit, deletes nothing) if
     any mngr-managed instance still exists in the region -- destroy those first
     with `mngr destroy <agent>` so a running agent is never stranded. With no
-    instances present, deletes the auto-created security group. The name comes
+    instances present, deletes the auto-created security group. The SG name comes
     from `--sg-name` if supplied; otherwise from the resolved
     `[providers.<--provider>]` block's `security_group.name` when that block
     configures an `AutoCreateSecurityGroup`; otherwise (block missing, non-AWS,
-    or configured with an `ExistingSecurityGroup` -- which carries an `id`
-    rather than a name) the default `mngr-aws` is used. Idempotent: a no-op
-    (exit 0) when the security group is already gone.
+    or configured with an `ExistingSecurityGroup` -- which carries an `id` rather
+    than a name) the default `mngr-aws` is used. Idempotent: a no-op (exit 0)
+    when it is already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
     ec2:DeleteSecurityGroup. Does not touch per-host keypairs -- those are
-    created and deleted by the create/destroy lifecycle, not by `prepare`
-    or `cleanup`.
+    created and deleted by the create/destroy lifecycle, not by `prepare` or
+    `cleanup`.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
