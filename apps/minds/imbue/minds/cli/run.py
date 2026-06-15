@@ -76,6 +76,7 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
@@ -111,6 +112,18 @@ MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
 # origin server sees the same in-memory value, and the agent itself
 # never sees the key at all.
 MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
+
+
+def _provider_name_for_target(backend_resolver: BackendResolverInterface, target: str) -> str | None:
+    """Resolve a ``mngr message`` target (agent id) to its provider name, or None if unknown.
+
+    Lets ``MngrMessageSender`` narrow discovery to the agent's own provider
+    instead of scanning every enabled one. Unknown targets (e.g. an agent
+    addressed by host name before its id is known) return None and fall back to
+    a full scan.
+    """
+    info = backend_resolver.get_agent_display_info(AgentId(target))
+    return info.provider_name if info is not None else None
 
 
 @click.command()
@@ -255,7 +268,10 @@ def run(
     # one-time import cost on a background thread, off the request path.
     mngr_caller = get_default_mngr_caller()
     mngr_caller.prewarm()
-    mngr_message_sender = MngrMessageSender(caller=mngr_caller)
+    mngr_message_sender = MngrMessageSender(
+        caller=mngr_caller,
+        provider_lookup=lambda target: _provider_name_for_target(backend_resolver, target),
+    )
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
