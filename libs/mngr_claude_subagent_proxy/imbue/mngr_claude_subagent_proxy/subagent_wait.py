@@ -14,9 +14,11 @@ from loguru import logger
 
 from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.stream_json import assistant_text
 from imbue.mngr_claude_subagent_proxy.mngr_binary import get_mngr_command
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.2
@@ -66,7 +68,7 @@ class AgentLocation:
 
     @property
     def state_dir(self) -> Path:
-        return self.host_dir / "agents" / self.agent_id
+        return get_agents_root_dir(self.host_dir) / self.agent_id
 
     @property
     def claude_projects_dir(self) -> Path:
@@ -281,23 +283,14 @@ def is_end_turn_event(event: dict) -> bool:
 
 
 def extract_assistant_text(event: dict) -> str:
-    """Concatenate text blocks from an assistant message event."""
+    """Concatenate text blocks from an assistant message event.
+
+    Delegates to the shared typed boundary (:func:`stream_json.assistant_text`), which validates
+    the inner message against ``anthropic.types.Message`` and falls back to a lenient text scan;
+    the empty string preserves this function's non-``None`` return contract.
+    """
     message = event.get("message")
-    if not isinstance(message, dict):
-        return ""
-    content = message.get("content")
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") != "text":
-            continue
-        text = block.get("text")
-        if isinstance(text, str) and text:
-            parts.append(text)
-    return "".join(parts)
+    return assistant_text(message if isinstance(message, dict) else None) or ""
 
 
 _MACHINE_USER_PREFIXES: Final[tuple[str, ...]] = (

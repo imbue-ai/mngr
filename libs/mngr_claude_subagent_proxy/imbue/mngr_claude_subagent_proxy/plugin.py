@@ -11,12 +11,15 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 
+from imbue.mngr.api.git import GitignoreStatus
+from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
@@ -98,6 +101,18 @@ class MalformedAgentSettingsError(MngrError):
     """
 
 
+class UnignoredProxyArtifactError(MngrError):
+    """A subagent-proxy provisioning artifact path is not gitignored.
+
+    Raised at provisioning time when the plugin would write its agent
+    definition (PROXY mode) or DENY-mode skill into a git-tracked worktree
+    where the target path is not gitignored -- the file would surface as an
+    unstaged change and trip clean-tree stop hooks. Like mngr_claude's
+    settings.local.json guard, we refuse rather than dirty the worktree; the
+    user must either gitignore the path or disable the plugin.
+    """
+
+
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConfig]]:
     """Register the mngr-proxy-child agent type.
@@ -109,7 +124,19 @@ def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConf
 
 
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
-_MNGR_SUBAGENTS_SKILL: Final[str] = "mngr-subagents.skill.md"
+_PROXY_SKILL_RESOURCE: Final[str] = "mngr-proxy.skill.md"
+
+# Where the plugin writes its provisioning artifacts, relative to the agent
+# worktree's ``.claude/`` directory. Both live under a ``mngr-proxy/``
+# subdirectory (rather than flat in ``agents/`` / ``skills/``) so a single
+# ``.claude/agents/mngr-proxy/`` or ``.claude/skills/mngr-proxy/`` line in
+# ``.gitignore`` covers them. Claude Code scans ``.claude/agents/``
+# recursively and identifies a subagent by its frontmatter ``name:`` field
+# (``mngr-proxy``), not its filename or directory, so the agent definition is
+# still discovered from the subdirectory. A skill, by contrast, is named by
+# its directory and its entry file must be exactly ``SKILL.md``.
+_PROXY_AGENT_SUBPATH: Final[Path] = Path("agents") / "mngr-proxy" / "proxy.md"
+_PROXY_SKILL_SUBPATH: Final[Path] = Path("skills") / "mngr-proxy" / "SKILL.md"
 
 _SPAWN_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.spawn"
 _CLEANUP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.cleanup"
@@ -184,8 +211,8 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
     """Build the deny-mode hooks config: PreToolUse:Agent deny + SessionStart reap.
 
     - PreToolUse (Agent): emit a short skill-pointer ``permissionDecisionReason``
-      that directs Claude at the ``mngr-subagents`` skill (installed under
-      ``.claude/skills/`` by ``_write_mngr_subagents_skill``); the
+      that directs Claude at the ``mngr-proxy`` skill (installed under
+      ``.claude/skills/`` by ``_write_proxy_skill``); the
       ``mngr create`` / ``subagent_wait`` protocol lives in that skill,
       not in the deny reason itself.
     - SessionStart: same shared label-driven reaper that PROXY mode uses
@@ -229,27 +256,73 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
     }
 
 
+def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, claude_subpath: Path) -> None:
+    """Refuse to write a provisioning artifact into a git-tracked worktree.
+
+    Mirrors mngr_claude's settings.local.json guard: writing the file into a
+    repo where its path is not gitignored would surface it as an unstaged
+    change. Uses the any-rule ``check_path_gitignore_status`` (not the
+    repo-rule-only variant), so a path ignored only via the user's global
+    excludes is accepted -- this is a local provisioning step, not a preflight
+    whose result has to hold on a remote host. Raises
+    ``UnignoredProxyArtifactError`` otherwise, pointing the user at both the
+    gitignore fix and the option to disable the plugin.
+
+    We check the exact file the plugin is about to write, not its directory:
+    the guard runs before the directory is created, and a directory-only
+    gitignore rule (``mngr-proxy/``) does not match a not-yet-existing
+    *directory* path -- but it does match a *file* under it, which is what we
+    check. So checking the file accepts both ``.claude/agents/mngr-proxy/`` and
+    broader rules like ``.claude/``. The remediation still points at the file's
+    parent directory, since the plugin owns that whole ``mngr-proxy/`` subdir
+    and one directory rule is the clean way to ignore it. ``relative.parent``
+    (not the input subpath's parent) is used so the suggestion reflects any
+    symlink resolution -- e.g. ``.agents/...`` when ``.claude -> .agents``.
+    """
+    status, relative = check_path_gitignore_status(host, work_dir, Path(".claude") / claude_subpath)
+    if status is not GitignoreStatus.NOT_IGNORED:
+        return
+    raise UnignoredProxyArtifactError(
+        f"'{relative}' is not gitignored in {work_dir}.\n"
+        "The mngr subagent-proxy plugin writes this file when provisioning a Claude agent, "
+        "but it would appear as an unstaged change in your repository.\n"
+        f"Add '{relative.parent}/' to your .gitignore and try again, or disable the plugin for this repository:\n"
+        f"  mngr config set --scope project plugins.{CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME}.enabled false"
+    )
+
+
 def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write the mngr-proxy subagent definition under the agent's .claude/agents/."""
-    agents_dir = work_dir / ".claude" / "agents"
-    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(agents_dir))}", timeout_seconds=5.0)
+    """Write the mngr-proxy subagent definition under the agent's .claude/agents/.
+
+    Written to ``.claude/agents/mngr-proxy/proxy.md``; Claude Code resolves the
+    ``mngr-proxy`` subagent_type from the file's frontmatter ``name:`` field
+    regardless of the subdirectory. Refuses to write if the path is not
+    gitignored (see ``_check_proxy_artifact_gitignored``).
+    """
+    _check_proxy_artifact_gitignored(host, work_dir, _PROXY_AGENT_SUBPATH)
+    agent_path = work_dir / ".claude" / _PROXY_AGENT_SUBPATH
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(agent_path.parent))}", timeout_seconds=5.0)
     content = _load_resource(_AGENT_DEFINITION)
-    host.write_text_file(agents_dir / "mngr-proxy.md", content)
+    host.write_text_file(agent_path, content)
 
 
-def _write_mngr_subagents_skill(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write the ``mngr-subagents`` Claude skill under the agent's .claude/skills/.
+def _write_proxy_skill(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Write the ``mngr-proxy`` Claude skill under the agent's .claude/skills/.
 
     Used in DENY mode to give Claude the full context for delegating to
     mngr-managed subagents. The deny hook's ``permissionDecisionReason``
     is intentionally short -- a one-liner pointing at this skill -- so
     the verbose two-command spawn-and-wait protocol is loaded on demand
-    by Claude rather than crowding every Task transcript.
+    by Claude rather than crowding every Task transcript. Written to
+    ``.claude/skills/mngr-proxy/SKILL.md`` (the skill is named by its
+    directory; Claude Code requires the entry file to be exactly
+    ``SKILL.md``). Refuses to write if the path is not gitignored.
     """
-    skill_dir = work_dir / ".claude" / "skills" / "mngr-subagents"
-    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(skill_dir))}", timeout_seconds=5.0)
-    content = _load_resource(_MNGR_SUBAGENTS_SKILL)
-    host.write_text_file(skill_dir / "SKILL.md", content)
+    _check_proxy_artifact_gitignored(host, work_dir, _PROXY_SKILL_SUBPATH)
+    skill_path = work_dir / ".claude" / _PROXY_SKILL_SUBPATH
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(skill_path.parent))}", timeout_seconds=5.0)
+    content = _load_resource(_PROXY_SKILL_RESOURCE)
+    host.write_text_file(skill_path, content)
 
 
 def _read_existing_local_settings(host: OnlineHostInterface, settings_path: Path) -> dict[str, Any]:
@@ -288,7 +361,7 @@ def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) 
 
     Deny mode installs two hooks: a PreToolUse:Agent hook that denies
     Task calls with a short skill-pointer reason pointing at the
-    ``mngr-subagents`` skill (installed alongside, under
+    ``mngr-proxy`` skill (installed alongside, under
     ``.claude/skills/``), plus the shared label-driven SessionStart
     reaper (same ``hooks/reap.py`` PROXY uses; both spawn paths attach
     the ``mngr_claude_subagent_proxy_parent_id`` label so the same
@@ -401,7 +474,7 @@ def _discover_plugin_hooks_files() -> list[Path]:
     # Per-agent plugin caches live under <host_dir>/agents/<id>/plugin/claude/anthropic/plugins/.
     # `read_default_host_dir` resolves MNGR_HOST_DIR (explicit override) or
     # falls back to ~/.mngr -- so we honor user-customized host dirs.
-    host_agents_root = read_default_host_dir() / "agents"
+    host_agents_root = get_agents_root_dir(read_default_host_dir())
     if host_agents_root.is_dir():
         try:
             candidates.extend(host_agents_root.glob("*/plugin/claude/anthropic/plugins/**/hooks/hooks.json"))
@@ -577,7 +650,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
       write the mngr-proxy agent definition, guard project Stop hooks.
     - ``DENY``: install the PreToolUse:Agent deny hook plus the shared
       label-driven SessionStart reaper (same ``hooks/reap.py`` PROXY
-      uses), and write the ``mngr-subagents`` skill under
+      uses), and write the ``mngr-proxy`` skill under
       ``.claude/skills/``. The other PROXY-only plumbing does NOT run
       (no PostToolUse cleanup, no Stop-hook guard, no project
       settings.json check). The deny hook never invokes ``mngr create``
@@ -592,7 +665,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     mode = _resolve_plugin_mode(mngr_ctx)
     if mode == SubagentProxyMode.DENY:
         _merge_subagent_proxy_deny_hooks(host, agent.work_dir)
-        _write_mngr_subagents_skill(host, agent.work_dir)
+        _write_proxy_skill(host, agent.work_dir)
         return
 
     _check_project_settings_stop_hooks_guarded(host, agent.work_dir)

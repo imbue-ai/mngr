@@ -10,6 +10,9 @@ from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr_claude.stream_json import build_assistant_message
+from imbue.mngr_claude.stream_json import text_delta_event
+from imbue.mngr_claude.stream_json import wrap_stream_event
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.data_types import ResultMeta
 
@@ -109,22 +112,24 @@ def _assistant_event_to_stream_json(event: dict[str, Any], session_id: str) -> d
         content_blocks.append(
             {
                 "type": "tool_use",
-                "id": call.get("tool_call_id", ""),
-                "name": call.get("tool_name", ""),
+                "id": _coerce_str(call.get("tool_call_id", "")),
+                "name": _coerce_str(call.get("tool_name", "")),
                 "input": _parse_input_preview(_coerce_str(call.get("input_preview", ""))),
             }
         )
+    # The inner `message` is the Anthropic-API Message; build it through the shared typed boundary
+    # so its shape is owned upstream. The outer `{"type":"assistant",...,"session_id":...}` is the
+    # claude-CLI wrapper and stays a plain dict.
+    usage = event.get("usage")
     return {
         "type": "assistant",
-        "message": {
-            "id": event.get("message_uuid", ""),
-            "type": "message",
-            "role": "assistant",
-            "model": event.get("model", _PLACEHOLDER_MODEL),
-            "content": content_blocks,
-            "stop_reason": event.get("stop_reason"),
-            "usage": event.get("usage"),
-        },
+        "message": build_assistant_message(
+            message_id=_coerce_str(event.get("message_uuid", "")),
+            model=_coerce_str(event.get("model", _PLACEHOLDER_MODEL)) or _PLACEHOLDER_MODEL,
+            content=content_blocks,
+            stop_reason=event.get("stop_reason") if isinstance(event.get("stop_reason"), str) else None,
+            usage=usage if isinstance(usage, dict) else None,
+        ),
         "session_id": session_id,
     }
 
@@ -268,15 +273,7 @@ class StreamingOutputWriter(MutableModel):
         match self.output_format:
             case OutputFormat.STREAM_JSON:
                 self.write_init_if_needed()
-                event = {
-                    "type": "stream_event",
-                    "event": {
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {"type": "text_delta", "text": delta},
-                    },
-                    "session_id": self.session_id,
-                }
+                event = wrap_stream_event(text_delta_event(delta), self.session_id)
                 self.stdout.write(json.dumps(event, separators=(",", ":")) + "\n")
                 self.stdout.flush()
                 self.has_streamed_partials = True
