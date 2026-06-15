@@ -4,6 +4,58 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+## AWS provider support: ProviderBackendInterface refactor
+
+`is_for_host_creation` was removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d in every other backend). Replaced with a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on the interface that Modal overrides. The Lima backend's now-unused `del`-of-`is_for_host_creation` is removed. No behavior change.
+
+## 2026-06-10
+
+Raised the stale coverage floor from 50% to 65% to match the coverage CI already measures (~67%).
+
+## 2026-06-09
+
+Offline hosts produced by this provider are now readable: the offline-host
+construction path (used by both `get_host` for stopped hosts and
+`to_offline_host`) returns an `OfflineHostWithVolume` (which implements the new
+`HostFileReadInterface`) via the shared `make_readable_offline_host` helper.
+This makes a stopped host's files readable through the same interface as an
+online host -- used by Claude session preservation when a host is destroyed
+while offline (the destroy path obtains the host via `get_host`), and available
+to other readers of offline host data. The host's volume is resolved lazily on
+first read, so this adds no per-host probe to host discovery. When no volume is
+available, reads behave as "nothing there".
+
+# Lima provider: run agents directly in the VM (drop docker-in-VM)
+
+Removed the Lima provider's `is_host_in_docker` mode entirely. The Lima provider
+no longer runs a Docker daemon, builds an image, or runs the agent inside a
+nested container in the VM. Agents always run directly in the Lima VM.
+
+- Added `is_run_as_root` to the Lima provider config. When enabled, mngr runs the
+  agent in the VM as root (uid 0) -- so a coding agent can `apt install` and
+  write anywhere with no `sudo`, exactly as it can inside a docker/VPS container.
+  mngr injects a root client key, enables key-based root login, and SSHes in as
+  root.
+- `is_run_as_root=true` requires the btrfs additional-disk layout
+  (`is_host_data_volume_exposed=false`); the invalid combination with the 9p
+  bind-mount layout is rejected at config construction.
+- Removed the docker-mode config fields (`is_host_in_docker`, `container_ssh_port`,
+  `default_image`, `builder`, `docker_install_timeout`,
+  `container_ssh_connect_timeout`, `image_build_timeout_seconds`,
+  `default_container_run_args`, `docker_runtime`, `install_gvisor_runtime`).
+  Configs that still set them now fail to load.
+- Existing docker-mode Lima hosts (records with `is_host_in_docker=true`) are no
+  longer startable; destroy and recreate them.
+- The Lima provider no longer depends on `mngr_vps_docker`.
+
+Consistent dependency setup across providers is now achieved by having the
+project ship idempotent setup scripts that its `Dockerfile` runs (for the
+docker/vps_docker/ovh providers) and that the Lima host runs directly after the
+project is synced in. btrfs-based backups continue to work because `host_dir`
+stays on a btrfs disk and the root agent can snapshot it directly.
+
 ## 2026-06-08
 
 - The Lima VM now installs a pinned Docker Engine version from Docker's official

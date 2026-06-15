@@ -18,6 +18,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import MngrContext
@@ -32,7 +33,10 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
@@ -384,13 +388,20 @@ def _build_agent_name() -> AgentName:
 
 def _send_user_turn(mngr_ctx: MngrContext, agent: ClaudeAgent, prompt: str) -> None:
     """Deliver a follow-up prompt to the running agent via ``send_message_to_agents``."""
-    include_filter = f'id == "{agent.id}"'
+    # The orchestrator only runs against locally-created Claude agents (see
+    # _build_events_target), so the host and provider are fixed; no discovery
+    # round-trip is needed to construct the AgentMatch.
+    match = AgentMatch(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host_id=agent.host_id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=LOCAL_PROVIDER_NAME,
+    )
     result = send_message_to_agents(
         mngr_ctx=mngr_ctx,
         message_content=prompt,
-        include_filters=(include_filter,),
-        exclude_filters=(),
-        all_agents=False,
+        agents_to_message=(match,),
         error_behavior=ErrorBehavior.ABORT,
         is_start_desired=False,
     )

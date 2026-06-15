@@ -26,14 +26,14 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
 HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
 
@@ -103,17 +103,13 @@ SLACK_AVAILABLE_PAYLOAD: dict[str, object] = {
 }
 
 
-def build_slack_services_catalog(
-    gateway_client: FakeLatchkeyGatewayClient | None = None,
-) -> ServicesCatalog:
+def build_slack_services_catalog() -> ServicesCatalog:
     """Return a :class:`ServicesCatalog` pre-seeded with the Slack fixture.
 
-    Uses the gateway client's ``available_services_payload`` hook so we
-    don't depend on the real ``services.json`` data file.
+    Uses an explicit catalog payload so we don't depend on the real
+    ``services.json`` data file.
     """
-    client = gateway_client if gateway_client is not None else build_fake_gateway_client()
-    client.available_services_payload = dict(SLACK_AVAILABLE_PAYLOAD)
-    return ServicesCatalog(gateway_client=client)
+    return ServicesCatalog.from_catalog_payload(SLACK_AVAILABLE_PAYLOAD)
 
 
 DEFAULT_AUTH_OPTIONS_JSON: str = json.dumps(["browser", "set"])
@@ -181,16 +177,16 @@ def build_handler_with_gateway_client(
 
     Tests that need to assert on the gateway client's recorded calls
     (``set_calls`` / ``deleted_request_ids``) pass in their own
-    :class:`FakeLatchkeyGatewayClient` and keep the reference; the
-    catalog is seeded from that same client so the available-services
-    payload stays consistent.
+    :class:`FakeLatchkeyGatewayClient` and keep the reference. The catalog
+    is independent of the gateway client (it reads a local payload), so the
+    two are wired separately.
     """
     latchkey = make_latchkey_with_status(tmp_path, credential_status=credential_status)
     mngr_binary = make_recording_binary(tmp_path, "mngr", exit_code=0)
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog=build_slack_services_catalog(gateway_client),
+        services_catalog=build_slack_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
         gateway_client=gateway_client,
     )
@@ -253,6 +249,7 @@ def make_file_sharing_handler(
     tmp_path: Path,
     gateway_handler: HttpxHandler,
     share_roots: tuple[Path, ...] = DEFAULT_TEST_SHARE_ROOTS,
+    home_dir: Path = Path("/home/example"),
 ) -> tuple[FileSharingGrantHandler, RecordingMessageSender]:
     sender = RecordingMessageSender(sent_messages=[])
     return (
@@ -261,6 +258,7 @@ def make_file_sharing_handler(
             gateway_client=build_gateway_client(gateway_handler),
             mngr_message_sender=sender,
             share_roots=share_roots,
+            home_dir=home_dir,
         ),
         sender,
     )

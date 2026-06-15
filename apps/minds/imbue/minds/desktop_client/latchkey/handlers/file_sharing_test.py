@@ -169,6 +169,26 @@ def test_render_request_detail_fragment_escapes_html_in_inputs(tmp_path: Path) -
     assert "onfocus" not in attrs
 
 
+def test_render_request_detail_fragment_embeds_home_dir(tmp_path: Path) -> None:
+    """The dialog embeds the home directory so the inbox shell can expand ``~`` client-side."""
+    handler, _sender = make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200), home_dir=Path("/home/glenn"))
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/glenn/notes.txt",
+        access="READ",
+        rationale="r",
+    )
+    body = str(
+        handler.render_request_detail_fragment(
+            req_event=event,
+            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+            mngr_forward_origin="",
+        )
+    )
+    attrs = _parse_input_attrs(body, element_id="file-sharing-path-input")
+    assert attrs["data-home-dir"] == "/home/glenn"
+
+
 def test_render_request_detail_fragment_embeds_allowed_roots(tmp_path: Path) -> None:
     """The dialog embeds the share roots so the inbox shell can validate client-side."""
     handler, _sender = make_file_sharing_handler(

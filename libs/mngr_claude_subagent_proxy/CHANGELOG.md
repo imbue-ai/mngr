@@ -9,6 +9,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `mngr_claude_subagent_proxy` typed `subagent_type` (e.g. `imbue-code-guardian:verify-and-fix`) now preserves Claude Code's system-prompt contract in both PROXY and DENY modes by resolving on-disk agent definitions.
+- Changed: Destroyed-agent transcript fallback now reads the preserved common transcript from its new location at `preserved/<name>--<id>/events/claude/common_transcript/events.jsonl` (via the shared `get_preserved_agent_dir` helper), reflecting `mngr_claude`'s switch to the unified `preserve_agent_data` layout; the former `plugin/mngr_claude/preserved_sessions/<name>--<id>/common_transcript/events.jsonl` path is no longer consulted.
+- Changed: Plugin is now **disabled by default**; it only loads when a config layer sets `[plugins.claude_subagent_proxy] enabled = true`. Inverts the usual plugin default because this plugin is experimental and intercepts Claude Code's built-in `Task` tool.
+- Changed: Provisioning artifacts moved under `mngr-proxy/` subdirs -- PROXY-mode agent at `.claude/agents/mngr-proxy/proxy.md` and DENY-mode skill at `.claude/skills/mngr-proxy/SKILL.md` (renamed from `mngr-subagents`); each path is covered by a single `.gitignore` line. Discovery is unaffected (Claude Code identifies the subagent by its frontmatter `name:` field).
+- Changed: At provisioning, the plugin now refuses to write either artifact into a git-tracked worktree where the path is not gitignored, raising a clear error instead of leaving an untracked file. The error tells you to either gitignore the path or disable the plugin for the repository (`mngr config set --scope project plugins.claude_subagent_proxy.enabled false`).
 
 ## [v0.2.8] - 2026-05-13
 
