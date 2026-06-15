@@ -7,38 +7,40 @@ from imbue.mngr.cli.plugin_install_wizard import _is_dependent_visible
 from imbue.mngr.cli.plugin_install_wizard import _phase2_dependent_entries
 from imbue.mngr.cli.plugin_install_wizard import _should_preselect_basic
 from imbue.mngr.plugin_catalog import CatalogEntry
-from imbue.mngr.plugin_catalog import ClaudeSignalCheck
+from imbue.mngr.plugin_catalog import RequiredPackagesGate
 from imbue.mngr.plugin_catalog import SignalCheck
+from imbue.mngr.plugin_catalog import SignalGate
 from imbue.mngr.primitives import PluginTier
 
 _PASSING_SIGNAL = SignalCheck(command=("true",))
 _FAILING_SIGNAL = SignalCheck(command=("false",))
-_CLAUDE_SIGNAL = ClaudeSignalCheck()
 
-# A base + agent plugin + agent-usage provider triple mirroring the real catalog
-# shape: the usage provider is package-gated on both the agent and base usage.
-_CLAUDE = CatalogEntry(
-    entry_point_name="claude",
-    package_name="imbue-mngr-claude",
-    description="Claude agent",
+# Abstract fixtures for the gating-logic tests: an agent plugin, a base plugin, and
+# a per-agent extra that is package-gated on both. Names are deliberately fake so
+# they aren't mistaken for real catalog entries (the real entries are exercised in
+# plugin_catalog_test.py).
+_AGENT_PLUGIN = CatalogEntry(
+    entry_point_name="agent_x",
+    package_name="pkg-agent-x",
+    description="Fake agent plugin",
     tier=PluginTier.INDEPENDENT,
-    signal=_CLAUDE_SIGNAL,
+    gate=SignalGate(signal=_PASSING_SIGNAL),
     is_recommended=True,
 )
-_USAGE = CatalogEntry(
-    entry_point_name="usage",
-    package_name="imbue-mngr-usage",
-    description="Usage tracking",
+_BASE_PLUGIN = CatalogEntry(
+    entry_point_name="base_y",
+    package_name="pkg-base-y",
+    description="Fake base plugin",
     tier=PluginTier.INDEPENDENT,
     is_recommended=True,
 )
-_CLAUDE_USAGE = CatalogEntry(
-    entry_point_name="claude_usage",
-    package_name="imbue-mngr-claude-usage",
-    description="Claude usage provider",
+_AGENT_EXTRA = CatalogEntry(
+    entry_point_name="agent_x_extra",
+    package_name="pkg-agent-x-extra",
+    description="Fake per-agent extra requiring the agent plugin and base plugin",
     tier=PluginTier.DEPENDENT,
     is_recommended=True,
-    requires_packages=("imbue-mngr-claude", "imbue-mngr-usage"),
+    gate=RequiredPackagesGate(packages=("pkg-agent-x", "pkg-base-y")),
 )
 
 # =============================================================================
@@ -47,37 +49,37 @@ _CLAUDE_USAGE = CatalogEntry(
 
 
 def test_should_preselect_basic_with_passing_signal() -> None:
-    """BASIC tier with passing signal should be preselected."""
+    """A BASIC entry with a passing signal gate should be preselected."""
     entry = CatalogEntry(
         entry_point_name="test",
         package_name="test",
         description="test",
         tier=PluginTier.INDEPENDENT,
-        signal=_PASSING_SIGNAL,
+        gate=SignalGate(signal=_PASSING_SIGNAL),
     )
     assert _should_preselect_basic(entry) is True
 
 
 def test_should_preselect_basic_with_failing_signal() -> None:
-    """BASIC tier with failing signal should not be preselected."""
+    """A BASIC entry with a failing signal gate should not be preselected."""
     entry = CatalogEntry(
         entry_point_name="test",
         package_name="test",
         description="test",
         tier=PluginTier.INDEPENDENT,
-        signal=_FAILING_SIGNAL,
+        gate=SignalGate(signal=_FAILING_SIGNAL),
     )
     assert _should_preselect_basic(entry) is False
 
 
-def test_should_preselect_basic_no_signal() -> None:
-    """BASIC tier with no signal should always be preselected."""
+def test_should_preselect_basic_no_gate() -> None:
+    """A BASIC entry with no gate should always be preselected."""
     entry = CatalogEntry(
         entry_point_name="test",
         package_name="test",
         description="test",
         tier=PluginTier.INDEPENDENT,
-        signal=None,
+        gate=None,
     )
     assert _should_preselect_basic(entry) is True
 
@@ -126,29 +128,29 @@ def test_get_selected_entries_all_checked() -> None:
 def test_get_accepted_signals_returns_signals_from_selected() -> None:
     selected = [
         CatalogEntry(
-            entry_point_name="claude",
-            package_name="p",
+            entry_point_name="with_signal",
+            package_name="pkg-a",
             description="d",
             tier=PluginTier.INDEPENDENT,
-            signal=_CLAUDE_SIGNAL,
+            gate=SignalGate(signal=_PASSING_SIGNAL),
         ),
         CatalogEntry(
-            entry_point_name="tutor",
-            package_name="p2",
+            entry_point_name="no_gate",
+            package_name="pkg-b",
             description="d",
             tier=PluginTier.INDEPENDENT,
         ),
     ]
     accepted = _get_accepted_signals(selected)
-    assert _CLAUDE_SIGNAL in accepted
+    assert _PASSING_SIGNAL in accepted
     assert len(accepted) == 1
 
 
-def test_get_accepted_signals_empty_when_no_signals() -> None:
+def test_get_accepted_signals_empty_when_no_gates() -> None:
     selected = [
         CatalogEntry(
-            entry_point_name="tutor",
-            package_name="p",
+            entry_point_name="no_gate",
+            package_name="pkg-a",
             description="d",
             tier=PluginTier.INDEPENDENT,
         ),
@@ -194,37 +196,48 @@ def test_filter_already_installed_none_installed() -> None:
 
 
 # =============================================================================
-# Tests for _is_dependent_visible (package-gated vs legacy signal-gated)
+# Tests for _is_dependent_visible (signal gate vs required-packages gate)
 # =============================================================================
 
 
 def test_is_dependent_visible_package_gated_all_present() -> None:
-    present = frozenset({"imbue-mngr-claude", "imbue-mngr-usage"})
-    assert _is_dependent_visible(_CLAUDE_USAGE, set(), present) is True
+    present = frozenset({"pkg-agent-x", "pkg-base-y"})
+    assert _is_dependent_visible(_AGENT_EXTRA, set(), present) is True
 
 
 def test_is_dependent_visible_package_gated_one_missing() -> None:
-    # Base usage present but the agent plugin is not -> not offered.
-    present = frozenset({"imbue-mngr-usage"})
-    assert _is_dependent_visible(_CLAUDE_USAGE, set(), present) is False
+    # Base plugin present but the agent plugin is not -> not offered.
+    present = frozenset({"pkg-base-y"})
+    assert _is_dependent_visible(_AGENT_EXTRA, set(), present) is False
 
 
 def test_is_dependent_visible_package_gated_ignores_signals() -> None:
-    """A package-gated entry is decided purely by package presence, not signals."""
-    assert _is_dependent_visible(_CLAUDE_USAGE, {_CLAUDE_SIGNAL}, frozenset()) is False
+    """A required-packages gate is decided purely by package presence, not signals."""
+    assert _is_dependent_visible(_AGENT_EXTRA, {_PASSING_SIGNAL}, frozenset()) is False
 
 
 def test_is_dependent_visible_signal_gated() -> None:
-    """An entry without requires_packages is gated purely on its signal."""
+    """A signal gate is unlocked only when its signal was accepted in phase 1."""
     signal_gated = CatalogEntry(
-        entry_point_name="code_guardian",
-        package_name="imbue-mngr-claude",
+        entry_point_name="signal_extra",
+        package_name="pkg-signal-extra",
         description="signal-gated dependent",
         tier=PluginTier.DEPENDENT,
-        signal=_CLAUDE_SIGNAL,
+        gate=SignalGate(signal=_PASSING_SIGNAL),
     )
-    assert _is_dependent_visible(signal_gated, {_CLAUDE_SIGNAL}, frozenset()) is True
+    assert _is_dependent_visible(signal_gated, {_PASSING_SIGNAL}, frozenset()) is True
     assert _is_dependent_visible(signal_gated, set(), frozenset()) is False
+
+
+def test_is_dependent_visible_no_gate_never_unlocked() -> None:
+    """A dependent with no gate is never offered."""
+    no_gate = CatalogEntry(
+        entry_point_name="orphan_extra",
+        package_name="pkg-orphan-extra",
+        description="dependent with no gate",
+        tier=PluginTier.DEPENDENT,
+    )
+    assert _is_dependent_visible(no_gate, {_PASSING_SIGNAL}, frozenset({"pkg-orphan-extra"})) is False
 
 
 # =============================================================================
@@ -232,25 +245,25 @@ def test_is_dependent_visible_signal_gated() -> None:
 # =============================================================================
 
 
-def test_phase2_usage_offered_when_agent_and_usage_both_selected() -> None:
-    """Selecting both the agent plugin and base usage in phase 1 unlocks the provider."""
-    result = _phase2_dependent_entries((_CLAUDE_USAGE,), [_CLAUDE, _USAGE], frozenset())
-    assert result == (_CLAUDE_USAGE,)
+def test_phase2_extra_offered_when_agent_and_base_both_selected() -> None:
+    """Selecting both the agent plugin and base plugin in phase 1 unlocks the extra."""
+    result = _phase2_dependent_entries((_AGENT_EXTRA,), [_AGENT_PLUGIN, _BASE_PLUGIN], frozenset())
+    assert result == (_AGENT_EXTRA,)
 
 
-def test_phase2_usage_offered_when_agent_installed_and_usage_selected() -> None:
+def test_phase2_extra_offered_when_agent_installed_and_base_selected() -> None:
     """The agent plugin already installed (filtered out of phase 1) still counts as present."""
-    result = _phase2_dependent_entries((_CLAUDE_USAGE,), [_USAGE], frozenset({"imbue-mngr-claude"}))
-    assert result == (_CLAUDE_USAGE,)
+    result = _phase2_dependent_entries((_AGENT_EXTRA,), [_BASE_PLUGIN], frozenset({"pkg-agent-x"}))
+    assert result == (_AGENT_EXTRA,)
 
 
-def test_phase2_usage_not_offered_without_base_usage() -> None:
-    """Having the agent plugin but not base usage does not unlock the provider."""
-    result = _phase2_dependent_entries((_CLAUDE_USAGE,), [_CLAUDE], frozenset())
+def test_phase2_extra_not_offered_without_base() -> None:
+    """Having the agent plugin but not the base plugin does not unlock the extra."""
+    result = _phase2_dependent_entries((_AGENT_EXTRA,), [_AGENT_PLUGIN], frozenset())
     assert result == ()
 
 
-def test_phase2_usage_not_offered_without_agent() -> None:
-    """Having base usage but not the agent plugin does not unlock the provider."""
-    result = _phase2_dependent_entries((_CLAUDE_USAGE,), [_USAGE], frozenset())
+def test_phase2_extra_not_offered_without_agent() -> None:
+    """Having the base plugin but not the agent plugin does not unlock the extra."""
+    result = _phase2_dependent_entries((_AGENT_EXTRA,), [_BASE_PLUGIN], frozenset())
     assert result == ()

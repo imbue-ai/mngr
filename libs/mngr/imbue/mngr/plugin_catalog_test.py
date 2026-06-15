@@ -26,11 +26,14 @@ def test_catalog_contains_expected_basic_entry_points() -> None:
 
 
 def test_catalog_entries_sharing_signal_use_same_instance() -> None:
-    """Entries that share a signal should reference the exact same object."""
+    """Entries that share a signal should reference the exact same SignalCheck object."""
     claude_entry = get_catalog_entry("claude")
     fixme_entry = get_catalog_entry("fixme_fairy")
     assert claude_entry is not None and fixme_entry is not None
-    assert claude_entry.signal is fixme_entry.signal
+    assert claude_entry.gate is not None and fixme_entry.gate is not None
+    claude_signal = claude_entry.gate.detection_signal()
+    assert claude_signal is not None
+    assert claude_signal is fixme_entry.gate.detection_signal()
 
 
 def test_base_usage_plugin_is_recommended_independent() -> None:
@@ -43,7 +46,7 @@ def test_base_usage_plugin_is_recommended_independent() -> None:
 
 
 def test_agent_usage_providers_require_agent_and_base_usage() -> None:
-    """Each per-agent usage provider is DEPENDENT and gated on its agent plugin plus base usage."""
+    """Each per-agent usage provider is DEPENDENT and unlocked only when its agent plugin and base usage are both present."""
     expected_agent_package = {
         "claude_usage": "imbue-mngr-claude",
         "codex_usage": "imbue-mngr-codex",
@@ -54,7 +57,13 @@ def test_agent_usage_providers_require_agent_and_base_usage() -> None:
         entry = get_catalog_entry(entry_point)
         assert entry is not None, entry_point
         assert entry.tier == PluginTier.DEPENDENT
-        assert set(entry.requires_packages) == {agent_package, "imbue-mngr-usage"}
+        gate = entry.gate
+        assert gate is not None, entry_point
+        assert gate.is_unlocked(
+            accepted_signals=set(), present_packages=frozenset({agent_package, "imbue-mngr-usage"})
+        )
+        assert not gate.is_unlocked(accepted_signals=set(), present_packages=frozenset({agent_package}))
+        assert not gate.is_unlocked(accepted_signals=set(), present_packages=frozenset({"imbue-mngr-usage"}))
 
 
 # =============================================================================
