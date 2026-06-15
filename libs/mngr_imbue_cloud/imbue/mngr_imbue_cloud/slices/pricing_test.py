@@ -323,6 +323,73 @@ def test_compute_slice_pricing_rows_filters_by_region() -> None:
     assert [(row.server_ram_gb, row.region) for row in rows] == [(32, "hil")]
 
 
+def test_compute_slice_pricing_rows_uses_cheapest_viable_storage_when_smallest_is_too_small() -> None:
+    # 128GB -> 16 slots. The cheapest storage (2x512 = 512GB) gives (512-20)/16 = 30 GiB/slice, below the
+    # 32 GiB boot disk, so it can't host a slice -- but 2x1920 can. The row must survive on the bigger storage.
+    catalog = {
+        "products": [
+            {
+                "name": "p",
+                "description": "CPU",
+                "blobs": {"technical": {"server": {"cpu": {"cores": 8, "threads": 16}}}},
+            }
+        ],
+        "plans": [
+            {
+                "planCode": "plan-128-us",
+                "invoiceName": "P",
+                "product": "p",
+                "pricings": [_install(0), _renew(100 * _USD, 0, 1)],
+                "addonFamilies": [
+                    {"name": "memory", "addons": ["ram-128g-ecc-3200-plan-128-us"]},
+                    {
+                        "name": "storage",
+                        "addons": ["softraid-2x512nvme-plan-128-us", "softraid-2x1920nvme-plan-128-us"],
+                    },
+                ],
+            }
+        ],
+        "addons": [
+            {
+                "planCode": "ram-128g-ecc-3200-plan-128-us",
+                "invoiceName": "128GB",
+                "pricings": [_install(0), _renew(0, 0, 1)],
+            },
+            {
+                "planCode": "softraid-2x512nvme-plan-128-us",
+                "invoiceName": "2x512",
+                "pricings": [_install(0), _renew(0, 0, 1)],
+            },
+            {
+                "planCode": "softraid-2x1920nvme-plan-128-us",
+                "invoiceName": "2x1920",
+                "pricings": [_install(0), _renew(40 * _USD, 0, 1)],
+            },
+        ],
+    }
+    availabilities = [
+        {
+            "planCode": "plan-128-us",
+            "memory": "ram-128g-ecc-3200",
+            "storage": storage,
+            "datacenters": [{"datacenter": "vin", "availability": "1H-high"}],
+        }
+        for storage in ("softraid-2x512nvme", "softraid-2x1920nvme")
+    ]
+    rows = compute_slice_pricing_rows(
+        catalog, availabilities, {"vin"}, memory_per_slice_gb=8, cpu_overcommit_ratio=2.0
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.slot_count == 16
+    # The too-small 2x512 is skipped; the base is the cheapest storage that can actually host a slice.
+    assert row.base_storage_label == "softraid-2x1920nvme"
+    assert row.disk_gb_per_slice == (1920 - 20) // 16
+    assert row.recurring_monthly_usd == Decimal(140)
+    # The smaller (unsliceable) storage is not offered as an upgrade.
+    assert row.storage_options == ()
+
+
 def test_compute_slice_pricing_rows_matches_addons_whose_suffix_differs_from_plan_code() -> None:
     # SYS RAM/storage add-ons carry a '-24sys-us' family suffix, not the '-24sys012-v1-us' planCode;
     # the builder must still match them (regression guard for the bug where only RISE plans appeared).

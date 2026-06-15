@@ -295,17 +295,25 @@ def _build_region_row(
     if not priced_storages:
         return None
     priced_storages.sort(key=lambda priced: (priced[0], priced[4]))
-    base_monthly, base_setup, base_storage_label, _base_code, base_usable_gb, _base_raid, base_status = (
-        priced_storages[0]
-    )
 
-    try:
-        disk_gb_per_slice = compute_slice_disk_budget_gib(base_usable_gb, slot_count)
-        # A slice needs a fixed boot disk plus a positive data disk; skip configs too disk-starved to host one
-        # (e.g. RAM-dense boxes whose per-slice disk falls below the boot disk at this slice size).
-        compute_slice_disk_gib(base_usable_gb, slot_count)
-    except BareMetalConfigError:
+    # Use the cheapest storage that can actually host a slice as the base. A storage whose per-slice disk
+    # budget can't fit the boot disk + a positive data disk is skipped, but a bigger storage on the SAME
+    # server can rescue the config -- so the row is dropped only if NO available storage is sliceable.
+    base = None
+    disk_gb_per_slice = 0
+    for candidate in priced_storages:
+        candidate_usable_gb = candidate[4]
+        try:
+            candidate_budget_gib = compute_slice_disk_budget_gib(candidate_usable_gb, slot_count)
+            compute_slice_disk_gib(candidate_usable_gb, slot_count)
+        except BareMetalConfigError:
+            continue
+        base = candidate
+        disk_gb_per_slice = candidate_budget_gib
+        break
+    if base is None:
         return None
+    base_monthly, base_setup, base_storage_label, _base_code, base_usable_gb, _base_raid, base_status = base
     delivery_hours, stock_level = parse_availability_delivery(base_status)
     amortized_monthly = base_monthly + base_setup / _SETUP_AMORTIZATION_MONTHS
     price_per_slice = (amortized_monthly / Decimal(slot_count)).quantize(Decimal("0.01"))
