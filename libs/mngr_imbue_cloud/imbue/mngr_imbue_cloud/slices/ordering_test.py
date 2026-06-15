@@ -70,9 +70,16 @@ def test_looks_like_service_name(candidate: object, expected: bool) -> None:
     assert _looks_like_service_name(candidate) is expected
 
 
-def test_summarize_checkout_prices_renders_labels() -> None:
-    preview = {"prices": [{"label": "TOTAL", "price": {"text": "$83.00 USD"}}]}
-    assert "TOTAL: $83.00 USD" in summarize_checkout_prices(preview)
+def test_summarize_checkout_prices_renders_due_now_from_price_dict() -> None:
+    preview = {
+        "prices": {
+            "withoutTax": {"text": "$153.00 USD"},
+            "tax": {"text": "$0.00 USD"},
+            "withTax": {"text": "$153.00 USD"},
+        }
+    }
+    summary = summarize_checkout_prices(preview)
+    assert "due now: $153.00 USD" in summary
 
 
 def test_derive_server_specs_reads_cpu_from_product_and_disk_from_storage() -> None:

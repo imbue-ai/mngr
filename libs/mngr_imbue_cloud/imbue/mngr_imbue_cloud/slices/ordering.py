@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 from typing import Final
+from urllib.parse import urlencode
 
 from loguru import logger
 
@@ -136,12 +137,16 @@ def extract_order_id(checkout_response: Mapping[str, Any]) -> int:
 
 @pure
 def summarize_checkout_prices(preview: Mapping[str, Any]) -> str:
-    """Render the GET-checkout price preview as a short human summary."""
+    """Render the GET-checkout price preview (a dict of withoutTax/tax/withTax entries) as a short summary.
+
+    ``withTax`` is the amount charged now (the one-time setup plus the first month).
+    """
+    prices = preview.get("prices") or {}
     lines = []
-    for price in preview.get("prices", []):
-        label = price.get("label", "?")
-        text = (price.get("price") or {}).get("text", "?")
-        lines.append(f"  {label}: {text}")
+    for human_label, key in (("subtotal", "withoutTax"), ("tax", "tax"), ("due now", "withTax")):
+        entry = prices.get(key)
+        if isinstance(entry, Mapping):
+            lines.append(f"  {human_label}: {entry.get('text', '?')}")
     return "\n".join(lines) if lines else "  (no price lines returned)"
 
 
@@ -189,7 +194,9 @@ def build_and_assign_eco_cart(
         ):
             client.call_api("POST", f"/order/cart/{cart_id}/item/{item_id}/configuration", label=label, value=value)
 
-        eco_options = client.call_api("GET", f"/order/cart/{cart_id}/eco/options", planCode=plan_code)
+        # call_api sends kwargs as the request body, so a GET's query params must go in the path.
+        options_path = f"/order/cart/{cart_id}/eco/options?{urlencode({'planCode': plan_code})}"
+        eco_options = client.call_api("GET", options_path)
         option_codes = select_eco_option_codes(eco_options, memory_gb, storage_short)
         for option_code in option_codes:
             client.call_api(
