@@ -808,7 +808,7 @@ def test_project_to_agent_type_entries_keeps_existing_metadata_when_names_match(
     result = _project_to_agent_type_entries(plugins, config)
 
     by_name = {p.name: p for p in result}
-    # codex is a built-in agent type, so it must be present.
+    # codex is a recommended catalog agent type (enabled by default), so it must be present.
     assert "codex" in by_name
     # Metadata must come through from the existing PluginInfo entry.
     assert by_name["codex"].version == "1.2.3"
@@ -906,8 +906,8 @@ def test_project_to_agent_type_entries_emits_every_available_type() -> None:
     The projection therefore must not apply a second filter that could
     drop registered types.
     """
-    # 'codex' and 'command' are built-in agent types (registered via the
-    # codex_agent / command_agent default plugins), so
+    # 'codex' (a recommended catalog plugin, enabled by default) and 'command'
+    # (registered in core) are both available agent types, so
     # ``list_available_agent_types(MngrConfig())`` will include both.
     # We deliberately omit codex from the input ``plugins`` list to make
     # sure the projection still emits it -- the input is consulted only

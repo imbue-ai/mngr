@@ -115,3 +115,19 @@ def test_claude_background_tasks_exits_when_target_session_is_gone_despite_prefi
         f"Background script exited non-zero: returncode={result.returncode}\n"
         f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
     )
+
+    # returncode == 0 alone cannot distinguish "exited because the target
+    # session is gone (correct)" from "exited 0 for an unrelated early reason"
+    # (e.g. a pidfile-collision early-exit at the top of the script). The
+    # final ``log_info "... (session ended)"`` is only reached after the
+    # polling loop's exact-match ``has-session`` check fails and the loop body
+    # never runs, so its presence proves the script took the gone-session path
+    # rather than short-circuiting earlier. ``log_info`` writes JSONL to the
+    # events log (not stdout), so we assert against that file.
+    events_log = state_dir_with_log_lib / "events" / "logs" / "claude_background_tasks" / "events.jsonl"
+    assert events_log.exists(), f"Expected background-tasks events log at {events_log}"
+    events_text = events_log.read_text()
+    assert "(session ended)" in events_text, (
+        "Expected the script to reach its gone-session exit log line "
+        f"'... (session ended)'. Events log contents:\n{events_text}"
+    )

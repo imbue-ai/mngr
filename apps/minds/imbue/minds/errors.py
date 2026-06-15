@@ -58,6 +58,18 @@ class MindsConfigError(MindError):
     ...
 
 
+class DeployLifecycleConfigError(MindError, ValueError):
+    """Raised when a deploy lifecycle config combination is invalid."""
+
+    ...
+
+
+class EnvelopeStreamConsumerError(MindError, RuntimeError):
+    """Raised when the envelope stream consumer is used out of lifecycle order."""
+
+    ...
+
+
 class BackupProvisioningError(MindError):
     """Raised when configuring restic backups for a workspace fails."""
 
@@ -76,7 +88,7 @@ class TelegramCredentialError(TelegramError, ValueError):
     ...
 
 
-class TelegramCredentialExtractionError(TelegramError):
+class TelegramCredentialExtractionError(TelegramError, ValueError):
     """Raised when credential extraction from the browser fails."""
 
     ...
