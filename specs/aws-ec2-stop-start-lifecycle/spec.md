@@ -201,9 +201,11 @@ Two sub-parts, with an open decision on the second:
 2. **Agent-level resolution while stopped (the open fork).** `mngr start` is agent-addressed
    (`mngr start --host` is `NotImplementedError`), so resolving `mngr start <agent>` needs the
    stopped host's *agents* to be discoverable. But agent records live on the unreadable EBS volume.
-   Options: (a) persist a minimal agent record (id/name/type/command) into EC2 tags and serve it via
-   `list_persisted_agent_data_for_host` (no new infra; capped by EC2's 50-tag / 256-char limits, so
-   fine for few-agent hosts); (b) persist agent records to S3 (full parity, any count; the
+   Options: (a) persist a minimal agent record (id/name/type/labels, as per-field
+   `mngr-agent-<id>-<field>` tags) into EC2 tags and serve it via `list_persisted_agent_data_for_host`
+   (no new infra; capped by EC2's 50-tag / 256-char limits, so fine for few-agent hosts -- a host with
+   too many agents to mirror raises `NotImplementedError`, prompting an issue); (b) persist agent
+   records to S3 (full parity, any count; the
    previously-deferred piece); or (c) implement `mngr start --host <name>` so resume targets the
    host and skips agent resolution. Modal's analog is (a/b): it serves stopped-host agents via
    `list_persisted_agent_data_for_host` backed by its persistent volume.

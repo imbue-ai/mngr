@@ -47,6 +47,7 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
@@ -60,12 +61,21 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
-# Per-agent metadata is persisted as one EC2 tag per agent, keyed
-# ``mngr-agent-<agent_id>``, so a *stopped* instance (no public IP, SSH
-# unreachable) still surfaces its agents in discovery and resolves by name.
-# The value is a compact JSON record kept under EC2's 256-char tag-value limit.
+# Per-agent metadata is mirrored onto the instance as up to three EC2 tags per
+# agent, keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the key,
+# not a value), so a *stopped* instance (no public IP, SSH unreachable) still
+# surfaces its agents in discovery and resolves by name. ``name``/``type`` are
+# stored raw; ``labels`` as compact JSON. One tag per field (rather than one
+# packed tag per agent) gives ``labels`` the full 256-char value budget; a field
+# whose value still overflows is dropped, not failed.
 AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
+_AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
 _MAX_TAG_VALUE_LEN: Final[int] = 256
+# EC2 allows 50 (non-``aws:``) tags per resource. When a host has so many agents
+# that mirroring another would exceed this, we surface a NotImplementedError
+# (which the CLI turns into an "open an issue" prompt) rather than failing
+# obscurely -- the S3-backed agent store is the planned fix for many-agent hosts.
+_AWS_MAX_TAGS_PER_INSTANCE: Final[int] = 50
 # The ``Name`` tag is set to ``mngr-<host_name>`` at launch; strip the prefix to
 # recover the host name when reconstructing a stopped host from tags.
 _HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
@@ -661,36 +671,55 @@ class AwsProvider(VpsDockerProvider):
         except HostNotFoundError:
             # Host stopped / unreachable: the on-volume store can't be written,
             # but the tag mirror below still must be (e.g. offline `mngr label`).
-            logger.debug("Host {} unreachable; persisting agent data to EC2 tag only", host_id)
-        value = self._compact_agent_tag_value(agent_data)
-        if value is None:
-            # _compact_agent_tag_value already logged the specific reason (missing
-            # id/name, or a record too large to fit the tag limit).
+            logger.debug("Host {} unreachable; persisting agent data to EC2 tags only", host_id)
+        agent_id = agent_data.get("id")
+        if agent_id is None:
+            logger.warning("Cannot mirror agent data to EC2 tags without an id (name={!r})", agent_data.get("name"))
             return
         instance = self._find_instance_for_host(host_id)
         if instance is None:
-            logger.warning("No EC2 instance found for host {}; cannot persist agent tag", host_id)
+            logger.warning("No EC2 instance found for host {}; cannot persist agent tags", host_id)
             return
-        agent_id = agent_data["id"]
-        self.aws_client.add_tags(VpsInstanceId(instance["id"]), {f"{AGENT_TAG_PREFIX}{agent_id}": value})
+        set_tags, delete_keys = self._agent_field_tags(str(agent_id), agent_data, instance)
+        try:
+            self.aws_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
+        except VpsApiError as e:
+            # EC2 caps a resource at 50 (non-aws:) tags. Hitting it means the host
+            # has more agents than the tag mirror can hold; surface it as a
+            # NotImplementedError so the CLI offers to open an issue rather than
+            # failing obscurely. (Updating an existing agent overwrites its keys,
+            # so this only fires when a *new* agent's tags don't fit.)
+            if "TagLimitExceeded" in str(e):
+                raise NotImplementedError(
+                    f"The AWS host for agent {agent_id!r} has reached EC2's {_AWS_MAX_TAGS_PER_INSTANCE}-tag-per-"
+                    "instance limit, so this agent can't be mirrored to tags for stopped-host listing and "
+                    "resume-by-name. Running this many agents on a single AWS host isn't supported yet -- please "
+                    "open an issue at https://github.com/imbue-ai/mngr/issues so we can prioritize the planned "
+                    "S3-backed agent store."
+                ) from e
+            raise
+        if delete_keys:
+            self.aws_client.remove_tags(VpsInstanceId(instance["id"]), delete_keys)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>`` tag.
+        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>-*`` tags.
 
         Mirrors ``persist_agent_data``: the base removes the authoritative
         on-volume record (best-effort -- ``HostNotFoundError`` when the instance
-        is stopped) and this override additionally drops the EC2 tag, so a
-        destroyed agent stops appearing in both running- and stopped-host
-        discovery.
+        is stopped) and this override additionally drops the agent's per-field EC2
+        tags, so a destroyed agent stops appearing in both running- and
+        stopped-host discovery. ``DeleteTags`` is idempotent, so deleting a field
+        key the agent never had is a harmless no-op.
         """
         try:
             super().remove_persisted_agent_data(host_id, agent_id)
         except HostNotFoundError:
-            logger.debug("Host {} unreachable; removing agent data from EC2 tag only", host_id)
+            logger.debug("Host {} unreachable; removing agent data from EC2 tags only", host_id)
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             return
-        self.aws_client.remove_tags(VpsInstanceId(instance["id"]), [f"{AGENT_TAG_PREFIX}{agent_id}"])
+        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
+        self.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         """Return the host's persisted agent records, on-volume when reachable else from tags.
@@ -796,79 +825,80 @@ class AwsProvider(VpsDockerProvider):
                 raise
             return self._offline_host_from_tags(host_id, instance)
 
-    def _compact_agent_tag_value(self, agent_data: Mapping[str, object]) -> str | None:
-        """Build a compact JSON tag value (id/name[/type][/labels]) under the 256-char tag limit.
+    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
+        """Render one agent field as a tag-value string, or ``None`` if absent/empty.
 
-        Returns ``None`` when the agent cannot be persisted in a tag: either the
-        required ``id``/``name`` are missing, or even the id+name minimum exceeds
-        the 256-char tag-value limit (e.g. a very long agent name). Otherwise
-        prefers the richest representation that fits, dropping ``labels`` (user
-        metadata) first, then ``type``, before the id+name minimum. Including
-        ``labels`` lets an offline ``mngr label`` on a stopped host actually
-        round-trip; if a given agent's labels are too large to fit, they are
-        dropped and a warning is logged so the write does not silently no-op. An
-        agent whose id+name alone do not fit is skipped (with a warning) rather
-        than returning an over-limit value that AWS would reject.
+        ``name``/``type`` are stored raw; ``labels`` as compact JSON (empty labels
+        are treated as absent so no ``-labels`` tag is written).
         """
-        agent_id = agent_data.get("id")
-        agent_name = agent_data.get("name")
-        if agent_id is None or agent_name is None:
-            logger.warning(
-                "Cannot mirror agent data to an EC2 tag without both an id and a name (got id={!r}, name={!r})",
-                agent_id,
-                agent_name,
-            )
-            return None
-        minimal: dict[str, object] = {"id": agent_id, "name": agent_name}
-        with_type = dict(minimal)
-        agent_type = agent_data.get("type")
-        if agent_type is not None:
-            with_type["type"] = agent_type
-        with_labels = dict(with_type)
-        labels = agent_data.get("labels")
-        if labels:
-            with_labels["labels"] = labels
-        for candidate in (with_labels, with_type, minimal):
-            value = json.dumps(candidate, separators=(",", ":"))
+        if field == "labels":
+            labels = agent_data.get("labels")
+            return json.dumps(labels, separators=(",", ":")) if labels else None
+        value = agent_data.get(field)
+        return None if value is None else str(value)
+
+    def _agent_field_tags(
+        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
+    ) -> tuple[dict[str, str], list[str]]:
+        """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
+
+        Returns ``(tags_to_set, keys_to_delete)``. A field whose value overflows
+        the 256-char tag limit (realistically only ``labels``) is dropped with a
+        warning. ``keys_to_delete`` is this agent's field tags currently on the
+        instance that we are *not* re-setting (e.g. ``labels`` removed, or a field
+        that grew too large), so a stale value never lingers to corrupt
+        reassembly. The agent id is carried in the tag *key*, not a value.
+        """
+        set_tags: dict[str, str] = {}
+        for field in _AGENT_TAG_FIELDS:
+            value = self._agent_field_value(field, agent_data)
+            if value is None:
+                continue
             if len(value) <= _MAX_TAG_VALUE_LEN:
-                if labels and "labels" not in candidate:
-                    logger.warning(
-                        "Labels for agent {} do not fit the {}-char EC2 tag and were omitted from "
-                        "its tag mirror; they will not be visible while the host is stopped",
-                        agent_name,
-                        _MAX_TAG_VALUE_LEN,
-                    )
-                return value
-        logger.warning(
-            "Agent {} cannot be mirrored to an EC2 tag: even its id+name exceeds the {}-char tag "
-            "limit, so it will not be listed by name while the host is stopped",
-            agent_name,
-            _MAX_TAG_VALUE_LEN,
-        )
-        return None
+                set_tags[f"{AGENT_TAG_PREFIX}{agent_id}-{field}"] = value
+            else:
+                logger.warning(
+                    "Agent {} {} ({} chars) exceeds the {}-char EC2 tag limit; omitted from the "
+                    "stopped-host tag mirror",
+                    agent_data.get("name", agent_id),
+                    field,
+                    len(value),
+                    _MAX_TAG_VALUE_LEN,
+                )
+        agent_key_prefix = f"{AGENT_TAG_PREFIX}{agent_id}-"
+        existing = {k for k in self._tag_dict_from_normalized(instance) if k.startswith(agent_key_prefix)}
+        return set_tags, sorted(existing - set(set_tags))
 
     def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Parse the ``mngr-agent-*`` tags off a normalized instance dict into agent records."""
-        agents: list[dict] = []
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if not sep or not key.startswith(AGENT_TAG_PREFIX):
+        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` tags.
+
+        Groups the per-field tags by agent id (recovered from the tag key, split on
+        the final ``-`` so ids may themselves contain dashes), and rebuilds one
+        dict per agent. A malformed/externally-edited ``-labels`` tag (not valid
+        JSON, or not a JSON object) is skipped for that field with a warning rather
+        than crashing the discovery sweep.
+        """
+        by_id: dict[str, dict] = {}
+        for key, value in self._tag_dict_from_normalized(instance).items():
+            if not key.startswith(AGENT_TAG_PREFIX):
                 continue
-            try:
-                parsed = json.loads(value)
-            except json.JSONDecodeError:
-                logger.warning("Skipping unparseable persisted-agent tag {!r}", key)
+            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
+            if not sep or field not in _AGENT_TAG_FIELDS:
                 continue
-            # mngr only ever writes a JSON object here (see _compact_agent_tag_value);
-            # a valid-JSON-but-non-object value means an externally edited/corrupted
-            # tag. Skip it rather than appending a non-dict, which downstream callers
-            # (validate_and_create_discovered_agent's .get('id')) would crash on,
-            # taking down the whole discovery sweep for every host.
-            if not isinstance(parsed, dict):
-                logger.warning("Skipping persisted-agent tag {!r}: value is not a JSON object", key)
-                continue
-            agents.append(parsed)
-        return agents
+            record = by_id.setdefault(agent_id, {"id": agent_id})
+            if field == "labels":
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping unparseable agent labels tag {!r}", key)
+                    continue
+                if not isinstance(parsed, dict):
+                    logger.warning("Skipping agent labels tag {!r}: value is not a JSON object", key)
+                    continue
+                record["labels"] = parsed
+            else:
+                record[field] = value
+        return list(by_id.values())
 
     def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
         """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""

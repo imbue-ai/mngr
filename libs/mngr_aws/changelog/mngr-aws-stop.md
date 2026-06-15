@@ -6,7 +6,7 @@ Under the hood:
 
 - `AwsProvider` overrides `stop_host`/`start_host`: stop stops the container then the instance and records `stop_reason=STOPPED`; start locates the stopped instance by its `mngr-host-id` tag (it isn't SSH-reachable), starts it, and rebinds the host record + known_hosts to the instance's new public IP before restarting the container.
 
-- Because a stopped instance has no public IP and drops out of SSH-based discovery, agent records are mirrored into EC2 tags (`mngr-agent-<id>`) as they are created/updated, and `AwsProvider` reconstructs stopped hosts and their agents from tags in discovery / `to_offline_host`. This keeps paused hosts visible and resumable by name. (Per-agent tags are capped by EC2's 50-tag / 256-char limits; an S3-backed store for many-agent hosts is a possible future follow-up.)
+- Because a stopped instance has no public IP and drops out of SSH-based discovery, agent records are mirrored into EC2 tags as they are created/updated, and `AwsProvider` reconstructs stopped hosts and their agents from tags in discovery / `to_offline_host`. This keeps paused hosts visible and resumable by name. Each agent is stored as up to three per-field tags (`mngr-agent-<id>-name`/`-type`/`-labels`). EC2 caps a resource at 50 tags, so a host with very many agents can run out of mirror space; rather than failing obscurely, `mngr create` then raises a `NotImplementedError` that prompts you to open an issue (an S3-backed store for many-agent hosts is the planned fix).
 
 - New per-host EC2 permissions: `ec2:StopInstances`, `ec2:StartInstances`, `ec2:CreateTags`, `ec2:DeleteTags`.
 
@@ -16,6 +16,6 @@ A new `terminate_on_shutdown` config field controls the stop-vs-terminate behavi
 
 `mngr aws prepare` and `mngr aws cleanup` are **security-group-only** -- no IAM provisioning, since idle self-stop needs none. `prepare` needs just `ec2:DescribeSecurityGroups`/`CreateSecurityGroup`/`AuthorizeSecurityGroupIngress`; `cleanup` just `ec2:DescribeInstances`/`DescribeSecurityGroups`/`DeleteSecurityGroup`.
 
-Offline `mngr label` on a stopped AWS host now actually persists: the compact `mngr-agent-<id>` tag includes the agent's `labels` when they fit the 256-char tag limit (previously only `id`/`name`/`type` were stored, so an offline label update reported success but was silently dropped). If a particular agent's labels are too large to fit, they are dropped and a warning is logged rather than silently no-op'ing.
+Offline `mngr label` on a stopped AWS host persists: the agent's `labels` are stored in their own `mngr-agent-<id>-labels` tag (so they get the full 256-char tag-value budget rather than sharing it with id/name/type), and reassembled on discovery. Labels too large for a single tag are dropped with a warning rather than silently no-op'ing.
 
 For security, `start_host` rebinds `known_hosts` for the instance's new IP from mngr's locally-held host keypairs (injected into the instance at create), not from EC2 tags -- account-writable tags must not be a source of SSH host-key trust. Offline discovery also tolerates a malformed `mngr-host-id`/`Name` tag (it skips that instance with a warning rather than aborting the whole `mngr list` sweep), and resolving an instance by `mngr-host-id` refuses an ambiguous duplicate-tag match rather than acting on the first one.
