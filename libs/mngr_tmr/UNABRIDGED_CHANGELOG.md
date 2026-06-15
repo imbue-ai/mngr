@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+## Fix snapshot launch path after provider bootstrap refactor
+
+The AWS-provider shared-layer refactor removed the `is_for_host_creation` parameter from `get_provider_instance`, but `mngr_tmr`'s `--use-snapshot` launch path still passed it, which broke the type check. The snapshot path now calls the new `bootstrap_backend_for_host_creation(provider_name, mngr_ctx)` helper before `get_provider_instance`, matching how `mngr create` triggers one-time backend bootstrap (e.g. Modal's per-user environment).
+
+## 2026-06-10
+
+Fixed a stale See-Also reference in the `tmr` command's help metadata. The `pull` reference pointed at a top-level command that was removed when push/pull were restructured into `rsync` and `git push`/`git pull`; it is now replaced with an `rsync` reference. Previously this produced a broken `[mngr help pull](mngr help pull)` markdown link in the generated docs.
+
+Raised the stale coverage floor from 50% to 75% to match the coverage CI already measures (~78%).
+
 ## 2026-06-08
 
 - Stays unpublished-on-purpose (already in `UNPUBLISHED_PACKAGES`; the canonical mapreduce recipe, internal tooling). Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.

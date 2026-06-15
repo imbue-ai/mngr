@@ -1,1 +1,0 @@
-Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml`, which caused a TOML parse error ("Cannot overwrite a value") and broke `mngr` commands in all e2e tutorial tests.
