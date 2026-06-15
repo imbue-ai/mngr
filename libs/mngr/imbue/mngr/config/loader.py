@@ -221,20 +221,29 @@ def load_config(
     # lower-precedence layer whose value is being dropped.
     narrowing_violations: list[_NarrowingViolation] = []
     provenance: dict[str, _SettingsSource] = {}
-    for scope, config_path, raw in loaded_layers:
-        file_source = _FileSettingsSource(scope=scope, path=config_path)
-        parsed_layer = _parse_config_with_extends(
+
+    def _fold_layer(current: MngrConfig, raw: dict[str, Any], source: _SettingsSource) -> MngrConfig:
+        """Parse, merge, and attribute one override layer onto ``current``.
+
+        Collects narrowing violations and updates ``provenance`` (both captured). The
+        provenance read happens BEFORE the record: a dropped value belongs to a prior
+        layer, so its source is whatever held the path before this layer.
+        """
+        parsed = _parse_config_with_extends(
             raw,
-            base_config=config,
+            base_config=current,
             disabled_plugins=config_disabled_plugins,
             strict=strict,
             silent=silent_unknown_fields,
         )
-        config, narrowing_paths = config.merge_with_narrowings(parsed_layer)
-        # Read provenance BEFORE this layer updates it: a dropped value belongs to
-        # a prior layer, so its source is whatever held the path before now.
-        narrowing_violations.extend(_collect_narrowing(narrowing_paths, file_source, provenance))
-        _record_provenance(provenance, parsed_layer, file_source)
+        merged, narrowing_paths = current.merge_with_narrowings(parsed)
+        narrowing_violations.extend(_collect_narrowing(narrowing_paths, source, provenance))
+        _record_provenance(provenance, parsed, source)
+        return merged
+
+    # Merge config files in precedence order (user, project, local).
+    for scope, config_path, raw in loaded_layers:
+        config = _fold_layer(config, raw, _FileSettingsSource(scope=scope, path=config_path))
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
     # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
@@ -243,17 +252,7 @@ def load_config(
     # form raise ConfigParseError.
     env_override_raw = _collect_env_overrides(os.environ)
     if env_override_raw:
-        env_source = _EnvSettingsSource()
-        parsed_env_layer = _parse_config_with_extends(
-            env_override_raw,
-            base_config=config,
-            disabled_plugins=config_disabled_plugins,
-            strict=strict,
-            silent=silent_unknown_fields,
-        )
-        config, env_narrowing_paths = config.merge_with_narrowings(parsed_env_layer)
-        narrowing_violations.extend(_collect_narrowing(env_narrowing_paths, env_source, provenance))
-        _record_provenance(provenance, parsed_env_layer, env_source)
+        config = _fold_layer(config, env_override_raw, _EnvSettingsSource())
 
     # Raise on collected narrowing assignments unless the user has opted in.
     # Done before further config_dict mutation so the error surfaces with the
