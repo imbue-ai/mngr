@@ -12,6 +12,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.errors import DeployLifecycleConfigError
 from imbue.minds.errors import MalformedMngrOutputError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
@@ -20,6 +21,7 @@ DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
 
 DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 
+# `uv run --active` puts the venv bin on PATH, so bare `mngr` resolves.
 MNGR_BINARY: Final[str] = "mngr"
 
 
@@ -174,7 +176,7 @@ class DeployLifecycleConfig(FrozenModel):
         coupling explicit here.
         """
         if self.writes_local_state and not self.creates_resources:
-            raise ValueError(
+            raise DeployLifecycleConfigError(
                 "deploy.toml [lifecycle] writes_local_state=true requires creates_resources=true. "
                 "The combination 'creates_resources=false + writes_local_state=true' is rejected "
                 "because deploy_env writes the local client.toml / secrets.toml from the records "
@@ -328,9 +330,12 @@ def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
 
     Raises ``MalformedMngrOutputError`` when the first non-empty line is not a
     JSON object, including when it looks like one (starts with ``{``) but does
-    not parse. stdout is reserved for JSON data; if log lines or SSH errors are
-    leaking onto it, fix the underlying process rather than papering over it
-    here.
+    not parse, when stdout is empty/blank, or when the parsed object lacks an
+    ``agents`` key. stdout is reserved for JSON data; if log lines or SSH errors
+    are leaking onto it, fix the underlying process rather than papering over
+    it here. ``mngr list --format json`` always serializes its result set as a
+    ``{"agents": [...]}`` object (zero agents is ``{"agents": []}``), so empty
+    stdout means the command produced no output at all rather than "no agents".
     """
     for line in stdout.splitlines():
         stripped = line.strip()
@@ -346,5 +351,7 @@ def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
             raise MalformedMngrOutputError(
                 f"Expected JSON object on first non-empty mngr output line, got unparseable JSON: {stripped[:200]!r}"
             ) from exc
+        if "agents" not in data:
+            raise MalformedMngrOutputError(f"mngr output JSON object missing 'agents' key: {stripped[:200]!r}")
         return data["agents"]
-    return []
+    raise MalformedMngrOutputError("Expected a JSON object in mngr output, but stdout was empty/blank")
