@@ -21,17 +21,14 @@ from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
 
-# Optional prefix release tests use for their agent names so leaked instances
-# (should the scanner ever fail) are still visually identifiable as mngr-created
-# test instances. No "gcp" in the prefix: a leaked instance is already in a GCP
-# project, so naming it "gcp" would be redundant. Cleanup logic does NOT depend
-# on this -- ``GcpVpsClient.create_instance`` labels pytest-launched instances
-# with ``mngr-pytest-launched=true`` and the conftest scanner filters on that label.
+# Prefix release tests give their agent names so a leaked instance (should the
+# scanner ever fail) is identifiable as mngr-created. Cleanup does not depend on
+# it: ``create_instance`` labels pytest instances ``mngr-pytest-launched=true``
+# and the conftest scanner filters on that label.
 GCP_TEST_NAME_PREFIX: Final[str] = "mngr-test-"
 
-# Zone used by the GCP release tests and the session-end leak scan. Tests can
-# override via ``MNGR_GCP_ZONE``; defaults to ``us-west1-a`` to match the
-# verified project. Read once at import time so conftest and test_release_gcp
+# Zone used by the GCP release tests and the session-end leak scan, overridable
+# via ``MNGR_GCP_ZONE``. Read once at import so conftest and test_release_gcp
 # observe the same value.
 GCP_DEFAULT_ZONE: Final[str] = os.environ.get("MNGR_GCP_ZONE", "us-west1-a")
 
@@ -43,13 +40,13 @@ GCP_DEFAULT_REGION: Final[str] = GCP_DEFAULT_ZONE.rsplit("-", 1)[0]
 # orphan scan when no release tests were requested.
 GCP_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_GCP_RELEASE_TESTS") == "1"
 
-# Single source of truth for the release-test instance lifetime. Used in two
-# places that must stay aligned:
+# Single source of truth for the release-test instance lifetime, kept aligned
+# across two consumers:
 #   1. ``test_release_gcp.py`` writes it into a tmp-path settings.toml
 #      (``[providers.gcp] auto_shutdown_seconds``) so each instance launches
 #      with scheduling.max_run_duration + instance_termination_action=DELETE.
-#   2. ``conftest.py`` derives the orphan-scan grace period from this value so
-#      the session-end leak detector never race-kills an in-flight test on a
+#   2. ``conftest.py`` derives the orphan-scan grace period from it so the
+#      session-end leak detector never race-kills an in-flight test on a
 #      parallel worker.
 GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 

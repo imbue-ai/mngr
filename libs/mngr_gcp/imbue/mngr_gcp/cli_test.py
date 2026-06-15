@@ -203,10 +203,9 @@ def test_prepare_command_fails_clearly_without_credentials(
     ``google.auth.default()`` checks that env var first and raises
     ``DefaultCredentialsError`` immediately when it names a missing file, so the
     well-known ADC file is never consulted and the test is hermetic regardless of
-    the host's gcloud state. Passes ``obj=plugin_manager`` because ``prepare`` now
-    runs through ``setup_command_context`` (so it can read ``[providers.NAME]``
-    from settings.toml as defaults), and ``setup_command_context`` reads the
-    plugin manager off ``ctx.obj``.
+    the host's gcloud state. Passes ``obj=plugin_manager`` because ``prepare``
+    runs through ``setup_command_context`` (to read ``[providers.NAME]`` from
+    settings.toml as defaults), which reads the plugin manager off ``ctx.obj``.
     """
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json")
     result = cli_runner.invoke(
@@ -219,17 +218,14 @@ def test_prepare_command_fails_clearly_without_credentials(
 
 
 # =============================================================================
-# Provider-config resolution (the bug-fix surface for `mngr gcp prepare`)
+# Provider-config resolution for `mngr gcp prepare`
 # =============================================================================
 #
-# Earlier versions of ``_build_operator_client`` used ``GcpProviderConfig()``
-# class defaults unconditionally, so a user with a non-default ``default_zone``
-# / ``network`` / ``firewall_name`` in ``[providers.gcp]`` running
-# ``mngr gcp prepare`` without the matching CLI flag would land the firewall
-# rule using class defaults while the runtime create path used whatever their
-# settings.toml specified. ``_resolve_provider_config`` fixes this by reading
-# the user's resolved provider config off the ``MngrContext``; these tests pin
-# that behavior. Mirrors the AWS provider's identical fix.
+# ``_resolve_provider_config`` reads the user's resolved provider config off the
+# ``MngrContext`` so a non-default ``default_zone`` / ``network`` /
+# ``firewall_name`` in ``[providers.gcp]`` applies to the firewall rule even when
+# the matching CLI flag is omitted, keeping prepare aligned with the runtime
+# create path. These tests pin that behavior. Mirrors the AWS provider.
 
 
 def _temp_mngr_ctx_with_provider(temp_mngr_ctx: MngrContext, name: str, config: ProviderInstanceConfig) -> MngrContext:

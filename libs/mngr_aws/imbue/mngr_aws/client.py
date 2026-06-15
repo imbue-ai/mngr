@@ -278,12 +278,50 @@ class AwsVpsClient(VpsClientInterface):
                 sg_name,
             )
 
+    def _ssh_ingress_already_authorized(self, security_group: dict[str, Any]) -> bool:
+        """Return whether the SG already permits every required SSH ingress rule.
+
+        Lets ``ensure_security_group`` skip the privileged
+        ``AuthorizeSecurityGroupIngress`` write when nothing is missing, so a
+        caller with only ``ec2:DescribeSecurityGroups`` can confirm the group
+        is ready (the read-only-first path minds relies on for its auto-prepare
+        with restricted-IAM keys). An empty ``allowed_ssh_cidrs`` requires no
+        ingress, so it is trivially satisfied -- matching
+        ``_authorize_ssh_ingress_idempotent``, which issues no call in that case.
+
+        Checks both tcp/22 and tcp/``container_ssh_port``: each required port
+        must have every CIDR in ``allowed_ssh_cidrs`` present across the group's
+        ``IpPermissions`` (rules may be split across multiple permission
+        entries, so the granted CIDRs are unioned per port before comparison).
+        """
+        if not self.allowed_ssh_cidrs:
+            return True
+        granted_cidrs_by_port: dict[int, set[str]] = {22: set(), self.container_ssh_port: set()}
+        for permission in security_group.get("IpPermissions", []):
+            if permission.get("IpProtocol") != "tcp":
+                continue
+            from_port = permission.get("FromPort")
+            to_port = permission.get("ToPort")
+            cidrs = {ip_range.get("CidrIp", "") for ip_range in permission.get("IpRanges", [])}
+            for port in granted_cidrs_by_port:
+                if from_port == port and to_port == port:
+                    granted_cidrs_by_port[port].update(cidrs)
+        required_cidrs = set(self.allowed_ssh_cidrs)
+        return all(required_cidrs <= granted for granted in granted_cidrs_by_port.values())
+
     def _ensure_auto_created_security_group(self, sg_name: str) -> SecurityGroupPrepareResult:
         self._warn_about_cidrs_if_needed(sg_name)
 
         existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
         if existing:
             sg_id = existing[0]["GroupId"]
+            # Read-only-first: when the group already permits every required
+            # ingress rule, issue no write call at all, so a describe-only key
+            # succeeds. Only fall through to the privileged authorize when a
+            # rule is genuinely missing.
+            if self._ssh_ingress_already_authorized(existing[0]):
+                logger.debug("Security group {} already has the required SSH ingress; skipping authorize", sg_id)
+                return SecurityGroupPrepareResult(security_group_id=sg_id, was_created=False)
             self._authorize_ssh_ingress_idempotent(sg_id)
             return SecurityGroupPrepareResult(security_group_id=sg_id, was_created=False)
 
