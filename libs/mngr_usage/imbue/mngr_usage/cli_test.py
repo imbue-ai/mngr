@@ -677,7 +677,9 @@ def test_flatten_for_template_always_includes_per_mode_cost_keys() -> None:
         updated_at=900,
         windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500)},
     )
-    flat = _flatten_primary_for_template(_build_render_model(snapshot_without_cost, stale_after=300, now=1000), now=1000)
+    flat = _flatten_primary_for_template(
+        _build_render_model(snapshot_without_cost, stale_after=300, now=1000), now=1000
+    )
     assert flat["subscription_cost.total_cost_usd"] == ""
     assert flat["subscription_cost.total_duration_ms"] == ""
     assert flat["api_cost.total_cost_usd"] == ""
@@ -914,7 +916,10 @@ def test_usage_command_includes_preserved_by_default_and_excludes_with_flag(
     assert default_payload["sources"][0]["five_hour"]["used_percentage"] == 42.0
 
     excluded_result = cli_runner.invoke(
-        usage, ["--format", "json", "--stale-after", "300", "--no-preserved"], obj=plugin_manager, catch_exceptions=False
+        usage,
+        ["--format", "json", "--stale-after", "300", "--no-preserved"],
+        obj=plugin_manager,
+        catch_exceptions=False,
     )
     assert excluded_result.exit_code == 0, excluded_result.output
     # No live agents and preserved excluded -> the no-data hint is logged ahead
