@@ -570,6 +570,12 @@ class AwsVpsClient(VpsClientInterface):
 
         AWS-only, like ``stop_instance`` -- reached via ``self.aws_client``.
         """
+        # AWS rejects ``start-instances`` on an instance that is still ``stopping``
+        # (``IncorrectInstanceState``). When resuming a host caught mid-stop -- e.g.
+        # one the idle watcher just powered off, resolved during its stop transition
+        # -- wait for the terminal ``stopped`` state before starting it.
+        if self._instance_state_name(instance_id) == "stopping":
+            self._wait_for_instance_state(instance_id, "stopped", timeout_seconds)
         with self._translate_aws_errors():
             self._ec2().start_instances(InstanceIds=[str(instance_id)])
         logger.info("Starting EC2 instance {}", instance_id)

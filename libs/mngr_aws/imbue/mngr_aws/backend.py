@@ -76,6 +76,11 @@ _MAX_TAG_VALUE_LEN: Final[int] = 256
 # (which the CLI turns into an "open an issue" prompt) rather than failing
 # obscurely -- the S3-backed agent store is the planned fix for many-agent hosts.
 _AWS_MAX_TAGS_PER_INSTANCE: Final[int] = 50
+# EC2 states in which the host OS is down (so the SSH-based sweep can't see the
+# host) but the instance still exists and its agents must be reconstructed from
+# tags. ``stopping`` is included so a host doesn't vanish from discovery during
+# the (seconds-long) stop transition before it reaches the terminal ``stopped``.
+_HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
 # The ``Name`` tag is set to ``mngr-<host_name>`` at launch; strip the prefix to
 # recover the host name when reconstructing a stopped host from tags.
 _HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
@@ -733,7 +738,14 @@ class AwsProvider(VpsDockerProvider):
         result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
         for instance in self._list_instances_cached():
-            if instance.get("main_ip") or instance.get("state") != "stopped":
+            # Reconstruct hosts whose instance is stopping or fully stopped: the OS
+            # is down, so the SSH-based sweep above can't reach them. Gate on state,
+            # not main_ip -- a `stopping` instance can still report a public IP while
+            # its OS is already off, and gating on main_ip would make the host vanish
+            # for the (seconds-long) stop transition. A genuinely-reachable host
+            # lands in online_host_ids and is deduped just below, so a running host
+            # is never double-listed here.
+            if instance.get("state") not in _HOST_DOWN_STATES:
                 continue
             try:
                 host_ref = self._discovered_host_from_tags(instance)

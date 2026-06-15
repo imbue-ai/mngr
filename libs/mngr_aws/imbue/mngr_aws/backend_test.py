@@ -521,6 +521,47 @@ def test_discover_hosts_and_agents_surfaces_stopped_host_from_tags(temp_mngr_ctx
     assert str(agents[0].agent_name) == "a1"
 
 
+def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp_mngr_ctx: MngrContext) -> None:
+    """A host whose instance is still ``stopping`` (OS already down) is reconstructed from tags.
+
+    Regression: the offline reconstruction used to require raw state ``stopped``, so a
+    host vanished from discovery for the seconds-long stop transition -- making
+    `mngr start <agent>` race a "not found" if it landed mid-stop. A stopping instance
+    must surface (as STOPPED) so resolve-by-name is stable across the transition.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopping",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        "mngr-provider": "aws-test",
+                        "Name": "mngr-myhost",
+                        f"mngr-agent-{agent_id}-name": "a1",
+                    },
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        with ConcurrencyGroup(name="test") as cg:
+            result = provider.discover_hosts_and_agents(cg)
+    finally:
+        stubber.deactivate()
+    hosts = {host.host_id: host for host in result}
+    assert host_id in hosts
+    assert hosts[host_id].host_state == HostState.STOPPED
+    assert [a.agent_id for a in result[hosts[host_id]]] == [agent_id]
+
+
 def test_discover_hosts_and_agents_skips_instance_with_malformed_host_id_tag(
     temp_mngr_ctx: MngrContext, log_warnings: list[str]
 ) -> None:
