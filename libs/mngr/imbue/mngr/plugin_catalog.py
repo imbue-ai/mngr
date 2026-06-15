@@ -198,6 +198,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Lima VM provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         signal=_LIMA_SIGNAL,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="vultr",

@@ -45,6 +45,19 @@ def test_cloud_provider_plugins_detect_their_cli() -> None:
         assert entry.signal.command == command
 
 
+def test_lima_plugin_detects_its_cli() -> None:
+    """lima is recommended and pre-selected when limactl is present.
+
+    Its signal only drives wizard preselection because the entry is
+    recommended (phase-1); a signal on a non-recommended entry is inert.
+    """
+    entry = get_catalog_entry("lima")
+    assert entry is not None
+    assert entry.is_recommended is True
+    assert entry.signal is not None
+    assert entry.signal.command == ("limactl", "--version")
+
+
 def test_catalog_entries_sharing_signal_use_same_instance() -> None:
     """Entries that share a signal should reference the exact same object."""
     claude_entry = get_catalog_entry("claude")
