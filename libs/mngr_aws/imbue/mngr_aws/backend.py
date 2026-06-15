@@ -822,21 +822,30 @@ class AwsProvider(VpsDockerProvider):
     ) -> tuple[dict[str, str], list[str]]:
         """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
 
-        Returns ``(tags_to_set, keys_to_delete)``. A field whose value overflows
-        the 256-char tag limit (realistically only ``labels``) is dropped with a
-        warning. ``keys_to_delete`` is this agent's field tags currently on the
-        instance that we are *not* re-setting (e.g. ``labels`` removed, or a field
-        that grew too large), so a stale value never lingers to corrupt
-        reassembly. The agent id is carried in the tag *key*, not a value.
+        Returns ``(tags_to_set, keys_to_delete)``. ``persist_agent_data`` is an
+        upsert that is sometimes called with a *partial* record (e.g. an update
+        carrying only ``id``/``type``), so a field absent from ``agent_data`` means
+        "unchanged" -- it is left alone, NOT removed (deleting it would clobber the
+        ``name`` tag that offline resolve-by-name depends on). A field that *is*
+        present but renders empty (e.g. ``labels={}``, an explicit removal) or
+        overflows the 256-char tag limit (realistically only ``labels``) is dropped
+        and its existing tag, if any, is deleted so no stale value lingers. The
+        agent id is carried in the tag *key*, not a value.
         """
         set_tags: dict[str, str] = {}
+        delete_keys: list[str] = []
         for field in _AGENT_TAG_FIELDS:
-            value = self._agent_field_value(field, agent_data)
-            if value is None:
+            if field not in agent_data:
                 continue
-            if len(value) <= _MAX_TAG_VALUE_LEN:
-                set_tags[f"{AGENT_TAG_PREFIX}{agent_id}-{field}"] = value
-            else:
+            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
+            value = self._agent_field_value(field, agent_data)
+            if value is not None and len(value) <= _MAX_TAG_VALUE_LEN:
+                set_tags[key] = value
+                continue
+            # Present but empty (an explicit removal, e.g. labels={}) or too large
+            # for a single tag: drop it, and delete any existing tag so no stale
+            # value lingers. Only oversized values warrant a warning.
+            if value is not None:
                 logger.warning(
                     "Agent {} {} ({} chars) exceeds the {}-char EC2 tag limit; omitted from the "
                     "stopped-host tag mirror",
@@ -845,9 +854,9 @@ class AwsProvider(VpsDockerProvider):
                     len(value),
                     _MAX_TAG_VALUE_LEN,
                 )
-        agent_key_prefix = f"{AGENT_TAG_PREFIX}{agent_id}-"
-        existing = {k for k in self._tag_dict_from_normalized(instance) if k.startswith(agent_key_prefix)}
-        return set_tags, sorted(existing - set(set_tags))
+            delete_keys.append(key)
+        existing = set(self._tag_dict_from_normalized(instance))
+        return set_tags, [key for key in delete_keys if key in existing]
 
     def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
         """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` tags.

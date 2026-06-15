@@ -667,8 +667,8 @@ def test_agent_field_tags_drops_oversized_labels_with_warning(
     assert any("exceeds the" in w and "labels" in w for w in log_warnings), log_warnings
 
 
-def test_agent_field_tags_deletes_stale_field_on_removal(temp_mngr_ctx: MngrContext) -> None:
-    """When an agent loses its labels, the now-stale -labels tag is scheduled for deletion (no stale value)."""
+def test_agent_field_tags_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
+    """When an update carries empty labels (an explicit removal), the stale -labels tag is deleted."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance(
         {
@@ -678,10 +678,32 @@ def test_agent_field_tags_deletes_stale_field_on_removal(temp_mngr_ctx: MngrCont
         }
     )
     set_tags, delete_keys = provider._agent_field_tags(
-        "agent-1", {"id": "agent-1", "name": "a1", "type": "command"}, instance
+        "agent-1", {"id": "agent-1", "name": "a1", "type": "command", "labels": {}}, instance
     )
     assert "mngr-agent-agent-1-labels" not in set_tags
     assert delete_keys == ["mngr-agent-agent-1-labels"]
+
+
+def test_agent_field_tags_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
+    """A partial persist (e.g. only id+type) must NOT delete the agent's existing name/labels tags.
+
+    Regression: persist_agent_data is an upsert sometimes called with a partial
+    record. Treating an absent field as a removal would clobber the name tag that
+    offline resolve-by-name (`mngr start <agent>` on a stopped host) depends on, so
+    a stopped agent would become unresolvable after any partial update.
+    """
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    instance = _normalized_instance(
+        {
+            "mngr-agent-agent-1-name": "a1",
+            "mngr-agent-agent-1-type": "command",
+            "mngr-agent-agent-1-labels": '{"env":"prod"}',
+        }
+    )
+    set_tags, delete_keys = provider._agent_field_tags("agent-1", {"id": "agent-1", "type": "claude"}, instance)
+    assert set_tags == {"mngr-agent-agent-1-type": "claude"}
+    # name and labels are absent from this update, so their tags are left untouched.
+    assert delete_keys == []
 
 
 def test_persisted_agent_dicts_reassembles_id_with_dashes(temp_mngr_ctx: MngrContext) -> None:
