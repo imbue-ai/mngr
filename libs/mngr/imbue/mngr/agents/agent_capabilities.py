@@ -12,6 +12,7 @@ from pydantic import Field
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
@@ -128,6 +129,12 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         key="waiting_reason_field",
         description="Surfaces why a WAITING agent is blocked (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.",
         detection_kind=CapabilityDetectionKind.FIELD_GENERATOR,
+    ),
+    AgentCapability(
+        key="streaming_snapshot",
+        description="Publishes a live, in-progress view of the agent's assistant text. Lowest-priority; only needed if a consuming UI wants live streaming.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=HasStreamingSnapshotMixin,
     ),
 )
 

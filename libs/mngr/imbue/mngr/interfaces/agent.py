@@ -578,3 +578,18 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
             "stage_initial_message, so the --message content cannot be delivered.",
             type(self).__name__,
         )
+
+
+class HasStreamingSnapshotMixin(ABC):
+    """Mixin for agent types that publish a live, in-progress view of assistant text.
+
+    A consuming UI can read the buffer file to show output before a message
+    completes. The agent maintains the file (e.g. a background watcher that
+    periodically captures the rendered pane); this contract exposes where it
+    lives. Lowest-priority capability -- only needed if a UI wants live streaming.
+    """
+
+    @abstractmethod
+    def get_stream_buffer_path(self) -> Path:
+        """Return the path to this agent's response-streaming buffer file."""
+        ...
