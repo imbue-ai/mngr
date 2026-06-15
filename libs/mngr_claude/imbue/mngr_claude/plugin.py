@@ -1521,12 +1521,19 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         The PermissionRequest hook creates a 'permissions_waiting' file when Claude
         is blocked on a permission dialog. When present, this overrides RUNNING to
         WAITING since the agent cannot make progress without user intervention.
+
+        Delegates the gating decision to the shared _classify_waiting_reason so this
+        promotion and the waiting_reason field generator cannot drift: a RUNNING
+        base state means the 'active' marker is present and the process is alive, so
+        the classifier's is_active gate is satisfied and a PERMISSIONS verdict is
+        what promotes RUNNING to WAITING.
         """
         state = super().get_lifecycle_state()
-        if state == AgentLifecycleState.RUNNING:
-            if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
-                return AgentLifecycleState.WAITING
-        return state
+        if state != AgentLifecycleState.RUNNING:
+            return state
+        is_blocked = self._check_file_exists(self._get_agent_dir() / "permissions_waiting")
+        reason = _classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked)
+        return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else state
 
     def get_expected_process_name(self) -> str:
         """Return 'claude' as the expected process name.
@@ -2527,6 +2534,32 @@ class WaitingReason(UpperCaseStrEnum):
     END_OF_TURN = auto()
 
 
+def _classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> WaitingReason | None:
+    """Classify why a Claude agent is waiting from the two marker signals, or None.
+
+    Single source of truth for the gating rule, shared by
+    ClaudeAgent.get_lifecycle_state (the lifecycle promotion) and the
+    ``waiting_reason`` field generator so the two readers cannot drift -- they
+    differ only in how each derives ``is_active`` (the lifecycle path from the live
+    process + ``active`` marker, the field generator from a cheap ``active`` marker
+    read), not in the decision made from it.
+
+    - not active -> END_OF_TURN (idle, turn complete)
+    - active and blocked on a permission dialog -> PERMISSIONS
+    - active and not blocked -> None (actively running)
+
+    PERMISSIONS is gated on ``is_active``: a permission dialog is only meaningful
+    during a live turn, so a *stranded* ``permissions_waiting`` marker (one that
+    outlived its turn) reports END_OF_TURN rather than PERMISSIONS. Correctness
+    therefore does not depend on a cleanup hook having deleted the marker.
+    """
+    if not is_active:
+        return WaitingReason.END_OF_TURN
+    if is_blocked_on_permission:
+        return WaitingReason.PERMISSIONS
+    return None
+
+
 def _host_file_exists(host: OnlineHostInterface, path: Path) -> bool:
     """Check if a file exists on the host without SSH overhead."""
     try:
@@ -2540,18 +2573,16 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     """Return why the agent is waiting based on marker files, or None.
 
     Checks the agent state directory for marker files rather than calling
-    get_lifecycle_state() (which involves tmux/ps SSH commands).
-
-    - permissions_waiting exists -> PERMISSIONS (blocked on permission dialog)
-    - active file absent -> END_OF_TURN (idle, turn complete)
-    - otherwise -> None (agent is actively running)
+    get_lifecycle_state() (which involves tmux/ps SSH commands), then delegates the
+    decision to the shared ``_classify_waiting_reason`` so this and the lifecycle
+    promotion stay in lockstep. ``permissions_waiting`` is only read when ``active``
+    is present, both to short-circuit the idle case and because the classifier
+    ignores the permission signal when the agent is not in a turn.
     """
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    if _host_file_exists(host, agent_dir / "permissions_waiting"):
-        return WaitingReason.PERMISSIONS
-    if not _host_file_exists(host, agent_dir / "active"):
-        return WaitingReason.END_OF_TURN
-    return None
+    is_active = _host_file_exists(host, agent_dir / "active")
+    is_blocked_on_permission = is_active and _host_file_exists(host, agent_dir / "permissions_waiting")
+    return _classify_waiting_reason(is_active, is_blocked_on_permission)
 
 
 @hookimpl

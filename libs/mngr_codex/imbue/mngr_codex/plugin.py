@@ -75,6 +75,7 @@ from collections.abc import Mapping
 from enum import auto
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import ClassVar
 from typing import Final
 
@@ -92,12 +93,14 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_codex import resources as _codex_resources
@@ -107,6 +110,7 @@ from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import MARKER_LOCK_DIRNAME
 from imbue.mngr_codex.codex_config import MARKER_STATE_LIB_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_ACTIVE_FILENAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
@@ -277,6 +281,23 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
     def get_expected_process_name(self) -> str:
         # The codex CLI is a single Rust binary; ps/tmux show the literal name.
         return "codex"
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        """Get lifecycle state, accounting for the codex ``permissions_waiting`` marker.
+
+        The ``PermissionRequest`` hook touches a ``permissions_waiting`` file while
+        codex is blocked on a tool-approval dialog (verified live against codex
+        0.139.0: the marker is present for the whole time the dialog is open and is
+        cleared on ``PostToolUse``). The base state reads only the ``active`` marker,
+        which stays present during a dialog (the root turn has not stopped), so on
+        its own it would report RUNNING. Promote RUNNING -> WAITING while the agent
+        is blocked, since it cannot progress without user intervention. The promotion
+        rule itself lives in ``_resolve_lifecycle_state_for_permission`` so it can be
+        unit-tested without a live tmux pane.
+        """
+        base_state = super().get_lifecycle_state()
+        is_blocked_on_permission = self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
+        return _resolve_lifecycle_state_for_permission(base_state, is_blocked_on_permission)
 
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # codex's UserPromptSubmit hook (set_active_marker.sh) fires
@@ -789,3 +810,101 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the codex agent type."""
     return ("codex", CodexAgent, CodexAgentConfig)
+
+
+class WaitingReason(UpperCaseStrEnum):
+    """Why a codex agent is in the WAITING lifecycle state."""
+
+    PERMISSIONS = auto()
+    END_OF_TURN = auto()
+
+
+def _classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> WaitingReason | None:
+    """Classify why a codex agent is waiting from the two marker signals, or None.
+
+    Single source of truth for the gating rule, shared by ``get_lifecycle_state``
+    (via ``_resolve_lifecycle_state_for_permission``) and the ``waiting_reason``
+    field generator so the two readers cannot drift -- they differ only in how each
+    derives ``is_active`` (the lifecycle path from the live process + ``active``
+    marker, the field generator from a cheap ``active`` marker read), not in the
+    decision made from it.
+
+    - not active -> END_OF_TURN (idle, turn complete)
+    - active and blocked on a permission dialog -> PERMISSIONS
+    - active and not blocked -> None (actively running)
+
+    PERMISSIONS is gated on ``is_active``: a tool-approval dialog can only be open
+    during a live turn, so a *stranded* ``permissions_waiting`` marker (one that
+    outlived its turn) reports END_OF_TURN rather than PERMISSIONS. Correctness
+    therefore does not depend on a cleanup hook having deleted the marker.
+
+    Known limitation: this gate cannot recover the one case where the ``active``
+    marker is *also* stranded. Cancelling a dialog (Esc / "No") interrupts the turn
+    and codex 0.139.0 fires no terminal hook for it -- no PostToolUse, no Stop, no
+    Notification (verified live) -- so both markers persist until the next turn's
+    Stop. With ``is_active`` True and ``is_blocked_on_permission`` True this returns
+    PERMISSIONS even though the dialog is closed. The lifecycle state stays WAITING
+    (correct -- the agent is waiting for the user); only this reason sub-field is
+    briefly wrong, and it self-heals at the next Stop. Accepted rather than worked
+    around; an app-server-backed variant would remove the ambiguity.
+    """
+    if not is_active:
+        return WaitingReason.END_OF_TURN
+    if is_blocked_on_permission:
+        return WaitingReason.PERMISSIONS
+    return None
+
+
+def _resolve_lifecycle_state_for_permission(
+    base_state: AgentLifecycleState, is_blocked_on_permission: bool
+) -> AgentLifecycleState:
+    """Layer the ``permissions_waiting`` signal onto the base lifecycle state.
+
+    Promotes RUNNING -> WAITING while codex is blocked on a tool-approval dialog
+    (the base state, which reads only the ``active`` marker, would otherwise report
+    RUNNING since the root turn has not stopped). Every non-RUNNING base state
+    passes through unchanged. Kept pure (no agent/host) so ``get_lifecycle_state``'s
+    promotion rule is unit-testable without standing up a tmux pane.
+
+    Defers the gating decision to ``_classify_waiting_reason``: a RUNNING base
+    state means the ``active`` marker is present and the process is alive, so the
+    classifier's ``is_active`` gate is satisfied and a PERMISSIONS verdict is what
+    promotes RUNNING to WAITING. Sharing that one function keeps this promotion and
+    the ``waiting_reason`` field generator from drifting apart.
+    """
+    if base_state != AgentLifecycleState.RUNNING:
+        return base_state
+    reason = _classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked_on_permission)
+    return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else base_state
+
+
+def _host_file_exists(host: OnlineHostInterface, path: Path) -> bool:
+    """Check whether a file exists on the host (no tmux/ps SSH overhead)."""
+    try:
+        host.read_text_file(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting based on marker files, or None.
+
+    Reads the agent state directory's marker files directly rather than calling
+    get_lifecycle_state() (which runs tmux/ps SSH commands), then delegates the
+    decision to the shared ``_classify_waiting_reason`` so this and the lifecycle
+    promotion stay in lockstep. The markers are maintained by the codex lifecycle
+    hooks (see build_codex_hooks_config). ``permissions_waiting`` is only read when
+    ``active`` is present, both to short-circuit the idle case and because the
+    classifier ignores the permission signal when the agent is not in a turn.
+    """
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    is_active = _host_file_exists(host, agent_dir / ACTIVE_MARKER_FILENAME)
+    is_blocked_on_permission = is_active and _host_file_exists(host, agent_dir / PERMISSIONS_WAITING_FILENAME)
+    return _classify_waiting_reason(is_active, is_blocked_on_permission)
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose codex-specific agent fields for listing."""
+    return ("codex", {"waiting_reason": _waiting_reason})
