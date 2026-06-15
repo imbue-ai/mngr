@@ -14,6 +14,8 @@ from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
 from modal.stream_type import StreamType as ModalStreamType
 from modal.volume import FileEntryType as ModalFileEntryType
+from tenacity import Retrying
+from tenacity import wait_none
 
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
@@ -23,9 +25,12 @@ from imbue.modal_proxy.direct import DirectImage
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.direct import DirectSecret
 from imbue.modal_proxy.direct import DirectVolume
+from imbue.modal_proxy.direct import _VOLUME_RETRY
+from imbue.modal_proxy.direct import _VOLUME_STOP
 from imbue.modal_proxy.direct import _should_retry_volume_op
 from imbue.modal_proxy.direct import _to_file_entry_type
 from imbue.modal_proxy.direct import _to_modal_stream_type
+from imbue.modal_proxy.direct import _translate_exceptions
 from imbue.modal_proxy.direct import _translate_modal_cli_not_found
 from imbue.modal_proxy.direct import _translate_modal_error
 from imbue.modal_proxy.direct import _unwrap_app
@@ -255,6 +260,49 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
     assert str(result) == str(modal_exc)
 
 
+# --- Exception-translation decorator tests ---
+#
+# These exercise the `_translate_exceptions` decorator (the actual error
+# boundary applied to most Direct* methods), not just the pure
+# `_translate_modal_error` helper it delegates to.
+
+
+def test_translate_exceptions_decorator_translates_modal_error_and_chains_cause() -> None:
+    modal_error = modal.exception.AuthError("boom")
+
+    @_translate_exceptions
+    def raises_modal_error() -> None:
+        raise modal_error
+
+    with pytest.raises(ModalProxyAuthError) as exc_info:
+        raises_modal_error()
+    # The boundary maps to the matching proxy type, preserves the message, and
+    # chains the original modal error as __cause__ (the `from e`).
+    assert str(exc_info.value) == "boom"
+    assert exc_info.value.__cause__ is modal_error
+
+
+def test_translate_exceptions_decorator_passes_through_non_modal_exceptions() -> None:
+    # Exceptions that are not modal.exception.Error must propagate untouched,
+    # not get swallowed or re-wrapped as a ModalProxyError.
+    @_translate_exceptions
+    def raises_value_error() -> None:
+        raise ValueError("not a modal error")
+
+    with pytest.raises(ValueError, match="not a modal error"):
+        raises_value_error()
+
+
+def test_translate_exceptions_decorator_returns_value_when_no_error() -> None:
+    sentinel = uuid4().hex
+
+    @_translate_exceptions
+    def returns_value() -> str:
+        return sentinel
+
+    assert returns_value() == sentinel
+
+
 # --- Volume retry predicate tests ---
 
 
@@ -283,6 +331,13 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
             id="path_containing_environment_substring",
         ),
         pytest.param(modal.exception.AuthError("bad token"), False, id="auth_error"),
+        # PermissionDeniedError is NOT retried by volume *data* ops, even though
+        # Modal propagates permission entries asynchronously (see the
+        # ModalProxyPermissionDeniedError docstring). This deliberately differs
+        # from the app-lookup / teardown flows in mngr_modal (backend.py and
+        # conftest.py), which DO retry it. Pinned so any change to that
+        # distinction is a conscious one rather than an accident.
+        pytest.param(modal.exception.PermissionDeniedError("denied"), False, id="permission_denied"),
     ],
 )
 def test_should_retry_volume_op(exc: BaseException, expected: bool) -> None:
@@ -363,3 +418,70 @@ def test_deploy_does_not_retry_on_non_lock_error(tmp_path: Path, monkeypatch: py
 
     assert not isinstance(exc_info.value, ModalProxyAppLockedError)
     assert counter.read_text().strip() == "1", "non-lock failures must not be retried"
+
+
+# --- Volume retry behavior tests ---
+#
+# `test_should_retry_volume_op` above checks the retry *predicate* in isolation.
+# These drive a fake through a tenacity Retrying built from the SAME module-level
+# constants the production decorator uses (`_VOLUME_RETRY` / `_VOLUME_STOP`),
+# verifying the predicate and stop actually compose into bounded retry/recovery:
+# a retryable error is re-attempted, recovery returns the value, a non-retryable
+# error surfaces immediately, and stop_after_attempt(5) caps the attempts. The
+# wait is substituted with `wait_none()` so no time is spent on backoff. (The
+# wait/`reraise` settings are re-specified here rather than imported because the
+# production config lives only inside the @retry decorator on each method;
+# whether each method actually carries that decorator is left to code review.)
+
+
+class _ScriptedFailureSource:
+    """Callable that raises a fixed error N times, then returns a sentinel.
+
+    Stands in for a modal.Volume operation so the shared retry config can be
+    exercised without a real Modal backend.
+    """
+
+    def __init__(self, failures: int, error: BaseException) -> None:
+        self.failures = failures
+        self.error = error
+        self.call_count = 0
+
+    def __call__(self) -> str:
+        self.call_count += 1
+        if self.call_count <= self.failures:
+            raise self.error
+        return "recovered"
+
+
+def _volume_retrying() -> Retrying:
+    return Retrying(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=wait_none(), reraise=True)
+
+
+def test_volume_retry_config_retries_transient_error_then_succeeds() -> None:
+    source = _ScriptedFailureSource(failures=2, error=modal.exception.InternalError("transient"))
+
+    result = _volume_retrying()(source)
+
+    # Two transient failures are retried; the third call succeeds and its value
+    # is returned, proving the retryable branch actually recovers.
+    assert source.call_count == 3
+    assert result == "recovered"
+
+
+def test_volume_retry_config_does_not_retry_non_retryable_error() -> None:
+    source = _ScriptedFailureSource(failures=99, error=modal.exception.AuthError("denied"))
+
+    with pytest.raises(modal.exception.AuthError):
+        _volume_retrying()(source)
+    # A non-retryable error surfaces immediately, after exactly one attempt.
+    assert source.call_count == 1
+
+
+def test_volume_retry_config_stops_after_five_attempts_and_reraises_original() -> None:
+    source = _ScriptedFailureSource(failures=99, error=modal.exception.InternalError("always"))
+
+    with pytest.raises(modal.exception.InternalError, match="always"):
+        _volume_retrying()(source)
+    # stop_after_attempt(5) caps the attempts and reraise=True surfaces the
+    # original modal error rather than a tenacity RetryError.
+    assert source.call_count == 5
