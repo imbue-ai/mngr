@@ -23,8 +23,8 @@ from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import SettingsPatchField
 from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
-from imbue.mngr.config.data_types import _CONTAINER_DICT_FIELDS
 from imbue.mngr.config.data_types import get_or_create_user_id
+from imbue.mngr.config.data_types import get_registry_field_names
 from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.loader import parse_config
@@ -80,7 +80,7 @@ def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
     """
     override_patch_field_names = get_settings_patch_field_names(type(override))
     if isinstance(base, MngrConfig):
-        container_field_names = _CONTAINER_DICT_FIELDS
+        container_field_names = get_registry_field_names(type(override))
         narrowings = base.merge_with_narrowings(override)[1]
     else:
         container_field_names = frozenset()

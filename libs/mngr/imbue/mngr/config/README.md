@@ -52,13 +52,25 @@ via **serialize -> pre-process -> overlay merge -> reparse**:
    (sparse -- only the fields this layer actually set, the `model_fields_set` semantics
    the merge relies on). `serialize_as_any` keeps subclass container entries (e.g.
    `ClaudeAgentConfig`) serialising through their concrete type.
-2. **Pre-process** the sparse override into the operator language:
+2. **Pre-process** the sparse override into the operator language by one uniform walk of
+   the live model and its dumped dict (the live value at each key selects the rule):
+   - A *sub-model* field (one whose **live value is a `BaseModel`**, e.g.
+     `logging` / `retry` or a provider's `security_group`) becomes `<field>__extend`
+     and is recursed into, so it merges **field-by-field** -- the base's unset
+     sub-fields carry through rather than reverting to defaults. Detection is purely
+     runtime (`isinstance(value, BaseModel)`): a `None` simply is not a model, and a
+     discriminated-union value's concrete class is its own `type()`. Conceptually
+     distinct from a settings patch (which accumulates keys) even though both emit
+     `__extend`. A nested *aggregate* inside a sub-model still narrows when it drops
+     entries.
+   - Each *registry* field marked `RegistryField` (`agent_types`, `providers`,
+     `plugins`, `commands`, `create_templates`) becomes a **two-level `__extend`** --
+     the dict itself, and each entry key -- so overlay deep-merges per key and a
+     shared-key entry combines field-by-field (which is the entry's own merge). A
+     registry entry's own sub-model fields are marked `__extend` too. The marked names
+     come from `get_registry_field_names` (no hard-coded set).
    - A `SettingsPatchField` (see below) becomes `<field>__extend`, so the algebra
      *accumulates* it instead of assigning.
-   - Each *container-additive* field (`agent_types`, `providers`, `plugins`,
-     `commands`, `create_templates`) becomes a **two-level `__extend`** -- the
-     container itself, and each entry key -- so overlay deep-merges per key and a
-     shared-key entry combines field-by-field (which is the entry's own merge).
    - When `drop_none_values` is set, keys that are `None` on both sides are dropped:
      `parse_config` pads every unset scalar to `None` and TOML has no null, so a
      `None` is always *unset* (reproducing the old `_assign_scalar` / None-base guards).
@@ -78,6 +90,19 @@ pydantic field metadata, so core never hard-codes the field name. Because such a
 field can only grow (a higher layer adding keys is a superset), it is also **exempt
 from the assign-narrowing detector**. The only field carrying it today is
 `ClaudeAgentConfig.settings_overrides`.
+
+## Registries (`RegistryField`)
+
+A top-level dict-of-models field annotated `Annotated[dict[K, V], RegistryField()]`
+merges **per key** instead of assigning by default: a key set in one scope carries
+through, and a shared key has its entries merged field-by-field (the entry's own merge).
+The five `MngrConfig` registries -- `agent_types`, `providers`, `plugins`, `commands`,
+`create_templates` -- carry the marker; the merge reads it off the field metadata
+(`get_registry_field_names`), so there is no hard-coded container set. Parallel to
+`SettingsPatchField` but a distinct concept (registries merge entries per key; a settings
+patch accumulates keys). A same-named dict *nested inside* a sub-model (e.g. a plugin
+config's own `commands` dict) carries no marker and is an ordinary assign-by-default
+aggregate, narrowing-checked as a leaf.
 
 ## `parent_type` inheritance
 

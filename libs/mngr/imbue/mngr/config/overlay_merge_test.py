@@ -41,6 +41,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.agent_config_registry import _METADATA_FIELDS
 from imbue.mngr.config.agent_config_registry import _apply_custom_overrides_to_parent_config
 from imbue.mngr.config.agent_config_registry import register_agent_config
@@ -53,7 +54,7 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import ScalarStrTuple
 from imbue.mngr.config.data_types import SettingsPatchField
-from imbue.mngr.config.data_types import _CONTAINER_DICT_FIELDS
+from imbue.mngr.config.data_types import get_registry_field_names
 from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.data_types import is_settings_patch_field
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
@@ -62,6 +63,8 @@ from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.overlay.markers import is_static_marker
@@ -255,49 +258,42 @@ def _reference_assign_scalar(base_value: Any, override_value: Any) -> Any:
     return override_value if override_value is not None else base_value
 
 
-def _reference_retry_merge(base: RetryConfig, override: RetryConfig) -> RetryConfig:
-    """Frozen copy of the old ``RetryConfig.merge_with`` body (deleted in production),
-    kept here as the independent "old" reference for the equivalence guard.
+def _reference_submodel_merge(base: BaseModel, override: BaseModel) -> BaseModel:
+    """Independent field-by-field reference for a sub-model merge (``logging`` / ``retry``).
 
-    Scalar fields: override wins if not None.
+    A sub-model merges by ``model_fields_set`` -- the override replaces only the fields it
+    actually set, carrying the base's unset sub-fields through -- exactly as
+    ``_reference_provider_merge`` / ``_reference_plugin_merge`` do for the other container
+    entries, and as the overlay pipeline does (its ``exclude_unset`` dump). This is the
+    real intent of the old field-by-field merge; the old ``LoggingConfig.merge_with`` /
+    ``RetryConfig.merge_with`` bodies used an ``override.X is not None`` test that, when a
+    layer was parsed via ``model_construct`` (which fills *defaults*, not ``None``, for
+    unset fields), silently dropped the base value for any sub-field with a non-``None``
+    default. The overlay merge fixes that drop; this reference matches the fix.
     """
-    return RetryConfig(
-        connect_retry_times=override.connect_retry_times
-        if override.connect_retry_times is not None
-        else base.connect_retry_times,
-        connect_retry_delay=override.connect_retry_delay
-        if override.connect_retry_delay is not None
-        else base.connect_retry_delay,
-    )
+    explicitly_set = override.model_fields_set
+    if not explicitly_set:
+        return base
+    base_values = base.model_dump()
+    override_values = override.model_dump()
+    merged_values: dict[str, Any] = dict(base_values)
+    for field_name in explicitly_set:
+        merged_values[field_name] = override_values[field_name]
+    return base.__class__(**merged_values)
+
+
+def _reference_retry_merge(base: RetryConfig, override: RetryConfig) -> RetryConfig:
+    """Field-by-field reference for ``RetryConfig`` (``model_fields_set`` semantics)."""
+    merged = _reference_submodel_merge(base, override)
+    assert isinstance(merged, RetryConfig)
+    return merged
 
 
 def _reference_logging_merge(base: LoggingConfig, override: LoggingConfig) -> LoggingConfig:
-    """Frozen copy of the old ``LoggingConfig.merge_with`` body (deleted in production),
-    kept here as the independent "old" reference for the equivalence guard.
-
-    Scalar fields: override wins if not None.
-    """
-    return LoggingConfig(
-        file_level=override.file_level if override.file_level is not None else base.file_level,
-        log_dir=override.log_dir if override.log_dir is not None else base.log_dir,
-        max_log_size_mb=override.max_log_size_mb if override.max_log_size_mb is not None else base.max_log_size_mb,
-        console_level=override.console_level if override.console_level is not None else base.console_level,
-        log_file_path=override.log_file_path if override.log_file_path is not None else base.log_file_path,
-        is_logging_commands=override.is_logging_commands
-        if override.is_logging_commands is not None
-        else base.is_logging_commands,
-        is_logging_command_output=override.is_logging_command_output
-        if override.is_logging_command_output is not None
-        else base.is_logging_command_output,
-        is_logging_env_vars=override.is_logging_env_vars
-        if override.is_logging_env_vars is not None
-        else base.is_logging_env_vars,
-        event_type=override.event_type if override.event_type is not None else base.event_type,
-        event_source=override.event_source if override.event_source is not None else base.event_source,
-        enable_paramiko_logging=override.enable_paramiko_logging
-        if override.enable_paramiko_logging is not None
-        else base.enable_paramiko_logging,
-    )
+    """Field-by-field reference for ``LoggingConfig`` (``model_fields_set`` semantics)."""
+    merged = _reference_submodel_merge(base, override)
+    assert isinstance(merged, LoggingConfig)
+    return merged
 
 
 def _reference_provider_merge(
@@ -787,6 +783,91 @@ def test_mngr_reference_does_not_call_mngr_merge_with() -> None:
 
 
 # =============================================================================
+# Sub-model field-by-field carry-through (the core regression)
+# =============================================================================
+#
+# A partial sub-model override (setting only some of the sub-model's fields) must
+# carry the base's *unset* sub-fields through rather than reverting them to defaults,
+# and must NOT spuriously narrow. This is the regression these tests pin: the overlay
+# integration had treated a sub-model field as a wholesale assign-leaf. The base sets a
+# NON-DEFAULT value for a field the override leaves unset (built via ``model_construct``
+# so ``model_fields_set`` is genuinely sparse, exactly as the loader's sub-model parsers
+# produce).
+
+
+def test_partial_logging_override_carries_base_unset_fields() -> None:
+    """A ``logging`` override that sets only ``console_level`` keeps the base's
+    non-default ``file_level`` (carried through) and surfaces no narrowing."""
+    base = MngrConfig.model_construct(
+        prefix="m-", logging=LoggingConfig(console_level=LogLevel.INFO, file_level=LogLevel.ERROR)
+    )
+    override = MngrConfig.model_construct(logging=LoggingConfig.model_construct(console_level=LogLevel.TRACE))
+    merged, narrowings = base.merge_with_narrowings(override)
+    assert merged.logging.console_level == LogLevel.TRACE
+    assert merged.logging.file_level == LogLevel.ERROR
+    assert narrowings == []
+
+
+def test_partial_retry_override_carries_base_unset_fields() -> None:
+    """A ``retry`` override that sets only ``connect_retry_delay`` keeps the base's
+    non-default ``connect_retry_times`` (carried through) and surfaces no narrowing."""
+    base = MngrConfig.model_construct(prefix="m-", retry=RetryConfig(connect_retry_times=9, connect_retry_delay="5s"))
+    override = MngrConfig.model_construct(retry=RetryConfig.model_construct(connect_retry_delay="30s"))
+    merged, narrowings = base.merge_with_narrowings(override)
+    assert merged.retry.connect_retry_delay == "30s"
+    assert merged.retry.connect_retry_times == 9
+    assert narrowings == []
+
+
+def test_partial_logging_override_via_loader_shaped_layers_carries_base() -> None:
+    """The loader's real path: a lower scope sets ``logging.file_level`` and a higher
+    scope sets only ``logging.console_level``; ``file_level`` must survive (carried
+    through) with no narrowing, reproducing a project+local settings merge."""
+    base = _base_from_layers({"logging": {"file_level": "ERROR"}})
+    override = _parse_layer({"logging": {"console_level": "TRACE"}})
+    merged, narrowings = base.merge_with_narrowings(override)
+    assert merged.logging.file_level == LogLevel.ERROR
+    assert merged.logging.console_level == LogLevel.TRACE
+    assert narrowings == []
+
+
+class _NestedSubmodel(FrozenModel):
+    """A leaf sub-model for ``_ProviderWithSubmodel`` (mirrors a provider's
+    ``security_group`` shape: a nested ``BaseModel`` field on a container entry)."""
+
+    name: str = Field(default="default")
+    size_gb: int = Field(default=10)
+
+
+class _ProviderWithSubmodel(ProviderInstanceConfig):
+    """Stand-in provider subclass carrying a sub-model field, so the corpus exercises
+    field-by-field sub-model merging *inside* a container entry without depending on the
+    aws package (whose ``AwsProviderConfig.security_group`` is the real instance)."""
+
+    volume: _NestedSubmodel = Field(default_factory=_NestedSubmodel)
+
+
+def test_container_entry_submodel_carries_base_unset_fields() -> None:
+    """A container entry's own sub-model field merges field-by-field: a base provider
+    entry's ``volume.name`` survives when a higher layer sets only ``volume.size_gb``."""
+    reset_provider_config_registry()
+    register_provider_config("docker", _ProviderWithSubmodel)
+    try:
+        base = _base_from_layers(
+            {"providers": {"p": {"backend": "docker", "volume": {"name": "data", "size_gb": 50}}}}
+        )
+        override = _parse_layer({"providers": {"p": {"backend": "docker", "volume": {"size_gb": 99}}}})
+        merged, narrowings = base.merge_with_narrowings(override)
+        entry = merged.providers[ProviderInstanceName("p")]
+        assert isinstance(entry, _ProviderWithSubmodel)
+        assert entry.volume.size_gb == 99
+        assert entry.volume.name == "data"
+        assert narrowings == []
+    finally:
+        reset_provider_config_registry()
+
+
+# =============================================================================
 # _apply_custom_overrides_to_parent_config (parent_type inheritance) equivalence guard
 # =============================================================================
 #
@@ -1121,7 +1202,7 @@ def _reference_walk_for_narrowing(
                 continue
             base_value = getattr(base, field_name, None) if isinstance(base, BaseModel) else None
             sub_path = path + (field_name,)
-            if not path and field_name in _CONTAINER_DICT_FIELDS:
+            if not path and field_name in get_registry_field_names(type(override)):
                 _reference_walk_for_narrowing(base_value, override_value, sub_path, violations)
                 continue
             _reference_check_narrowing(base_value, override_value, sub_path, violations)
@@ -1311,6 +1392,24 @@ _NARROWING_CASES: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = [
         [{"agent_types": {"c": {"parent_type": "claude", "settings_overrides": {"model": "sonnet", "k": 1}}}}],
         {"agent_types": {"c": {"parent_type": "claude", "settings_overrides": {"model": "opus"}}}},
     ),
+    # --- partial sub-model over a NON-DEFAULT base: carries through, no narrowing ---
+    # The walker recurses into the sub-model and narrows only a dropped nested aggregate;
+    # a scalar sub-field the override leaves unset is carried through, not narrowed.
+    (
+        "logging_partial_over_nondefault_base",
+        [{"logging": {"file_level": "ERROR"}}],
+        {"logging": {"console_level": "TRACE"}},
+    ),
+    (
+        "retry_partial_over_nondefault_base",
+        [{"retry": {"connect_retry_times": 9}}],
+        {"retry": {"connect_retry_delay": "30s"}},
+    ),
+    (
+        "logging_scalar_replace_no_narrow",
+        [{"logging": {"file_level": "ERROR"}}],
+        {"logging": {"file_level": "INFO"}},
+    ),
     # --- mixture: scalar + narrowing list + exempt cli_args string + added entry ---
     (
         "combined_mixture",
@@ -1343,6 +1442,7 @@ def _overlay_non_settings_narrowings(base: MngrConfig, override: MngrConfig) -> 
     subset the frozen walker exempts.
     """
     settings_patch_field_names = get_settings_patch_field_names(type(override))
+    registry_field_names = get_registry_field_names(type(override))
     base_fields = dict(base)
     override_fields = dict(override)
     merged_classes: dict[str, dict[Any, type[Any]]] = {
@@ -1350,7 +1450,7 @@ def _overlay_non_settings_narrowings(base: MngrConfig, override: MngrConfig) -> 
             **{key: type(value) for key, value in (base_fields.get(field_name) or {}).items()},
             **{key: type(value) for key, value in (override_fields.get(field_name) or {}).items()},
         }
-        for field_name in _CONTAINER_DICT_FIELDS
+        for field_name in registry_field_names
     }
     all_paths = base.merge_with_narrowings(override)[1]
     return [
@@ -1359,7 +1459,7 @@ def _overlay_non_settings_narrowings(base: MngrConfig, override: MngrConfig) -> 
         if not _is_settings_patch_narrowing(
             dotted_path,
             settings_patch_field_names,
-            _CONTAINER_DICT_FIELDS,
+            registry_field_names,
             merged_classes,
             get_settings_patch_field_names,
         )

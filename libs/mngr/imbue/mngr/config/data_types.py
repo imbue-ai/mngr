@@ -99,6 +99,38 @@ def get_settings_patch_field_names(model_class: type[BaseModel]) -> frozenset[st
     )
 
 
+class RegistryField:
+    """Marker attached (via ``Annotated[dict[K, V], RegistryField()]``) to a top-level
+    dict-of-models *registry* field whose cross-scope merge is **per key** (instead of
+    assign-by-default).
+
+    The five ``MngrConfig`` registries (``agent_types``, ``providers``, ``plugins``,
+    ``commands``, ``create_templates``) carry it. The overlay merge reads the marker off
+    the field metadata (``get_registry_field_names``) and merges each marked dict per key:
+    a key present in one scope carries through, a key present in both has its entries
+    merged field-by-field (the entry's own merge). A same-named dict nested *inside* a
+    sub-model (e.g. a plugin config's own ``commands`` dict) carries no marker and so is an
+    ordinary assign-by-default aggregate, narrowing-checked as a leaf. Parallel to
+    ``SettingsPatchField`` but a distinct concept: a settings patch *accumulates* keys; a
+    registry merges its entries per key.
+    """
+
+
+def is_registry_field(metadata: Sequence[Any]) -> bool:
+    """Return True if a field's ``metadata`` contains a ``RegistryField`` marker."""
+    return any(isinstance(item, RegistryField) for item in metadata)
+
+
+def get_registry_field_names(model_class: type[BaseModel]) -> frozenset[str]:
+    """Return the ``RegistryField``-marked field names of a model class.
+
+    Read off the pydantic field metadata so the overlay merge marks exactly the
+    per-key-merging registries without hard-coding any field name. A class with no such
+    fields yields an empty set.
+    """
+    return frozenset(name for name, field in model_class.model_fields.items() if is_registry_field(field.metadata))
+
+
 class StringDerivedTuple(ScalarTuple):
     """Marker for a tuple value originally provided as a single string in user
     settings.
@@ -146,18 +178,6 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     lexer.whitespace_split = True
     lexer.commenters = ""
     return tuple(lexer)
-
-
-# ``MngrConfig``'s top-level container dict fields, whose cross-scope merge is per-key
-# (instead of assign-by-default). These count as containers *only* at the top level of
-# ``MngrConfig``: a same-named field nested inside a sub-model (e.g. a plugin config's
-# own ``commands`` dict) is an ordinary aggregate, narrowing-checked as a leaf -- not
-# per-key-recursed (which would silently skip its dropped keys). The overlay merge only
-# ever marks the outermost ``MngrConfig`` dict, so a name match there is already
-# unambiguous.
-_CONTAINER_DICT_FIELDS: Final[frozenset[str]] = frozenset(
-    {"agent_types", "providers", "plugins", "commands", "create_templates"}
-)
 
 
 # === Enums ===
@@ -293,7 +313,11 @@ class AgentTypeConfig(FrozenModel):
         # field-by-field merge); see ``overlay_merge.merge_models_via_overlay``
         # and ``config/README.md``.
         settings_patch_field_names = get_settings_patch_field_names(type(override))
-        return merge_models_via_overlay(self, override, settings_patch_field_names=settings_patch_field_names)
+        return merge_models_via_overlay(
+            self,
+            override,
+            settings_patch_field_names=settings_patch_field_names,
+        )
 
 
 class ProviderInstanceConfig(FrozenModel):
@@ -439,15 +463,15 @@ class MngrConfig(FrozenModel):
         default_factory=list,
         description="List of enabled provider backends. If empty, all backends are enabled. If non-empty, only the listed backends are enabled.",
     )
-    agent_types: dict[AgentTypeName, AgentTypeConfig] = Field(
+    agent_types: Annotated[dict[AgentTypeName, AgentTypeConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Custom agent type definitions",
     )
-    providers: dict[ProviderInstanceName, ProviderInstanceConfig] = Field(
+    providers: Annotated[dict[ProviderInstanceName, ProviderInstanceConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Custom provider instance definitions",
     )
-    plugins: dict[PluginName, PluginConfig] = Field(
+    plugins: Annotated[dict[PluginName, PluginConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Plugin configurations",
     )
@@ -455,11 +479,11 @@ class MngrConfig(FrozenModel):
         default_factory=frozenset,
         description="Set of plugin names that were explicitly disabled (used to filter backends)",
     )
-    commands: dict[str, CommandDefaults] = Field(
+    commands: Annotated[dict[str, CommandDefaults], RegistryField()] = Field(
         default_factory=dict,
         description="Default values for CLI command parameters (e.g., 'commands.create')",
     )
-    create_templates: dict[CreateTemplateName, CreateTemplate] = Field(
+    create_templates: Annotated[dict[CreateTemplateName, CreateTemplate], RegistryField()] = Field(
         default_factory=dict,
         description="Named templates for the create command (e.g., 'create_templates.modal-dev')",
     )
@@ -569,9 +593,9 @@ class MngrConfig(FrozenModel):
             override,
             settings_patch_field_names=settings_patch_field_names,
             serialize_as_any=True,
-            container_dict_field_names=_CONTAINER_DICT_FIELDS,
             drop_none_values=True,
             settings_patch_field_names_for_class=get_settings_patch_field_names,
+            registry_field_names_for_class=get_registry_field_names,
         )
 
 

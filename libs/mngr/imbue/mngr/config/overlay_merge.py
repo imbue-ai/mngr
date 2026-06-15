@@ -8,15 +8,22 @@ typed-node algebra in ``imbue.overlay.node_merge``. It backs ``AgentTypeConfig.m
 The pipeline is **serialize -> pre-process -> overlay merge -> reparse**:
 
 1. Serialize the full base and the sparse (``exclude_unset``) override.
-2. Pre-process the override into the operator language: a ``SettingsPatchField`` ->
-   ``<field>__extend`` (accumulate); each container-additive field -> a two-level
-   ``__extend``; ``drop_none_values`` -> drop keys that are ``None`` on both sides
-   (an unset scalar); every other key stays bare (assign).
+2. Pre-process the override into the operator language by one uniform walk of the live
+   model (and its dumped dict): a value that is a ``BaseModel`` -> ``<field>__extend``
+   recursed into (field-by-field sub-model merge); a ``RegistryField`` dict -> a
+   two-level ``__extend`` (the dict + each entry key) recursed per entry; a
+   ``SettingsPatchField`` -> ``<field>__extend`` (accumulate); ``drop_none_values`` ->
+   drop keys that are ``None``; every other key stays bare (assign).
 3. ``lift`` both and ``merge_narrowing_allowed`` override over base (the value, plus
    every narrowing path for the with-narrowings variant).
 4. ``lower`` (not ``finalize``, so inner ``__extend`` markers survive), strip the
    synthetic suffixes, reparse container entries into their concrete classes, and
    reparse the whole dict into ``type(base)``.
+
+Sub-model fields are detected at *runtime*: a field's value is a sub-model iff the live
+value is a ``BaseModel`` instance (a ``None`` is simply not a model; a discriminated-union
+value's concrete class is its own ``type()``). The ``RegistryField``-marked dict fields
+are supplied by ``registry_field_names_for_class``.
 
 See ``config/README.md`` for the rationale behind each step (why ``exclude_unset``,
 why a two-level container ``__extend``, why ``lower`` not ``finalize``, and how the
@@ -48,6 +55,25 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 # imports ``merge_models_via_overlay`` from here.
 SettingsPatchFieldNamesFn = Callable[[type[BaseModel]], frozenset[str]]
 
+# A callable that returns the ``RegistryField``-marked dict-of-models field names of a
+# model class (the top-level ``MngrConfig`` registries merged per key). Threaded in for
+# the same cycle-avoidance reason as ``SettingsPatchFieldNamesFn``.
+RegistryFieldNamesFn = Callable[[type[BaseModel]], frozenset[str]]
+
+
+def _strip_extend_suffix(key: str) -> str:
+    """Return ``key`` without a trailing ``__extend`` suffix (unchanged if absent)."""
+    return key[: -len(EXTEND_SUFFIX)] if key.endswith(EXTEND_SUFFIX) else key
+
+
+def _submodel_values(model: BaseModel) -> dict[str, BaseModel]:
+    """Map each field name of ``model`` whose live value is a ``BaseModel`` to that value.
+
+    This is the runtime sub-model detection: a sub-model field is one whose *value* is a
+    ``BaseModel`` instance (``None`` and scalars are excluded). ``dict(model)`` yields the
+    ``{field: value}`` map without per-field ``getattr``."""
+    return {name: value for name, value in dict(model).items() if isinstance(value, BaseModel)}
+
 
 def _mark_settings_fields(values: dict[str, Any], settings_patch_field_names: frozenset[str]) -> dict[str, Any]:
     """Rename each ``SettingsPatchField`` key to ``<field>__extend`` so the overlay
@@ -76,8 +102,76 @@ def _unmark_settings_fields(values: dict[str, Any], settings_patch_field_names: 
         return values
     result: dict[str, Any] = {}
     for key, value in values.items():
-        if key.endswith(EXTEND_SUFFIX) and key[: -len(EXTEND_SUFFIX)] in settings_patch_field_names:
-            result[key[: -len(EXTEND_SUFFIX)]] = value
+        if key.endswith(EXTEND_SUFFIX) and _strip_extend_suffix(key) in settings_patch_field_names:
+            result[_strip_extend_suffix(key)] = value
+        else:
+            result[key] = value
+    return result
+
+
+def _mark_submodel_fields(
+    values: dict[str, Any],
+    live_model: BaseModel,
+    *,
+    drop_none_values: bool,
+) -> dict[str, Any]:
+    """Mark each *sub-model* field of ``live_model`` (a field whose live value is a
+    ``BaseModel``) ``<field>__extend`` in the serialized ``values`` dict and recurse into
+    its value so the sub-model merges *field-by-field*.
+
+    A sub-model field marked ``__extend`` makes the overlay algebra combine the two
+    sub-model patches per declared field (carrying a base's unset sub-fields through)
+    rather than assign-replacing the whole sub-model. The recursion descends into the
+    sub-model's *own* sub-model fields (detected off the live sub-value, so a
+    discriminated-union member like ``security_group`` resolves unambiguously) and,
+    under ``drop_none_values``, drops ``None``-valued sub-fields so a ``None``-padded
+    unset sub-field carries the base value through rather than assigning ``None``.
+
+    The sub-model's bare leaf fields stay bare (assign-by-default); a nested *aggregate*
+    that drops entries is still surfaced as a narrowing by the algebra at its own depth.
+    """
+    submodel_values = _submodel_values(live_model)
+    if not submodel_values:
+        return values
+    result: dict[str, Any] = {}
+    for key, value in values.items():
+        if key in submodel_values and isinstance(value, dict):
+            marked_sub = _mark_submodel_fields(value, submodel_values[key], drop_none_values=drop_none_values)
+            if drop_none_values:
+                marked_sub = {k: v for k, v in marked_sub.items() if v is not None}
+            result[f"{key}{EXTEND_SUFFIX}"] = marked_sub
+        else:
+            result[key] = value
+    return result
+
+
+def _unmark_submodel_fields(
+    values: dict[str, Any],
+    live_model: BaseModel | None,
+    settings_patch_field_names_for_class: SettingsPatchFieldNamesFn,
+) -> dict[str, Any]:
+    """Invert ``_mark_submodel_fields``: strip the synthetic ``__extend`` suffix off each
+    sub-model field (detected off ``live_model``) and recurse to strip the suffixes its
+    own (nested) sub-model fields carry, so the merged dict re-parses against the real
+    field names.
+
+    ``live_model`` is the live base (or override) instance owning this dict level, used to
+    detect sub-models at runtime. A ``None`` ``live_model`` (no live instance available)
+    leaves the dict untouched; any genuine ``__extend`` living inside a settings patch is
+    left intact.
+    """
+    if live_model is None:
+        return values
+    submodel_values = _submodel_values(live_model)
+    if not submodel_values:
+        return values
+    result: dict[str, Any] = {}
+    for key, value in values.items():
+        unsuffixed = _strip_extend_suffix(key)
+        if key.endswith(EXTEND_SUFFIX) and unsuffixed in submodel_values and isinstance(value, dict):
+            result[unsuffixed] = _unmark_submodel_fields(
+                value, submodel_values[unsuffixed], settings_patch_field_names_for_class
+            )
         else:
             result[key] = value
     return result
@@ -85,10 +179,10 @@ def _unmark_settings_fields(values: dict[str, Any], settings_patch_field_names: 
 
 def _container_entry_classes(
     model: BaseModel,
-    container_dict_field_names: frozenset[str],
+    registry_field_names: frozenset[str],
 ) -> dict[str, dict[Any, type[BaseModel]]]:
-    """For each container-additive field, map its keys to the concrete model class of
-    the entry stored there.
+    """For each ``RegistryField`` dict, map its keys to the concrete model class of the
+    entry stored there.
 
     The class is needed both to read its ``SettingsPatchField`` set (so a
     ``ClaudeAgentConfig`` entry's ``settings_overrides`` is marked ``__extend``) and
@@ -99,20 +193,38 @@ def _container_entry_classes(
     """
     field_values = dict(model)
     classes: dict[str, dict[Any, type[BaseModel]]] = {}
-    for field_name in container_dict_field_names:
+    for field_name in registry_field_names:
         container = field_values.get(field_name) or {}
         classes[field_name] = {key: type(value) for key, value in container.items()}
     return classes
 
 
+def _container_entry_models(
+    model: BaseModel,
+    registry_field_names: frozenset[str],
+) -> dict[str, dict[Any, BaseModel]]:
+    """For each ``RegistryField`` dict, map its keys to the live entry *model* stored
+    there (so a container entry's own sub-model fields can be marked off a concrete
+    instance, as ``providers.<key>.security_group`` needs)."""
+    field_values = dict(model)
+    models: dict[str, dict[Any, BaseModel]] = {}
+    for field_name in registry_field_names:
+        container = field_values.get(field_name) or {}
+        models[field_name] = {key: value for key, value in container.items() if isinstance(value, BaseModel)}
+    return models
+
+
 def _preprocess_container(
     container: dict[Any, Any],
-    entry_classes: dict[Any, type[BaseModel]],
+    entry_models: dict[Any, BaseModel],
     settings_patch_field_names_for_class: SettingsPatchFieldNamesFn,
+    *,
+    drop_none_values: bool,
 ) -> dict[Any, Any]:
     """Pre-process one already-serialized container dict (``{key: entry_dict}``): mark
-    each entry **key** ``<key>__extend`` and mark each entry's settings-patch fields
-    ``__extend``.
+    each entry **key** ``<key>__extend``, mark each entry's settings-patch fields
+    ``__extend``, and mark each entry's *sub-model* fields ``__extend`` (so a container
+    entry's sub-model -- e.g. a provider's ``security_group`` -- merges field-by-field).
 
     Two levels of ``__extend`` are needed to reproduce the per-key container merge:
     the container field is ``__extend`` (caller) so overlay merges *per key* (key in
@@ -124,44 +236,59 @@ def _preprocess_container(
     """
     result: dict[Any, Any] = {}
     for key, entry in container.items():
-        entry_class = entry_classes.get(key)
-        patch_field_names = (
-            settings_patch_field_names_for_class(entry_class) if entry_class is not None else frozenset()
-        )
-        result[f"{key}{EXTEND_SUFFIX}"] = _mark_settings_fields(entry, patch_field_names)
+        entry_model = entry_models.get(key)
+        if entry_model is not None:
+            patch_field_names = settings_patch_field_names_for_class(type(entry_model))
+            marked = _mark_settings_fields(entry, patch_field_names)
+            marked = _mark_submodel_fields(marked, entry_model, drop_none_values=drop_none_values)
+        else:
+            marked = entry
+        result[f"{key}{EXTEND_SUFFIX}"] = marked
     return result
 
 
 def _to_operator_dict(
     values: dict[str, Any],
+    live_model: BaseModel,
     settings_patch_field_names: frozenset[str],
     drop_field_names: frozenset[str],
-    container_dict_field_names: frozenset[str],
-    entry_classes_by_field: dict[str, dict[Any, type[BaseModel]]],
+    registry_field_names: frozenset[str],
+    entry_models_by_field: dict[str, dict[Any, BaseModel]],
     settings_patch_field_names_for_class: SettingsPatchFieldNamesFn,
     *,
     drop_none_values: bool,
 ) -> dict[str, Any]:
-    """Pre-process a serialized layer dict into the overlay operator language.
+    """Pre-process a serialized layer dict into the overlay operator language by one
+    uniform walk of ``live_model`` and its dumped ``values``.
 
-    ``drop_field_names`` keys are dropped (e.g. routing metadata). When
-    ``drop_none_values`` is set, ``None``-valued keys are also dropped (the override
-    side's "treat ``None`` as unset" reproduction of ``_assign_scalar``). Each
-    ``settings_patch_field_names`` key is renamed ``<field>__extend`` (accumulate);
-    each ``container_dict_field_names`` key is rewritten as a two-level ``__extend``
-    (per-key deep merge, see ``_preprocess_container``). Every other key is left bare
-    (assign-by-default).
+    For each dumped key, the live value selects the rule: a ``BaseModel`` value ->
+    ``<field>__extend`` recursed into (field-by-field sub-model merge,
+    ``_mark_submodel_fields``); a ``registry_field_names`` field -> a two-level
+    ``__extend`` (per-key deep merge, ``_preprocess_container``); a
+    ``settings_patch_field_names`` field -> ``<field>__extend`` (accumulate); every other
+    key bare (assign-by-default). ``drop_field_names`` keys are dropped (routing metadata);
+    under ``drop_none_values`` a ``None``-valued key is dropped (the "treat ``None`` as
+    unset" reproduction of ``_assign_scalar``).
     """
+    submodel_values = _submodel_values(live_model)
     result: dict[str, Any] = {}
     for key, value in values.items():
         if key in drop_field_names:
             continue
         if drop_none_values and value is None:
             continue
-        if key in container_dict_field_names:
-            entry_classes = entry_classes_by_field.get(key, {})
+        if key in submodel_values and isinstance(value, dict):
+            marked_sub = _mark_submodel_fields(value, submodel_values[key], drop_none_values=drop_none_values)
+            if drop_none_values:
+                marked_sub = {k: v for k, v in marked_sub.items() if v is not None}
+            result[f"{key}{EXTEND_SUFFIX}"] = marked_sub
+        elif key in registry_field_names:
+            entry_models = entry_models_by_field.get(key, {})
             result[f"{key}{EXTEND_SUFFIX}"] = _preprocess_container(
-                value, entry_classes, settings_patch_field_names_for_class
+                value,
+                entry_models,
+                settings_patch_field_names_for_class,
+                drop_none_values=drop_none_values,
             )
         elif key in settings_patch_field_names:
             result[f"{key}{EXTEND_SUFFIX}"] = value
@@ -172,36 +299,57 @@ def _to_operator_dict(
 
 def _from_operator_dict(
     merged: dict[str, Any],
+    base_model: BaseModel,
+    override_model: BaseModel,
     settings_patch_field_names: frozenset[str],
-    container_dict_field_names: frozenset[str],
-    entry_classes_by_field: dict[str, dict[Any, type[BaseModel]]],
+    registry_field_names: frozenset[str],
+    entry_models_by_field: dict[str, dict[Any, BaseModel]],
     settings_patch_field_names_for_class: SettingsPatchFieldNamesFn,
 ) -> dict[str, Any]:
     """Invert ``_to_operator_dict``: strip the synthetic ``__extend`` suffix off the
-    settings-patch fields, the container fields, and each container entry key/settings
-    field, so the merged dict re-parses against the real field names. Genuine
-    ``__extend`` markers living *inside* a settings patch are left untouched.
+    settings-patch fields, the sub-model fields, the registry fields, and each registry
+    entry key / settings field / sub-model field, so the merged dict re-parses against
+    the real field names. Genuine ``__extend`` markers living *inside* a settings patch
+    are left untouched.
+
+    Sub-model fields are detected at runtime off the live model: a field is a sub-model iff
+    the base (or, when base lacks it, the override) live value is a ``BaseModel``.
+    ``entry_models_by_field`` are the live container-entry models (base preferred, override
+    fallback) used to unmark a registry entry's own sub-model fields.
     """
+    base_submodels = _submodel_values(base_model)
+    override_submodels = _submodel_values(override_model)
     result: dict[str, Any] = {}
     for key, value in merged.items():
-        if key.endswith(EXTEND_SUFFIX) and key[: -len(EXTEND_SUFFIX)] in container_dict_field_names:
-            field_name = key[: -len(EXTEND_SUFFIX)]
-            entry_classes = entry_classes_by_field.get(field_name, {})
+        unsuffixed = _strip_extend_suffix(key)
+        if key.endswith(EXTEND_SUFFIX) and unsuffixed in registry_field_names:
+            field_name = unsuffixed
+            entry_models = entry_models_by_field.get(field_name, {})
             unmarked_container: dict[Any, Any] = {}
             for marked_entry_key, entry in value.items():
-                entry_key = (
-                    marked_entry_key[: -len(EXTEND_SUFFIX)]
-                    if marked_entry_key.endswith(EXTEND_SUFFIX)
-                    else marked_entry_key
-                )
-                entry_class = entry_classes.get(entry_key)
+                entry_key = _strip_extend_suffix(marked_entry_key)
+                # The live entry model (base-preferred) is the concrete class the entry
+                # re-parses into, so its settings-patch fields are stripped symmetrically
+                # with how the mark side marked them off that same live class.
+                entry_model = entry_models.get(entry_key)
                 patch_field_names = (
-                    settings_patch_field_names_for_class(entry_class) if entry_class is not None else frozenset()
+                    settings_patch_field_names_for_class(type(entry_model)) if entry_model is not None else frozenset()
                 )
-                unmarked_container[entry_key] = _unmark_settings_fields(entry, patch_field_names)
+                unmarked_entry = _unmark_settings_fields(entry, patch_field_names)
+                unmarked_entry = _unmark_submodel_fields(
+                    unmarked_entry, entry_model, settings_patch_field_names_for_class
+                )
+                unmarked_container[entry_key] = unmarked_entry
             result[field_name] = unmarked_container
-        elif key.endswith(EXTEND_SUFFIX) and key[: -len(EXTEND_SUFFIX)] in settings_patch_field_names:
-            result[key[: -len(EXTEND_SUFFIX)]] = value
+        elif key.endswith(EXTEND_SUFFIX) and unsuffixed in settings_patch_field_names:
+            result[unsuffixed] = value
+        elif (
+            key.endswith(EXTEND_SUFFIX)
+            and (unsuffixed in base_submodels or unsuffixed in override_submodels)
+            and isinstance(value, dict)
+        ):
+            live_sub = base_submodels.get(unsuffixed) or override_submodels.get(unsuffixed)
+            result[unsuffixed] = _unmark_submodel_fields(value, live_sub, settings_patch_field_names_for_class)
         else:
             result[key] = value
     return result
@@ -209,14 +357,14 @@ def _from_operator_dict(
 
 def _reparse_container_entries(
     merged_dict: dict[str, Any],
-    container_dict_field_names: frozenset[str],
+    registry_field_names: frozenset[str],
     base_classes: dict[str, dict[Any, type[BaseModel]]],
     override_classes: dict[str, dict[Any, type[BaseModel]]],
 ) -> dict[str, Any]:
-    """Re-parse each container entry back into its concrete model class, returning a
-    new dict with the container fields replaced (the input is left untouched).
+    """Re-parse each registry entry back into its concrete model class, returning a
+    new dict with the registry fields replaced (the input is left untouched).
 
-    The whole-model ``model_validate`` cannot pick a subclass for a container entry
+    The whole-model ``model_validate`` cannot pick a subclass for a registry entry
     (the declared value type is the base ``AgentTypeConfig`` / ``PluginConfig`` /
     ...), so a ``ClaudeAgentConfig`` entry would lose its subclass-only fields.
     Reproduce the per-key merge's class handling by re-parsing each entry dict into
@@ -225,7 +373,7 @@ def _reparse_container_entries(
     entry's class for a key the override added.
     """
     result = dict(merged_dict)
-    for field_name in container_dict_field_names:
+    for field_name in registry_field_names:
         container = result.get(field_name)
         if not container:
             continue
@@ -333,9 +481,9 @@ def merge_models_via_overlay(
     settings_patch_field_names: frozenset[str],
     drop_field_names: frozenset[str] = frozenset(),
     serialize_as_any: bool = False,
-    container_dict_field_names: frozenset[str] = frozenset(),
     drop_none_values: bool = False,
     settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None = None,
+    registry_field_names_for_class: RegistryFieldNamesFn | None = None,
 ) -> ModelT:
     """Merge ``override`` onto ``base`` via the overlay node algebra (see module docstring).
 
@@ -348,9 +496,9 @@ def merge_models_via_overlay(
         settings_patch_field_names=settings_patch_field_names,
         drop_field_names=drop_field_names,
         serialize_as_any=serialize_as_any,
-        container_dict_field_names=container_dict_field_names,
         drop_none_values=drop_none_values,
         settings_patch_field_names_for_class=settings_patch_field_names_for_class,
+        registry_field_names_for_class=registry_field_names_for_class,
     )
     return merged
 
@@ -362,9 +510,9 @@ def merge_models_via_overlay_with_narrowings(
     settings_patch_field_names: frozenset[str],
     drop_field_names: frozenset[str] = frozenset(),
     serialize_as_any: bool = False,
-    container_dict_field_names: frozenset[str] = frozenset(),
     drop_none_values: bool = False,
     settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None = None,
+    registry_field_names_for_class: RegistryFieldNamesFn | None = None,
 ) -> tuple[ModelT, list[str]]:
     """Merge ``override`` onto ``base`` and also return *every* narrowing path the
     overlay merge surfaced (see module docstring for the merge mechanics).
@@ -375,13 +523,18 @@ def merge_models_via_overlay_with_narrowings(
     (e.g. routing metadata). ``serialize_as_any`` is threaded to ``model_dump`` so
     subclass entries serialize through their concrete type when needed.
 
-    ``container_dict_field_names`` are container-additive dict fields (e.g.
-    ``MngrConfig.agent_types``) merged per key via a two-level ``__extend``; their
-    entries are re-parsed into their concrete (sub)classes. ``drop_none_values``
-    drops ``None``-valued keys from the sparse override (the top-level None-padding
-    case). ``settings_patch_field_names_for_class`` discovers the
-    ``SettingsPatchField`` names of a *container entry* class; required whenever
-    ``container_dict_field_names`` is non-empty.
+    ``registry_field_names_for_class`` discovers a class's ``RegistryField``-marked
+    dict-of-models registries (e.g. ``MngrConfig.agent_types``), merged per key via a
+    two-level ``__extend``; their entries are re-parsed into their concrete (sub)classes.
+    ``drop_none_values`` drops ``None``-valued keys from the sparse override (the
+    top-level None-padding case). ``settings_patch_field_names_for_class`` discovers the
+    ``SettingsPatchField`` names of a *container entry* class; required whenever a
+    registry field is present.
+
+    Sub-model fields (whose value is itself a ``BaseModel``, e.g. ``logging`` / ``retry``
+    or a provider's ``security_group``) are detected at runtime off the live model; each
+    is marked ``__extend`` so it merges field-by-field (carrying a base's unset sub-fields
+    through) rather than assign-replacing the whole sub-model.
 
     Returns ``(merged, narrowings)``: ``merged`` is a ``type(base)`` instance (so a
     subclass like ``ClaudeAgentConfig`` keeps its concrete class and subclass-only
@@ -396,26 +549,33 @@ def merge_models_via_overlay_with_narrowings(
     into its flag-gated narrowing error.
     """
     config_class = type(base)
+    # A no-op-defaulted registry resolver so typing has a callable even when a caller
+    # (e.g. ``AgentTypeConfig.merge_with``, whose models have no registry fields) does
+    # not pass one.
+    registry_fn: RegistryFieldNamesFn = registry_field_names_for_class or (lambda _cls: frozenset())
+    registry_field_names = registry_fn(config_class)
     pipeline = _run_overlay_pipeline(
         base,
         override,
         settings_patch_field_names=settings_patch_field_names,
         drop_field_names=drop_field_names,
         serialize_as_any=serialize_as_any,
-        container_dict_field_names=container_dict_field_names,
+        registry_field_names=registry_field_names,
         drop_none_values=drop_none_values,
         settings_patch_field_names_for_class=settings_patch_field_names_for_class,
     )
 
     merged_dict = _from_operator_dict(
         lower(pipeline.merged_patch),
+        base,
+        override,
         settings_patch_field_names,
-        container_dict_field_names,
-        pipeline.merged_classes,
+        registry_field_names,
+        pipeline.merged_entry_models,
         pipeline.entry_patch_fn,
     )
     merged_dict = _reparse_container_entries(
-        merged_dict, container_dict_field_names, pipeline.base_classes, pipeline.override_classes
+        merged_dict, registry_field_names, pipeline.base_classes, pipeline.override_classes
     )
     return config_class.model_validate(merged_dict), pipeline.all_narrowings
 
@@ -431,7 +591,7 @@ class _OverlayPipelineResult(BaseModel):
     all_narrowings: list[str]
     base_classes: dict[str, dict[Any, type[BaseModel]]]
     override_classes: dict[str, dict[Any, type[BaseModel]]]
-    merged_classes: dict[str, dict[Any, type[BaseModel]]]
+    merged_entry_models: dict[str, dict[Any, BaseModel]]
     entry_patch_fn: SettingsPatchFieldNamesFn
 
 
@@ -442,13 +602,13 @@ def _run_overlay_pipeline(
     settings_patch_field_names: frozenset[str],
     drop_field_names: frozenset[str],
     serialize_as_any: bool,
-    container_dict_field_names: frozenset[str],
+    registry_field_names: frozenset[str],
     drop_none_values: bool,
     settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None,
 ) -> _OverlayPipelineResult:
     """Run the serialize -> re-mark -> pre-process -> ``lift`` -> ``merge_narrowing_allowed``
     pipeline and return the merged patch plus *all* narrowing paths (unfiltered) and the
-    class tables needed to lower/reparse.
+    class/entry-model tables needed to lower/reparse.
 
     The override sparse dump is re-marked (``_remark_static_leaves``) so the ``Static*``
     markers ``model_dump`` strips are restored as atomic leaves before pre-processing --
@@ -459,20 +619,26 @@ def _run_overlay_pipeline(
     # Internal invariant (caller-side programming error, never a user/runtime
     # condition): a per-entry settings discoverer is required to pre-process container
     # entries. ``assert`` documents the contract without a user-facing exception.
-    assert not container_dict_field_names or settings_patch_field_names_for_class is not None, (
-        "settings_patch_field_names_for_class is required when container_dict_field_names is set"
+    assert not registry_field_names or settings_patch_field_names_for_class is not None, (
+        "settings_patch_field_names_for_class is required when a registry field is present"
     )
-    # A no-op discoverer when there are no container fields: it is never consulted in
+    # A no-op discoverer when there are no registry fields: it is never consulted in
     # that case (no entry gets pre-processed), but typing wants a concrete callable.
     entry_patch_fn: SettingsPatchFieldNamesFn = settings_patch_field_names_for_class or (lambda _cls: frozenset())
 
-    base_classes = _container_entry_classes(base, container_dict_field_names)
-    override_classes = _container_entry_classes(override, container_dict_field_names)
-    # A class table spanning both layers, so an entry present only in the override
-    # (whose key is absent from ``base``) still has its settings fields marked.
-    merged_classes: dict[str, dict[Any, type[BaseModel]]] = {
-        field_name: {**base_classes.get(field_name, {}), **override_classes.get(field_name, {})}
-        for field_name in container_dict_field_names
+    base_classes = _container_entry_classes(base, registry_field_names)
+    override_classes = _container_entry_classes(override, registry_field_names)
+    # Live entry models per side, so a container entry's own sub-model fields are marked
+    # off the concrete instance (each side uses its own entries; an entry present on only
+    # one side is pre-processed against that side's live model).
+    base_entry_models = _container_entry_models(base, registry_field_names)
+    override_entry_models = _container_entry_models(override, registry_field_names)
+    # A live-entry-model table spanning both layers (base preferred), so the unmark step
+    # can detect a merged entry's sub-model fields at runtime regardless of which side
+    # contributed the entry.
+    merged_entry_models: dict[str, dict[Any, BaseModel]] = {
+        field_name: {**override_entry_models.get(field_name, {}), **base_entry_models.get(field_name, {})}
+        for field_name in registry_field_names
     }
 
     base_full = base.model_dump(serialize_as_any=serialize_as_any)
@@ -485,10 +651,11 @@ def _run_overlay_pipeline(
     lower_patch = lift(
         _to_operator_dict(
             base_full,
+            base,
             settings_patch_field_names,
             drop_field_names,
-            container_dict_field_names,
-            merged_classes,
+            registry_field_names,
+            base_entry_models,
             entry_patch_fn,
             # When ``drop_none_values`` is set, ``None`` is the model's "unset"
             # sentinel on *both* sides (TOML has no null), so a ``None`` in the base
@@ -506,10 +673,11 @@ def _run_overlay_pipeline(
     higher_patch = lift(
         _to_operator_dict(
             override_sparse,
+            override,
             settings_patch_field_names,
             drop_field_names,
-            container_dict_field_names,
-            merged_classes,
+            registry_field_names,
+            override_entry_models,
             entry_patch_fn,
             drop_none_values=drop_none_values,
         )
@@ -522,6 +690,6 @@ def _run_overlay_pipeline(
         all_narrowings=all_narrowings,
         base_classes=base_classes,
         override_classes=override_classes,
-        merged_classes=merged_classes,
+        merged_entry_models=merged_entry_models,
         entry_patch_fn=entry_patch_fn,
     )
