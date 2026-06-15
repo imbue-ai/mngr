@@ -22,6 +22,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
@@ -30,26 +31,15 @@ from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
-def _make_recording_binary(tmp_path: Path, name: str, *, exit_code: int = 0, stderr: str = "") -> Path:
-    """Build a fake binary that appends its argv to a report file and exits."""
-    script = tmp_path / name
-    report_path = tmp_path / f"{name}_report.jsonl"
-    script.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, sys\n"
-        f"report = {str(report_path)!r}\n"
-        "with open(report, 'a') as f:\n"
-        "    f.write(json.dumps({'argv': sys.argv[1:], 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
-        f"if {stderr!r}:\n"
-        f"    sys.stderr.write({stderr!r})\n"
-        f"sys.exit({exit_code})\n"
-    )
-    script.chmod(0o755)
-    return script
+def _recorded_mngr_argvs(handler: LatchkeyPermissionGrantHandler) -> list[list[str]]:
+    """Return the argv of each ``mngr`` call the handler's message sender made."""
+    caller = handler.mngr_message_sender.caller
+    assert isinstance(caller, RecordingMngrCaller)
+    return caller.calls
 
 
 def _read_recording(report_path: Path) -> list[dict[str, list[str] | str]]:
-    """Parse the JSONL recording emitted by ``_make_recording_binary``."""
+    """Parse the JSONL recording emitted by the fake latchkey binary."""
     if not report_path.exists():
         return []
     parsed: list[dict[str, list[str] | str]] = []
@@ -178,40 +168,13 @@ def _build_handler(
         set_credentials_example=set_credentials_example,
         latchkey_directory=latchkey_directory,
     )
-    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
         gateway_client=build_fake_gateway_client(),
     )
-
-
-# -- MngrMessageSender --
-
-
-def test_mngr_message_sender_invokes_message_subcommand(tmp_path: Path) -> None:
-    binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
-    sender = MngrMessageSender(mngr_binary=str(binary))
-    agent_id = AgentId()
-
-    sender.send(agent_id, "hello")
-
-    recording = _read_recording(tmp_path / "mngr_report.jsonl")
-    # ``mngr message`` collects every positional into ``agents`` (nargs=-1),
-    # so the message text MUST be passed via ``-m`` -- otherwise it would be
-    # parsed as a second agent identifier and the message content would be
-    # read from (silently empty) stdin in this subprocess context.
-    assert recording == [{"argv": ["message", "-m", "hello", "--", str(agent_id)], "env_LATCHKEY_DIRECTORY": ""}]
-
-
-def test_mngr_message_sender_does_not_raise_on_failure(tmp_path: Path) -> None:
-    binary = _make_recording_binary(tmp_path, "mngr", exit_code=1, stderr="agent missing")
-    sender = MngrMessageSender(mngr_binary=str(binary))
-
-    # No assertion needed: this must not raise.
-    sender.send(AgentId(), "hello")
 
 
 # -- LatchkeyPermissionGrantHandler.grant --
@@ -242,10 +205,9 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
     assert responses[0].status == str(RequestStatus.GRANTED)
-    mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
-    assert len(mngr_recording) == 1
-    argv = mngr_recording[0]["argv"]
-    assert isinstance(argv, list)
+    mngr_argvs = _recorded_mngr_argvs(handler)
+    assert len(mngr_argvs) == 1
+    argv = mngr_argvs[0]
     assert argv[0] == "message"
 
 
@@ -302,12 +264,11 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
         "    sys.exit(0)\n"
     )
     binary.chmod(0o755)
-    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
         gateway_client=build_fake_gateway_client(),
     )
 
@@ -354,7 +315,7 @@ def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path)
     assert load_response_events(tmp_path) == []
     # No mngr message was sent: the agent stays blocked, waiting on the
     # still-pending request rather than being told it was resolved.
-    assert not (tmp_path / "mngr_report.jsonl").exists()
+    assert _recorded_mngr_argvs(handler) == []
 
 
 def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
@@ -449,7 +410,7 @@ def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp
     # file, no mngr message.
     assert load_response_events(tmp_path) == []
     assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
-    assert not (tmp_path / "mngr_report.jsonl").exists()
+    assert _recorded_mngr_argvs(handler) == []
 
 
 def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: Path) -> None:
@@ -565,12 +526,11 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         "sys.exit(99)\n"
     )
     binary.chmod(0o755)
-    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
         gateway_client=build_fake_gateway_client(),
     )
     agent_id = AgentId()
@@ -633,10 +593,9 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
         display_name=_SLACK_SERVICE_INFO.display_name,
     )
 
-    mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
-    assert len(mngr_recording) == 1
-    argv = mngr_recording[0]["argv"]
-    assert isinstance(argv, list)
+    mngr_argvs = _recorded_mngr_argvs(handler)
+    assert len(mngr_argvs) == 1
+    argv = mngr_argvs[0]
     assert "denied" in argv[2].lower()
 
 
@@ -644,12 +603,11 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
     """The handler routes the on-disk write through the gateway extension and clears the pending request."""
     fake_client = FakeLatchkeyGatewayClient()
     latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
-    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
         gateway_client=fake_client,
     )
     host_id = HostId()
@@ -678,12 +636,11 @@ def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> No
     """Deny tears down the pending gateway record but never POSTs permissions."""
     fake_client = FakeLatchkeyGatewayClient()
     latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
-    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
         gateway_client=fake_client,
     )
 
@@ -771,10 +728,9 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     assert response_events[0].scope == "not-in-catalog-scope"
     # Agent was notified; the message falls back to the raw scope as
     # the display name since no catalog entry exists.
-    mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
-    assert len(mngr_recording) == 1
-    argv = mngr_recording[0]["argv"]
-    assert isinstance(argv, list)
+    mngr_argvs = _recorded_mngr_argvs(handler)
+    assert len(mngr_argvs) == 1
+    argv = mngr_argvs[0]
     assert "denied" in argv[2].lower()
     assert "not-in-catalog-scope" in argv[2]
 
@@ -789,12 +745,11 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     """
     fake_client = FakeLatchkeyGatewayClient()
     latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
-    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
         gateway_client=fake_client,
     )
     host_id = HostId()

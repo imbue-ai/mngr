@@ -2,9 +2,9 @@
 
 Both sibling handlers in this package (:mod:`.predefined` and
 :mod:`.file_sharing`) notify the waiting agent on resolution by
-spawning ``mngr message``. The class lives alongside them rather than
-inside either handler module so neither sibling has to import from
-the other.
+running ``mngr message`` through a :class:`~imbue.minds.utils.mngr_caller.MngrCaller`.
+The class lives alongside them rather than inside either handler module
+so neither sibling has to import from the other.
 """
 
 import json
@@ -13,12 +13,11 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -61,39 +60,23 @@ class MngrMessageSender(MutableModel):
     event has already been written, so an undelivered nudge is recoverable
     (the agent will eventually wake up on its own).
 
-    When a :class:`MngrCaller` is supplied (the production wiring passes the
-    pre-warmed forkserver-backed singleton), each ``mngr message`` runs in a
-    warm forked child instead of a brand-new subprocess, avoiding the
-    multi-second interpreter+import startup cost. When ``caller`` is ``None``,
-    it falls back to spawning ``mngr_binary`` as a subprocess. This dual path
-    lets call sites migrate to the caller incrementally.
+    Each ``mngr message`` runs through a :class:`MngrCaller`, which executes the
+    CLI in a child forked from a pre-warmed forkserver rather than spawning a
+    brand-new subprocess -- avoiding the multi-second interpreter+import startup
+    cost. Production passes the shared, pre-warmed singleton; tests inject a
+    recording double.
     """
 
-    mngr_binary: str = Field(
-        default=MNGR_BINARY, frozen=True, description="Path to mngr binary (subprocess fallback)."
-    )
-    caller: MngrCaller | None = Field(
-        default=None,
-        description="Forkserver-backed in-app caller; when set, used instead of spawning a subprocess.",
+    caller: MngrCaller = Field(
+        default_factory=get_default_mngr_caller,
+        description="Forkserver-backed in-app ``mngr`` CLI caller.",
     )
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
     def _run_message(self, argv: list[str]) -> MngrCallResult:
-        """Run a ``mngr`` ``argv`` either via the caller or a subprocess fallback."""
-        if self.caller is not None:
-            return self.caller.call(argv, timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
-        cg = ConcurrencyGroup(name="mngr-message")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=[self.mngr_binary, *argv],
-                timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
-                is_checked_after=False,
-            )
-        # ``run_process_to_completion`` always waits for exit, so returncode is
-        # set; treat a missing code defensively as a failure.
-        returncode = result.returncode if result.returncode is not None else 1
-        return MngrCallResult(returncode=returncode, stdout=result.stdout, stderr=result.stderr)
+        """Run a ``mngr`` ``argv`` through the caller."""
+        return self.caller.call(argv, timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
 
     def send(self, agent_id: AgentId, text: str) -> None:
         is_delivered = self.try_send(str(agent_id), text)

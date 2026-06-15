@@ -24,6 +24,7 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import UserDataPreference
+from imbue.minds.utils.testing import RecordingMngrCaller
 
 
 def test_is_noop_for_empty_answers() -> None:
@@ -102,7 +103,7 @@ def _make_applier(
     return OnboardingApplier(
         agent_creator=agent_creator,
         paths=paths,
-        message_sender=MngrMessageSender(mngr_binary="mngr"),
+        message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
         root_concurrency_group=root_concurrency_group,
     )
 
@@ -183,7 +184,7 @@ def test_q2_and_q3_are_applied_concurrently(
     applier = _HandshakeApplier(
         agent_creator=agent_creator,
         paths=paths,
-        message_sender=MngrMessageSender(mngr_binary="mngr"),
+        message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
         root_concurrency_group=root_concurrency_group,
     )
 
