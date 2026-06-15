@@ -350,6 +350,14 @@ def clone_git_repo(
     caller still calls :func:`checkout_branch` next to rename the detached
     HEAD to a real local branch.
 
+    When ``branch`` is ``None``, no caller renames the HEAD afterward, so a
+    detached checkout would leave ``refs/heads/*`` empty -- and the
+    downstream ``mngr create`` mirror push only pushes ``refs/heads/*`` +
+    ``refs/tags/*``, failing with "No refs in common and none specified;
+    doing nothing". To avoid that, the no-branch path resolves the remote's
+    default branch (via ``git ls-remote --symref``) and checks it out as a
+    real local branch, mirroring what a plain ``git clone`` leaves you on.
+
     Checking out here (rather than leaving an empty tree for the caller)
     is load-bearing: callers that overlay a worktree via
     :func:`rsync_worktree_over_clone` need a *checked-out* clone, else the
@@ -394,29 +402,68 @@ def clone_git_repo(
     cg = _make_child_cg("git-clone", parent_cg)
     failed: tuple[str, str] | None = None
     with cg:
-        for command in (
-            ["git", "init", "-q"],
-            ["git", "remote", "add", "origin", str(git_url)],
-            ["git", "fetch", "origin", str(branch) if branch is not None else "HEAD"],
-            ["git", "checkout", "--detach", "FETCH_HEAD"],
-        ):
-            result = cg.run_process_to_completion(
-                command=command,
+        # With no requested branch the clone must land on a real local branch
+        # (not a detached HEAD), so resolve the remote's default branch up
+        # front. ls-remote takes the URL directly and needs no local repo, so
+        # it can run before `git init`.
+        checkout_command: list[str] = ["git", "checkout", "--detach", "FETCH_HEAD"]
+        if branch is None:
+            symref_result = cg.run_process_to_completion(
+                command=["git", "ls-remote", "--symref", str(git_url), "HEAD"],
                 cwd=clone_dir,
                 is_checked_after=False,
                 on_output=redacted_on_output,
             )
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-                stdout = result.stdout.strip()
-                failed = (command[1], stderr if stderr else stdout)
-                break
+            if symref_result.returncode != 0:
+                stderr = symref_result.stderr.strip()
+                stdout = symref_result.stdout.strip()
+                failed = ("ls-remote", stderr if stderr else stdout)
+            else:
+                default_branch = _parse_default_branch_from_symref(symref_result.stdout)
+                if default_branch is None:
+                    failed = ("ls-remote", "could not determine the remote's default branch")
+                else:
+                    checkout_command = ["git", "checkout", "-B", default_branch, "FETCH_HEAD"]
+
+        if failed is None:
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "remote", "add", "origin", str(git_url)],
+                ["git", "fetch", "origin", str(branch) if branch is not None else "HEAD"],
+                checkout_command,
+            ):
+                result = cg.run_process_to_completion(
+                    command=command,
+                    cwd=clone_dir,
+                    is_checked_after=False,
+                    on_output=redacted_on_output,
+                )
+                if result.returncode != 0:
+                    stderr = result.stderr.strip()
+                    stdout = result.stdout.strip()
+                    failed = (command[1], stderr if stderr else stdout)
+                    break
     if failed is not None:
         step_name, output = failed
         raise GitCloneError("git {} failed:\n{}".format(step_name, _redact_url_credentials_in_text(output)))
 
 
 _FULL_SHA_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
+
+# Matches the symref line `git ls-remote --symref <url> HEAD` prints for a
+# remote whose HEAD points at a branch, e.g. `ref: refs/heads/main\tHEAD`.
+_SYMREF_HEAD_RE: Final[re.Pattern[str]] = re.compile(r"^ref:\s+refs/heads/(?P<branch>.+?)\s+HEAD$", re.MULTILINE)
+
+
+def _parse_default_branch_from_symref(symref_output: str) -> str | None:
+    """Extract the remote's default branch name from ``git ls-remote --symref`` output.
+
+    Returns the branch name (e.g. ``main``) or ``None`` if the output has no
+    ``ref: refs/heads/<branch>\tHEAD`` line (e.g. a remote whose HEAD is
+    detached or points outside refs/heads).
+    """
+    match = _SYMREF_HEAD_RE.search(symref_output)
+    return match.group("branch") if match is not None else None
 
 
 def checkout_branch(

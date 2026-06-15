@@ -540,6 +540,41 @@ def test_clone_git_repo_checks_out_working_tree(tmp_path: Path) -> None:
     assert _git(dest, "status", "--porcelain") == ""
 
 
+def test_clone_no_branch_lands_on_default_branch_and_is_mirror_pushable(tmp_path: Path) -> None:
+    """Cloning a remote with no branch lands on a real local branch (the
+    remote's default), so the downstream mngr-create mirror push succeeds.
+
+    Regression for the github-URL create failure: the no-branch path used to
+    leave a detached HEAD (no caller renames it, unlike the branch-given
+    path), so ``refs/heads/*`` was empty and the mirror push -- which only
+    pushes ``refs/heads/*`` + ``refs/tags/*`` -- failed with "No refs in
+    common and none specified; doing nothing". The remote here defaults to
+    ``main``; the clone must check that branch out by name.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest)
+
+    # Landed on the remote's default branch (a named branch, not detached HEAD).
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert (dest / "f").read_text() == "base\n"
+    assert not (dest / ".git" / "shallow").exists()
+
+    # The mirror push mngr create performs must succeed -- this is the exact
+    # operation that failed before the fix.
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    push = subprocess.run(
+        ["git", "-C", str(dest), "push", "--force", "--prune", str(bare), *GIT_MIRROR_PUSH_REFSPECS],
+        capture_output=True,
+        text=True,
+    )
+    assert push.returncode == 0, push.stderr
+    assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "main"
+
+
 @pytest.mark.rsync
 def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
     """The local-worktree create flow (clone -> rsync overlay -> checkout)
