@@ -109,9 +109,13 @@ _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
 HOST_DIR_SYNC_UNIT_NAME: Final[str] = "mngr-azure-host-dir-sync"
 HOST_DIR_SYNC_INTERVAL_SECONDS: Final[int] = 60
 # host_dir can contain large transient build artifacts; exclude the obvious ones
-# so a periodic full-tree sync stays cheap. The same conservative set as AWS,
-# expressed as azcopy ``--exclude-pattern`` globs (semicolon-separated).
-_HOST_DIR_SYNC_EXCLUDE_PATTERNS: Final[tuple[str, ...]] = ("*.tmp", "__pycache__", "node_modules")
+# so a periodic full-tree sync stays cheap. azcopy distinguishes file-NAME globs
+# (``--exclude-pattern``) from directory PATH prefixes (``--exclude-path``), so the
+# file glob and the directory trees go on different flags -- a single
+# ``--exclude-pattern`` would only match files literally named ``__pycache__`` /
+# ``node_modules``, not their trees. Matches the effective AWS exclude set.
+_HOST_DIR_SYNC_EXCLUDE_PATTERNS: Final[tuple[str, ...]] = ("*.tmp",)
+_HOST_DIR_SYNC_EXCLUDE_PATHS: Final[tuple[str, ...]] = ("__pycache__", "node_modules")
 
 
 def _build_host_dir_sync_command(host_dir_on_outer: str, blob_prefix_url: str) -> str:
@@ -119,16 +123,20 @@ def _build_host_dir_sync_command(host_dir_on_outer: str, blob_prefix_url: str) -
 
     Syncs the per-host ``host_dir`` tree to the ``hosts/<id>/host_dir/`` blob
     prefix, with ``--delete-destination=true`` so a removed file is removed offline
-    too (the ``--delete`` analog), and a few excludes for large transient caches.
+    too (the ``--delete`` analog). Large transient caches are excluded: file-name
+    globs via ``--exclude-pattern`` and whole directory trees via ``--exclude-path``
+    (azcopy treats the two differently -- a pattern only matches a file's name).
     azcopy authenticates as the VM's *user-assigned* managed identity via MSI; the
     identity is pinned by ``AZCOPY_AUTO_LOGIN_TYPE``/``AZCOPY_MSI_CLIENT_ID`` set in
     the service unit's environment (not on the command line), since the VM also
     carries a system-assigned identity.
     """
-    excludes = ";".join(_HOST_DIR_SYNC_EXCLUDE_PATTERNS)
+    exclude_patterns = ";".join(_HOST_DIR_SYNC_EXCLUDE_PATTERNS)
+    exclude_paths = ";".join(_HOST_DIR_SYNC_EXCLUDE_PATHS)
     return (
         f'azcopy sync "{host_dir_on_outer}" "{blob_prefix_url}" '
-        f'--recursive --delete-destination=true --exclude-pattern "{excludes}"'
+        f"--recursive --delete-destination=true "
+        f'--exclude-pattern "{exclude_patterns}" --exclude-path "{exclude_paths}"'
     )
 
 

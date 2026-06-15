@@ -18,9 +18,10 @@ def test_sync_command_uses_delete_destination_and_excludes() -> None:
     command = _build_host_dir_sync_command(_HOST_DIR, _BLOB_URL)
     assert command.startswith(f'azcopy sync "{_HOST_DIR}" "{_BLOB_URL}"')
     assert "--delete-destination=true" in command
-    # The known transient-cache excludes are present.
-    assert "__pycache__" in command
-    assert "node_modules" in command
+    # File-name globs go on --exclude-pattern; directory trees go on --exclude-path
+    # (azcopy treats a pattern as a file name, so it would not skip the dir trees).
+    assert '--exclude-pattern "*.tmp"' in command
+    assert '--exclude-path "__pycache__;node_modules"' in command
 
 
 def test_service_unit_is_oneshot_and_authenticates_as_the_managed_identity() -> None:
