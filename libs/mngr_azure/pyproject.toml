@@ -13,6 +13,8 @@ dependencies = [
     "azure-mgmt-resource>=25",
     "azure-mgmt-authorization>=4",
     "azure-core>=1.41",
+    "azure-storage-blob>=12.28",
+    "azure-mgmt-storage>=21",
 ]
 
 [project.entry-points.mngr]

@@ -7,17 +7,21 @@ Mirrors ``libs/mngr_aws/imbue/mngr_aws/testing.py`` and ``mngr_gcp``'s.
 """
 
 import os
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 from typing import Final
 
 from azure.core.exceptions import AzureError
 from azure.core.exceptions import HttpResponseError
+from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import ResourceNotFoundError
 from pydantic import Field
 
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureSubscriptionError
+from imbue.mngr_azure.state_bucket import BlobStateBucket
 
 # Optional prefix release tests use for their agent names so leaked VMs (should
 # the scanner ever fail) are still visually identifiable as mngr-created test
@@ -428,3 +432,127 @@ class _StubbedAzureVpsClient(AzureVpsClient):
 
     def _authorization(self) -> Any:
         return self.stubbed_authorization_client
+
+
+class FakeBlobStorageBackend:
+    """In-memory backing store for the Azure Blob + storage-management fakes.
+
+    There is no moto-equivalent for Azure Blob, so this models the slice of
+    behavior ``BlobStateBucket`` depends on: a single storage account that may or
+    may not exist, and one container holding ``{blob_name: bytes}``. Shared by the
+    data-plane and management-plane fakes so they observe a consistent state.
+    """
+
+    def __init__(self, account_exists: bool = False) -> None:
+        self.account_exists: bool = account_exists
+        self.container_exists: bool = False
+        self.blobs_by_name: dict[str, bytes] = {}
+        self.deleted_account: bool = False
+
+
+class _FakeBlobDownloader:
+    """Stand-in for the StorageStreamDownloader: ``readall`` returns the blob bytes."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def readall(self) -> bytes:
+        return self._data
+
+
+class FakeContainerClient:
+    """Fake ``ContainerClient`` over a ``FakeBlobStorageBackend``."""
+
+    def __init__(self, backend: FakeBlobStorageBackend) -> None:
+        self._backend = backend
+
+    def exists(self) -> bool:
+        return self._backend.container_exists
+
+    def list_blobs(self, name_starts_with: str = "") -> Iterator[Any]:
+        for name in sorted(self._backend.blobs_by_name):
+            if name.startswith(name_starts_with):
+                yield SimpleNamespace(name=name)
+
+    def upload_blob(self, name: str, data: bytes, overwrite: bool = False) -> None:
+        if name in self._backend.blobs_by_name and not overwrite:
+            raise ResourceExistsError(message=f"blob {name} already exists")
+        self._backend.blobs_by_name[name] = data
+
+    def download_blob(self, name: str) -> _FakeBlobDownloader:
+        if name not in self._backend.blobs_by_name:
+            raise ResourceNotFoundError(message=f"blob {name} not found")
+        return _FakeBlobDownloader(self._backend.blobs_by_name[name])
+
+    def delete_blob(self, name: str) -> None:
+        if name not in self._backend.blobs_by_name:
+            raise ResourceNotFoundError(message=f"blob {name} not found")
+        del self._backend.blobs_by_name[name]
+
+
+class FakeBlobServiceClient:
+    """Fake ``BlobServiceClient`` returning a single shared ``FakeContainerClient``."""
+
+    def __init__(self, backend: FakeBlobStorageBackend) -> None:
+        self._backend = backend
+
+    def get_container_client(self, container_name: str) -> FakeContainerClient:
+        del container_name
+        return FakeContainerClient(self._backend)
+
+    def create_container(self, name: str) -> None:
+        del name
+        if self._backend.container_exists:
+            raise ResourceExistsError(message="container already exists")
+        self._backend.container_exists = True
+
+
+class FakeStorageAccountsOperations:
+    """Fake ``StorageManagementClient.storage_accounts``."""
+
+    def __init__(self, backend: FakeBlobStorageBackend) -> None:
+        self._backend = backend
+
+    def get_properties(self, resource_group_name: str, account_name: str) -> Any:
+        del resource_group_name
+        if not self._backend.account_exists:
+            raise ResourceNotFoundError(message="storage account not found")
+        return SimpleNamespace(name=account_name)
+
+    def begin_create(self, resource_group_name: str, account_name: str, parameters: Any) -> FakePoller:
+        del resource_group_name, parameters
+        self._backend.account_exists = True
+        return FakePoller(result_value=SimpleNamespace(name=account_name))
+
+    def begin_delete(self, resource_group_name: str, account_name: str) -> None:
+        del resource_group_name, account_name
+        self._backend.account_exists = False
+        self._backend.container_exists = False
+        self._backend.blobs_by_name.clear()
+        self._backend.deleted_account = True
+
+
+class FakeStorageManagementClient:
+    """Fake ``StorageManagementClient`` bundling the ``storage_accounts`` operations."""
+
+    def __init__(self, backend: FakeBlobStorageBackend) -> None:
+        self.storage_accounts = FakeStorageAccountsOperations(backend)
+
+
+class _StubbedBlobStateBucket(BlobStateBucket):
+    """Test-only ``BlobStateBucket`` that injects in-memory blob + storage clients.
+
+    Production ``BlobStateBucket`` builds the azure SDK clients lazily from its
+    credential; this subclass routes the data-plane and management-plane client
+    accessors to hand-written fakes backed by a single ``FakeBlobStorageBackend``,
+    so unit tests exercise the request-building and response-handling logic without
+    real Azure calls. Mirrors ``_StubbedAzureVpsClient``.
+    """
+
+    fake_backend: Any = Field(default=None, description="Shared FakeBlobStorageBackend for the injected fakes")
+
+    def _blob_service(self) -> Any:
+        return FakeBlobServiceClient(self.fake_backend)
+
+    def _storage_mgmt(self) -> Any:
+        return FakeStorageManagementClient(self.fake_backend)

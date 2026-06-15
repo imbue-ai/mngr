@@ -389,6 +389,20 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-mgmt-storage"
+version = "25.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-mgmt-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/47/6a/62d21f86b62cf990cb7d63f470dd4a766277a68a71543ef9331e0ee16f7d/azure_mgmt_storage-25.0.0.tar.gz", hash = "sha256:52c4bb1fb395fcfa7a2e8fb024c1dabc5a67bd6fa23c0d2d5a7fb29314f172d2", size = 228272, upload-time = "2026-05-20T08:37:01.135Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/ca/92239e71a92cd3a60c5c6175539defcec5ffa086bd9507817330cf7f4662/azure_mgmt_storage-25.0.0-py3-none-any.whl", hash = "sha256:7824840e8251aa6b2c27abf29cbd0ab86fc6685aa69e44f61c2f53168e71ff2d", size = 215194, upload-time = "2026-05-20T08:37:02.555Z" },
+]
+
+[[package]]
 name = "azure-storage-blob"
 version = "12.28.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2079,6 +2093,8 @@ dependencies = [
     { name = "azure-mgmt-compute" },
     { name = "azure-mgmt-network" },
     { name = "azure-mgmt-resource" },
+    { name = "azure-mgmt-storage" },
+    { name = "azure-storage-blob" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-vps-docker" },
 ]
@@ -2091,6 +2107,8 @@ requires-dist = [
     { name = "azure-mgmt-compute", specifier = ">=37" },
     { name = "azure-mgmt-network", specifier = ">=30" },
     { name = "azure-mgmt-resource", specifier = ">=25" },
+    { name = "azure-mgmt-storage", specifier = ">=21" },
+    { name = "azure-storage-blob", specifier = ">=12.28" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
 ]

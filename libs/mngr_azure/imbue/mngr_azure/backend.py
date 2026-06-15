@@ -7,12 +7,14 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Literal
 
 import click
 from azure.core.exceptions import AzureError
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
@@ -44,6 +46,8 @@ from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.client import HOST_NAME_TAG_KEY
 from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
@@ -211,6 +215,49 @@ class AzureProvider(VpsDockerProvider):
 
     azure_client: AzureVpsClient = Field(frozen=True, description="Azure VM API client")
     azure_config: AzureProviderConfig = Field(frozen=True, description="Azure-specific configuration")
+
+    # Lazily-resolved Blob state bucket. ``False`` means "not yet resolved"; once
+    # resolved it holds either a ``BlobStateBucket`` or ``None`` (no
+    # account/container yet -- the legacy tag-mirror fallback).
+    _state_bucket_cache: BlobStateBucket | None | Literal[False] = PrivateAttr(default=False)
+
+    def _state_bucket(self) -> BlobStateBucket | None:
+        """Return the Blob state bucket when account + container actually exist, else None (cached).
+
+        When present, the bucket is the source of truth for agent records and the
+        offline host record (replacing the legacy VM tag mirror); when None (the
+        storage account / container do not yet exist because ``mngr azure prepare``
+        was never run, or the subscription can't be resolved), mngr falls back to
+        the per-agent tag mirror. The existence probe is cached so it runs at most
+        once per provider lifetime. Mirrors ``AwsProvider._state_bucket``.
+        """
+        if self._state_bucket_cache is False:
+            self._state_bucket_cache = self._resolve_existing_state_bucket()
+        return self._state_bucket_cache
+
+    def _resolve_existing_state_bucket(self) -> BlobStateBucket | None:
+        """Build the configured/derived bucket and return it only if it exists."""
+        try:
+            subscription_id = self.azure_config.get_subscription_id()
+        except ValueError as e:
+            logger.debug("Could not resolve subscription for the Blob state bucket; using the VM tag mirror: {}", e)
+            return None
+        bucket = self.azure_config.build_state_bucket(subscription_id)
+        try:
+            if not (bucket.account_exists() and bucket.container_exists()):
+                logger.debug(
+                    "Azure state account/container {}/{} does not exist; using the legacy VM tag mirror "
+                    "(run `mngr azure prepare` to create it)",
+                    bucket.account_name,
+                    bucket.container_name,
+                )
+                return None
+        except BlobStateBucketError as e:
+            logger.warning(
+                "Could not check Azure state bucket {}; falling back to VM tags: {}", bucket.account_name, e
+            )
+            return None
+        return bucket
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List Azure VMs tagged with this provider's name."""
@@ -558,41 +605,108 @@ class AzureProvider(VpsDockerProvider):
         )
 
     # =========================================================================
-    # Offline metadata via VM tags (so DEALLOCATED hosts list + resolve by name)
+    # Offline metadata (so DEALLOCATED hosts list + resolve by name): the Blob
+    # state bucket when configured, else the legacy VM tag mirror.
     # =========================================================================
 
+    def _persist_host_record_externally(self, record: VpsDockerHostRecord) -> None:
+        """Mirror the full host record into the Blob state bucket when one exists.
+
+        Best-effort: a bucket-write failure is logged at WARNING and swallowed so
+        it never breaks create / stop / rename. No-op when no bucket exists (the
+        legacy tag mirror covers offline listing instead). Mirrors
+        ``AwsProvider._persist_host_record_externally``.
+        """
+        bucket = self._state_bucket()
+        if bucket is None:
+            return
+        host_id = HostId(record.certified_host_data.host_id)
+        try:
+            bucket.write_host_record(host_id, record.model_dump_json(indent=2))
+        except BlobStateBucketError as e:
+            logger.warning("Failed to mirror host record for {} to Azure state bucket: {}", host_id, e)
+
+    def _delete_host_record_externally(self, host_id: HostId) -> None:
+        """Delete the host's state from the Blob bucket when one exists.
+
+        Best-effort: a failure is logged at WARNING and swallowed so it never
+        breaks destroy / delete. No-op when no bucket exists.
+        """
+        bucket = self._state_bucket()
+        if bucket is None:
+            return
+        try:
+            bucket.delete_host_state(host_id)
+        except BlobStateBucketError as e:
+            logger.warning("Failed to delete host state for {} from Azure state bucket: {}", host_id, e)
+
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
-        """Persist an agent's record on the host volume *and* mirror it into VM tags.
+        """Persist an agent's record on the host volume *and* in the external store.
 
         Mirrors ``AwsProvider.persist_agent_data``: the base writes the
         authoritative on-volume record (read by SSH-based discovery for *running*
         hosts -- best-effort, raises ``HostNotFoundError`` when deallocated), and
-        this override mirrors a compact record into VM tags so a *deallocated* VM
-        still surfaces its agents and resolves for ``mngr start``.
+        this override mirrors the record externally so a *deallocated* VM still
+        surfaces its agents and resolves for ``mngr start``. When a Blob state
+        bucket exists, the full record is written there (no size limit); otherwise
+        it falls back to the legacy per-field VM tag mirror (256-char cap).
         """
         try:
             super().persist_agent_data(host_id, agent_data)
         except HostNotFoundError:
-            logger.debug("Host {} unreachable; persisting agent data to Azure tags only", host_id)
+            logger.debug("Host {} unreachable; persisting agent data to the external store only", host_id)
         agent_id = agent_data.get("id")
         if agent_id is None:
-            logger.warning("Cannot mirror agent data to Azure tags without an id (name={!r})", agent_data.get("name"))
+            logger.warning("Cannot mirror agent data without an id (name={!r})", agent_data.get("name"))
             return
+        bucket = self._state_bucket()
+        if bucket is not None:
+            self._persist_agent_to_bucket(bucket, host_id, str(agent_id), agent_data)
+        else:
+            self._persist_agent_to_tags(host_id, str(agent_id), agent_data)
+
+    def _persist_agent_to_bucket(
+        self, bucket: BlobStateBucket, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]
+    ) -> None:
+        """Mirror an agent record into the Blob state bucket (full record, no tag limits)."""
+        try:
+            bucket.write_agent_record(host_id, agent_id, agent_data)
+        except BlobStateBucketError as e:
+            logger.warning("Failed to mirror agent {} for host {} to Azure state bucket: {}", agent_id, host_id, e)
+
+    def _persist_agent_to_tags(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        """Mirror an agent record into per-field VM tags (legacy, no-bucket fallback)."""
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             logger.warning("No Azure VM found for host {}; cannot persist agent tags", host_id)
             return
-        set_tags, delete_keys = self._agent_field_tags(str(agent_id), agent_data, instance)
+        set_tags, delete_keys = self._agent_field_tags(agent_id, agent_data, instance)
         self.azure_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
         if delete_keys:
             self.azure_client.remove_tags(VpsInstanceId(instance["id"]), delete_keys)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>-*`` tags."""
+        """Remove the agent's on-volume record *and* its external mirror.
+
+        Mirrors ``persist_agent_data``: the base removes the authoritative
+        on-volume record (best-effort), and this override drops the agent from the
+        external store (Blob bucket when configured, else the per-field VM tags),
+        so a destroyed agent stops appearing in both running- and stopped-host
+        discovery. Both external removals are idempotent.
+        """
         try:
             super().remove_persisted_agent_data(host_id, agent_id)
         except HostNotFoundError:
-            logger.debug("Host {} unreachable; removing agent data from Azure tags only", host_id)
+            logger.debug("Host {} unreachable; removing agent data from the external store only", host_id)
+        bucket = self._state_bucket()
+        if bucket is not None:
+            try:
+                bucket.remove_agent_record(host_id, str(agent_id))
+            except BlobStateBucketError as e:
+                logger.warning(
+                    "Failed to remove agent {} for host {} from Azure state bucket: {}", agent_id, host_id, e
+                )
+            return
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             return
@@ -600,10 +714,13 @@ class AzureProvider(VpsDockerProvider):
         self.azure_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the host's persisted agent records, on-volume when reachable else from tags."""
+        """Return the host's persisted agent records, on-volume when reachable else from the external store."""
         try:
             return super().list_persisted_agent_data_for_host(host_id)
         except HostNotFoundError:
+            bucket = self._state_bucket()
+            if bucket is not None:
+                return bucket.list_agent_records(host_id)
             instance = self._find_instance_for_host(host_id)
             if instance is None:
                 return []
@@ -630,6 +747,7 @@ class AzureProvider(VpsDockerProvider):
         """
         result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
+        bucket = self._state_bucket()
         for instance in self._list_instances_cached():
             try:
                 host_ref = self._discovered_host_from_tags(instance)
@@ -647,8 +765,12 @@ class AzureProvider(VpsDockerProvider):
             # and their in-flight transitions.
             if self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) != VpsInstanceStatus.HALTED:
                 continue
+            if bucket is not None:
+                agent_dicts = bucket.list_agent_records(host_ref.host_id)
+            else:
+                agent_dicts = self._persisted_agent_dicts_from_instance(instance)
             agent_refs: list[DiscoveredAgent] = []
-            for agent_data in self._persisted_agent_dicts_from_instance(instance):
+            for agent_data in agent_dicts:
                 ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
                 if ref is not None:
                     agent_refs.append(ref)
@@ -678,14 +800,48 @@ class AzureProvider(VpsDockerProvider):
             raise
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a deallocated VM's record from tags."""
+        """Return an offline host, reconstructing a deallocated VM's record offline.
+
+        Falls back to the base (SSH/volume-backed) path first; if that can't find
+        the host (deallocated and unreachable), reconstruct it from the external
+        store. When a Blob state bucket exists, the *full* ``VpsDockerHostRecord``
+        is read from ``host_state.json`` (no information loss); otherwise a minimal
+        ``CertifiedHostData`` is rebuilt from VM tags. Mirrors
+        ``AwsProvider.to_offline_host``.
+        """
         try:
             return super().to_offline_host(host_id)
         except HostNotFoundError:
+            bucket_record = self._host_record_from_bucket(host_id)
+            if bucket_record is not None:
+                return self._create_offline_host(bucket_record)
             instance = self._find_instance_for_host(host_id)
             if instance is None:
                 raise
             return self._offline_host_from_tags(host_id, instance)
+
+    def _host_record_from_bucket(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        """Read and parse the full host record from the Blob state bucket, or None.
+
+        Returns None when no bucket exists, no record exists, or the stored JSON is
+        malformed (logged at warning) -- so the caller falls back to the tag-based
+        reconstruction. Mirrors ``AwsProvider._host_record_from_bucket``.
+        """
+        bucket = self._state_bucket()
+        if bucket is None:
+            return None
+        try:
+            record_json = bucket.read_host_record(host_id)
+        except BlobStateBucketError as e:
+            logger.warning("Failed to read host record for {} from Azure state bucket: {}", host_id, e)
+            return None
+        if record_json is None:
+            return None
+        try:
+            return VpsDockerHostRecord.model_validate_json(record_json)
+        except ValueError as e:
+            logger.warning("Malformed host record for {} in Azure state bucket: {}", host_id, e)
+            return None
 
     def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
         """Render one agent field as a tag-value string, or ``None`` if absent/empty.
