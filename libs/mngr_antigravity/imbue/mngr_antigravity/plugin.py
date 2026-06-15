@@ -35,21 +35,31 @@ agy process; mngr-owned files rewritten idempotently each ``provision``)::
       config/hooks.json
 
 where ``settings.json`` is a copy of the user's settings (when
-``sync_home_settings``) plus the workspace trust and ``settings_overrides``;
+``sync_home_settings``) plus the workspace trust, ``settings_overrides``, and
+the mngr-owned lifecycle ``statusLine`` (applied last so it wins);
 ``cache/onboarding.json`` is the NUX seed that skips the first-run theme/ToS
 flow; ``antigravity-oauth-token`` is a symlink to the user's shared file token
 (auth) -- created even when that token doesn't exist yet, so the first agent's
 login writes *through* it to the shared path and authenticates every agent (agy
 writes the token in place; copy mode is available for full isolation); and
-``config/hooks.json`` holds the active-marker hooks (agy executes them from
-there directly -- no ``--add-dir``).
+``config/hooks.json`` holds the conversation-id capture hook (agy executes it
+from there directly -- no ``--add-dir``).
 
-Hooks: a ``PreInvocation``/``Stop`` pair maintains an ``active`` marker (see
-``build_antigravity_hooks_config``). ``BaseAgent.get_lifecycle_state`` reads it
-to report RUNNING while the agent works and WAITING when idle; agy maintains no
-such marker on its own. Because the per-agent ``$HOME`` is unconditional, agy
-executes these from ``$HOME/.gemini/config/hooks.json`` directly -- no
-``--add-dir`` symlink workaround.
+Lifecycle: agy invokes a configured ``statusLine`` command on every agent-state
+change (JSON payload on stdin), and ``statusline.sh`` is the single source of
+truth (see ``build_antigravity_statusline_settings``). It maintains an
+``active`` marker that ``BaseAgent.get_lifecycle_state`` reads to report RUNNING
+while the agent works and WAITING when idle (agy maintains no such marker on its
+own), records the root conversation for resume, and fires the tmux
+message-submission signal. agy's top-level ``agent_state`` already aggregates
+subagent activity (stays ``working`` while a subagent runs), so this single
+state check captures the whole-turn busy/idle invariant on its own.
+
+Hooks: a single ``PreInvocation`` handler captures every conversation id (incl.
+subagents', which ``statusLine`` does not surface) for transcript scoping (see
+``build_antigravity_hooks_config``). Because the per-agent ``$HOME`` is
+unconditional, agy executes it from ``$HOME/.gemini/config/hooks.json`` directly
+-- no ``--add-dir`` symlink workaround.
 
 Permissions: routed through the per-agent ``settings.json`` (a ``permissions``
 block in ``settings_overrides``) and/or ``--dangerously-skip-permissions``
@@ -58,12 +68,12 @@ block in ``settings_overrides``) and/or ``--dangerously-skip-permissions``
 dialog (verified live against agy 1.0.3 -- the hook runs but the dialog still
 appears).
 
-Readiness is signalled by the ``InteractiveTuiAgent`` banner-poll: agy's hook
-events (``PreToolUse``/``PostToolUse``/``PreInvocation``/``PostInvocation``/
-``Stop``) are execution-loop events with no "input prompt drawn" analog. A
-permission dialog can't be detected via hooks either -- none fires while the
-agent is blocked at it, and the hook input carries no dialog state -- so the
-agent exposes no permission-specific WAITING reason.
+Readiness is signalled by the ``InteractiveTuiAgent`` banner-poll: it gates
+"input row drawn and able to receive a paste", which the ``statusLine``
+``agent_state`` does not (that is about the agent loop and can be ``idle`` before
+the input row renders). A permission dialog can't be detected via hooks either
+-- none fires while the agent is blocked at it -- so the agent exposes no
+permission-specific WAITING reason.
 
 Transcript support: enabled by default. ``stream_transcript.sh`` tails agy's
 per-conversation JSONL files under ``$ANTIGRAVITY_APP_DATA_DIR`` (pointed at the
@@ -96,7 +106,7 @@ from imbue.mngr.agents.common_transcript import maybe_provision_common_transcrip
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import send_enter_best_effort
+from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -111,14 +121,16 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
-from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
-from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
+from imbue.mngr_antigravity.antigravity_config import USER_STATUSLINE_COMMAND_FILENAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
+from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
+from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
@@ -138,6 +150,9 @@ _DANGEROUSLY_SKIP_PERMISSIONS_FLAG: Final[str] = "--dangerously-skip-permissions
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
+# The python3 decoder stream_transcript.sh invokes to read agy's SQLite conversation
+# store (agy >= 1.0.4); provisioned alongside the streamer into the commands/ dir.
+_TRANSCRIPT_DECODER_SCRIPT_NAME: Final[str] = "decode_agy_transcript.py"
 
 # Supervisor script provisioned into the agent's commands/ dir; owns the
 # lifecycle of the raw streamer and (when enabled) the common-transcript
@@ -193,6 +208,25 @@ _AGY_WORKSPACE_SYMLINK_PARENT: Final[str] = "/tmp/mngr_antigravity_workspaces"
 _PLAYWRIGHT_CACHE_SUBPATH_MACOS: Final[tuple[str, ...]] = ("Library", "Caches", "ms-playwright-go")
 _PLAYWRIGHT_CACHE_SUBPATH_LINUX: Final[tuple[str, ...]] = (".cache", "ms-playwright-go")
 _DARWIN_UNAME: Final[str] = "Darwin"
+
+# macOS keychain directory (under ``$HOME``). agy embeds Chromium, whose
+# ``os_crypt`` keeps its "Antigravity Safe Storage" key -- the key that encrypts
+# agy's persisted conversation store -- in the login keychain, which macOS
+# resolves at ``$HOME/Library/Keychains``. Under a relocated per-agent ``$HOME``
+# that directory is absent, so os_crypt finds no keychain and macOS raises a
+# *modal* "A keychain cannot be found to store Antigravity Safe Storage" dialog.
+# That dialog blocks agy's main thread until a human dismisses it, so an
+# unattended run (e.g. the release test, or any non-interactive create) hangs
+# and never persists a turn -- and even interactively it is the popup users hit
+# on every fresh agent. Symlinking the per-agent home's ``Library/Keychains`` to
+# the user's real one restores keychain discovery: agy finds the existing Safe
+# Storage item (it is already in that item's ACL from the user's interactive
+# logins, so no access prompt) and proceeds silently. macOS-only -- Linux has no
+# such keychain (Chromium falls back to its file-based "basic" store with no
+# prompt), exactly the claude-style "straightforward on Linux, keychain on
+# macOS" split. Mirrors ``_provision_playwright_cache`` -- another HOME-relative,
+# machine-shared resource symlinked into the per-agent home.
+_MACOS_KEYCHAINS_SUBPATH: Final[tuple[str, ...]] = ("Library", "Keychains")
 
 
 def _load_antigravity_resource_script(filename: str) -> str:
@@ -327,27 +361,40 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         return "agy"
 
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        # Antigravity has no ``UserPromptSubmit`` analog (so the tmux wait-for
-        # hook trick Claude uses doesn't apply) and its input row has no
-        # placeholder that hides while text is typed and reappears after
-        # submission, so we can't poll for a cleared indicator either.
-        # ``wait_for_paste_visible`` upstream already confirmed the message
-        # landed in the pane before we get here, so a best-effort Enter is
-        # the right strategy.
-        send_enter_best_effort(self, tmux_target)
+        # agy's ``statusLine`` command fires ``tmux wait-for -S`` on the
+        # per-session channel whenever the agent enters a busy state -- i.e. once
+        # it starts processing the just-submitted message (see statusline.sh).
+        # Wait for that, exactly as Claude waits for its UserPromptSubmit hook.
+        # Known edge: a model that *refuses* the prompt -- e.g. quota exhausted
+        # -- never enters a busy state, so this times out even though the prompt
+        # was enqueued.
+        send_enter_via_tmux_wait_for_hook(
+            self,
+            tmux_target,
+            wait_channel=f"mngr-submit-{self.session_name}",
+            timeout_seconds=self.enter_submission_timeout_seconds,
+            accept_marker_command=None,
+        )
 
     @property
     def is_common_transcript_enabled(self) -> bool:
         return self.agent_config.emit_common_transcript
 
     def get_raw_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the antigravity raw-transcript streamer.
+        """Return the antigravity raw-transcript streamer and its SQLite decoder.
 
-        Always provisioned per :class:`HasTranscriptMixin`: the raw bytes are
-        the source of truth that the common-transcript converter and any
-        future tooling read from.
+        Always provisioned per :class:`HasTranscriptMixin`: the raw records are
+        the source of truth that the common-transcript converter and any future
+        tooling read from. ``stream_transcript.sh`` is the supervisor (python3
+        guard + poll loop); ``decode_agy_transcript.py`` does the actual work of
+        reading new steps from agy's per-conversation SQLite ``.db`` and emitting
+        the JSON records (agy >= 1.0.4 replaced the JSONL transcript the streamer
+        used to tail; see the module docstrings and ``regenerating_protobuf_schema.md``).
         """
-        return {_RAW_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_RAW_TRANSCRIPT_SCRIPT_NAME)}
+        return {
+            _RAW_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_RAW_TRANSCRIPT_SCRIPT_NAME),
+            _TRANSCRIPT_DECODER_SCRIPT_NAME: _load_antigravity_resource_script(_TRANSCRIPT_DECODER_SCRIPT_NAME),
+        }
 
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
         """Return the antigravity common-transcript converter."""
@@ -435,14 +482,14 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
     def _get_root_conversation_file_path(self) -> Path:
         """Per-agent file recording the *main* (root) agy conversation ID.
 
-        Written by ``set_active_marker.sh`` (the ``PreInvocation`` marker hook)
-        with the conversation that opens each turn -- the true root, since agy
-        runs the root agent's invocation before it spawns subagents. Read on
-        restart by ``assemble_command`` to resume the main conversation via
+        Written by ``statusline.sh`` (the lifecycle ``statusLine`` command) with
+        the ``conversation_id`` from agy's payload, which always reports the root
+        (never a subagent, even while one runs). Read on restart by
+        ``assemble_command`` to resume the main conversation via
         ``agy --conversation``. This is the single source of truth for "the
         agent's current conversation", unaffected by the subagent ids that also
         land in ``CONVERSATION_IDS_FILENAME``. Lives directly under the agent
-        state dir so the hook's ``$MNGR_AGENT_STATE_DIR/{ROOT_CONVERSATION_FILENAME}``
+        state dir so the script's ``$MNGR_AGENT_STATE_DIR/{ROOT_CONVERSATION_FILENAME}``
         and this path resolve to the same file.
         """
         return self._get_agent_dir() / ROOT_CONVERSATION_FILENAME
@@ -465,8 +512,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            agent on untrusted code.
         3. Build the per-agent ``$HOME`` tree (``_provision_agy_home``):
            settings.json (copy of the user's settings + workspace trust +
-           overrides), the onboarding NUX seed, the active-marker hooks, the
-           oauth token symlink/copy, and the shared playwright-cache symlink.
+           overrides + the mngr-owned lifecycle statusLine), the onboarding NUX
+           seed, the conversation-id capture hook, the oauth token symlink/copy,
+           the shared playwright-cache symlink, and -- on macOS -- the
+           ``Library/Keychains`` symlink (restores keychain discovery under the
+           relocated ``$HOME`` so agy's os_crypt never raises a blocking dialog).
         4. Install the transcript scripts and the background-tasks supervisor
            under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
@@ -491,20 +541,16 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                 self._get_agent_dir(),
                 {
                     _BACKGROUND_TASKS_SCRIPT_NAME: _load_antigravity_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME),
-                    # Run by the PreInvocation hook to touch the active marker and
-                    # record the turn's root conversation (see
-                    # build_antigravity_hooks_config).
-                    SET_ACTIVE_MARKER_SCRIPT_NAME: _load_antigravity_resource_script(SET_ACTIVE_MARKER_SCRIPT_NAME),
-                    # Run by the PreInvocation capture hook to record the active
-                    # conversation ID (see build_antigravity_hooks_config).
+                    # Run by agy's statusLine command on every agent-state change:
+                    # maintains the active marker (RUNNING/WAITING), records the
+                    # root conversation, and fires the message-submission signal
+                    # (see build_antigravity_statusline_settings).
+                    STATUSLINE_SCRIPT_NAME: _load_antigravity_resource_script(STATUSLINE_SCRIPT_NAME),
+                    # Run by the PreInvocation capture hook to record every
+                    # conversation ID (incl. subagents') for transcript scoping
+                    # (see build_antigravity_hooks_config).
                     CAPTURE_CONVERSATION_ID_SCRIPT_NAME: _load_antigravity_resource_script(
                         CAPTURE_CONVERSATION_ID_SCRIPT_NAME
-                    ),
-                    # Run by the Stop hook to clear the active marker only when
-                    # agy reports the conversation is fully idle (see
-                    # build_antigravity_hooks_config).
-                    CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME: _load_antigravity_resource_script(
-                        CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
                     ),
                 },
                 concurrency_group,
@@ -513,14 +559,18 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
     def _provision_agy_home(self, host: OnlineHostInterface, host_home: Path, host_uname: str) -> None:
         """Write the mngr-owned per-agent ``$HOME`` tree (idempotent each provision).
 
-        Provisions the oauth token, settings.json, the onboarding NUX seed, the
-        active-marker hooks, and the shared playwright-cache symlink.
+        Provisions the oauth token, settings.json (including the mngr-owned
+        lifecycle ``statusLine``), the onboarding NUX seed, the conversation-id
+        capture hook, the shared playwright-cache symlink, and -- on macOS -- the
+        ``Library/Keychains`` symlink that restores keychain discovery under the
+        relocated ``$HOME`` (see ``_provision_macos_keychain``).
         ``host.write_text_file`` creates intermediate directories. agy-owned
         session dirs (brain/, conversations/) are left intact across re-provision.
         """
         agy_home = self._get_agy_home_dir()
         self._provision_oauth_token(host, host_home, agy_home)
         self._provision_playwright_cache(host, host_home, host_uname, agy_home)
+        self._provision_macos_keychain(host, host_home, host_uname, agy_home)
         base_settings: dict[str, Any] = {}
         if self.agent_config.sync_home_settings:
             user_settings_path = get_antigravity_settings_path(host_home)
@@ -534,6 +584,17 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             self.agent_config.settings_overrides,
             [self._get_agy_workspace_symlink_path()],
         )
+        # The agy statusLine must be mngr's: RUNNING/WAITING detection and
+        # message-submission confirmation both depend on statusline.sh running, and
+        # agy allows only one statusLine command. A user's own statusLine (in the
+        # synced base settings or settings_overrides -- both already merged into
+        # per_agent_settings here) is therefore not the agy statusLine, but it is
+        # *composed* rather than discarded: record its command so statusline.sh runs
+        # it (with the same payload) and emits only its output as the status row (mngr
+        # itself renders nothing). A statusLine we can't run as a command (an unknown
+        # shape) is dropped with a warning. Then inject mngr's statusLine LAST so it wins.
+        self._provision_user_statusline_command(host, per_agent_settings.get("statusLine"))
+        per_agent_settings.update(build_antigravity_statusline_settings())
         settings_path = get_antigravity_settings_path(agy_home)
         with log_span("Writing per-agent antigravity settings to {}", settings_path):
             host.write_text_file(settings_path, serialize_antigravity_settings(per_agent_settings))
@@ -545,13 +606,58 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         with log_span("Installing antigravity hooks at {}", hooks_path):
             host.write_text_file(hooks_path, serialize_antigravity_hooks(build_antigravity_hooks_config()))
 
+    def _provision_user_statusline_command(self, host: OnlineHostInterface, user_statusline: Any) -> None:
+        """Record a user's own statusLine command for statusline.sh to compose, or clear a stale one.
+
+        ``user_statusline`` is whatever ``statusLine`` the merged per-agent settings
+        carry (from the synced base settings or ``settings_overrides``), or ``None``.
+        When it is a runnable ``{"type": "command", "command": <str>}`` block, its
+        command is written to the per-agent ``user_statusline_command`` file;
+        ``statusline.sh`` runs it (with the same payload) and emits only its output
+        as the status row, so the user's rendering survives verbatim (mngr's own use
+        is lifecycle-only and renders nothing). A statusLine present but not runnable
+        as a command is dropped with a warning (mngr's statusLine must be the agy one
+        regardless).
+        Any stale file from a prior provision is removed so a config that no longer
+        has a user statusLine stops composing one.
+        """
+        command_file = self._get_user_statusline_command_file_path()
+        composable_command = extract_statusline_command(user_statusline)
+        if composable_command is not None:
+            host.write_text_file(command_file, composable_command)
+            return
+        if user_statusline is not None:
+            logger.warning(
+                "Antigravity agent {} has a user-provided statusLine ({!r}) that mngr cannot compose "
+                "with its lifecycle statusLine: only a {{'type': 'command', 'command': <str>}} block is "
+                "runnable. Dropping it (mngr's statusLine drives RUNNING/WAITING and message-submission "
+                "confirmation, so it must be the agy statusLine).",
+                self.name,
+                user_statusline,
+            )
+        host.execute_idempotent_command(f"rm -f {shlex.quote(str(command_file))}", timeout_seconds=5.0)
+
+    def _get_user_statusline_command_file_path(self) -> Path:
+        """Per-agent file holding the user's own statusLine command (for compose).
+
+        Written by ``_provision_user_statusline_command``; read by ``statusline.sh``
+        at ``$MNGR_AGENT_STATE_DIR/{USER_STATUSLINE_COMMAND_FILENAME}``. Lives
+        directly under the agent state dir so the script's expansion and this path
+        resolve to the same file.
+        """
+        return self._get_agent_dir() / USER_STATUSLINE_COMMAND_FILENAME
+
     def _provision_oauth_token(self, host: OnlineHostInterface, host_home: Path, agy_home: Path) -> None:
         """Point the per-agent oauth token at the shared host token (symlink), or copy it.
 
         agy is keyring-first, file-fallback (``ChainedAuth``) and writes the
         token file at login; on Linux (mngr's runtime) there is no OS keyring so
-        the file is the native store, and on macOS it falls back to the file when
-        the keyring write times out (which it does under a relocated ``$HOME``).
+        the file is the native store. On macOS the keyring is the login keychain;
+        ``_provision_macos_keychain`` symlinks it back into the relocated
+        ``$HOME`` so it stays reachable (otherwise agy hits a blocking "keychain
+        cannot be found" dialog), but this token file remains the portable seed
+        that authenticates a fresh agent and shares logins/refreshes across
+        agents regardless of platform.
 
         **Symlink mode (default).** Always create the per-agent
         ``antigravity-oauth-token`` as a symlink to the user's *shared*
@@ -611,6 +717,41 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             host_home.joinpath(*subpath),
             agy_home.joinpath(*subpath),
             ensure_source_parent=True,
+        )
+
+    def _provision_macos_keychain(
+        self, host: OnlineHostInterface, host_home: Path, host_uname: str, agy_home: Path
+    ) -> None:
+        """Symlink the per-agent home's ``Library/Keychains`` to the user's real one (macOS only).
+
+        agy embeds Chromium, whose ``os_crypt`` stores the "Antigravity Safe
+        Storage" key (which encrypts agy's persisted conversation store) in the
+        login keychain that macOS resolves at ``$HOME/Library/Keychains``. The
+        per-agent ``$HOME`` relocation that isolates agy's config also hides that
+        directory, so os_crypt finds no keychain and macOS raises a *modal* "A
+        keychain cannot be found to store Antigravity Safe Storage" dialog that
+        blocks agy until dismissed -- hanging any unattended run, and popping on
+        every fresh agent interactively. Symlinking the directory to the user's
+        real one restores discovery; agy is already in the Safe Storage item's
+        ACL (from interactive logins), so it reads the key with no access prompt.
+        Per-item ACLs still gate every other secret, so this grants agy nothing
+        it did not already have interactively.
+
+        macOS-only (gated on the host's ``uname``, so it is correct for remote
+        hosts too): on Linux there is no such keychain and Chromium falls back to
+        its file-based "basic" store without prompting, so nothing is provisioned
+        -- the claude-style "straightforward on Linux, keychain on macOS" split.
+        Unlike the oauth-token and playwright-cache symlinks, the source
+        (``~/Library/Keychains``) always exists on a real macOS user, so
+        ``ensure_source_parent`` is left off -- we never fabricate an empty
+        keychain dir in the user's real home.
+        """
+        if host_uname != _DARWIN_UNAME:
+            return
+        symlink_on_host(
+            host,
+            host_home.joinpath(*_MACOS_KEYCHAINS_SUBPATH),
+            agy_home.joinpath(*_MACOS_KEYCHAINS_SUBPATH),
         )
 
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
@@ -813,10 +954,10 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            ``HOME`` is injected only on the agy process (the unambiguous ``env``
            prefix), so the backgrounded supervisor subshell and tmux keep the
            real HOME. agy loads and executes the per-agent ``hooks.json`` (the
-           active marker + the conversation-ID capture hook; see
-           ``build_antigravity_hooks_config``) directly from
-           ``$HOME/.gemini/config/hooks.json`` under the relocated home -- no
-           ``--add-dir`` needed. The ``--dangerously-skip-permissions`` flag is
+           conversation-ID capture hook; see ``build_antigravity_hooks_config``)
+           directly from ``$HOME/.gemini/config/hooks.json`` under the relocated
+           home -- no ``--add-dir`` needed, and the lifecycle ``statusLine`` runs
+           from the per-agent ``settings.json``. The ``--dangerously-skip-permissions`` flag is
            appended only when ``auto_allow_permissions`` is set; the model and
            any permissions policy flow through the per-agent ``settings.json``,
            not the CLI.
@@ -888,3 +1029,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the antigravity agent type."""
     return ("antigravity", AntigravityAgent, AntigravityAgentConfig)
+
+
+@hookimpl
+def register_agent_aliases() -> dict[str, str]:
+    """Register ``agy`` as a short alias for the ``antigravity`` agent type."""
+    return {"agy": "antigravity"}

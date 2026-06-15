@@ -48,14 +48,7 @@ class LocalProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Build a local provider instance.
-
-        ``is_for_host_creation`` is ignored: the local backend has no one-time
-        backend resources to bootstrap.
-        """
-        del is_for_host_creation
         if not isinstance(config, LocalProviderConfig):
             raise ConfigStructureError(f"Expected LocalProviderConfig, got {type(config).__name__}")
         # Get host_dir from typed config, falling back to default

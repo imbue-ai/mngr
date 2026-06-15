@@ -6,6 +6,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.13] - 2026-06-13
+
+### Changed
+
+- Changed: Offline hosts produced by this provider are now readable via the new `HostFileReadInterface` — the offline-host construction path (used by both `get_host` and `to_offline_host`) returns an `OfflineHostWithVolume` via the shared `make_readable_offline_host` helper, with lazy volume resolution (no per-host probe). The new `get_volume_reference_for_host` is wrapped so missing/expired Modal credentials surface as the user-friendly `ModalAuthError` (consistent with the other provider methods), including during offline-host construction.
+- Changed: AWS-provider shared-layer refactor — Modal now overrides a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on `ProviderBackendInterface`, where the per-user environment registration moves. `mngr create` invokes this hook before `build_provider_instance`. No behavior change for Modal.
+
+### Removed
+
+- Removed: Modal async-permission-propagation workaround. The `ModalProxyPermissionDeniedError` retries in `_lookup_persistent_app_with_retry` and `_enter_ephemeral_app_context_with_retry` are gone (both decorators once again retry only on `ModalProxyNotFoundError`), and the `_invoke_modal_sdk_delete_with_retry` test-cleanup helper is removed (`_classify_modal_sdk_delete` now invokes the SDK delete callable directly again). Modal has fixed the underlying bug on their side, so read-after-write is immediate and the workaround is no longer needed.
+
 ## [v0.2.12] - 2026-06-08
 
 ### Fixed

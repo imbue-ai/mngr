@@ -1,7 +1,7 @@
 """Per-provider region selection for the create form.
 
 The create form always shows an explicit region for the providers that support
-one (``imbue_cloud`` and ``vultr``). The default shown is, in order of
+one (``imbue_cloud``, ``vultr``, and ``aws``). The default shown is, in order of
 preference:
 
 1. the last-used region for that provider (persisted in ``~/.minds/config.toml``
@@ -30,13 +30,18 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.minds.primitives import DEFAULT_AWS_REGION
 
 # Canonical provider keys used to key region config + tables. They match the
 # ``[providers.<name>]`` section names in ``~/.minds/config.toml`` and the
 # provider instance names mngr uses (``imbue_cloud`` leases an OVH-US host;
-# ``vultr`` is the cloud-VM provider).
+# ``vultr`` is the cloud-VM provider). ``aws`` is the create-form-level key for
+# the AWS provider: minds collapses the per-region ``aws-<region>`` mngr
+# provider instances behind this single key (the chosen region is selected
+# explicitly in the form, not encoded in the key).
 IMBUE_CLOUD_PROVIDER_KEY: Final[str] = "imbue_cloud"
 VULTR_PROVIDER_KEY: Final[str] = "vultr"
+AWS_PROVIDER_KEY: Final[str] = "aws"
 
 # Approximate (latitude, longitude) of each provider's regions, used for the
 # coarse nearest-region geolocation default. The imbue_cloud pool lands hosts in
@@ -89,9 +94,28 @@ _VULTR_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {
     "mel": (-37.81, 144.96),
 }
 
+# AWS region codes mapped to the approximate (latitude, longitude) of each
+# region's datacenter, used only to pick a sensible default nearest the user
+# (the user can override). The keys MUST stay in sync with
+# ``CONFIGURED_AWS_REGIONS`` in ``imbue.minds.primitives`` (the single source of
+# truth for which AWS regions minds offers); a region missing here just won't be
+# considered for the geo-nearest default. Cities, in declaration order: N.
+# Virginia, Ohio, N. California, Oregon, Ireland, Frankfurt, Singapore, Tokyo.
+_AWS_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {
+    "us-east-1": (38.95, -77.45),
+    "us-east-2": (40.42, -82.91),
+    "us-west-1": (37.35, -121.96),
+    "us-west-2": (45.87, -119.69),
+    "eu-west-1": (53.41, -8.24),
+    "eu-central-1": (50.11, 8.68),
+    "ap-southeast-1": (1.35, 103.82),
+    "ap-northeast-1": (35.68, 139.69),
+}
+
 _REGION_COORDINATES_BY_PROVIDER: Final[dict[str, dict[str, tuple[float, float]]]] = {
     IMBUE_CLOUD_PROVIDER_KEY: _IMBUE_CLOUD_REGION_COORDINATES,
     VULTR_PROVIDER_KEY: _VULTR_REGION_COORDINATES,
+    AWS_PROVIDER_KEY: _AWS_REGION_COORDINATES,
 }
 
 # Fallback region per provider when there is no stored value and geolocation has
@@ -99,6 +123,7 @@ _REGION_COORDINATES_BY_PROVIDER: Final[dict[str, dict[str, tuple[float, float]]]
 _DEFAULT_REGION_BY_PROVIDER: Final[dict[str, str]] = {
     IMBUE_CLOUD_PROVIDER_KEY: "US-EAST-VA",
     VULTR_PROVIDER_KEY: "ewr",
+    AWS_PROVIDER_KEY: DEFAULT_AWS_REGION,
 }
 
 _EARTH_RADIUS_KM: Final[float] = 6371.0

@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+Added the `agy` alias for the `antigravity` agent type. `mngr create my-agent agy` is now equivalent to `mngr create my-agent antigravity`.
+
+Made `mngr message` to an antigravity (`agy`) agent robust by switching from a blind best-effort Enter to a confirmed submission, and replaced the fragile lifecycle marker hooks with agy's `statusLine` mechanism.
+
+A single mngr-owned `statusline.sh`, seeded into the per-agent `settings.json` as agy's `statusLine` command (applied last, so it always wins), is now the source of truth for agent lifecycle. agy invokes it on every agent-state change: it maintains the `active` marker that drives RUNNING vs WAITING (busy iff `agent_state` is not idle/initializing/authenticating), records the root conversation for resume, and fires the tmux signal that confirms a message was accepted. Because agy's top-level `agent_state` already aggregates subagent activity, this single check replaces the old `PreInvocation`/`Stop` marker-hook pair (`set_active_marker.sh` / `clear_active_marker_when_idle.sh`), which are removed.
+
+`mngr message` now returns only after the agent has actually started processing the submission (not after a blind Enter), and the agent correctly reports RUNNING for the whole turn including while subagents run. The conversation-id capture hook is retained (it is the only place subagent ids surface, for transcript scoping). Readiness is still gated by the TUI banner poll, which is the correct precondition for sending input.
+
+mngr's `statusLine` is lifecycle-only and prints nothing of its own (agy already shows working/idle), so the status row looks exactly as it would without mngr. agy allows only one `statusLine` command, so mngr's must be it; a user's own `statusLine` (in `settings_overrides` or the synced global settings) is preserved by **composing** it -- `statusline.sh` runs the user's command with the same payload and emits only its output, so the user's statusline renders verbatim. A `statusLine` that isn't a runnable command block is dropped with a warning.
+
+## 2026-06-11
+
+Strengthened the two-space-indent assertions in `antigravity_config_test.py`. The
+previous `assert "  " in serialized` checks could not distinguish two-space from
+four-space (or wider) indentation, so they did not actually verify the format the
+serializers promise. They now assert that a top-level key line begins with exactly
+two spaces.
+
 ## 2026-06-08
 
 Fixed the antigravity onboarding seed so it also skips agy's first-run NUX for users authenticated through an enterprise account. The seed now marks `enterpriseOnboardingComplete` as `True` (previously `False`), which was leaving enterprise-authenticated users stuck in the enterprise onboarding flow on their first message.

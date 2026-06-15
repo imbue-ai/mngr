@@ -69,3 +69,15 @@ class ImbueCloudBucketNotFoundError(ImbueCloudBucketError):
 
 class ImbueCloudBucketLimitError(ImbueCloudBucketError):
     """Raised when the account is already at the per-account bucket cap."""
+
+
+class InvalidBuildArgError(ImbueCloudError, ValueError):
+    """Raised when a recognized imbue_cloud build arg has a malformed value."""
+
+
+class FixedAgentIdError(ImbueCloudError, ValueError):
+    """Raised when a caller requests an agent id that conflicts with the lease's pre-baked id."""
+
+
+class ClaudeConfigPatchError(ImbueCloudError, RuntimeError):
+    """Raised when patching the claude config on a leased imbue_cloud host fails."""

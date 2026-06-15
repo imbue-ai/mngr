@@ -11,7 +11,7 @@
 #
 # This file is the transcript-scoping *set* only; it does NOT pick the agent's
 # main conversation for resume (its lines include subagents). Resume reads
-# root_conversation, written by set_active_marker.sh. See
+# root_conversation, written by statusline.sh. See
 # AntigravityAgent.assemble_command and CONVERSATION_IDS_FILENAME.
 #
 # The file name is kept in sync with CONVERSATION_IDS_FILENAME in
@@ -26,6 +26,8 @@
 # wiring bug, not a tolerable runtime case. Fail loudly (to stderr, never
 # stdout -- agy treats PreInvocation stdout as injected steps) rather than
 # silently writing the ids file to the filesystem root.
+set -euo pipefail
+
 if [ -z "${MNGR_AGENT_STATE_DIR:-}" ]; then
     echo "capture_conversation_id.sh: MNGR_AGENT_STATE_DIR is not set" >&2
     exit 1
@@ -37,11 +39,15 @@ payload=$(cat)
 
 # Extract the first `"conversationId":"<uuid>"` value. POSIX grep/sed only --
 # no jq dependency (jq may be absent on remote hosts).
+# `|| true` keeps a payload with no conversationId match (grep exits 1)
+# from tripping `set -e` via `pipefail` -- a missing id is a normal case
+# handled by the empty-id branch below, not an error.
 conv_id=$(
     printf '%s' "$payload" \
         | grep -oE '"conversationId":"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"' \
         | head -n 1 \
-        | sed -E 's/.*:"([0-9a-f-]+)".*/\1/'
+        | sed -E 's/.*:"([0-9a-f-]+)".*/\1/' \
+        || true
 )
 
 # No id in the payload -> nothing to record (never clobber the file).
@@ -52,7 +58,7 @@ fi
 # Append each distinct id once. Order/recency does not matter: the only
 # consumer is stream_transcript.sh, which reads the unique set (`sort -u`). The
 # agent's main conversation for resume is tracked separately in
-# root_conversation by set_active_marker.sh. `grep -qxF` is a whole-line fixed
+# root_conversation by statusline.sh. `grep -qxF` is a whole-line fixed
 # match; on a missing file it returns non-zero, so the first id is appended.
 if ! grep -qxF "$conv_id" "$ids_file" 2>/dev/null; then
     printf '%s\n' "$conv_id" >> "$ids_file"
