@@ -16,8 +16,8 @@ from imbue.mngr_vps_docker.errors import VpsProvisioningError
 # trailing distro suffix is repo-specific. ``_PINNED_DOCKER_APT_VERSION_CORE`` is
 # the distro-independent prefix; ``_DOCKER_INSTALL_SCRIPT`` derives the suffix
 # from ``/etc/os-release`` at run time so the same step works on every Debian-
-# family outer (Debian 12 "bookworm" for Vultr/OVH/AWS; Ubuntu 22.04 "jammy" for
-# GCP, whose images ship cloud-init where the stock GCE Debian images do not).
+# family outer (Debian 12 "bookworm" across all providers; the os-release
+# derivation also covers Ubuntu LTS images for anyone overriding the GCP image).
 # Confirm a new core against the live repo with ``apt-cache madison docker-ce``.
 # ``PINNED_DOCKER_APT_VERSION`` is the fully-rendered Debian 12 apt version
 # string, exported for any caller or test that needs the exact Debian value
@@ -38,6 +38,13 @@ PINNED_GVISOR_RELEASE: Final[str] = "20260601"
 # of minutes on a fresh VPS; the gVisor download adds more, so keep this well
 # above the expected worst case to avoid failing an otherwise-fine provision.
 _HOST_SETUP_COMMAND_TIMEOUT_SECONDS: Final[float] = 600.0
+
+# First-boot completion marker. The bootstrap (cloud-init runcmd or the GCE
+# startup-script) ``touch``es this once Docker and the rest of host setup are in
+# place; ``instance._wait_for_cloud_init_marker`` polls for it before proceeding.
+# Single source of truth shared by every writer and the poller so the path can
+# never drift between them.
+MNGR_READY_MARKER_PATH: Final[str] = "/var/run/mngr-ready"
 
 
 class HostSetupStep(FrozenModel):

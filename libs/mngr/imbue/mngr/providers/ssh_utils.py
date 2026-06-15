@@ -248,6 +248,60 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
     raise MngrError(f"SSH server not ready after {timeout_seconds}s at {hostname}:{port}")
 
 
+def parse_openssh_public_key_blob(public_key: str) -> tuple[str, str]:
+    """Split an OpenSSH public key line into its (key_type, base64_blob).
+
+    ``"ssh-ed25519 AAAA... comment"`` -> ``("ssh-ed25519", "AAAA...")``. The
+    optional trailing comment is ignored.
+    """
+    parts = public_key.split()
+    if len(parts) < 2:
+        raise MngrError(f"Malformed OpenSSH public key (expected '<type> <base64> [comment]'): {public_key!r}")
+    return parts[0], parts[1]
+
+
+def wait_for_expected_host_key(
+    hostname: str,
+    port: int,
+    expected_host_public_key: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 2.0,
+) -> None:
+    """Poll until the server presents exactly ``expected_host_public_key``, then return.
+
+    For backends that install the host key after sshd starts (a GCE
+    ``startup-script``, unlike cloud-init which sets it pre-sshd), the server briefly
+    serves a boot-generated key first. Waiting here, before the strict-checked
+    provisioning connection, avoids a mismatch abort. Not TOFU: only the exact
+    expected key is accepted. Raises ``MngrError`` on timeout.
+    """
+    expected_type, expected_blob = parse_openssh_public_key_blob(expected_host_public_key)
+    start_time = time.time()
+    while time.time() - start_time < timeout_seconds:
+        transport = None
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(min(5.0, max(1.0, timeout_seconds - (time.time() - start_time))))
+            sock.connect((hostname, port))
+            transport = paramiko.Transport(sock)
+            transport.connect()
+            remote_key = transport.get_remote_server_key()
+            if remote_key.get_name() == expected_type and remote_key.get_base64() == expected_blob:
+                return
+        except (socket.error, socket.timeout, paramiko.SSHException, EOFError, OSError):
+            pass
+        finally:
+            if transport is not None:
+                try:
+                    transport.close()
+                except (OSError, paramiko.SSHException):
+                    pass
+            else:
+                sock.close()
+        time.sleep(poll_interval_seconds)
+    raise MngrError(f"Server at {hostname}:{port} did not present the expected SSH host key within {timeout_seconds}s")
+
+
 def create_pyinfra_host(
     hostname: str,
     port: int,

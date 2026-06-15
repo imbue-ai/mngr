@@ -1,11 +1,18 @@
-## host-setup: OS-aware Docker install (Debian + Ubuntu)
+## host-setup: OS-aware Docker install
 
-- The pinned Docker install step now derives the apt repo (`download.docker.com/linux/$ID`) and the full apt version suffix (`~$ID.$VERSION_ID~$VERSION_CODENAME`) from `/etc/os-release` at run time, instead of hardcoding the Debian 12 / bookworm strings. The script *text* changed (the os-release source moved up, a `DOCKER_APT_VERSION` shell var was added, the repo URL is now `linux/$ID`), but on Debian 12 it renders the identical apt version (`5:29.5.1-1~debian.12~bookworm`) and repo URL (`linux/debian`) as before, so the existing Debian-family outers (Vultr / OVH / AWS) are behaviorally unchanged; the change lets the same step work on GCP's Ubuntu LTS images. `PINNED_DOCKER_APT_VERSION` is retained as the fully-rendered Debian 12 apt version string for any caller or test that needs the exact Debian value rather than the runtime-derived suffix.
+- The pinned Docker install step derives the apt repo (`download.docker.com/linux/$ID`) and the full apt version suffix (`~$ID.$VERSION_ID~$VERSION_CODENAME`) from `/etc/os-release` at run time rather than hardcoding the Debian 12 / bookworm strings, so it is distro-aware across the Debian family. On the Debian 12 default it renders the same apt version (`5:29.5.1-1~debian.12~bookworm`) and repo URL (`linux/debian`) every backend already used; the derivation additionally covers a non-default `--gcp-image` (e.g. an Ubuntu LTS image) without a code change. `PINNED_DOCKER_APT_VERSION` is exported as the fully-rendered Debian 12 apt version string for any caller or test that needs the exact value rather than the runtime-derived suffix.
 
-## cloud-init: optional direct root-key injection
+## bootstrap: direct root-key injection
 
-- `generate_cloud_init_user_data` gains an optional `authorized_user_public_key` parameter. When set, the key is written straight into root's `authorized_keys` by cloud-init, independent of the existing copy-from-default-user (`admin` / `ec2-user` / `ubuntu` / `debian` / ...) step.
-- `VpsDockerProvider._provision_vps` now always passes the VPS SSH public key through this parameter. This removes any reliance on a cloud image's default-user key landing in root. It is the deciding fix for GCE, where the google guest agent provisions the `ssh-keys` metadata into the `ubuntu` user asynchronously and races the cloud-init `runcmd` copy, intermittently leaving root without the key. Additive and idempotent for the AWS / Vultr / OVH backends (the key also lands in root via the default-user copy, so the extra line is a no-op duplicate).
+- The first-boot bootstrap (cloud-init `user-data` and the GCE `startup-script`) writes the provider SSH public key straight into root's `authorized_keys`, independent of the copy-from-default-user (`admin` / `ec2-user` / `ubuntu` / `debian` / ...) step, via an `authorized_user_public_key` parameter that `_provision_vps` always passes. This removes any reliance on a cloud image's default-user key landing in root. It is the deciding fix for GCE, where the google guest agent provisions the `ssh-keys` metadata into the `ubuntu` user asynchronously and races the default-user copy, intermittently leaving root without the key. Additive and idempotent for the AWS / Vultr / OVH backends (the key also lands in root via the default-user copy, so the extra line is a no-op duplicate).
+
+## startup-script bootstrap path (for GCP / Debian)
+
+- New `startup_script.generate_gce_startup_script`: the cloud-init analog for backends whose images run the google-guest-agent instead of cloud-init (GCP). It renders the same shared `host_setup.build_host_setup_steps` plus the first-boot pieces (host-key install, sshd hardening, root-key forwarding, the `mngr-ready` marker) as one bash script, with each host-setup step wrapped in a subshell so a step's early `exit` (e.g. the gVisor `exit 0`) can't skip the marker.
+
+- `VpsDockerProvider` gains two override hooks: `_generate_bootstrap_payload` (default cloud-init `user-data`; GCP overrides it to a GCE `startup-script`) and `_wait_for_expected_host_key` (default no-op; GCP overrides it to wait for its post-boot-installed host key before strict-checking). Provisioning is otherwise backend-agnostic -- both payloads render the same host-setup steps and write the same marker.
+
+- The `mngr-ready` first-boot completion marker path is now the single `host_setup.MNGR_READY_MARKER_PATH` constant, shared by both bootstrap renderers and the poller.
 
 ## create_host: pre-create validation runs before any provider write
 

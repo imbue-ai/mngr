@@ -2,6 +2,7 @@ import math
 import shlex
 
 from imbue.mngr_vps_docker.host_setup import HostSetupStep
+from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_setup import build_host_setup_steps
 
 
@@ -108,7 +109,7 @@ runcmd:
 {root_key_block}  - for u in admin ec2-user ubuntu debian fedora centos; do if [ -f "/home/$u/.ssh/authorized_keys" ]; then cat "/home/$u/.ssh/authorized_keys" >> /root/.ssh/authorized_keys; fi; done
   - touch /root/.ssh/authorized_keys && chmod 0600 /root/.ssh/authorized_keys
 {runcmd_block}
-  - touch /var/run/mngr-ready
+  - touch {MNGR_READY_MARKER_PATH}
 {shutdown_block}"""
 
 

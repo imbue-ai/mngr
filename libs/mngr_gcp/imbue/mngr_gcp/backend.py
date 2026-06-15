@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
@@ -33,6 +34,7 @@ from imbue.mngr_vps_docker.instance import extract_single_value_arg
 from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
 from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.startup_script import generate_gce_startup_script
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
@@ -232,6 +234,41 @@ class GcpProvider(VpsDockerProvider):
             tags=tags,
             spot=spot,
             image=image,
+        )
+
+    def _generate_bootstrap_payload(
+        self,
+        *,
+        host_private_key: str,
+        host_public_key: str,
+        authorized_user_public_key: str,
+    ) -> str:
+        """GCP override: render a GCE ``startup-script`` instead of cloud-init ``user-data``.
+
+        Stock GCE images (Debian especially) ship no cloud-init; the
+        google-guest-agent runs ``startup-script`` on every image instead.
+        ``GcpVpsClient.create_instance`` stores it under that metadata key.
+        """
+        return generate_gce_startup_script(
+            host_private_key=host_private_key,
+            host_public_key=host_public_key,
+            install_gvisor_runtime=self.config.install_gvisor_runtime,
+            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
+            authorized_user_public_key=authorized_user_public_key,
+        )
+
+    def _wait_for_expected_host_key(self, vps_ip: str, expected_host_public_key: str, timeout_seconds: float) -> None:
+        """GCP override: wait until the VM serves our host key before strict-checking.
+
+        The startup-script installs the host key after sshd has already booted with
+        a random key, so poll the live key until it matches and the mismatch window
+        is closed.
+        """
+        wait_for_expected_host_key(
+            hostname=vps_ip,
+            port=22,
+            expected_host_public_key=expected_host_public_key,
+            timeout_seconds=timeout_seconds,
         )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
