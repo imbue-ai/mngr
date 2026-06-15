@@ -1,5 +1,6 @@
 """Unit tests for the kanpan CLI command."""
 
+import json
 from typing import Any
 
 import pluggy
@@ -86,3 +87,35 @@ def test_kanpan_command_fails_fast_on_invalid_cel(
     assert result.exit_code != 0
     assert len(patched_run_kanpan) == 0
     assert "Invalid include filter expression 'invalid('" in result.output
+
+
+def test_kanpan_json_format_skips_tui_and_emits_json(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    patched_run_kanpan: list[dict[str, Any]],
+) -> None:
+    """`--format json` prints a single board snapshot and never launches the TUI.
+
+    The isolated test environment has no agents, so the board is empty -- but the
+    output must still be a well-formed JSON object with the expected top-level keys.
+    """
+    result = cli_runner.invoke(kanpan, ["--format", "json"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert patched_run_kanpan == []
+    payload = json.loads(result.stdout)
+    assert set(payload.keys()) == {"columns", "sections", "errors", "fetch_time_seconds"}
+    # Builtin columns are always present and ordered first.
+    assert payload["columns"][:2] == [{"key": "name", "header": "NAME"}, {"key": "state", "header": "STATE"}]
+    assert payload["sections"] == []
+
+
+def test_kanpan_jsonl_format_skips_tui(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    patched_run_kanpan: list[dict[str, Any]],
+) -> None:
+    """`--format jsonl` also skips the TUI; an empty board yields no output lines."""
+    result = cli_runner.invoke(kanpan, ["--format", "jsonl"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert patched_run_kanpan == []
+    assert result.stdout.strip() == ""

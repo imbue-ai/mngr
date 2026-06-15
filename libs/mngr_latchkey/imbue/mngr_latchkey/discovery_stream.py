@@ -49,6 +49,12 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_latchkey.core import LatchkeyError
+
+
+class DiscoveryStreamError(LatchkeyError, RuntimeError):
+    """Raised when the discovery stream consumer is used incorrectly."""
+
 
 # Bare-name default for the ``mngr`` CLI; callers can pass an absolute
 # path via the ``mngr_binary`` field for environments where ``mngr`` is
@@ -120,7 +126,7 @@ class DiscoveryStreamConsumer(MutableModel):
     def start(self) -> None:
         """Spawn the ``mngr observe`` subprocess and begin dispatching events."""
         if self._process is not None:
-            raise RuntimeError("DiscoveryStreamConsumer.start already called")
+            raise DiscoveryStreamError("DiscoveryStreamConsumer.start already called")
         self._process = self.concurrency_group.run_process_in_background(
             command=self._observe_command(),
             on_output=self._on_observe_output,

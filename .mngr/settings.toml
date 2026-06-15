@@ -27,7 +27,24 @@ provider = "modal"
 build_arg = ["file=libs/mngr/imbue/mngr/resources/Dockerfile", "context-dir=.mngr/dev/build/", "volume=code-review-json:/code_reviews"]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
-pass_env = ["GH_TOKEN"]
+pass_env__extend = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
+target_path = "/code/mngr"
+
+# Run an agent on this repo on an AWS EC2 host. Differs from modal because the VPS backend
+# resolves `--file=` inside the uploaded context, so modal's `.mngr/dev/build/` keyframe
+# tarball can't be used: the context is `.`, which the mngr_vps_docker build flow clones +
+# overlays with uncommitted changes and the Dockerfile's `COPY . /code/mngr/` consumes. The
+# image builds on depot's remote builders (builder=DEPOT on [providers.aws] below).
+#
+# Requires DEPOT_TOKEN (forwarded to the remote depot build) and GH_TOKEN (git/gh in the
+# container) exported at `mngr create -t aws` time.
+[create_templates.aws]
+provider = "aws"
+build_arg = ["--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+agent_args = ["--dangerously-skip-permissions"]
+pass_env__extend = ["GH_TOKEN"]
 pass_host_env = ["EDITOR"]
 target_path = "/code/mngr"
 
@@ -45,8 +62,25 @@ default_memory = 8
 default_idle_timeout = 600
 default_sandbox_timeout = 7200
 
+# Shared AWS config consumed by the `aws` create-template above.
+[providers.aws]
+backend = "aws"
+# us-west-2 (Oregon): has a pinned default Debian 12 AMI; no region is set in ~/.aws.
+default_region = "us-west-2"
+# 2 vCPU / 8 GB. The image build runs on depot's remote builders (builder below), so the
+# instance only needs to comfortably run the agent.
+default_instance_type = "t3.large"
+# Wall-clock safety net: cloud-init halts + terminates the instance after 2h, mirroring
+# the modal sandbox cap above. Guards against a forgotten host accruing EC2 cost.
+auto_shutdown_seconds = 7200
+# Build on depot's cached remote builders. Requires DEPOT_TOKEN at create time; depot.json
+# in the repo supplies the project id.
+builder = "DEPOT"
+
 [plugins.forward]
 enabled = true
 
+# This plugin is now disabled by default (it is opt-in; see its README), so
+# this is redundant -- kept explicit to document that we want it off here.
 [plugins.claude_subagent_proxy]
 enabled = false

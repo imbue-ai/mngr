@@ -7,6 +7,8 @@
   static/tokens.css and fails if either side drifts.
 #}
 {% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/dev_styleguide.js" defer></script>
 {% endset %}
 <Base title="Minds Styleguide" scripts={{ _scripts }}>
@@ -167,21 +169,43 @@
     <section class="mb-12">
       <h2 class="text-lg font-semibold text-zinc-900 mb-1">Workspace accent</h2>
       <p class="text-xs text-zinc-500 mb-4">
-        Per-workspace identity color. Drag the hue slider; everything below
-        that uses <code>--workspace-accent</code> updates live.
+        Per-workspace identity color: a user-picked <code>#rrggbb</code> hex
+        (12-swatch palette + custom hex in workspace settings, stored as an
+        mngr <code>color</code> label). Pick a color; everything below that
+        uses <code>--workspace-accent</code> updates live.
       </p>
       <div class="bg-white border border-zinc-200 rounded-lg p-4 shadow-sm">
         <div class="flex items-center gap-4">
           <div class="accent-swatch w-12 h-12 rounded-md border border-zinc-200 shrink-0"></div>
           <div class="flex-1">
-            <label for="styleguide-accent-hue" class="block text-xs text-zinc-500 mb-1">
-              hue (0-360)
+            <label for="styleguide-accent-color" class="block text-xs text-zinc-500 mb-1">
+              accent hex
             </label>
-            <input id="styleguide-accent-hue" type="range" min="0" max="360" value="230"
-                   class="w-full">
+            <input id="styleguide-accent-color" type="color" value="#0b292b">
           </div>
           <code id="styleguide-accent-value" class="text-xs text-zinc-700"></code>
         </div>
+      </div>
+
+      {# ColorSwatch primitive: the circular radio buttons the workspace
+         color pickers (settings + create form) compose. aria-checked drives
+         the blue selection ring via tokens.css; the create page additionally
+         narrows the rim to 1px via its own picker-scoped override. #}
+      <div class="mt-6">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Color swatches</div>
+        <div class="flex items-center gap-2" role="radiogroup" aria-label="Color swatch demo, settings size">
+          <ColorSwatch hex="#0b292b" name="confusion" selected size="md" />
+          <ColorSwatch hex="#9fbbd3" name="peace" size="md" />
+          <ColorSwatch hex="#cecd0c" name="energy" size="md" />
+          <ColorSwatch hex="#ffffff" name="white" size="md" />
+          <ColorSwatch hex="#492222" name="courage" size="md" disabled />
+        </div>
+        <div class="flex items-center gap-2 mt-2" role="radiogroup" aria-label="Color swatch demo, create-form size">
+          <ColorSwatch hex="#0b292b" name="confusion" selected size="sm" />
+          <ColorSwatch hex="#9fbbd3" name="peace" size="sm" />
+          <ColorSwatch hex="#cecd0c" name="energy" size="sm" />
+        </div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + tokens.css :: .color-swatch</div>
       </div>
     </section>
 
@@ -194,18 +218,20 @@
       </p>
 
       {# Titlebar buttons. Demo container paints the full-width accent
-         bar (oklch(85% 0.08 230)) and sets --titlebar-fg to the contrast
-         pick the workspace_accent helper would make for that lightness
-         ("0 0 0", since L=0.85 >= 0.5), so the page title + nav-button
-         glyphs render against the bar exactly as they do in Chrome.jinja. #}
+         bar with the default workspace color (#0b292b, the palette's
+         "confusion" entry) and sets --titlebar-fg to the WCAG-luminance
+         contrast pick pick_workspace_foreground makes for that hex
+         ("255 255 255" -- white text on the dark bar), so the page
+         title + nav-button glyphs render against the bar exactly as
+         they do in Chrome.jinja. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons</div>
         <div class="rounded-lg overflow-hidden border border-zinc-200"
-             style="--titlebar-bg: oklch(85% 0.08 230); --titlebar-fg: 0 0 0;">
+             style="--titlebar-bg: #0b292b; --titlebar-fg: 255 255 255;">
           <div class="h-[38px] flex items-center select-none px-1"
                style="background-color: var(--titlebar-bg);">
             <div class="flex gap-0.5">
-              <TitlebarButton title="Projects"><Icon24 name="sidebar" /></TitlebarButton>
+              <TitlebarButton title="Projects"><Icon24 name="menu" /></TitlebarButton>
               <TitlebarButton title="Home"><Icon24 name="home" /></TitlebarButton>
               <TitlebarButton title="Back"><Icon24 name="back" /></TitlebarButton>
               <TitlebarButton title="Forward"><Icon24 name="forward" /></TitlebarButton>
@@ -249,23 +275,17 @@
         <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
       </div>
 
-      {# Sidebar items #}
+      {# Sidebar items. The sidebar is a floating menu (shared modal
+         WebContentsView in Electron, inline overlay in browser). Each row
+         is built by the shared window.mindsSidebarRow.buildRow helper; the
+         styleguide renders its samples through that exact builder (see
+         dev_styleguide.js) so this catalog can't drift from the live menu.
+         The empty container below is filled in on load. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Sidebar items</div>
-        <div class="w-[260px] rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-          <div class="py-2">
-            <div class="sidebar-item is-current cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors bg-white/5">
-              current-workspace
-            </div>
-            <div class="sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5">
-              another-workspace
-            </div>
-            <div class="sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5">
-              third-one
-            </div>
-          </div>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">static/sidebar.js + static/chrome.js (rendered dynamically) :: .sidebar-item from tokens.css</div>
+        <div id="styleguide-sidebar-rows"
+             class="w-[280px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black overflow-hidden"></div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
       </div>
 
       {# Accent spine #}
@@ -334,8 +354,8 @@
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Icons -- 24x24 (Icon24)</div>
         <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4 text-zinc-700">
           <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="sidebar" />
-            <code class="text-[11px] font-mono text-zinc-500">sidebar</code>
+            <Icon24 name="menu" />
+            <code class="text-[11px] font-mono text-zinc-500">menu</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="home" />
@@ -364,6 +384,10 @@
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="external" />
             <code class="text-[11px] font-mono text-zinc-500">external</code>
+          </div>
+          <div class="flex flex-col items-center gap-1 w-16">
+            <Icon24 name="arrow-up-right" />
+            <code class="text-[11px] font-mono text-zinc-500">arrow-up-right</code>
           </div>
         </div>
         <p class="mt-1 text-[11px] text-zinc-500">
