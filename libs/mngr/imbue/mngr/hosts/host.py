@@ -1369,13 +1369,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
                 env = {"GIT_SSH_COMMAND": git_ssh_cmd}
                 remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
+                # Fetch into the bare repo that _transfer_git_repo already
+                # created via `git init --bare`. We cannot use `git clone` here:
+                # clone refuses a non-empty destination, and the target .git
+                # always exists by this point. A mirror-style fetch with the
+                # same refspecs as the push branches replicates branches and
+                # tags without the empty-destination requirement.
                 try:
                     self.mngr_ctx.concurrency_group.run_process_to_completion(
-                        ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
+                        [
+                            "git",
+                            "-C",
+                            str(target_path / ".git"),
+                            "fetch",
+                            "--prune",
+                            remote_url,
+                            *GIT_MIRROR_PUSH_REFSPECS,
+                        ],
                         env={**os.environ, **env},
                     )
                 except ProcessError as e:
-                    raise MngrError(f"Failed to clone from remote source: {e}") from e
+                    raise MngrError(f"Failed to fetch from remote source: {e}") from e
                 return
         else:
             user, hostname, port, key_path = target_ssh_info
