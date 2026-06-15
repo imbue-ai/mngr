@@ -365,12 +365,12 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
     return tags
 
 
-def _is_ready_marker_present(outer: OuterHostInterface) -> bool | None:
-    """Return True once the ``mngr-ready`` marker exists, else None (not-ready / transient SSH error).
+def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | None:
+    """Return True if the ``mngr-ready`` marker exists, else None (so polling continues).
 
-    Returning None (rather than False) keeps ``poll_for_value`` polling: a
-    ``HostConnectionError`` is the expected mid-bootstrap SSH disruption, not a
-    terminal failure.
+    A ``HostConnectionError`` counts as "not ready yet" (None): the bootstrap runs
+    ``apt-get install`` and Docker setup which can momentarily disrupt SSH (e.g.
+    ``systemctl restart ssh`` after writing the sshd tuning).
     """
     try:
         return True if check_file_exists_on_outer(outer, Path(MNGR_READY_MARKER_PATH)) else None
@@ -390,18 +390,16 @@ def _wait_for_cloud_init_marker(
 
     Returns once the marker file appears. The marker is written by whichever
     first-boot mechanism the backend uses -- cloud-init ``runcmd`` (Vultr / AWS /
-    OVH) or the GCE ``startup-script`` (GCP). A ``HostConnectionError`` on a poll
-    counts as "not ready yet": the bootstrap runs ``apt-get install`` and Docker
-    setup which can momentarily disrupt SSH (e.g. ``systemctl restart ssh`` after
-    writing the sshd tuning), so keep polling until ``timeout_seconds`` -- the
-    hard wall.
+    OVH) or the GCE ``startup-script`` (GCP). Keeps polling until ``timeout_seconds``
+    -- the hard wall (see ``_is_mngr_ready_marker_present_or_none`` for the
+    transient-error handling).
 
     ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters so
     tests can drive this with short intervals; defaults preserve the production
     cadence (poll every 5s, warn if total > 30s).
     """
     value, _, elapsed = poll_for_value(
-        lambda: _is_ready_marker_present(outer),
+        lambda: _is_mngr_ready_marker_present_or_none(outer),
         timeout=timeout_seconds,
         poll_interval=poll_interval_seconds,
     )
