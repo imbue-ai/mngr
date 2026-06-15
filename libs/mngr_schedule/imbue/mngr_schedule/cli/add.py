@@ -275,6 +275,11 @@ def schedule_add(ctx: click.Context, **kwargs: Any) -> None:
     if isinstance(provider, LocalProviderInstance):
         if opts.full_copy:
             logger.warning("--full-copy has no effect for the local provider (code is run from the current directory)")
+        if opts.timezone is not None:
+            raise click.UsageError(
+                "--timezone is only supported for the modal provider; the local provider runs "
+                "via the system crontab, which uses the machine's own local time."
+            )
         _deploy_local(trigger, mngr_ctx, opts)
     elif isinstance(provider, ModalProviderInstance):
         _deploy_modal(trigger, mngr_ctx, opts, provider)
@@ -363,6 +368,7 @@ def _deploy_modal(
             target_repo_path=opts.target_dir,
             auto_merge_branch=auto_merge_branch,
             is_full_copy=opts.full_copy,
+            requested_timezone=opts.timezone,
         )
     except ScheduleDeployError as e:
         raise click.ClickException(str(e)) from e

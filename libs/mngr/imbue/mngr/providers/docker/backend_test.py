@@ -2,12 +2,10 @@ from pathlib import Path
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.backend import DOCKER_BACKEND_NAME
 from imbue.mngr.providers.docker.backend import DockerProviderBackend
 from imbue.mngr.providers.docker.backend import get_files_for_deploy
 from imbue.mngr.providers.docker.config import DockerProviderConfig
-from imbue.mngr.providers.docker.instance import DockerProviderInstance
 
 
 def test_backend_name() -> None:
@@ -39,48 +37,11 @@ def test_backend_get_config_class() -> None:
     assert config_class is DockerProviderConfig
 
 
-def test_build_provider_instance_returns_docker_provider_instance(temp_mngr_ctx: MngrContext) -> None:
-    config = DockerProviderConfig(isolate_host_volumes=False)
-    instance = DockerProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test-docker"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
-        is_for_host_creation=True,
-    )
-    assert isinstance(instance, DockerProviderInstance)
-
-
-def test_build_provider_instance_with_custom_host_dir(temp_mngr_ctx: MngrContext) -> None:
-    config = DockerProviderConfig(host_dir=Path("/custom/dir"), isolate_host_volumes=False)
-    instance = DockerProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test-docker"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
-        is_for_host_creation=True,
-    )
-    assert instance.host_dir == Path("/custom/dir")
-
-
-def test_build_provider_instance_uses_default_host_dir(temp_mngr_ctx: MngrContext) -> None:
-    config = DockerProviderConfig(isolate_host_volumes=False)
-    instance = DockerProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("test-docker"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
-        is_for_host_creation=True,
-    )
-    assert instance.host_dir == Path("/mngr")
-
-
-def test_build_provider_instance_uses_name(temp_mngr_ctx: MngrContext) -> None:
-    config = DockerProviderConfig(isolate_host_volumes=False)
-    instance = DockerProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("my-docker"),
-        config=config,
-        mngr_ctx=temp_mngr_ctx,
-        is_for_host_creation=True,
-    )
-    assert instance.name == ProviderInstanceName("my-docker")
+# build_provider_instance / bootstrap_for_host_creation now always go through the
+# Docker daemon (the read-only guard materializes the client to check for the
+# singleton state container), so they are covered by the docker_sdk tests in
+# test_docker_lifecycle.py rather than by no-daemon unit tests here -- mirroring
+# the Modal backend, which likewise has no unit tests for build_provider_instance.
 
 
 # =============================================================================
