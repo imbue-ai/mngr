@@ -1,0 +1,1 @@
+Added a design doc (`specs/agent-plugin-parity/capability-mixins.md`) proposing a code-derived agent capability taxonomy: capability mixins plus a registry that generates the parity matrix from the agent classes, replacing the hand-maintained table and guarding against doc/code drift.
