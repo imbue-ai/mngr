@@ -8,12 +8,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -22,8 +25,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
-from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
-from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
@@ -31,6 +33,7 @@ from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
+from imbue.mngr_antigravity.plugin import register_agent_aliases
 from imbue.mngr_antigravity.plugin import register_agent_type
 
 
@@ -87,11 +90,70 @@ def test_antigravity_agent_implements_send_enter_and_validate() -> None:
     assert "_send_enter_and_validate" not in AntigravityAgent.__abstractmethods__
 
 
+class _RecordingHost(FakeHost):
+    """FakeHost that records stateful commands and reports success without running them.
+
+    Lets ``_send_enter_and_validate`` exercise the wait-for strategy without
+    actually invoking tmux (so the resource guard stays quiet) while we assert
+    the command it issues.
+    """
+
+    recorded: list[str] = Field(default_factory=list)
+
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.recorded.append(command)
+        return CommandResult(stdout="", stderr="", success=True)
+
+
+def test_send_enter_and_validate_waits_on_per_session_submit_channel(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """``_send_enter_and_validate`` uses the tmux wait-for strategy on the per-session channel.
+
+    agy's statusLine fires ``tmux wait-for -S mngr-submit-<session>`` when the
+    agent starts processing the submitted message; mngr registers a waiter on
+    that exact channel (parity with the shell side). The strategy also sends
+    Enter from a backgrounded subshell, which must appear in the issued command.
+    """
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    recording_host = _RecordingHost()
+    agent = AntigravityAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-antigravity"),
+        agent_type=AgentTypeName("antigravity"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=HostName(LOCAL_HOST_NAME),
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=AntigravityAgentConfig(),
+        host=recording_host,
+    )
+    agent._send_enter_and_validate(agent.tmux_target)
+    assert len(recording_host.recorded) == 1
+    issued = recording_host.recorded[0]
+    assert f"mngr-submit-{agent.session_name}" in issued
+    # The strategy sends Enter (from the backgrounded subshell) alongside the wait.
+    assert "tmux send-keys" in issued
+    assert "tmux wait-for" in issued
+
+
 def test_register_agent_type_returns_antigravity_class_and_config() -> None:
     name, agent_class, config_class = register_agent_type()
     assert name == "antigravity"
     assert agent_class is AntigravityAgent
     assert config_class is AntigravityAgentConfig
+
+
+def test_register_agent_aliases_maps_agy_to_antigravity() -> None:
+    assert register_agent_aliases() == {"agy": "antigravity"}
 
 
 def _make_antigravity_agent(
@@ -896,6 +958,30 @@ def test_provision_symlinks_playwright_cache_to_shared_host_cache(
     assert Path(os.readlink(dest)) == isolated_home.joinpath(*subpath)
 
 
+def test_provision_symlinks_macos_keychain_into_per_agent_home(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """On macOS the per-agent home's Library/Keychains is symlinked to the host's; Linux is a no-op.
+
+    agy's embedded Chromium os_crypt resolves the login keychain at
+    $HOME/Library/Keychains, so the relocated per-agent $HOME hides it and agy
+    blocks on a modal "keychain cannot be found" dialog. The plugin symlinks the
+    directory to the host's so discovery works (macOS only -- Linux has no such
+    keychain and Chromium uses its file-based store). The link points at
+    *host_home*'s Library/Keychains (here the isolated HOME); the target need not
+    exist for the symlink to be created.
+    """
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    dest = agent._get_agy_home_dir() / "Library" / "Keychains"
+    if is_macos():
+        assert dest.is_symlink()
+        assert Path(os.readlink(dest)) == isolated_home / "Library" / "Keychains"
+    else:
+        assert not dest.exists()
+        assert not dest.is_symlink()
+
+
 # =============================================================================
 # provision: per-agent hooks.json
 # =============================================================================
@@ -919,36 +1005,114 @@ def test_provision_writes_hooks_json_under_per_agent_home_config(
     assert hooks_path.exists()
 
 
-def test_provision_hooks_json_sets_active_marker_on_preinvocation_and_clears_on_stop(
+def test_provision_hooks_json_emits_only_conversation_id_capture(
     antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """The active marker hooks are always present (they drive RUNNING vs WAITING).
+    """The lone hook is the PreInvocation conversation-id capture; no Stop block.
 
-    PreInvocation runs set_active_marker.sh (touch + record the turn's root);
-    Stop runs the root-gated clear script, which removes the marker only on the
-    root agent's fully-idle Stop.
+    Lifecycle (RUNNING/WAITING) is driven by the statusLine command, so the
+    provisioned hooks config carries no marker handler and no Stop block. The
+    capture hook is present because the statusLine payload only reports the root
+    conversation.
     """
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     mngr = _read_hooks_json(agent)["mngr"]
+    assert set(mngr) == {"PreInvocation"}
     assert (
-        mngr["PreInvocation"][0]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
-    )
-    assert (
-        mngr["Stop"][0]["command"]
-        == f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
+        mngr["PreInvocation"][0]["command"]
+        == f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"'
     )
 
 
-def test_provision_installs_clear_active_marker_when_idle_script(
+def test_provision_settings_json_has_mngr_owned_statusline(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """The per-agent settings.json carries the mngr-owned lifecycle statusLine.
+
+    agy invokes it on every agent-state change; statusline.sh is the source of
+    truth for RUNNING/WAITING and message-submission confirmation.
+    """
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    settings = _read_per_agent_settings(agent)
+    assert settings["statusLine"] == {
+        "type": "command",
+        "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"',
+    }
+
+
+def test_provision_composes_user_statusline_from_settings_overrides(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path, log_warnings: list[str]
+) -> None:
+    """A runnable user statusLine is composed, not discarded: mngr's is the agy
+    statusLine, and the user's command is recorded for statusline.sh to run.
+
+    agy allows only one statusLine command, and mngr's must be it (lifecycle
+    correctness), so a user's own command-type statusLine is preserved by recording
+    it in the per-agent user_statusline_command file; statusline.sh runs it and
+    appends its output. No warning for this composable case.
+    """
+    agent = _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(
+            auto_dismiss_dialogs=True,
+            settings_overrides={"statusLine": {"type": "command", "command": "echo user-owned"}},
+        ),
+    )
+    _provision(agent)
+    settings = _read_per_agent_settings(agent)
+    # The agy statusLine is mngr's (so agy invokes statusline.sh).
+    assert settings["statusLine"]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
+    # ...and the user's command is recorded for statusline.sh to compose.
+    assert agent._get_user_statusline_command_file_path().read_text() == "echo user-owned"
+    # A composable statusLine is preserved, not dropped, so no warning fires.
+    assert not any("statusLine" in msg for msg in log_warnings)
+
+
+def test_provision_warns_and_drops_non_composable_statusline(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path, log_warnings: list[str]
+) -> None:
+    """A statusLine that is not a runnable command block is dropped with a warning.
+
+    Only ``{"type": "command", "command": <str>}`` can be composed; any other shape
+    (here a non-command type) can't be run, so mngr warns and records nothing.
+    """
+    agent = _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(
+            auto_dismiss_dialogs=True,
+            settings_overrides={"statusLine": {"type": "static", "text": "unsupported"}},
+        ),
+    )
+    _provision(agent)
+    settings = _read_per_agent_settings(agent)
+    assert settings["statusLine"]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
+    # Nothing recorded to compose, and the drop is surfaced as a warning.
+    assert not agent._get_user_statusline_command_file_path().exists()
+    assert any("statusLine" in msg for msg in log_warnings)
+
+
+def test_provision_records_no_user_statusline_when_none(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path, log_warnings: list[str]
+) -> None:
+    """With no user statusLine, mngr injects its own with nothing to compose and no warning."""
+    _provision(antigravity_agent_auto_dismiss)
+    assert not antigravity_agent_auto_dismiss._get_user_statusline_command_file_path().exists()
+    assert not any("statusLine" in msg for msg in log_warnings)
+
+
+def test_provision_installs_statusline_script(
     auto_approve_ctx: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """provision() installs clear_active_marker_when_idle.sh into the commands/ dir.
+    """provision() installs statusline.sh into the commands/ dir.
 
-    The Stop hook invokes this script by that path
-    (build_antigravity_hooks_config), so it must be provisioned for the
-    fully-idle-gated WAITING transition to work.
+    agy's statusLine command invokes this script by that path
+    (build_antigravity_statusline_settings), so it must be provisioned for the
+    RUNNING/WAITING lifecycle and message-submission signal to work.
     """
     agent = auto_approve_ctx
     agent.provision(
@@ -956,32 +1120,12 @@ def test_provision_installs_clear_active_marker_when_idle_script(
         options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
         mngr_ctx=agent.mngr_ctx,
     )
-    script_path = agent._get_agent_dir() / "commands" / CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
+    script_path = agent._get_agent_dir() / "commands" / STATUSLINE_SCRIPT_NAME
     assert script_path.exists()
-    # Sanity-check it's the idle-gate script (keys on the fullyIdle field).
-    assert "fullyIdle" in script_path.read_text()
-
-
-def test_provision_installs_set_active_marker_script(
-    auto_approve_ctx: AntigravityAgent,
-    isolated_home: Path,
-) -> None:
-    """provision() installs set_active_marker.sh into the commands/ dir.
-
-    The PreInvocation hook invokes this script by that path
-    (build_antigravity_hooks_config), so it must be provisioned for the marker
-    to be set and the turn's root recorded.
-    """
-    agent = auto_approve_ctx
-    agent.provision(
-        host=agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
-        mngr_ctx=agent.mngr_ctx,
-    )
-    script_path = agent._get_agent_dir() / "commands" / SET_ACTIVE_MARKER_SCRIPT_NAME
-    assert script_path.exists()
-    # Sanity-check it's the marker/root script (records the root conversation).
-    assert "root_conversation" in script_path.read_text()
+    # Sanity-check it's the statusline script (keys on agent_state, records the root).
+    text = script_path.read_text()
+    assert "agent_state" in text
+    assert "root_conversation" in text
 
 
 def test_provision_does_not_write_hooks_into_work_dir(
