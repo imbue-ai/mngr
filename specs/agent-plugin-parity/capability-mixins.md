@@ -54,27 +54,39 @@ What pi genuinely lacks -- a per-resource allow/deny/ask policy -- is an honest 
 | Streaming headless output | (headless variants) | class mixin (`StreamingHeadlessAgentMixin`) |
 | Streaming snapshot (live TUI view) | claude | config + provisioned watcher script |
 | Unattended operation (auto-allow in-run tool prompts) | all five (pi degenerately) | auto-allow config |
-| Per-resource permission policy (allow/deny/ask) | claude, antigravity, opencode, codex | config / `config_overrides` / `sandbox_mode` |
-| Install / version management | claude, pi, opencode, codex | config field + provisioning helper |
+| Per-resource permission policy (allow/deny/ask) | antigravity, opencode, codex | config / `config_overrides` / `sandbox_mode` |
+| Auto-install (install the binary if missing) | claude, pi | `check_installation` + installer/npm |
+| Version management (pin vs auto-update) | claude, codex | claude `version` pin; codex `update_policy` |
 | Deploy / scheduling contributions | claude | **pluggy hookimpl on the plugin module** |
-| Field generators (`waiting_reason`) | claude, opencode, codex, pi | **pluggy hookimpl on the plugin module** |
+| Field generators (`waiting_reason`) | claude, codex, opencode | **pluggy hookimpl on the plugin module** |
 | Usage tracking (token/cost emission) | claude, opencode, pi, codex | **sibling `mngr_<harness>_usage` plugin (hookimpls)** |
+
+The "Has it today" column was **corrected against the code on the synthetic base** (this is
+exactly the drift the matrix is meant to kill): the earlier draft wrongly listed claude under
+per-resource policy (it is blanket-hooks only), opencode under install management (it has
+none), and pi under `waiting_reason` (it has none yet -- pi's degenerate single-value generator
+is still to be added). "Install/version management" was one lumped row hiding three independent
+axes; it is now split into **auto-install** (get the binary present: claude, pi) and **version
+management** (control which version runs -- claude pins against its own auto-update, codex
+runs an update policy). The generated matrix is the source of truth; this table is illustrative.
 
 The crucial split: **Unattended operation** is "can complete a whole run with no human." Its
 *start* dialogs are already handled by the universal mngr-owned-dialogs requirement (which
 picks defaults in unattended mode), so the one interactive point left to this capability is
 the **in-run tool-approval prompt** -- auto-allowing it is what makes remote / scheduled /
-headless agents work at all, the load-bearing capability. A **per-resource permission policy**
-(allow/deny/ask per tool) is a refinement on top, present for everyone but pi. They must be
-*separately* detectable -- pi has the first, not the second -- so they cannot share one mixin
-(an agent inheriting a combined mixin would falsely claim the policy). Two small mixins is the
-price of honest per-aspect detection.
+headless agents work at all, the load-bearing capability. All five have it (pi degenerately).
+A **per-resource permission policy** (allow/deny/ask per tool) is a refinement on top, present
+only for antigravity, opencode, and codex -- claude exposes only blanket auto-allow hooks (no
+per-tool config), and pi has no approval gate. So *two* agents (claude and pi) have unattended
+operation without a policy, which is exactly why these must be *separately* detectable and
+cannot share one mixin (an agent inheriting a combined mixin would falsely claim the policy).
+Two small mixins is the price of honest per-aspect detection.
 
-The opencode/codex `Y` for the permission rows is from the parity spec's dimension I (wired
-via `config_overrides` / `sandbox_mode` / `approval_policy`, not the `auto_allow_permissions`
-field claude/agy use); a code-mapping pass that searched for the claude/agy field names marked
-them absent. That contradiction is unresolved and must be pinned down per-agent when the
-detectors are written -- itself more evidence the hand-matrix is unreliable.
+Where each agent's policy lives (verified against the code on the synthetic base): antigravity
+a `permissions` block in `settings_overrides`; opencode a `permission` block via
+`config_overrides`; codex `sandbox_mode` / `approval_policy` / `config_overrides`. claude
+routes permissions through blanket `"*"` hooks with no structured per-tool surface, so it is an
+honest `-`.
 
 ## Membership has two honest shapes
 
@@ -138,17 +150,27 @@ the agent class (from `list_registered_agent_class_types` / `get_agent_class`) a
 ### Class-level mixins to introduce
 
 `HasStreamingSnapshotMixin`, `HasUnattendedModeMixin`, `HasPermissionPolicyMixin`,
-`HasInstallationManagementMixin`, `HasSessionPreservationMixin` -- each a small ABC carrying
-the abstract method(s) that capability already implies (e.g. `HasUnattendedModeMixin` declares
-the auto-allow application step that claude/agy/opencode/codex each implement differently, and
-that pi implements degenerately; `HasSessionPreservationMixin` declares the preserve step that
-all five `on_destroy` overrides already call). Unattended and policy are deliberately *two*
-mixins, not one, so pi can claim the first without the second. The `Has…Mixin` shape matches the existing capability mixins
-(`HasTranscriptMixin`, `HasCommonTranscriptMixin`). Contract-bearing, not bare markers: you
-cannot inherit one without implementing its method, and the existing behavior is routed
-through it, so membership and implementation are the same fact. The four existing
-transcript/headless mixins are folded into the registry as-is. (Names are bikeable --
-`HasUnattendedModeMixin` could be `SupportsUnattendedRunMixin`; the suffix is the fixed part.)
+`HasVersionManagementMixin`, `HasSessionPreservationMixin` -- each a small ABC carrying the
+abstract method(s) that capability already implies (e.g. `HasUnattendedModeMixin` declares the
+auto-allow application step that claude/agy/opencode/codex each implement differently, and that
+pi implements degenerately; `HasSessionPreservationMixin` declares the preserve step that all
+five `on_destroy` overrides already call). Unattended and policy are deliberately *two* mixins,
+not one, so claude and pi can claim the first without the second. The `Has…Mixin` shape matches
+the existing capability mixins (`HasTranscriptMixin`, `HasCommonTranscriptMixin`).
+Contract-bearing, not bare markers: you cannot inherit one without implementing its method, and
+the existing behavior is routed through it, so membership and implementation are the same fact.
+The four existing transcript/headless mixins are folded into the registry as-is. (Names are
+bikeable -- `HasUnattendedModeMixin` could be `SupportsUnattendedRunMixin`; the suffix is fixed.)
+
+**Auto-install is a *base* capability, not one of the optional mixins above.** Checking the
+binary is present and installing it if missing is cheap and every agent should have it, so it
+belongs on the base (a method every plugin supplies its install command for, invoked by the
+shared provision flow), and the agents currently missing it (antigravity, opencode, codex) get
+it added rather than left as a gap. The one non-trivial part is per-CLI: each CLI's install
+command differs (claude's installer script, pi's npm, codex's `codex update`/standalone, an
+opencode install script, agy's -- to be determined), so "toss it in" still means sourcing each
+command. Version management (pin vs auto-update) stays a *distinguishing* capability
+(`HasVersionManagementMixin`: claude, codex), since not every CLI exposes version control.
 
 ## Discoverability: making "you should implement this" obvious
 
@@ -220,18 +242,18 @@ in the parity spec, because their content is how-not-whether.
 
 ## Implementation plan
 
-1. Add `agent_capabilities.py`: the `AgentCapability` dataclass, `AgentClassInfo`, the
-   registry, and the matrix generator. Detectors for the four existing transcript/headless
-   mixins and the two module-level hookimpl capabilities (no plugin changes needed for these
-   -- detection only).
-2. Introduce the five new class-level mixins and wire them in, routing existing behavior
+1. **(done)** `agents/agent_capabilities.py`: `AgentCapability`, `AgentClassInfo`, the
+   registry, and the matrix renderer, with class-mixin / field-generator / plugin-hookimpl /
+   usage-source detection. Unit-tested; no plugin changes.
+2. The live `build_agent_class_infos(plugin_manager)` builder (introspects registered agent
+   classes, the `waiting_reason`-keyed field generators, per-agent plugin hookimpls, and usage
+   claims), the generated matrix doc, and the drift-guard test.
+3. Introduce the five new class-level mixins and wire them in, routing existing behavior
    through the mixin method: snapshot -> claude; unattended -> all five (pi degenerately,
-   erroring on explicit-off); per-resource policy -> claude/agy/opencode/codex; install ->
-   claude/pi/opencode/codex; session preservation -> all five. Add pi's single-value
-   `waiting_reason` field generator. One changelog entry per touched project.
-3. Generate the matrix into `libs/mngr/docs/concepts/agent_capabilities.md`; link the parity
-   spec to it (dropping its hand-maintained matrix); add the regenerate pre-commit step and
-   the drift-guard test.
+   erroring on explicit-off); per-resource policy -> agy/opencode/codex; version management ->
+   claude/codex; session preservation -> all five. Add pi's single-value `waiting_reason` field
+   generator. Make **auto-install** a base capability and add it to the agents missing it
+   (agy/opencode/codex), per-CLI install command. One changelog entry per touched project.
 4. Wire the registry into the e2e/release harness: the `{capability_key: exercise_fn}` map,
    the per-agent walk over declared capabilities, and the coverage test that forces every
    capability to have an exercise.
