@@ -1,5 +1,7 @@
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
+from imbue.mngr.plugin_catalog import RequiredPackagesGate
 from imbue.mngr.plugin_catalog import SignalCheck
+from imbue.mngr.plugin_catalog import SignalGate
 from imbue.mngr.plugin_catalog import UNPUBLISHED_PACKAGES
 from imbue.mngr.plugin_catalog import check_signal
 from imbue.mngr.plugin_catalog import get_all_cataloged_entry_point_names
@@ -30,10 +32,9 @@ def test_catalog_entries_sharing_signal_use_same_instance() -> None:
     claude_entry = get_catalog_entry("claude")
     fixme_entry = get_catalog_entry("fixme_fairy")
     assert claude_entry is not None and fixme_entry is not None
-    assert claude_entry.gate is not None and fixme_entry.gate is not None
-    claude_signal = claude_entry.gate.detection_signal()
-    assert claude_signal is not None
-    assert claude_signal is fixme_entry.gate.detection_signal()
+    assert isinstance(claude_entry.gate, SignalGate)
+    assert isinstance(fixme_entry.gate, SignalGate)
+    assert claude_entry.gate.signal is fixme_entry.gate.signal
 
 
 def test_base_usage_plugin_is_recommended_independent() -> None:
@@ -46,7 +47,7 @@ def test_base_usage_plugin_is_recommended_independent() -> None:
 
 
 def test_agent_usage_providers_require_agent_and_base_usage() -> None:
-    """Each per-agent usage provider is DEPENDENT and unlocked only when its agent plugin and base usage are both present."""
+    """Each per-agent usage provider is DEPENDENT and gated on its agent plugin plus base usage."""
     expected_agent_package = {
         "claude_usage": "imbue-mngr-claude",
         "codex_usage": "imbue-mngr-codex",
@@ -57,13 +58,8 @@ def test_agent_usage_providers_require_agent_and_base_usage() -> None:
         entry = get_catalog_entry(entry_point)
         assert entry is not None, entry_point
         assert entry.tier == PluginTier.DEPENDENT
-        gate = entry.gate
-        assert gate is not None, entry_point
-        assert gate.is_unlocked(
-            accepted_signals=set(), present_packages=frozenset({agent_package, "imbue-mngr-usage"})
-        )
-        assert not gate.is_unlocked(accepted_signals=set(), present_packages=frozenset({agent_package}))
-        assert not gate.is_unlocked(accepted_signals=set(), present_packages=frozenset({"imbue-mngr-usage"}))
+        assert isinstance(entry.gate, RequiredPackagesGate), entry_point
+        assert set(entry.gate.packages) == {agent_package, "imbue-mngr-usage"}
 
 
 # =============================================================================
