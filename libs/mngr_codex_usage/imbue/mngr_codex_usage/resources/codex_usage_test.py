@@ -1,9 +1,10 @@
 """Behavioural test for the Codex usage writer (resources/codex_usage.sh).
 
 Plants a synthetic raw rollout stream, runs the script single-pass, and asserts
-on the cost_snapshot events it emits. The script is bash + embedded python3
-(both always available), so no skip is needed; the .sh is a resource, not Python,
-so it does not count toward coverage.
+on the cost_snapshot events it emits end-to-end (bash wiring + the python3
+emitter it invokes, ``codex_usage_emit.py``). Both interpreters are always
+available, so no skip is needed. The emitter's own logic is unit-tested directly
+in ``codex_usage_emit_test.py``; this test covers the shell integration.
 """
 
 from __future__ import annotations

@@ -35,6 +35,10 @@ from imbue.mngr_usage.data_types import UsageSnapshot
 # launches it when present. Kept in sync with that supervisor's USAGE_SCRIPT path.
 _USAGE_WRITER_SCRIPT = "codex_usage.sh"
 
+# The Python emitter the writer script invokes (python3 <dir>/codex_usage_emit.py).
+# Installed next to the writer so the writer resolves it relative to itself.
+_USAGE_EMIT_SCRIPT = "codex_usage_emit.py"
+
 # Source the writer emits under ($STATE_DIR/events/codex/usage/...); the reader
 # strips "/usage", so this hookimpl claims exactly "codex".
 _CODEX_USAGE_SOURCE_NAME = "codex"
@@ -55,6 +59,12 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
         module=_resources,
         filename=_USAGE_WRITER_SCRIPT,
         dest=commands_dir / _USAGE_WRITER_SCRIPT,
+    )
+    install_packaged_script_on_host(
+        host,
+        module=_resources,
+        filename=_USAGE_EMIT_SCRIPT,
+        dest=commands_dir / _USAGE_EMIT_SCRIPT,
     )
 
 
