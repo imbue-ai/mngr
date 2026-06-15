@@ -335,6 +335,18 @@ deploy *args:
 # dev case. Refuses without activation so the recipe never silently
 # writes to the wrong env's data root.
 #
+# Install the minds desktop client's node deps (electron, etc.) using the Node
+# version apps/minds pins in apps/minds/.nvmrc -- selected via
+# select_node_version.sh so pnpm's engine-strict check passes regardless of the
+# shell's default node. Run this once before `just minds-start`; `minds-start`
+# points here when node_modules is missing. Never installs Node (errors with a
+# hint if the pinned version isn't available via nvm).
+minds-install:
+    #!/bin/bash
+    set -ueo pipefail
+    . apps/minds/scripts/select_node_version.sh || exit 2
+    cd apps/minds && pnpm install
+
 # Override agent_name / branch via positional args:
 #   just minds-start agent_name=foo branch=some-branch
 # Refuses to start if another minds-start is already running in this
@@ -428,8 +440,7 @@ minds-start agent_name="mindtest" branch="":
         echo "" >&2
         echo "error: minds desktop client isn't installed/built yet in this worktree." >&2
         echo "       Run:" >&2
-        echo "         cd apps/minds && pnpm install && cd -" >&2
-        echo "         just minds-build" >&2
+        echo "         just minds-install" >&2
         echo "       (~2 min on first run; subsequent rebuilds are seconds)." >&2
         echo "       Then re-run \`just minds-start\`." >&2
         exit 2
