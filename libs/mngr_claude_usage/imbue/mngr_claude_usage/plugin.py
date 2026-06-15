@@ -37,7 +37,8 @@ from typing import Any
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.host import install_packaged_script_on_host
 from imbue.mngr.hosts.host import read_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -99,7 +100,7 @@ def _is_mngr_owned_shim_path(command: str, host_dir: Path) -> bool:
         return False
     if candidate == _stable_shim_path(host_dir):
         return True
-    return candidate.parent.parent.parent == host_dir / "agents"
+    return candidate.parent.parent.parent == get_agents_root_dir(host_dir)
 
 
 def _capture_existing_statusline_command(host: OnlineHostInterface, work_dir: Path) -> str:

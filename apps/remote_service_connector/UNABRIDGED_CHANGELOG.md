@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-11
+
+Replaced a direct RuntimeError raise in the app with a dedicated custom exception type.
+
+## 2026-06-10
+
+Raised the stale coverage floor from 45% to 80% to match the coverage CI already measures (~83%).
+
 ## 2026-06-08
 
 Region-aware host leasing.

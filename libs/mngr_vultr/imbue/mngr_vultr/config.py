@@ -3,8 +3,13 @@ import os
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+
+
+class VultrConfigError(MngrError, ValueError):
+    """Raised when the Vultr provider configuration is incomplete or invalid."""
 
 
 class VultrProviderConfig(VpsDockerProviderConfig):
@@ -38,7 +43,7 @@ class VultrProviderConfig(VpsDockerProviderConfig):
         env_key = os.environ.get("VULTR_API_KEY")
         if env_key is not None:
             return env_key
-        raise ValueError(
+        raise VultrConfigError(
             "Vultr API key not configured. Set VULTR_API_KEY environment variable "
             "or add api_key to the provider config."
         )

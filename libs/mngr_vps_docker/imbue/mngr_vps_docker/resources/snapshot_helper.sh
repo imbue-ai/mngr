@@ -7,12 +7,24 @@
 # against the per-host subvolume, then writes a result.json the inner
 # host_backup script can read.
 #
+# Snapshots are created at <btrfs-mount>/snapshots/<name>, where <name> is
+# a unique, per-request value chosen by the inner script (a timestamp).
+# We never reuse a single fixed path: under gVisor (runsc) the container
+# reads the snapshot through the gofer, which caches a handle to the
+# directory it first opened. Deleting and recreating one path leaves the
+# container reading the stale (deleted) subvolume, so every snapshot after
+# the first comes back empty. A fresh name per request avoids that, and
+# the inner script garbage-collects old snapshots by name.
+#
 # Request file format:
-#     {"request_id": "<uuid>", "operation": "snapshot" | "cleanup",
-#      "timestamp_iso": "..."}
+#     {"request_id": "<id>", "operation": "snapshot" | "cleanup",
+#      "timestamp_iso": "...", "target": "<name>"}
+#   - For "snapshot", the snapshot is created at snapshots/<request_id>.
+#   - For "cleanup", the snapshot named by "target" is deleted; "request_id"
+#     is only used to correlate the result.
 #
 # Result file format (atomically renamed from result.json.tmp):
-#     {"request_id": "<same uuid>", "operation": "...", "exit_code": int,
+#     {"request_id": "<same id>", "operation": "...", "exit_code": int,
 #      "stdout": "...", "stderr": "...", "snapshot_path": "..."}
 #
 # Environment (set by the systemd unit, parameterized at host-create time
@@ -27,7 +39,7 @@ set -euo pipefail
 : "${MNGR_HOST_SUBVOLUME:?MNGR_HOST_SUBVOLUME must be set}"
 : "${MNGR_TRIGGER_DIR:=/var/lib/mngr-snapshot}"
 
-SNAPSHOT_PATH="${MNGR_BTRFS_MOUNT_PATH}/snapshots/current"
+SNAPSHOTS_DIR="${MNGR_BTRFS_MOUNT_PATH}/snapshots"
 REQUEST_PATH="${MNGR_TRIGGER_DIR}/request.json"
 RESULT_PATH="${MNGR_TRIGGER_DIR}/result.json"
 RESULT_TMP="${MNGR_TRIGGER_DIR}/result.json.tmp"
@@ -50,22 +62,44 @@ emit_result() {
     mv "$RESULT_TMP" "$RESULT_PATH"
 }
 
+# Return 0 iff `name` is a safe single path component (a child of the
+# snapshots dir). Rejects empty, ".", "..", anything containing "/" or
+# "..", so a malformed request can never escape the snapshots directory or
+# target the live subvolume.
+is_safe_name() {
+    local name="$1"
+    case "$name" in
+        "" | . | ..) return 1 ;;
+        */* | *..*) return 1 ;;
+    esac
+    return 0
+}
+
 do_snapshot() {
-    local request_id="$1"
+    local name="$1"
     local stdout stderr exit_code
 
-    # Defensive cleanup: if a stale `current/` snapshot is present, delete
-    # it first so `btrfs subvolume snapshot` doesn't fail with "exists".
-    if [ -d "$SNAPSHOT_PATH" ]; then
-        btrfs subvolume delete "$SNAPSHOT_PATH" >/dev/null 2>&1 || true
+    if ! is_safe_name "$name"; then
+        emit_result "$name" "snapshot" 2 "" "invalid snapshot name: ${name}" ""
+        return
     fi
-    mkdir -p "$(dirname "$SNAPSHOT_PATH")"
+
+    local target="${SNAPSHOTS_DIR}/${name}"
+    mkdir -p "$SNAPSHOTS_DIR"
+
+    # Names are unique per request, so a collision means a stale leftover at
+    # this exact name. Fail rather than overwrite; the next request uses a
+    # fresh name and recovers.
+    if [ -e "$target" ]; then
+        emit_result "$name" "snapshot" 1 "" "snapshot path already exists: ${name}" ""
+        return
+    fi
 
     local out_file err_file
     out_file=$(mktemp)
     err_file=$(mktemp)
     set +e
-    btrfs subvolume snapshot -r "$MNGR_HOST_SUBVOLUME" "$SNAPSHOT_PATH" >"$out_file" 2>"$err_file"
+    btrfs subvolume snapshot -r "$MNGR_HOST_SUBVOLUME" "$target" >"$out_file" 2>"$err_file"
     exit_code=$?
     set -e
     stdout=$(cat "$out_file"); rm -f "$out_file"
@@ -73,21 +107,28 @@ do_snapshot() {
 
     local effective_snapshot_path=""
     if [ "$exit_code" -eq 0 ]; then
-        effective_snapshot_path="$SNAPSHOT_PATH"
+        effective_snapshot_path="$target"
     fi
-    emit_result "$request_id" "snapshot" "$exit_code" "$stdout" "$stderr" "$effective_snapshot_path"
+    emit_result "$name" "snapshot" "$exit_code" "$stdout" "$stderr" "$effective_snapshot_path"
 }
 
 do_cleanup() {
-    local request_id="$1"
+    local request_id="$1" target="$2"
     local stdout="" stderr="" exit_code=0
 
-    if [ -d "$SNAPSHOT_PATH" ]; then
+    if ! is_safe_name "$target"; then
+        emit_result "$request_id" "cleanup" 2 "" "invalid cleanup target: ${target}" ""
+        return
+    fi
+
+    local path="${SNAPSHOTS_DIR}/${target}"
+    # "Already gone" is success: cleanup is idempotent.
+    if [ -e "$path" ]; then
         local out_file err_file
         out_file=$(mktemp)
         err_file=$(mktemp)
         set +e
-        btrfs subvolume delete "$SNAPSHOT_PATH" >"$out_file" 2>"$err_file"
+        btrfs subvolume delete "$path" >"$out_file" 2>"$err_file"
         exit_code=$?
         set -e
         stdout=$(cat "$out_file"); rm -f "$out_file"
@@ -97,17 +138,19 @@ do_cleanup() {
 }
 
 handle_request() {
-    local payload request_id operation
+    local payload request_id operation target
     payload=$(cat "$REQUEST_PATH" 2>/dev/null || echo "{}")
     request_id=$(echo "$payload" | jq -r '.request_id // ""')
     operation=$(echo "$payload" | jq -r '.operation // ""')
+    target=$(echo "$payload" | jq -r '.target // ""')
     if [ -z "$request_id" ]; then
         echo "snapshot_helper: request missing request_id; skipping" >&2
         return
     fi
     case "$operation" in
+        # For a snapshot the request_id doubles as the snapshot name.
         snapshot) do_snapshot "$request_id" ;;
-        cleanup)  do_cleanup  "$request_id" ;;
+        cleanup)  do_cleanup  "$request_id" "$target" ;;
         *)
             emit_result "$request_id" "$operation" 2 "" "unknown operation: $operation" ""
             ;;

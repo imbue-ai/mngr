@@ -1387,23 +1387,25 @@ def wait_for_usage(
     timeout_seconds: float | None,
     interval_seconds: float,
     now_fn: Callable[[], int] = lambda: int(time.time()),
-    monotonic_fn: Callable[[], float] = time.monotonic,
-    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> WaitForUsageResult:
     """Poll until any source's CEL context satisfies all ``until_filters``, or timeout.
 
-    Per tick: ``poll_fn()`` returns the snapshot list. For each source,
-    build a CEL context and evaluate against ``until_filters``. First
-    passing source wins. If no match and not timed out, sleep
-    ``interval_seconds`` and try again.
+    Per tick: ``poll_fn()`` returns the snapshot list. For each source, build a CEL
+    context and evaluate against ``until_filters``. First passing source wins. If no
+    match and not timed out, sleep ``interval_seconds`` and try again.
 
-    Clock and sleep are injected so tests can run the loop fast without
-    real time elapsing. The default callable for ``now_fn`` reads
-    wall-clock; ``monotonic_fn`` is used only for the timeout/elapsed
-    measurement so a wall-clock skew during the wait doesn't confuse
-    timeout accounting.
+    ``timeout_seconds=None`` waits indefinitely. This is a background/daemon wait,
+    expected to run until the usage predicate flips -- the deliberate exception to
+    the "every wait must set a timeout" rule. That is why this loop owns a real
+    ``time.sleep`` (the one sanctioned sleep in this package -- see
+    ``test_ratchets``) rather than going through the shared ``poll_until``, which
+    requires an explicit timeout on purpose.
+
+    ``now_fn`` supplies the wall-clock seconds fed into each CEL context (so
+    time-based filters can be evaluated deterministically in tests). ``time.monotonic``
+    drives the timeout/elapsed accounting so a wall-clock skew mid-wait can't confuse it.
     """
-    start = monotonic_fn()
+    start = time.monotonic()
     last_snapshots: list[UsageSnapshot] = []
     is_waiting = True
     while is_waiting:
@@ -1421,18 +1423,18 @@ def wait_for_usage(
                 is_matched=True,
                 is_timed_out=False,
                 matched_source=matched,
-                elapsed_seconds=monotonic_fn() - start,
+                elapsed_seconds=time.monotonic() - start,
                 final_snapshots=tuple(last_snapshots),
             )
-        elapsed = monotonic_fn() - start
-        if timeout_seconds is not None and elapsed >= timeout_seconds:
+        if timeout_seconds is not None and time.monotonic() - start >= timeout_seconds:
             is_waiting = False
         else:
-            sleep_fn(interval_seconds)
+            # Daemon wait: this real sleep is the deliberate per-package exception.
+            time.sleep(interval_seconds)
     return WaitForUsageResult(
         is_matched=False,
         is_timed_out=True,
         matched_source=None,
-        elapsed_seconds=monotonic_fn() - start,
+        elapsed_seconds=time.monotonic() - start,
         final_snapshots=tuple(last_snapshots),
     )

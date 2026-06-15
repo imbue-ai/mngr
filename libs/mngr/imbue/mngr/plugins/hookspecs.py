@@ -60,6 +60,28 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type | None
     """
 
 
+@hookspec
+def register_agent_aliases() -> Mapping[str, str] | None:
+    """Register alternate names (aliases) for agent types with mngr.
+
+    Plugins implement this hook to expose short, alternate names for the
+    agent types they register via ``register_agent_type``. For example, the
+    antigravity plugin can alias ``agy`` to ``antigravity`` so that
+    ``mngr create my-agent agy`` is equivalent to
+    ``mngr create my-agent antigravity``.
+
+    Return a mapping of ``alias_name -> canonical_agent_type_name``, or None.
+    An alias is a name-resolution entry, not a distinct agent type: it is never
+    registered into the agent class/config registries, but is resolved to its
+    canonical type before any lookup. It is therefore accepted anywhere the
+    canonical name is and shares the canonical type's class, config, and
+    disabled-plugin handling. The canonical target must be a type the same
+    plugin registers; aliases pointing at an unregistered target are skipped.
+    An alias whose name collides with an already-registered agent type or
+    another alias is skipped so plugins cannot shadow existing types.
+    """
+
+
 # --- Host lifecycle hooks ---
 
 

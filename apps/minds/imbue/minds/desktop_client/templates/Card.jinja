@@ -12,9 +12,9 @@
   Props:
     layout      "block" (default), "row", or "row-spread".
                   - block:      no flex; caller arranges children.
-                  - row:        flex items-center gap-3 (children flow left-to-right;
+                  - row:        flex items-center gap-1.5 (children flow left-to-right;
                                 a flex-1 child pushes following items to the right edge).
-                  - row-spread: flex items-center justify-between gap-3 (header/action layout).
+                  - row-spread: flex items-center justify-between gap-1.5 (header/action layout).
     padding     "default" (p-4) or "tight" (px-4 py-2.5).
     interactive Adds cursor-pointer + transition + hover:border-zinc-300 so the
                 surface reads as clickable. Typical with tag="a".
@@ -36,8 +36,8 @@
 #}
 {%- set _layout_cls = {
   "block": "",
-  "row": "flex items-center gap-3",
-  "row-spread": "flex items-center justify-between gap-3",
+  "row": "flex items-center gap-1.5",
+  "row-spread": "flex items-center justify-between gap-1.5",
 }[layout] -%}
 {%- set _padding_cls = {
   "default": "p-4",

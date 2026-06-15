@@ -5,8 +5,8 @@ Pipeline tests (``gather_usage_snapshots``, ``_RawEventsCollector``,
 ``cli_test.py`` through the planted-events fixtures. The tests here focus
 on the bits the wait subcommand depends on directly: ``derive_elapsed``
 arithmetic, ``window_render_dict`` / ``build_source_cel_context`` shape
-(which is the CEL surface), and the ``wait_for_usage`` polling loop with
-injected clock/poll/sleep.
+(which is the CEL surface), and the ``wait_for_usage`` polling loop (driven
+with an injected ``poll_fn`` and short real intervals).
 """
 
 from __future__ import annotations
@@ -214,26 +214,6 @@ def _make_snapshot(source: str, used: float, resets_at: int, window_seconds: int
     )
 
 
-class _FakeClock:
-    """Deterministic monotonic clock for tests -- advances only via ``sleep``.
-
-    Lets the wait loop's elapsed/timeout accounting see time pass without
-    actually sleeping: ``monotonic()`` reports the current pseudo-clock and
-    ``sleep(duration)`` advances it by ``duration``. So when the wait loop
-    sleeps ``interval_seconds`` between polls, the clock advances by that
-    amount and the timeout check sees progress.
-    """
-
-    def __init__(self) -> None:
-        self.now: float = 0.0
-
-    def monotonic(self) -> float:
-        return self.now
-
-    def sleep(self, duration: float) -> None:
-        self.now += duration
-
-
 def _compile_until(filters: Sequence[str]) -> list[object]:
     compiled, _ = compile_cel_filters(filters, exclude_filters=())
     return compiled
@@ -242,15 +222,12 @@ def _compile_until(filters: Sequence[str]) -> list[object]:
 def test_wait_for_usage_matches_on_first_poll_when_predicate_already_true() -> None:
     """Predicate true on tick 1 -> exit immediately with is_matched=True."""
     snapshots = [_make_snapshot("claude", used=10.0, resets_at=2000)]
-    clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
         timeout_seconds=None,
-        interval_seconds=30.0,
+        interval_seconds=0.001,
         now_fn=lambda: 1000,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
     )
     assert result.is_matched is True
     assert result.is_timed_out is False
@@ -268,15 +245,12 @@ def test_wait_for_usage_polls_until_predicate_flips_true() -> None:
         used = 80.0 if call_count[0] == 1 else 10.0
         return [_make_snapshot("claude", used=used, resets_at=2000)]
 
-    clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=poll_fn,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
         timeout_seconds=None,
-        interval_seconds=30.0,
+        interval_seconds=0.001,
         now_fn=lambda: 1000,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
     )
     assert result.is_matched is True
     assert call_count[0] == 2
@@ -285,15 +259,12 @@ def test_wait_for_usage_polls_until_predicate_flips_true() -> None:
 def test_wait_for_usage_times_out_when_predicate_never_matches() -> None:
     """Timeout: predicate stays false; loop exits with is_timed_out=True after timeout_seconds."""
     snapshots = [_make_snapshot("claude", used=80.0, resets_at=2000)]
-    clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        timeout_seconds=60.0,
-        interval_seconds=30.0,
+        timeout_seconds=0.02,
+        interval_seconds=0.001,
         now_fn=lambda: 1000,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
     )
     assert result.is_matched is False
     assert result.is_timed_out is True
@@ -304,15 +275,12 @@ def test_wait_for_usage_source_predicate_in_cel_excludes_non_matching_sources() 
     """Users scope to one source via CEL: ``source == "claude"``. An opencode
     snapshot that would otherwise satisfy the numeric predicate is ignored."""
     snapshots = [_make_snapshot("opencode", used=10.0, resets_at=2000)]
-    clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(['source == "claude" && five_hour.used_percentage < 50']),
-        timeout_seconds=60.0,
-        interval_seconds=30.0,
+        timeout_seconds=0.02,
+        interval_seconds=0.001,
         now_fn=lambda: 1000,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
     )
     assert result.is_matched is False
     assert result.is_timed_out is True
@@ -324,15 +292,12 @@ def test_wait_for_usage_multi_source_any_match_wins() -> None:
         _make_snapshot("opencode", used=80.0, resets_at=2000),
         _make_snapshot("claude", used=10.0, resets_at=2000),
     ]
-    clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
         timeout_seconds=None,
-        interval_seconds=30.0,
+        interval_seconds=0.001,
         now_fn=lambda: 1000,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
     )
     assert result.is_matched is True
     # claude is the matching one; opencode (80%) fails the predicate.
@@ -341,15 +306,12 @@ def test_wait_for_usage_multi_source_any_match_wins() -> None:
 
 def test_wait_for_usage_no_snapshots_keeps_polling_until_timeout() -> None:
     """No data yet -> not a match; loop times out rather than crashes."""
-    clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=lambda: [],
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
-        timeout_seconds=60.0,
-        interval_seconds=30.0,
+        timeout_seconds=0.02,
+        interval_seconds=0.001,
         now_fn=lambda: 1000,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
     )
     assert result.is_matched is False
     assert result.is_timed_out is True
@@ -367,15 +329,12 @@ def test_wait_for_usage_handles_poll_error_and_keeps_trying() -> None:
             raise MngrError("flaky host")
         return [_make_snapshot("claude", used=10.0, resets_at=2000)]
 
-    clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=poll_fn,
         until_filters=_compile_until(["five_hour.used_percentage < 50"]),
         timeout_seconds=None,
-        interval_seconds=30.0,
+        interval_seconds=0.001,
         now_fn=lambda: 1000,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
     )
     assert result.is_matched is True
     # First attempt raised, second succeeded.
@@ -390,15 +349,12 @@ def test_wait_for_usage_elapsed_percentage_predicate() -> None:
     used_percentage = 40 (< 50), so the predicate matches.
     """
     snapshots = [_make_snapshot("claude", used=40.0, resets_at=15400, window_seconds=18000)]
-    clock = _FakeClock()
     result = wait_for_usage(
         poll_fn=lambda: snapshots,
         until_filters=_compile_until(["five_hour.elapsed_percentage > 75.0 && five_hour.used_percentage < 50.0"]),
         timeout_seconds=None,
-        interval_seconds=30.0,
+        interval_seconds=0.001,
         now_fn=lambda: 14500,
-        monotonic_fn=clock.monotonic,
-        sleep_fn=clock.sleep,
     )
     assert result.is_matched is True
     assert result.matched_source == "claude"

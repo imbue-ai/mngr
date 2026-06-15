@@ -78,7 +78,7 @@ class UsageCliOptions(CommonCliOptions, AgentFilterCliOptions):
     'log more' with 'show more'.
     """
 
-    max_age: str | None
+    stale_after: str | None
     since: str | None
     detail: bool
     provider: tuple[str, ...]
@@ -391,11 +391,11 @@ class _UsageRenderModel(FrozenModel):
         return apis[0].last_event_at if apis else None
 
 
-def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _UsageRenderModel:
+def _build_render_model(snapshot: UsageSnapshot, stale_after: int, now: int) -> _UsageRenderModel:
     """Assemble the renderable view for a snapshot.
 
     Two staleness causes, tracked separately so the warning text matches:
-    - ``is_age_stale``: snapshot updated_at is older than max_age (no fresh
+    - ``is_age_stale``: snapshot updated_at is older than stale_after (no fresh
       event in a while).
     - ``has_past_reset``: any populated window's resets_at is in the past
       (the limit refreshed; cached used_percentage is from the prior window).
@@ -404,7 +404,7 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
     return _UsageRenderModel(
         snapshot=snapshot,
         now=now,
-        is_age_stale=(now - snapshot.updated_at) > max_age,
+        is_age_stale=(now - snapshot.updated_at) > stale_after,
         has_past_reset=any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values()),
     )
 
@@ -703,19 +703,15 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
 
 
 @click.group(name="usage", invoke_without_command=True)
-@click.option(
-    "--max-age",
+@optgroup.group("Display")
+@optgroup.option(
+    "--stale-after",
     default=None,
-    help="Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config.",
+    help="Warn when the snapshot file is older than this (e.g. '300', '5m', '2h'). Display warning "
+    "only -- it does not change which events are aggregated (use --since for that). Default: from "
+    "plugin config.",
 )
-@click.option(
-    "--since",
-    default=None,
-    help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
-    "last event is older are dropped from `sessions[]` and from the per-mode aggregates "
-    "(`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h).",
-)
-@click.option(
+@optgroup.option(
     "--detail",
     is_flag=True,
     default=False,
@@ -724,19 +720,26 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown "
     "for terseness; the per-mode cost lines and window lines are unchanged.",
 )
-@click.option(
+@add_agent_filter_options
+@optgroup.option(
+    "--provider",
+    multiple=True,
+    help="Show only agents from the given provider(s) (repeatable, e.g. --provider local)",
+)
+@optgroup.option(
+    "--since",
+    default=None,
+    help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
+    "last event is older are dropped from `sessions[]` and from the per-mode aggregates "
+    "(`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h).",
+)
+@optgroup.option(
     "--preserved/--no-preserved",
     default=True,
     show_default=True,
     help="Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). "
     "On by default so destroyed agents' spend still counts; pass --no-preserved to show only "
     "live agents. Preserved agents honor the same --provider/--project/--local/label filters.",
-)
-@add_agent_filter_options
-@optgroup.option(
-    "--provider",
-    multiple=True,
-    help="Show only agents from the given provider(s) (repeatable, e.g. --provider local)",
 )
 @add_common_options
 @click.pass_context
@@ -766,8 +769,10 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     )
     plugin_config = mngr_ctx.get_plugin_config("usage", UsagePluginConfig)
 
-    max_age_override = _parse_optional_duration(opts.max_age)
-    effective_max_age = max_age_override if max_age_override is not None else plugin_config.max_age_seconds
+    stale_after_override = _parse_optional_duration(opts.stale_after)
+    effective_stale_after = (
+        stale_after_override if stale_after_override is not None else plugin_config.stale_after_seconds
+    )
     since_override = _parse_optional_duration(opts.since)
     effective_since = since_override if since_override is not None else plugin_config.since_seconds
 
@@ -787,7 +792,7 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     # One render model per source (already collapsed in the aggregation pipeline),
     # sorted freshest-first. Tiebreak by source_name so the order is stable in tests.
     snapshots_with_models = sorted(
-        ((s, _build_render_model(s, effective_max_age, now)) for s in snapshots),
+        ((s, _build_render_model(s, effective_stale_after, now)) for s in snapshots),
         key=lambda sm: (sm[0].updated_at, sm[0].source_name),
         reverse=True,
     )
@@ -804,7 +809,7 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="usage",
     one_line_description="Show rolling-window usage / quota data from agent statusline events",
-    synopsis="mngr usage [OPTIONS] [COMMAND]",
+    synopsis="mngr usage [--stale-after DURATION] [--detail] [--since DURATION] [--no-preserved] [COMMAND]",
     description="""Reports rolling-window usage / quota data captured by an agent's
 statusline.
 
@@ -843,7 +848,7 @@ Per-source aggregation:
         ("Local agents only", "mngr usage --local"),
         ("Specific providers", "mngr usage --provider local --provider modal"),
         ("Aggregate cost across the last week", "mngr usage --since 7d"),
-        ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --max-age 60"),
+        ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --stale-after 60"),
         ("Per-session breakdown (human + JSON, mode-tagged)", "mngr usage --detail"),
         ("Machine-readable output", "mngr usage --format json"),
         (
