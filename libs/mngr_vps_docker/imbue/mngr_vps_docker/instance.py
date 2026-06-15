@@ -1147,8 +1147,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         self._create_shutdown_script(host)
         with log_span("Starting activity watcher"):
-            start_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
-            exec_in_container(outer, container_name, start_watcher_cmd)
+            self._start_activity_watcher(outer, container_name)
 
         host_record = VpsDockerHostRecord(
             certified_host_data=host_data,
@@ -1293,6 +1292,15 @@ class VpsDockerProvider(BaseProviderInstance):
     # Core Lifecycle: start_host
     # =========================================================================
 
+    def _start_activity_watcher(self, outer: OuterHostInterface, container_name: str) -> None:
+        """Launch the in-container activity watcher (the idle/auto-shutdown driver).
+
+        The watcher is a backgrounded process inside the agent container (not part
+        of its entrypoint), so it does not survive a container stop/start. It is
+        started here at create time and re-started by ``start_host`` on resume.
+        """
+        exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
+
     def start_host(
         self,
         host: HostInterface | HostId,
@@ -1314,13 +1322,37 @@ class VpsDockerProvider(BaseProviderInstance):
             with log_span("Restarting sshd in container"):
                 start_container_sshd(outer, host_record.config.container_name)
 
-        # Wait for sshd in container
-        with log_span("Waiting for container SSH"):
-            self._wait_for_container_sshd(host_record.vps_ip)
+            with log_span("Waiting for container SSH"):
+                self._wait_for_container_sshd(host_record.vps_ip)
 
-        host_obj = self._create_host_object(
-            host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip
-        )
+            host_obj = self._create_host_object(
+                host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip
+            )
+
+            # A resume is itself activity: refresh the BOOT activity file (whose
+            # mtime is what the idle watcher reads) so the watcher relaunched just
+            # below starts a fresh idle window. Without this, a resumed-but-idle
+            # host keeps the pre-stop activity mtimes and the watcher re-stops it
+            # within one poll -- so e.g. `mngr start` on an idle host would race a
+            # near-immediate auto-stop. Must happen before the watcher relaunch.
+            host_obj.record_activity(ActivitySource.BOOT)
+
+            # The in-container activity watcher is a backgrounded process that does
+            # not survive the container restart, so relaunch it -- else auto-stop-
+            # on-idle would silently stop working after the first resume (for every
+            # vps_docker provider, not just AWS). Best-effort: a resumed host that
+            # can't auto-stop is better than a failed resume.
+            with log_span("Relaunching activity watcher"):
+                try:
+                    self._start_activity_watcher(outer, host_record.config.container_name)
+                except MngrError as e:
+                    logger.warning(
+                        "Failed to relaunch the activity watcher on resume for host {} ({}); "
+                        "this host will not auto-stop on idle until it is recreated",
+                        host_id,
+                        e,
+                    )
+
         logger.info("Host {} started", host_id)
         return host_obj
 

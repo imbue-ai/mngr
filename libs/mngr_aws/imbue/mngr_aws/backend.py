@@ -39,14 +39,12 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
-from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
-from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
@@ -425,37 +423,10 @@ class AwsProvider(VpsDockerProvider):
         self._evict_cached_host(host_id)
         self._host_record_cache[host_id] = updated_record
         started = super().start_host(host_id, snapshot_id)
-        # The in-container idle watcher does not survive a container restart, so
-        # re-launch it on resume; otherwise auto-stop-on-idle would work only
-        # until the first resume.
-        self._relaunch_idle_watcher(host_id, new_ip)
+        # The base ``start_host`` (called above) relaunches the in-container
+        # activity watcher and refreshes BOOT activity on resume, so auto-stop-on-
+        # idle keeps working across resumes without an AWS-specific step here.
         return started
-
-    def _relaunch_idle_watcher(self, host_id: HostId, vps_ip: str) -> None:
-        """Re-launch the in-container activity watcher after a resume (best-effort).
-
-        The watcher is a backgrounded process started at create time; a stopped
-        instance / restarted container loses it. Re-launching keeps auto-stop
-        working across resumes. Best-effort: a failure just means this resumed
-        agent won't auto-stop until the next create, so log and continue.
-        """
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            return
-        try:
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                exec_in_container(
-                    outer,
-                    record.config.container_name,
-                    build_start_activity_watcher_command(str(self.host_dir)),
-                )
-        except MngrError as e:
-            logger.warning(
-                "Failed to re-launch the idle watcher on resume for host {} ({}); "
-                "this agent won't auto-stop on idle until recreated",
-                host_id,
-                e,
-            )
 
     def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
         """Locate this host's EC2 instance by its ``mngr-host-id`` tag (works while stopped).
