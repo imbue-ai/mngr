@@ -86,6 +86,18 @@ def test_pool_create_requires_region() -> None:
     assert "Missing option" in result.output and "--region" in result.output
 
 
+def _insert_columns() -> list[str]:
+    """Parse the exact column tokens out of _INSERT_POOL_HOST_SQL's INTO clause.
+
+    Returns the standalone column names (e.g. ``id``, ``ssh_port``) so callers
+    can do *exact* membership checks rather than raw substring scans -- a bare
+    ``"id" in sql`` would spuriously match ``agent_id``/``host_id`` and a bare
+    ``"ssh_port" in sql`` would match ``container_ssh_port``.
+    """
+    columns_part = _INSERT_POOL_HOST_SQL.split("(", 1)[1].split(")", 1)[0]
+    return [c.strip() for c in columns_part.split(",")]
+
+
 def test_pool_hosts_insert_has_required_columns() -> None:
     """The INSERT must include every pool_hosts NOT-NULL column the schema requires.
 
@@ -95,7 +107,11 @@ def test_pool_hosts_insert_has_required_columns() -> None:
     the final DB write.
 
     Asserting the literal column list keeps this test cheap (no fake DB)
-    while still catching any future drop of a required column.
+    while still catching any future drop of a required column. We compare
+    against the *parsed* column tokens (not raw substrings) so dropping a
+    column whose name is a substring of another -- e.g. ``id`` (inside
+    ``agent_id``/``host_id``) or ``ssh_port`` (inside ``container_ssh_port``)
+    -- actually fails the test.
     """
     required_columns = (
         "id",
@@ -111,10 +127,11 @@ def test_pool_hosts_insert_has_required_columns() -> None:
         "attributes",
         "created_at",
     )
+    actual_columns = set(_insert_columns())
     for column in required_columns:
-        assert column in _INSERT_POOL_HOST_SQL, (
+        assert column in actual_columns, (
             f"Pool host INSERT is missing required column {column!r}; this is the same drift "
-            f"class as the host_name regression. SQL: {_INSERT_POOL_HOST_SQL!r}"
+            f"class as the host_name regression. Columns present: {sorted(actual_columns)}"
         )
 
 
@@ -126,8 +143,7 @@ def _insert_column_to_value(values: tuple[object, ...]) -> dict[str, object]:
     with ``values`` -- so a test can assert "this column got that value"
     robustly even if the column order changes.
     """
-    columns_part = _INSERT_POOL_HOST_SQL.split("(", 1)[1].split(")", 1)[0]
-    columns = [c.strip() for c in columns_part.split(",")]
+    columns = _insert_columns()
     values_part = _INSERT_POOL_HOST_SQL.split("VALUES (", 1)[1].rsplit(")", 1)[0]
     value_tokens = [t.strip() for t in values_part.split(",")]
     placeholder_columns = [col for col, tok in zip(columns, value_tokens, strict=False) if "%s" in tok]
