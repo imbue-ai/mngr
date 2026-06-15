@@ -1,3 +1,5 @@
+Fixed the desktop client showing the "create or log in" screen on every relaunch even when already logged in. The local `minds_session` cookie was set without a `Max-Age`, so it was a session cookie that electron discarded on quit; on relaunch there was no cookie and the UI gate treated the user as logged out (the signature and the imbue_cloud account session were still valid, which is why clicking through revealed an existing login). The cookie is now persisted for the same 30-day window its signature is valid for.
+
 imbue_cloud workspace creation now sends the form's repository to the lease, so the fast path can only adopt a pre-baked host that genuinely matches the requested repo (previously the repo was dropped and only an operator-chosen branch label was matched, so a request for one repo could silently adopt a host running another).
 
 - The desktop client passes the create form's repository through as `-b repo_url=<repository>` (a remote URL in production, a local clone path in dev); the imbue_cloud provider canonicalizes it (resolving a local path to its `origin` remote). The client does no git logic itself.
