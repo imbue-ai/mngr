@@ -10,27 +10,35 @@ guarantees the opposite -- every spawned process is killed on group
 exit -- so it is structurally the wrong tool here. Same justification as
 ``apps/minds/imbue/minds/desktop_client/latchkey/_spawn.py``.
 
-Status is fully derived from disk + the live resolver; there is no
-state.json. For each in-flight destroy ``<paths.data_dir>/destroying/<agent_id>/``
-contains exactly two files: ``pid`` (single-line text) and
-``output.log`` (combined stdout+stderr from the bash wrapper).
-:py:class:`DestroyingStatus` is computed from ``pid`` liveness +
-whether ``agent_id`` still appears in
-``MngrCliBackendResolver.list_known_workspace_ids()``:
+Status is derived from disk; there is no state.json. For each in-flight
+destroy ``<paths.data_dir>/destroying/<agent_id>/`` holds:
 
-  - dir present + pid alive                  -> RUNNING
-  - dir present + pid dead + agent gone      -> DONE   (caller deletes the dir)
-  - dir present + pid dead + agent still up  -> FAILED (kept for inspection)
+  - ``pid`` (single-line int): the detached bash wrapper's PID.
+  - ``process_start`` (single-line float): the wrapper's psutil
+    ``create_time()``, so a recycled PID is not mistaken for a live
+    wrapper.
+  - ``output.log``: combined stdout+stderr from the wrapper.
+  - ``result`` (single-line int): the wrapper's exit code, written
+    atomically the instant ``mngr destroy`` finishes. Its presence is
+    the authoritative completion signal.
 
-The ~1-second window between the destroy subprocess exiting and the
-``mngr observe`` discovery tail picking up the ``AgentDestroyed`` event
-can briefly flip status to FAILED for a successful destroy. The detail
-page poll picks up the corrected status on the next tick. Acceptable
-jitter; documented in ``specs/detached-destroy-flow/spec.md``.
+:py:class:`DestroyingStatus` is computed as:
+
+  - ``result`` present, exit code 0        -> DONE   (caller deletes the dir)
+  - ``result`` present, exit code non-zero -> FAILED (kept for inspection)
+  - ``result`` absent, pid alive           -> RUNNING
+  - ``result`` absent, pid dead            -> FAILED (wrapper died mid-destroy)
+
+Completion is read from the wrapper's own recorded exit code rather than
+from the lagging ``mngr observe`` discovery cache, so the status is
+correct the instant the wrapper exits and survives a minds restart: a
+destroy that succeeded reads DONE and one that genuinely failed reads
+FAILED, with no spurious FAILED flicker while discovery catches up.
 """
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from datetime import datetime
@@ -39,6 +47,7 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 
+import psutil
 from loguru import logger
 from pydantic import Field
 
@@ -51,13 +60,21 @@ from imbue.mngr.primitives import AgentId
 _DESTROYING_DIR_NAME: Final[str] = "destroying"
 _PID_FILE_NAME: Final[str] = "pid"
 _LOG_FILE_NAME: Final[str] = "output.log"
+_RESULT_FILE_NAME: Final[str] = "result"
+_RESULT_TMP_SUFFIX: Final[str] = ".partial"
+_PROCESS_START_FILE_NAME: Final[str] = "process_start"
+
+# Two different processes cannot occupy one PID within a second of each
+# other (the slot stays held until the first is reaped), so a create_time
+# gap this large means the PID was recycled.
+_CREATE_TIME_TOLERANCE_SECONDS: Final[float] = 1.0
 
 
 class DestroyingStatus(UpperCaseStrEnum):
     """Status of a detached destroy subprocess.
 
-    Values are derived from disk + resolver state -- callers don't write
-    them anywhere; :py:func:`read_destroying` computes them per request.
+    Values are derived from disk state -- callers don't write them
+    anywhere; :py:func:`read_destroying` computes them per request.
     """
 
     RUNNING = auto()
@@ -69,16 +86,17 @@ class DestroyingRecord(FrozenModel):
     """Snapshot of a detached destroy's state.
 
     All fields are derived from disk inspection of
-    ``<paths.data_dir>/destroying/<agent_id>/`` plus the caller's
-    ``agent_in_resolver`` answer; there is no on-disk state.json.
+    ``<paths.data_dir>/destroying/<agent_id>/``; there is no on-disk
+    state.json.
     """
 
     agent_id: AgentId = Field(description="Agent that is being / was being destroyed")
     pid: int = Field(description="PID of the detached bash wrapper that runs `mngr destroy`")
     started_at: datetime = Field(description="Wall-clock time the destroy was started (directory mtime)")
     pid_alive: bool = Field(description="Whether the wrapper PID is still live")
-    agent_in_resolver: bool = Field(
-        description="Whether the agent is still listed in MngrCliBackendResolver.list_known_workspace_ids()"
+    exit_code: int | None = Field(
+        default=None,
+        description="Exit code the wrapper recorded on completion, or None while it is still running",
     )
     status: DestroyingStatus = Field(description="Derived status; see DestroyingStatus docstring")
     log_path: Path = Field(description="Absolute path to output.log for the detail page tail")
@@ -96,41 +114,85 @@ def _log_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
     return _destroying_dir(paths, agent_id) / _LOG_FILE_NAME
 
 
-def _is_pid_alive(pid: int) -> bool:
-    """Best-effort check whether ``pid`` is still running.
+def _result_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+    return _destroying_dir(paths, agent_id) / _RESULT_FILE_NAME
 
-    Three cases to handle:
 
-    - Pid was never our child (we're a fresh minds backend after the
-      original Popen-parent died). ``os.kill(pid, 0)`` is the right
-      check: ``ProcessLookupError`` => dead, ok => alive.
-    - Pid IS our child and is still running. Same -- ``os.kill(pid, 0)``
-      succeeds, and we want to report alive.
-    - Pid IS our child and exited but hasn't been reaped (zombie).
-      ``os.kill(pid, 0)`` succeeds because the pid still occupies the
-      process table, but the destroy is done. We need
-      ``os.waitpid(pid, WNOHANG)`` to reap it; once reaped, the next
-      ``os.kill(pid, 0)`` will correctly raise ``ProcessLookupError``.
+def _process_start_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+    return _destroying_dir(paths, agent_id) / _PROCESS_START_FILE_NAME
 
-    PermissionError is reported as alive (kept-alive default for the
-    not-our-pid edge case where someone else's pid happens to match).
+
+def _process_create_time(pid: int) -> float | None:
+    """Return the process creation time for ``pid``, or None if it is already gone."""
+    try:
+        return psutil.Process(pid).create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+
+
+def _is_pid_alive(pid: int, expected_create_time: float | None = None) -> bool:
+    """Whether ``pid`` still names the destroy wrapper we spawned.
+
+    ``expected_create_time`` (the wrapper's ``create_time()`` recorded at
+    spawn) guards against PID reuse: if the OS recycled the PID onto an
+    unrelated process while minds was closed, the live process's
+    create_time will not match and we report the wrapper as gone rather
+    than mistaking the stranger for a still-running destroy.
+
+    Reaps our own finished child first so it stops occupying the table;
+    ``ECHILD`` ("not our child") fires after a minds restart re-parents
+    the wrapper to init, which is fine.
     """
     try:
-        # Reap if we're the parent and the child has finished. ECHILD
-        # ("not our child") fires on the post-restart case; that's fine,
-        # the os.kill below handles the actual liveness check there.
         os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
         pass
     except OSError as e:
-        logger.trace("waitpid({}) raised {}; falling through to kill(0)", pid, e)
+        logger.trace("waitpid({}) raised {}; falling through to psutil check", pid, e)
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        proc = psutil.Process(pid)
+        create_time = proc.create_time()
+    except psutil.NoSuchProcess:
         return False
-    except PermissionError:
+    except psutil.AccessDenied:
         return True
-    return True
+    if expected_create_time is not None and abs(create_time - expected_create_time) > _CREATE_TIME_TOLERANCE_SECONDS:
+        return False
+    try:
+        return proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.AccessDenied:
+        return True
+
+
+def _read_result(paths: WorkspacePaths, agent_id: AgentId) -> int | None:
+    """Read the wrapper's recorded exit code, or None if it has not finished."""
+    try:
+        text = _result_file(paths, agent_id).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        logger.warning("Unparseable result file for destroying agent {}: {!r}", agent_id, text)
+        return None
+
+
+def _read_process_start(paths: WorkspacePaths, agent_id: AgentId) -> float | None:
+    """Read the wrapper's recorded create_time, or None if not recorded."""
+    try:
+        text = _process_start_file(paths, agent_id).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def lookup_host_id(agent_id: AgentId, env: dict[str, str] | None = None, timeout_seconds: float = 10.0) -> str | None:
@@ -188,13 +250,25 @@ def lookup_host_id(agent_id: AgentId, env: dict[str, str] | None = None, timeout
     return host_id if isinstance(host_id, str) and host_id else None
 
 
-def _build_destroy_command(agent_id: AgentId, host_id: str | None, mngr_binary: str = MNGR_BINARY) -> list[str]:
+def _build_destroy_command(
+    agent_id: AgentId,
+    host_id: str | None,
+    result_path: Path,
+    mngr_binary: str = MNGR_BINARY,
+) -> list[str]:
     """Build the bash command run by the detached subprocess.
 
     With a host_id, fans out to every agent on the same host (matches the
     pre-detached behavior in ``AgentCreator._destroy_all_agents_on_host``).
     Without a host_id (lookup failed before spawn), falls back to
     single-agent destroy.
+
+    The wrapper records ``mngr destroy``'s exit code to ``result_path``
+    atomically (write-then-rename) once it finishes; this is the
+    authoritative completion signal :py:func:`read_destroying` derives
+    status from. ``set -o pipefail`` ensures a failed ``mngr list`` in the
+    fanout pipe surfaces as a non-zero result rather than being masked by
+    the trailing ``mngr destroy`` exiting 0 on empty input.
 
     Lease release is intentionally NOT chained here. For imbue_cloud
     agents the lease lifecycle is owned by
@@ -206,9 +280,25 @@ def _build_destroy_command(agent_id: AgentId, host_id: str | None, mngr_binary: 
     if host_id is not None:
         # ``mngr list ... --ids`` writes one id per line; ``mngr destroy -f -`` reads
         # ids from stdin. The pipe handles host-mates fanout in one shot.
-        shell_command = f"{mngr_binary} list --include 'host.id == \"{host_id}\"' --ids | {mngr_binary} destroy -f -"
+        destroy = f"{mngr_binary} list --include 'host.id == \"{host_id}\"' --ids | {mngr_binary} destroy -f -"
     else:
-        shell_command = f"{mngr_binary} destroy {agent_id} -f"
+        destroy = f"{mngr_binary} destroy {agent_id} -f"
+    final = shlex.quote(str(result_path))
+    partial = shlex.quote(str(result_path) + _RESULT_TMP_SUFFIX)
+    shell_command = (
+        "set -o pipefail\n"
+        + destroy
+        + "\n"
+        + "rc=$?\n"
+        + "printf '%s\\n' \"$rc\" > "
+        + partial
+        + " && mv "
+        + partial
+        + " "
+        + final
+        + "\n"
+        + "exit $rc\n"
+    )
     return ["bash", "-c", shell_command]
 
 
@@ -226,13 +316,14 @@ def start_destroy(
 
     The subprocess is detached (``start_new_session=True``), so it
     survives a minds-backend exit. stdout+stderr go to a single
-    ``output.log`` file; the wrapper's PID is written to ``pid``.
+    ``output.log`` file; the wrapper's PID is written to ``pid`` and its
+    create_time to ``process_start``.
 
     Idempotent: if a destroy is already running for this agent
     (``pid`` exists and is alive), we return the existing record
     without spawning a second process.
     """
-    existing = read_destroying(agent_id, paths, agent_in_resolver=True)
+    existing = read_destroying(agent_id, paths)
     if existing is not None and existing.status == DestroyingStatus.RUNNING:
         logger.info("Destroy for {} already running (pid={}); reusing", agent_id, existing.pid)
         return existing
@@ -241,11 +332,18 @@ def start_destroy(
     dir_path.mkdir(parents=True, exist_ok=True)
     log_path = _log_file(paths, agent_id)
     pid_path = _pid_file(paths, agent_id)
+    result_path = _result_file(paths, agent_id)
+    process_start_path = _process_start_file(paths, agent_id)
 
-    # Truncate the log file so a Retry doesn't show the previous run's output.
+    # Clear the prior run's artifacts so a Retry starts clean: a stale
+    # ``result`` would read as an immediate terminal status, a stale
+    # ``process_start`` would point at the previous wrapper, and the log
+    # would show the old attempt's output.
     log_path.write_bytes(b"")
+    result_path.unlink(missing_ok=True)
+    process_start_path.unlink(missing_ok=True)
 
-    command = _build_destroy_command(agent_id, host_id)
+    command = _build_destroy_command(agent_id, host_id, result_path)
     log_handle = log_path.open("ab")
     try:
         process_env = dict(os.environ) if env is None else dict(env)
@@ -265,6 +363,9 @@ def start_destroy(
         log_handle.close()
 
     pid_path.write_text(f"{process.pid}\n")
+    create_time = _process_create_time(process.pid)
+    if create_time is not None:
+        process_start_path.write_text(f"{create_time!r}\n")
     started_at = datetime.now(timezone.utc)
     logger.info(
         "Started detached destroy for agent {} (pid={}, host_id={}, log={})",
@@ -278,7 +379,7 @@ def start_destroy(
         pid=process.pid,
         started_at=started_at,
         pid_alive=True,
-        agent_in_resolver=True,
+        exit_code=None,
         status=DestroyingStatus.RUNNING,
         log_path=log_path,
     )
@@ -287,19 +388,18 @@ def start_destroy(
 def read_destroying(
     agent_id: AgentId,
     paths: WorkspacePaths,
-    agent_in_resolver: bool,
 ) -> DestroyingRecord | None:
     """Read the on-disk record for a single agent's destroy, or None if no dir.
 
-    ``agent_in_resolver`` is supplied by the caller (typically
-    ``agent_id in MngrCliBackendResolver.list_known_workspace_ids()``)
-    rather than fetched here so this module stays free of the resolver's
-    threading + locking shape. The status table:
+    Status is derived from the wrapper's recorded ``result`` (exit code)
+    first, falling back to pid liveness only while no result has been
+    recorded yet:
 
-      - dir absent                                            -> None
-      - dir present, pid alive                                -> RUNNING
-      - dir present, pid dead, agent_in_resolver=False        -> DONE
-      - dir present, pid dead, agent_in_resolver=True         -> FAILED
+      - dir absent                            -> None
+      - result present, exit code 0           -> DONE
+      - result present, exit code non-zero    -> FAILED
+      - result absent, pid alive              -> RUNNING
+      - result absent, pid dead               -> FAILED
 
     Returns ``None`` for the absent case; otherwise a populated record.
     """
@@ -312,35 +412,31 @@ def read_destroying(
     except (ValueError, OSError) as e:
         logger.warning("Could not parse pid file {} for destroying agent {}: {}", pid_path, agent_id, e)
         return None
-    pid_alive = _is_pid_alive(pid)
-    if pid_alive:
+    exit_code = _read_result(paths, agent_id)
+    pid_alive = _is_pid_alive(pid, _read_process_start(paths, agent_id))
+    if exit_code is not None:
+        status = DestroyingStatus.DONE if exit_code == 0 else DestroyingStatus.FAILED
+    elif pid_alive:
         status = DestroyingStatus.RUNNING
-    elif agent_in_resolver:
-        status = DestroyingStatus.FAILED
     else:
-        status = DestroyingStatus.DONE
+        status = DestroyingStatus.FAILED
     started_at = datetime.fromtimestamp(dir_path.stat().st_mtime, tz=timezone.utc)
     return DestroyingRecord(
         agent_id=agent_id,
         pid=pid,
         started_at=started_at,
         pid_alive=pid_alive,
-        agent_in_resolver=agent_in_resolver,
+        exit_code=exit_code,
         status=status,
         log_path=_log_file(paths, agent_id),
     )
 
 
-def list_destroying(
-    paths: WorkspacePaths,
-    agent_ids_in_resolver: frozenset[AgentId],
-) -> dict[AgentId, DestroyingRecord]:
+def list_destroying(paths: WorkspacePaths) -> dict[AgentId, DestroyingRecord]:
     """Walk ``<paths.data_dir>/destroying/`` and return a record per agent_id.
 
-    Used by the landing-page renderer. ``agent_ids_in_resolver`` is the
-    snapshot of ``MngrCliBackendResolver.list_known_workspace_ids()`` at
-    render time so the same set is shared across every record's status
-    derivation.
+    Used by the landing-page renderer. Status no longer depends on the
+    resolver snapshot -- each record's status comes from disk alone.
     """
     root = paths.data_dir / _DESTROYING_DIR_NAME
     if not root.is_dir():
@@ -354,7 +450,7 @@ def list_destroying(
         except ValueError:
             logger.warning("Skipping destroying entry with non-AgentId name: {}", entry.name)
             continue
-        record = read_destroying(agent_id, paths, agent_in_resolver=agent_id in agent_ids_in_resolver)
+        record = read_destroying(agent_id, paths)
         if record is not None:
             records[agent_id] = record
     return records

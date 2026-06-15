@@ -964,12 +964,15 @@ def _resolve_destroying_for_landing(
     paths: WorkspacePaths | None,
     all_agent_ids: tuple[AgentId, ...],
 ) -> dict[str, str]:
-    """Walk ``<paths.data_dir>/destroying/``, delete DONE records, return marker map.
+    """Walk ``<paths.data_dir>/destroying/``, finalize DONE records, return marker map.
 
-    Returns ``{agent_id_str: "running" | "failed"}`` for any in-flight or
-    failed destroy whose agent_id is currently known to the resolver. DONE
-    records (pid dead AND agent missing from the resolver) are deleted on
-    the spot so the row vanishes naturally on the next refresh.
+    Returns ``{agent_id_str: "running" | "failed"}``. A successful destroy
+    (DONE) keeps its "Destroying…" marker until discovery actually drops
+    the agent, so the row never flickers back to a normal clickable state
+    during teardown; once the agent is gone from the resolver the dir is
+    deleted and the row vanishes naturally. ``all_agent_ids`` is only used
+    for this finalize timing -- it never decides DONE vs FAILED, which
+    comes purely from the destroy's recorded exit code.
 
     Returns an empty dict (and does no work) when ``paths`` is None --
     that path is exercised by tests that build a minimal app without
@@ -978,19 +981,17 @@ def _resolve_destroying_for_landing(
     if paths is None:
         return {}
     in_resolver = frozenset(all_agent_ids)
-    records = list_destroying(paths, in_resolver)
+    records = list_destroying(paths)
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
-            delete_destroying(agent_id, paths)
+            if agent_id in in_resolver:
+                marker[str(agent_id)] = "running"
+            else:
+                delete_destroying(agent_id, paths)
             continue
         marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
     return marker
-
-
-def _agent_in_resolver(request: Request, agent_id: AgentId) -> bool:
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    return agent_id in backend_resolver.list_known_workspace_ids()
 
 
 async def _handle_destroy_agent_api(
@@ -1028,7 +1029,7 @@ async def _handle_destroy_agent_api(
             session_store.disassociate_workspace(str(account.user_id), agent_id)
 
     # Idempotent: short-circuit if a destroy is already running.
-    existing = read_destroying(parsed_id, paths, agent_in_resolver=_agent_in_resolver(request, parsed_id))
+    existing = read_destroying(parsed_id, paths)
     if existing is not None and existing.status == DestroyingStatus.RUNNING:
         return Response(
             status_code=200,
@@ -1058,7 +1059,7 @@ def _handle_destroying_status_api(
     if paths is None:
         return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     parsed_id = AgentId(agent_id)
-    record = read_destroying(parsed_id, paths, agent_in_resolver=_agent_in_resolver(request, parsed_id))
+    record = read_destroying(parsed_id, paths)
     if record is None:
         return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     return Response(
@@ -1067,7 +1068,7 @@ def _handle_destroying_status_api(
                 "agent_id": agent_id,
                 "pid": record.pid,
                 "pid_alive": record.pid_alive,
-                "agent_in_resolver": record.agent_in_resolver,
+                "exit_code": record.exit_code,
                 "status": str(record.status).lower(),
             }
         ),
@@ -1137,8 +1138,7 @@ def _handle_destroying_page(
     if paths is None:
         return Response(status_code=404, content="No record")
     parsed_id = AgentId(agent_id)
-    in_resolver = parsed_id in backend_resolver.list_known_workspace_ids()
-    record = read_destroying(parsed_id, paths, agent_in_resolver=in_resolver)
+    record = read_destroying(parsed_id, paths)
     if record is None:
         return Response(status_code=404, content="No record")
     workspace_name = backend_resolver.get_workspace_name(parsed_id)
