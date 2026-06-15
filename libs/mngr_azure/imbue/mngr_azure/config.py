@@ -37,7 +37,7 @@ DEFAULT_IMAGE_VERSION: Final[str] = "latest"
 # Retry a few times -- spaced by a short sleep so the (concurrent) writer can
 # finish -- before giving up. The window is sub-second, so this stays small.
 _AZ_PROFILE_READ_ATTEMPTS: Final[int] = 3
-_AZ_PROFILE_READ_RETRY_SECONDS: Final[float] = 0.05
+_AZ_PROFILE_READ_RETRY_SECONDS: Final[float] = 0.1
 
 
 def read_az_cli_default_subscription() -> str | None:
