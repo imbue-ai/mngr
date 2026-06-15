@@ -1313,11 +1313,11 @@ def gather_usage_snapshots(
     mngr_ctx: MngrContext,
     *,
     now: int,
-    include_filters: tuple[str, ...] = (),
-    exclude_filters: tuple[str, ...] = (),
-    provider_names: tuple[str, ...] | None = None,
-    since_seconds: int = 86400,
-    include_preserved: bool = True,
+    include_filters: tuple[str, ...],
+    exclude_filters: tuple[str, ...],
+    provider_names: tuple[str, ...] | None,
+    since_seconds: int,
+    include_preserved: bool,
 ) -> list[UsageSnapshot]:
     """Enumerate matching agents, collect raw events, aggregate per source.
 
@@ -1332,7 +1332,7 @@ def gather_usage_snapshots(
     kept regardless of session recency, since rate limits track the
     underlying account quota's current state.
 
-    When ``include_preserved`` is True (the default), usage events preserved
+    When ``include_preserved`` is True, usage events preserved
     from destroyed agents (under ``<local_host_dir>/preserved/``) are folded in
     too, so destroyed agents' spend still counts. They are filtered by the same
     provider / CEL predicates as live agents via their preserved data.json.

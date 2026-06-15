@@ -245,7 +245,15 @@ def test_gather_usage_snapshots_includes_preserved_by_default(temp_mngr_ctx: Mng
     agent_id = AgentId.generate()
     _plant_preserved_agent(temp_mngr_ctx, agent_id, "a1", events=[_usage_event("s1")])
 
-    snapshots = gather_usage_snapshots(temp_mngr_ctx, now=2_000_000_000)
+    snapshots = gather_usage_snapshots(
+        temp_mngr_ctx,
+        now=2_000_000_000,
+        include_filters=(),
+        exclude_filters=(),
+        provider_names=None,
+        since_seconds=86_400,
+        include_preserved=True,
+    )
     assert [s.source_name for s in snapshots] == ["claude"]
 
 
@@ -253,5 +261,13 @@ def test_gather_usage_snapshots_excludes_preserved_when_disabled(temp_mngr_ctx: 
     agent_id = AgentId.generate()
     _plant_preserved_agent(temp_mngr_ctx, agent_id, "a1", events=[_usage_event("s1")])
 
-    snapshots = gather_usage_snapshots(temp_mngr_ctx, now=2_000_000_000, include_preserved=False)
+    snapshots = gather_usage_snapshots(
+        temp_mngr_ctx,
+        now=2_000_000_000,
+        include_filters=(),
+        exclude_filters=(),
+        provider_names=None,
+        since_seconds=86_400,
+        include_preserved=False,
+    )
     assert snapshots == []
