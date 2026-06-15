@@ -23,6 +23,7 @@ from urwid.widget.wimp import SelectableIcon
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
+from imbue.mngr.errors import MismatchedPreselectionError
 
 
 class _PickerState(MutableModel):
@@ -173,7 +174,7 @@ def run_multi_select_picker(
         return None
 
     if preselected is not None and len(preselected) != len(options):
-        raise ValueError("preselected must be the same length as options")
+        raise MismatchedPreselectionError("preselected must be the same length as options")
     if preselected is None:
         preselected = [False] * len(options)
 

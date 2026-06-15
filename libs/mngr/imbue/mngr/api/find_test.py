@@ -9,12 +9,12 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _filter_all_agents
-from imbue.mngr.api.find import _filter_one_agent
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import _post_filter_matches_by_addresses
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import filter_all_hosts
+from imbue.mngr.api.find import filter_one_agent
 from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import get_unique_host_from_list_by_name
@@ -202,7 +202,7 @@ def test_filter_one_host_raises_when_multiple_hosts_with_same_name() -> None:
         )
 
 
-def test__filter_one_agent_by_id() -> None:
+def test_filter_one_agent_by_id() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     host_ref = DiscoveredHost(
@@ -217,7 +217,7 @@ def test__filter_one_agent_by_id() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = _filter_one_agent(
+    result = filter_one_agent(
         agent=agent_id,
         resolved_host=None,
         agents_by_host={host_ref: [agent_ref]},
@@ -226,7 +226,7 @@ def test__filter_one_agent_by_id() -> None:
     assert result == (host_ref, agent_ref)
 
 
-def test__filter_one_agent_by_name() -> None:
+def test_filter_one_agent_by_name() -> None:
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     host_ref = DiscoveredHost(
@@ -241,7 +241,7 @@ def test__filter_one_agent_by_name() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = _filter_one_agent(
+    result = filter_one_agent(
         agent=AgentName("test-agent"),
         resolved_host=None,
         agents_by_host={host_ref: [agent_ref]},
@@ -250,7 +250,7 @@ def test__filter_one_agent_by_name() -> None:
     assert result == (host_ref, agent_ref)
 
 
-def test__filter_one_agent_with_resolved_host_filters_by_host() -> None:
+def test_filter_one_agent_with_resolved_host_filters_by_host() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
     agent_id1 = AgentId.generate()
@@ -280,7 +280,7 @@ def test__filter_one_agent_with_resolved_host_filters_by_host() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    result = _filter_one_agent(
+    result = filter_one_agent(
         agent=AgentName("test-agent"),
         resolved_host=host_ref1,
         agents_by_host={
@@ -292,30 +292,30 @@ def test__filter_one_agent_with_resolved_host_filters_by_host() -> None:
     assert result == (host_ref1, agent_ref1)
 
 
-def test__filter_one_agent_raises_when_not_found() -> None:
+def test_filter_one_agent_raises_when_not_found() -> None:
     with pytest.raises(UserInputError, match="Could not find agent with ID or name: nonexistent"):
-        _filter_one_agent(
+        filter_one_agent(
             agent=AgentName("nonexistent"),
             resolved_host=None,
             agents_by_host={},
         )
 
 
-def test__filter_one_agent_raises_agent_not_found_for_unknown_id() -> None:
+def test_filter_one_agent_raises_agent_not_found_for_unknown_id() -> None:
     """An unknown AgentId raises AgentNotFoundError (not UserInputError).
 
     The distinction lets callers detect "the specific agent you named no
     longer exists" separately from "your search term didn't match anything".
     """
     with pytest.raises(AgentNotFoundError):
-        _filter_one_agent(
+        filter_one_agent(
             agent=AgentId.generate(),
             resolved_host=None,
             agents_by_host={},
         )
 
 
-def test__filter_one_agent_raises_when_multiple_agents_match() -> None:
+def test_filter_one_agent_raises_when_multiple_agents_match() -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
     agent_id1 = AgentId.generate()
@@ -346,7 +346,7 @@ def test__filter_one_agent_raises_when_multiple_agents_match() -> None:
     )
 
     with pytest.raises(UserInputError, match="Multiple agents found with name 'test-agent'"):
-        _filter_one_agent(
+        filter_one_agent(
             agent=AgentName("test-agent"),
             resolved_host=None,
             agents_by_host={

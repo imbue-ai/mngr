@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.cli.completion_install import COMPLETION_SHIM_MARKER
+from imbue.mngr.cli.completion_install import get_managed_completion_script_path
 from imbue.mngr.cli.extras import _CLAUDE_CODE_PLUGINS
 from imbue.mngr.cli.extras import _completion_status
 from imbue.mngr.cli.extras import _detect_shell
@@ -21,6 +23,20 @@ from imbue.mngr.cli.extras import _plugins_status
 from imbue.mngr.cli.extras import _print_extras_status
 from imbue.mngr.cli.extras import _read_current_default_agent_type
 from imbue.mngr.cli.extras import extras
+
+# A byte-identical copy of an old self-contained zsh completion function mngr generated
+# before the managed-shim model (any baked python path). strip_legacy_completion_block
+# removes such a block, so installing migrates it to the shim.
+_OLD_SELF_CONTAINED_ZSH_BLOCK = (
+    "_mngr_complete() {\n"
+    "    local -a completions\n"
+    "    (( ! $+commands[mngr] )) && return 1\n"
+    '    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1))'
+    ' /some/python -m imbue.mngr.cli.complete)"})\n'
+    "    compadd -U -V unsorted -a completions\n"
+    "}\n"
+    "compdef _mngr_complete mngr"
+)
 
 
 def test_detect_shell_returns_zsh_or_bash() -> None:
@@ -71,25 +87,40 @@ def test_is_completion_configured_false_for_empty_file(tmp_path: Path) -> None:
     assert _is_completion_configured(rc) is False
 
 
-def test_is_completion_configured_true_when_present(tmp_path: Path) -> None:
-    """_is_completion_configured returns True when _mngr_complete is in the file."""
+def test_is_completion_configured_true_when_shim_present(tmp_path: Path) -> None:
+    """_is_completion_configured returns True when the managed shim marker is present."""
     rc = tmp_path / ".zshrc"
-    rc.write_text("# some config\n_mngr_complete() { ... }\n")
+    rc.write_text(f"# some config\n{COMPLETION_SHIM_MARKER}; ...)\n...\n")
     assert _is_completion_configured(rc) is True
 
 
-def test_generate_completion_script_zsh() -> None:
-    """_generate_completion_script returns a non-empty string for zsh."""
+def test_is_completion_configured_false_for_old_function_only(tmp_path: Path) -> None:
+    """An rc with only the old self-contained function (no shim marker) is treated as not configured.
+
+    This is what lets `mngr extras` install the up-to-date shim over an old install.
+    """
+    rc = tmp_path / ".zshrc"
+    rc.write_text("# some config\n_mngr_complete() { ... }\ncompdef _mngr_complete mngr\n")
+    assert _is_completion_configured(rc) is False
+
+
+def test_generate_completion_script_zsh_is_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_generate_completion_script returns the rc shim (marker + sources the managed file) for zsh."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     script = _generate_completion_script("zsh")
-    assert isinstance(script, str)
-    assert "_mngr_complete" in script
+    assert COMPLETION_SHIM_MARKER in script
+    assert "completions/mngr.zsh" in script
+    # The shim must NOT inline the completion function body.
+    assert "compadd" not in script
 
 
-def test_generate_completion_script_bash() -> None:
-    """_generate_completion_script returns a non-empty string for bash."""
+def test_generate_completion_script_bash_is_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_generate_completion_script returns the rc shim for bash."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     script = _generate_completion_script("bash")
-    assert isinstance(script, str)
-    assert "_mngr_complete" in script
+    assert COMPLETION_SHIM_MARKER in script
+    assert "completions/mngr.bash" in script
+    assert "complete -o default" not in script
 
 
 def test_completion_status_returns_tuple() -> None:
@@ -102,28 +133,62 @@ def test_completion_status_returns_tuple() -> None:
     assert isinstance(rc_path, Path)
 
 
-def test_install_completion_auto_writes_script(tmp_path: Path) -> None:
-    """_install_completion writes the script when auto=True; reports configured once present."""
+def test_install_completion_auto_writes_shim_and_managed_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """_install_completion writes the rc shim + managed files when auto=True; idempotent once present."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     rc = tmp_path / ".zshrc"
     rc.write_text("# existing config\n")
 
     def _status() -> tuple[bool, str, Path]:
-        return ("_mngr_complete" in rc.read_text(), "zsh", rc)
+        return (COMPLETION_SHIM_MARKER in rc.read_text(), "zsh", rc)
 
-    # First call: not configured yet -> writes the script
+    # First call: not configured yet -> writes the shim and the managed file
     assert _install_completion(auto=True, status_fn=_status) is True
-    assert "_mngr_complete" in rc.read_text()
+    assert COMPLETION_SHIM_MARKER in rc.read_text()
+    assert (tmp_path / "completions" / "mngr.zsh").is_file()
 
-    # Second call: now configured -> returns True without re-writing
+    # The success path prints how to activate completion in the current shell,
+    # pointing at the managed completion file (no new shell needed).
+    install_out = capsys.readouterr().out
+    assert "source" in install_out
+    assert str(get_managed_completion_script_path("zsh")) in install_out
+
+    # Second call: now configured -> returns True without appending the shim again
     assert _install_completion(auto=False, status_fn=_status) is True
+    assert rc.read_text().count(COMPLETION_SHIM_MARKER) == 1
 
 
-def test_install_completion_skips_without_tty(tmp_path: Path) -> None:
+def test_install_completion_replaces_old_self_contained_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Installing migrates an old self-contained completion function to the managed shim.
+
+    The byte-identical old block is removed and the shim is added (so `mngr extras
+    completion` cleans up the stale function rather than leaving it orphaned).
+    """
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    rc = tmp_path / ".zshrc"
+    rc.write_text(f"# config\n{_OLD_SELF_CONTAINED_ZSH_BLOCK}\n")
+
+    def _status() -> tuple[bool, str, Path]:
+        return (COMPLETION_SHIM_MARKER in rc.read_text(), "zsh", rc)
+
+    assert _install_completion(auto=True, status_fn=_status) is True
+
+    text = rc.read_text()
+    assert COMPLETION_SHIM_MARKER in text
+    # The old self-contained function is gone (migrated to the shim).
+    assert "compadd -U -V unsorted -a completions" not in text
+    assert "# config" in text
+
+
+def test_install_completion_skips_without_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without an interactive terminal, _install_completion skips and returns False.
 
     The confirm_fn would install if reached, but the is_interactive_fn
     gate fires first.
     """
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     rc = tmp_path / ".zshrc"
     rc.write_text("# existing config\n")
     assert (
@@ -131,15 +196,16 @@ def test_install_completion_skips_without_tty(tmp_path: Path) -> None:
             auto=False,
             status_fn=lambda: (False, "zsh", rc),
             is_interactive_fn=lambda: False,
-            confirm_fn=lambda _rc: True,
+            confirm_fn=lambda _rc, _replace: True,
         )
         is False
     )
-    assert "_mngr_complete" not in rc.read_text()
+    assert COMPLETION_SHIM_MARKER not in rc.read_text()
 
 
-def test_install_completion_picker_skip_writes_nothing(tmp_path: Path) -> None:
-    """When the picker confirm returns False, no script is written."""
+def test_install_completion_picker_skip_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the picker confirm returns False, the shim is not added to the rc."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     rc = tmp_path / ".zshrc"
     rc.write_text("# existing config\n")
     assert (
@@ -147,11 +213,38 @@ def test_install_completion_picker_skip_writes_nothing(tmp_path: Path) -> None:
             auto=False,
             status_fn=lambda: (False, "zsh", rc),
             is_interactive_fn=lambda: True,
-            confirm_fn=lambda _rc: False,
+            confirm_fn=lambda _rc, _replace: False,
         )
         is False
     )
-    assert "_mngr_complete" not in rc.read_text()
+    assert COMPLETION_SHIM_MARKER not in rc.read_text()
+
+
+def test_install_completion_confirm_prompt_signals_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When an old block is present, the confirm prompt is told it's a replacement (will_replace=True)."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    rc = tmp_path / ".zshrc"
+    rc.write_text(f"# config\n{_OLD_SELF_CONTAINED_ZSH_BLOCK}\n")
+    captured: dict[str, bool] = {}
+
+    def _confirm(_rc: Path, will_replace: bool) -> bool:
+        captured["will_replace"] = will_replace
+        return True
+
+    assert (
+        _install_completion(
+            auto=False,
+            status_fn=lambda: (False, "zsh", rc),
+            is_interactive_fn=lambda: True,
+            confirm_fn=_confirm,
+        )
+        is True
+    )
+    assert captured["will_replace"] is True
+    assert COMPLETION_SHIM_MARKER in rc.read_text()
+    assert "compadd -U -V unsorted -a completions" not in rc.read_text()
 
 
 def _all_installed() -> tuple[bool, dict[str, bool]]:
@@ -162,8 +255,10 @@ def _none_installed() -> tuple[bool, dict[str, bool]]:
     return True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}
 
 
-def test_install_completion_auto_skips_unrecognized_shell(tmp_path: Path) -> None:
+def test_install_completion_auto_skips_unrecognized_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """In auto mode, an unrecognized shell ($SHELL not bash/zsh) is skipped, not guessed."""
+    # Keep the always-on managed-file refresh inside tmp_path rather than the real host dir.
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     assert (
         _install_completion(
             auto=True,
@@ -176,8 +271,10 @@ def test_install_completion_auto_skips_unrecognized_shell(tmp_path: Path) -> Non
 
 def test_install_completion_prompts_for_unrecognized_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Interactively, an unrecognized shell prompts for a shell and installs to its rc."""
-    # Redirect HOME so _get_shell_rc(prompted_shell) resolves into tmp_path.
+    # Redirect HOME so _get_shell_rc(prompted_shell) resolves into tmp_path, and
+    # MNGR_HOST_DIR so the managed completion files are written under tmp_path too.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     rc = tmp_path / ".bashrc"
     rc.write_text("# existing config\n")
     assert (
@@ -186,22 +283,24 @@ def test_install_completion_prompts_for_unrecognized_shell(tmp_path: Path, monke
             status_fn=lambda: (False, None, None),
             is_interactive_fn=lambda: True,
             prompt_shell_fn=lambda: "bash",
-            confirm_fn=lambda _rc: True,
+            confirm_fn=lambda _rc, _replace: True,
         )
         is True
     )
-    assert "_mngr_complete" in rc.read_text()
+    assert COMPLETION_SHIM_MARKER in rc.read_text()
 
 
-def test_install_completion_unrecognized_shell_prompt_skip(tmp_path: Path) -> None:
+def test_install_completion_unrecognized_shell_prompt_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Interactively, skipping the shell prompt for an unrecognized shell installs nothing."""
+    # Keep the always-on managed-file refresh inside tmp_path rather than the real host dir.
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     assert (
         _install_completion(
             auto=False,
             status_fn=lambda: (False, None, None),
             is_interactive_fn=lambda: True,
             prompt_shell_fn=lambda: None,
-            confirm_fn=lambda _rc: True,
+            confirm_fn=lambda _rc, _replace: True,
         )
         is False
     )
@@ -312,8 +411,12 @@ def test_plugins_status_returns_string() -> None:
 
 def test_print_extras_status_runs_without_error() -> None:
     """_print_extras_status completes without error."""
-    # Exercises plugin status, completion status, and claude plugin status code paths
-    _print_extras_status()
+    # Inject a fast claude-plugin status so the test does not shell out to the
+    # `claude` CLI -- a Node process whose startup dominated this test's runtime
+    # and made it flaky under the 10s offload timeout (observed at 10.05s in CI;
+    # ~0.4s locally). Report claude as available so the richer status-formatting
+    # branch is still exercised. The other status paths are fast local reads.
+    _print_extras_status(claude_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}))
 
 
 def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
