@@ -300,14 +300,12 @@ def _perform_host_identity_cleanup(identity: S3StateHostIdentity | None) -> str 
     return identity.identity_name
 
 
-def _perform_cleanup(client: AwsVpsClient) -> str | None:
-    """Core of ``mngr aws cleanup``: refuse if any instance exists, else delete the SG.
+def _refuse_cleanup_if_instances_exist(client: AwsVpsClient) -> None:
+    """Raise ``click.ClickException`` when any mngr-managed instance still exists.
 
-    Returns the deleted security-group id, or ``None`` when it was already absent
-    (idempotent). Raises ``click.ClickException`` when any mngr-managed instance
-    still exists in the region, so cleanup never strands a running agent. Split
-    from the click callback so the refuse/delete decision is unit-testable
-    against a stubbed client, without the click runtime or real credentials.
+    Run first by ``mngr aws cleanup``, before any teardown, so a still-running
+    instance aborts the whole cleanup (bucket + identity + SG) and strands
+    nothing. Split out so the refusal is unit-testable against a stubbed client.
     """
     instances = client.list_mngr_managed_instances()
     if instances:
@@ -317,6 +315,18 @@ def _perform_cleanup(client: AwsVpsClient) -> str | None:
             f"instance(s) still exist: {summary}. Destroy them first with `mngr destroy "
             "<agent>` (or terminate them), then re-run `mngr aws cleanup`."
         )
+
+
+def _perform_cleanup(client: AwsVpsClient) -> str | None:
+    """Core of ``mngr aws cleanup``: refuse if any instance exists, else delete the SG.
+
+    Returns the deleted security-group id, or ``None`` when it was already absent
+    (idempotent). Raises ``click.ClickException`` when any mngr-managed instance
+    still exists in the region, so cleanup never strands a running agent. Split
+    from the click callback so the refuse/delete decision is unit-testable
+    against a stubbed client, without the click runtime or real credentials.
+    """
+    _refuse_cleanup_if_instances_exist(client)
     return client.delete_security_group()
 
 
@@ -602,10 +612,15 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         # Same credential / environment errors as the prepare path.
         raise click.ClickException(str(e)) from e
 
-    # Refuse the whole cleanup (delete nothing) while host state remains in the
-    # bucket, before touching the SG -- the bucket refusal mirrors the
-    # instance-exists refusal. ``_build_state_bucket`` may raise if S3 creds are
-    # unresolvable; surface that to the operator rather than silently skipping.
+    # Refuse the whole cleanup (delete nothing) while any mngr-managed instance
+    # still exists, BEFORE tearing down its bucket / identity -- a running
+    # instance must abort cleanup so its offline state and write identity are
+    # never stranded.
+    _refuse_cleanup_if_instances_exist(client)
+    # No instances remain: tear down the bucket while it holds no host state
+    # (its own refusal mirrors the instance check, as defense in depth).
+    # ``_build_state_bucket`` may raise if S3 creds are unresolvable; surface
+    # that to the operator rather than silently skipping.
     try:
         bucket = _build_state_bucket(base, opts.region)
     except (ValueError, BotoCoreError) as e:

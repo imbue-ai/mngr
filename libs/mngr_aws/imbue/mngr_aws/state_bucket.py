@@ -518,15 +518,19 @@ class S3Volume(BaseVolume):
 
     def path_exists(self, path: str) -> bool:
         key = path.lstrip("/")
-        # A file exists if the exact key exists; a directory exists if any key
-        # shares its prefix. One delimited list with the directory prefix covers
-        # both (Contents for the exact key, KeyCount for the prefix).
+        # Two probes, because a single list on the bare prefix can return a
+        # lexicographically-earlier sibling (e.g. ``foobar`` when probing dir
+        # ``foo``) that matches neither test. The directory probe lists the
+        # ``foo/`` prefix; the exact-file probe lists the bare key and checks
+        # for an exact match. Mirrors the Azure ``BlobVolume.path_exists``.
+        dir_prefix = _as_dir_prefix(path)
         with _translate_s3_errors(self.bucket_name):
+            if dir_prefix:
+                directory = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=dir_prefix, MaxKeys=1)
+                if directory.get("KeyCount", 0) > 0:
+                    return True
             exact = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=key, MaxKeys=1)
-        for obj in exact.get("Contents", []):
-            if obj["Key"] == key or obj["Key"].startswith(_as_dir_prefix(path)):
-                return True
-        return False
+        return any(obj["Key"] == key for obj in exact.get("Contents", []))
 
     def read_file(self, path: str) -> bytes:
         key = path.lstrip("/")

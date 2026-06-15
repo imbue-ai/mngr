@@ -21,6 +21,7 @@ from imbue.mngr_azure.cli import _perform_cleanup
 from imbue.mngr_azure.cli import _perform_host_identity_cleanup
 from imbue.mngr_azure.cli import _perform_state_bucket_cleanup
 from imbue.mngr_azure.cli import _provision_host_identity
+from imbue.mngr_azure.cli import _refuse_cleanup_if_vms_exist
 from imbue.mngr_azure.cli import _resolve_provider_config
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
@@ -117,6 +118,28 @@ def test_cleanup_logic_noop_when_rg_missing() -> None:
     # Resource group get_result left None -> the fake raises 404 -> None returned.
     client = _operator_client()
     assert _perform_cleanup(client) is None
+
+
+def test_refuse_cleanup_if_vms_exist_aborts_before_teardown() -> None:
+    """The VM-exists refusal runs first, so the storage account is never torn down.
+
+    Reproduces the callback ordering: when a VM is still alive, the guard raises
+    before any bucket teardown, so a state account holding host state survives.
+    """
+    compute = FakeComputeClient()
+    compute.virtual_machines.list_result = [
+        SimpleNamespace(name="vm-live", tags={"managed-by": "mngr", "mngr-provider": "azure"}, instance_view=None)
+    ]
+    client = _operator_client(compute=compute)
+    backend = FakeBlobStorageBackend()
+    bucket = _stubbed_bucket(backend)
+    bucket.ensure_bucket()
+    bucket.write_host_record(HostId.generate(), "{}")
+    with pytest.raises(AzureProviderError, match="Refusing to clean up"):
+        _refuse_cleanup_if_vms_exist(client)
+    # The guard raised before any teardown, so the account and its state survive.
+    assert backend.deleted_account is False
+    assert bucket.has_any_host_state() is True
 
 
 def test_prepare_command_help_is_reachable() -> None:

@@ -83,10 +83,15 @@ def test_get_host_identity_client_id_returns_client_id_after_create() -> None:
 
 def test_delete_host_identity_removes_it_and_is_idempotent() -> None:
     msi = FakeManagedServiceIdentityClient()
-    identity = _identity(msi, FakeAuthorizationClient())
+    authorization = FakeAuthorizationClient()
+    identity = _identity(msi, authorization)
     identity.ensure_host_identity()
+    created_assignment = authorization.role_assignments.created[0]
     identity.delete_host_identity()
     assert identity.host_identity_exists() is False
+    # The scoped role assignment is deleted explicitly (not left for Azure's
+    # stale-principal reaping), targeting the same scope + deterministic name.
+    assert authorization.role_assignments.deleted == [(created_assignment[0], created_assignment[1])]
     # A second delete is a no-op (missing identity tolerated).
     identity.delete_host_identity()
 

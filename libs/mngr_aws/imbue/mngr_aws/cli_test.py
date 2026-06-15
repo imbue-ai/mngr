@@ -38,6 +38,7 @@ from imbue.mngr_aws.cli import _perform_cleanup
 from imbue.mngr_aws.cli import _perform_host_identity_cleanup
 from imbue.mngr_aws.cli import _perform_state_bucket_cleanup
 from imbue.mngr_aws.cli import _provision_host_identity
+from imbue.mngr_aws.cli import _refuse_cleanup_if_instances_exist
 from imbue.mngr_aws.cli import _resolve_provider_config
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
@@ -212,6 +213,52 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
         ec2_stubber.assert_no_pending_responses()
     finally:
         ec2_stubber.deactivate()
+
+
+def test_refuse_cleanup_if_instances_exist_aborts_before_teardown() -> None:
+    """The instance-exists refusal runs first, so the bucket/identity are never torn down.
+
+    Reproduces the callback ordering: when an instance is still alive, the guard
+    raises before any bucket teardown, so a bucket holding host state survives.
+    """
+    client, ec2_stubber = _stubbed_aws_client(sg_name="mngr-aws")
+    ec2_stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-live999",
+                            "State": {"Name": "running"},
+                            "Tags": [{"Key": "mngr-provider", "Value": "aws"}],
+                        }
+                    ]
+                }
+            ]
+        },
+        expected_params={
+            "Filters": [
+                {"Name": "instance-state-name", "Values": _ACTIVE_STATES},
+                {"Name": "tag-key", "Values": ["mngr-provider"]},
+            ]
+        },
+    )
+    with mock_aws():
+        session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
+        bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-refuse-first")
+        bucket.ensure_bucket()
+        bucket.write_host_record(HostId.generate(), "{}")
+        ec2_stubber.activate()
+        try:
+            with pytest.raises(click.ClickException, match="Refusing"):
+                _refuse_cleanup_if_instances_exist(client)
+            ec2_stubber.assert_no_pending_responses()
+        finally:
+            ec2_stubber.deactivate()
+        # The guard raised before any teardown, so the bucket and its state survive.
+        assert bucket.bucket_exists() is True
+        assert bucket.has_any_host_state() is True
 
 
 def test_perform_state_bucket_cleanup_refuses_while_host_state_remains() -> None:

@@ -155,6 +155,23 @@ def _build_operator_client(
     )
 
 
+def _refuse_cleanup_if_vms_exist(client: AzureVpsClient) -> None:
+    """Raise ``AzureProviderError`` when any mngr-managed VM still exists.
+
+    Run first by ``mngr azure cleanup``, before any teardown, so a still-running
+    VM aborts the whole cleanup (storage account + identity + RG) and strands
+    nothing. Split out so the refusal is unit-testable against a stubbed client.
+    """
+    vms = client.list_mngr_managed_vms()
+    if vms:
+        summary = ", ".join(str(vm["id"]) for vm in vms)
+        raise AzureProviderError(
+            f"Refusing to clean up resource group {client.resource_group}: {len(vms)} mngr-managed "
+            f"VM(s) still exist: {summary}. Destroy them first with `mngr destroy <agent>`, then "
+            "re-run `mngr azure cleanup`."
+        )
+
+
 def _perform_cleanup(client: AzureVpsClient) -> str | None:
     """Core of ``mngr azure cleanup``: refuse if VMs exist, else delete the RG.
 
@@ -165,14 +182,7 @@ def _perform_cleanup(client: AzureVpsClient) -> str | None:
     decision is unit-testable against a stubbed client, without the click runtime
     or real credentials.
     """
-    vms = client.list_mngr_managed_vms()
-    if vms:
-        summary = ", ".join(str(vm["id"]) for vm in vms)
-        raise AzureProviderError(
-            f"Refusing to clean up resource group {client.resource_group}: {len(vms)} mngr-managed "
-            f"VM(s) still exist: {summary}. Destroy them first with `mngr destroy <agent>`, then "
-            "re-run `mngr azure cleanup`."
-        )
+    _refuse_cleanup_if_vms_exist(client)
     return client.delete_managed_resource_group()
 
 
@@ -594,11 +604,15 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         # (an MngrError) propagates with its specific type.
         raise AzureProviderError(str(e)) from e
 
-    # Refuse the whole cleanup (delete nothing) while host state remains in the
-    # bucket, before touching the resource group -- the bucket refusal mirrors the
-    # VM-exists refusal. The storage account lives in the resource group, so it is
-    # deleted first (its own delete, before the RG cascade) and surfaces a clear
-    # refusal if managed-host state remains.
+    # Refuse the whole cleanup (delete nothing) while any mngr-managed VM still
+    # exists, BEFORE tearing down its storage account / identity / role
+    # assignment -- a running VM must abort cleanup so its offline state and write
+    # identity are never stranded.
+    _refuse_cleanup_if_vms_exist(client)
+    # No VMs remain: tear down the storage account while it holds no host state
+    # (its own refusal mirrors the VM check, as defense in depth). The storage
+    # account lives in the resource group, so it is deleted first (its own
+    # delete, before the RG cascade).
     deleted_account_name = _perform_state_bucket_cleanup(_build_state_bucket(base, client))
     # Delete the bucket-write managed identity (best-effort, idempotent) before the
     # RG cascade. The RG delete would reap it anyway, but the explicit delete keeps

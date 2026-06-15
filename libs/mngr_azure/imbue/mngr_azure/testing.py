@@ -391,6 +391,7 @@ class FakeRoleAssignmentsOperations:
 
     def __init__(self) -> None:
         self.created: list[tuple[str, str, Any]] = []
+        self.deleted: list[tuple[str, str]] = []
         self.create_error: Exception | None = None
 
     def create(self, scope: str, role_assignment_name: str, parameters: Any) -> Any:
@@ -398,6 +399,14 @@ class FakeRoleAssignmentsOperations:
             raise self.create_error
         self.created.append((scope, role_assignment_name, parameters))
         return SimpleNamespace(id=f"{scope}/providers/Microsoft.Authorization/roleAssignments/{role_assignment_name}")
+
+    def delete(self, scope: str, role_assignment_name: str) -> Any:
+        # A missing assignment 404s in the real SDK; model that so the production
+        # idempotent-delete path is exercised when nothing was ever created.
+        if (scope, role_assignment_name) not in {(s, n) for s, n, _p in self.created}:
+            raise ResourceNotFoundError(message=f"role assignment {role_assignment_name} not found")
+        self.deleted.append((scope, role_assignment_name))
+        return None
 
 
 class FakeAuthorizationClient:

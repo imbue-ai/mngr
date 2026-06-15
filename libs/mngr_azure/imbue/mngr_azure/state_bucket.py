@@ -459,6 +459,14 @@ class BlobStateHostIdentity(MutableModel):
         )
         return self.resource_id()
 
+    def _blob_role_assignment_name(self, principal_id: str) -> str:
+        """The deterministic role-assignment GUID for this principal on the account scope.
+
+        Derived from the principal + scope so ``ensure`` and ``delete`` target the
+        same assignment across runs.
+        """
+        return str(uuid5(NAMESPACE_URL, f"{principal_id}/{self._account_scope()}/blob-data-contributor"))
+
     def _ensure_blob_role_assignment(self, principal_id: str) -> None:
         """Assign Storage Blob Data Contributor to ``principal_id``, scoped to the state account.
 
@@ -473,7 +481,7 @@ class BlobStateHostIdentity(MutableModel):
             f"roleDefinitions/{STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}"
         )
         scope = self._account_scope()
-        assignment_name = str(uuid5(NAMESPACE_URL, f"{principal_id}/{scope}/blob-data-contributor"))
+        assignment_name = self._blob_role_assignment_name(principal_id)
         parameters = RoleAssignmentCreateParameters(
             role_definition_id=role_definition_id,
             principal_id=principal_id,
@@ -517,19 +525,33 @@ class BlobStateHostIdentity(MutableModel):
         return True
 
     def delete_host_identity(self) -> None:
-        """Delete the user-assigned managed identity (cascading its role assignments). Idempotent.
+        """Delete the scoped role assignment, then the user-assigned managed identity. Idempotent.
 
-        Deleting the identity removes the principal, which Azure reaps the
-        principal's role assignments with -- so no separate assignment delete is
-        needed. A missing identity is a no-op. Mirrors
-        ``S3StateHostIdentity.delete_host_identity``.
+        The role assignment is deleted explicitly (rather than relying on Azure's
+        stale-principal reaping) so cleanup leaves nothing orphaned, mirroring how
+        ``S3StateHostIdentity`` explicitly detaches+deletes its role/profile/policy.
+        Both deletes tolerate a missing target. Skips the assignment delete when the
+        identity is already gone (no principal to derive the assignment name from).
         """
         with _translate_identity_errors(self.identity_name):
+            identity = self._get_identity()
+            if identity is not None and identity.principal_id:
+                self._delete_blob_role_assignment_if_present(identity.principal_id)
             try:
                 self._msi().user_assigned_identities.delete(self.resource_group, self.identity_name)
             except ResourceNotFoundError:
                 return
         logger.info("Deleted managed identity {} for state account {}", self.identity_name, self.account_name)
+
+    def _delete_blob_role_assignment_if_present(self, principal_id: str) -> None:
+        """Delete the deterministic blob-data-contributor assignment for this principal. Idempotent."""
+        try:
+            self._authorization().role_assignments.delete(
+                scope=self._account_scope(),
+                role_assignment_name=self._blob_role_assignment_name(principal_id),
+            )
+        except ResourceNotFoundError:
+            return
 
 
 class BlobVolume(BaseVolume):

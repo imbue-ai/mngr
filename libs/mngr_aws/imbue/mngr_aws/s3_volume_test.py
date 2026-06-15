@@ -60,6 +60,23 @@ def test_path_exists_for_file_and_directory(aws_session: boto3.Session) -> None:
     assert volume.path_exists("missing") is False
 
 
+def test_path_exists_with_prefix_colliding_sibling(aws_session: boto3.Session) -> None:
+    # A file ``foobar`` shares the bare prefix of dir ``foo`` and sorts earlier,
+    # so a single MaxKeys=1 list on ``foo`` would return ``foobar`` and wrongly
+    # report the directory absent. The directory probe lists ``foo/`` instead.
+    _seed(
+        aws_session,
+        {
+            "hosts/abc/host_dir/foobar": b"f",
+            "hosts/abc/host_dir/foo/bar": b"b",
+        },
+    )
+    volume = _raw_volume(aws_session).scoped("hosts/abc/host_dir")
+    assert volume.path_exists("foo") is True
+    assert volume.path_exists("foobar") is True
+    assert volume.path_exists("nope") is False
+
+
 def test_listdir_returns_files_and_subdirs(aws_session: boto3.Session) -> None:
     _seed(
         aws_session,
