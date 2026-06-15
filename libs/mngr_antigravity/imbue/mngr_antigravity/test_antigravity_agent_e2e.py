@@ -131,6 +131,9 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
 
 @pytest.mark.release
 @pytest.mark.tmux
+# The arc's destroy step preserves transcripts to the local preserved/ dir, which rsyncs
+# the transcript directories off the (local) host (the resource guard requires this marker).
+@pytest.mark.rsync
 # Known-flaky: the post-resume "recall" step occasionally hits agy's TUI "Timeout waiting for
 # message submission signal (waited 90.0s)" and fails -- the conversation restores correctly,
 # only the message submit into the resumed TUI hangs. Seen once in two local runs on agy 1.0.8.

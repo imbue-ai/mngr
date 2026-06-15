@@ -21,6 +21,7 @@ single :func:`preserve_agent_data` call does the right thing. Preserved files
 mirror the agent-state-dir layout verbatim under the destination root.
 """
 
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -32,11 +33,16 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 
@@ -150,3 +156,95 @@ def _get_local_online_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
     if not isinstance(host_interface, OnlineHostInterface):
         raise MngrError("Local host is not online")
     return host_interface
+
+
+def build_transcript_preserved_items(event_source: str) -> list[PreservedItem]:
+    """Return the raw + common transcript directories an agent writes for ``event_source``.
+
+    Every agent plugin follows the same on-disk convention: the raw,
+    agent-native transcript lives at ``logs/<event_source>_transcript`` and the
+    common (agent-agnostic) transcript at ``events/<event_source>/common_transcript``,
+    where ``event_source`` is the agent type's stable source name (e.g. ``codex``,
+    ``opencode``, ``pi-coding``, ``antigravity``). A plugin appends its own
+    session-id-history :class:`PreservedItem`(s) to this list.
+    """
+    return [
+        PreservedItem(rel_path=f"logs/{event_source}_transcript", kind=FileType.DIRECTORY),
+        PreservedItem(rel_path=f"events/{event_source}/common_transcript", kind=FileType.DIRECTORY),
+    ]
+
+
+def preserve_agent_state(
+    items: Sequence[PreservedItem],
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+) -> None:
+    """Preserve an online agent's declared items to local storage before its state dir is deleted.
+
+    Thin wrapper over :func:`preserve_agent_data` for use in a plugin's
+    ``on_destroy``: it resolves the agent's state directory on ``host`` and the
+    agent's local preserved-files destination, so the plugin only declares
+    *what* to keep. The caller is responsible for gating on its own
+    preserve-on-destroy config flag before calling this.
+    """
+    preserve_agent_data(
+        items,
+        host,
+        get_agent_state_dir_path(host.host_dir, agent.id),
+        get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id),
+        agent.mngr_ctx,
+    )
+
+
+def flag_gated_items(
+    ref: DiscoveredAgent,
+    flag_name: str,
+    items: Sequence[PreservedItem],
+) -> Sequence[PreservedItem] | None:
+    """Return ``items`` if the discovered agent opted in via ``flag_name``, else None.
+
+    The shared selector body for a plugin's ``on_before_host_destroy``: it reads
+    a boolean preserve-on-destroy flag out of a :class:`DiscoveredAgent`'s
+    persisted ``agent_config`` (the raw data.json in ``certified_data``) and
+    returns the declared ``items`` to preserve only when that flag is truthy.
+    """
+    if not ref.certified_data.get("agent_config", {}).get(flag_name):
+        return None
+    return items
+
+
+def preserve_host_agents_on_destroy(
+    host: HostInterface,
+    mngr_ctx: MngrContext,
+    agent_type: AgentTypeName,
+    # Given a discovered agent (raw data.json in ``certified_data``), return the items to
+    # preserve, or None/empty to skip it (e.g. when its preserve-on-destroy flag is off).
+    items_for_agent: Callable[[DiscoveredAgent], Sequence[PreservedItem] | None],
+) -> None:
+    """Preserve declared items for every matching agent on a host about to be destroyed.
+
+    Shared body for a plugin's ``on_before_host_destroy`` hookimpl. When a host
+    is destroyed without per-agent ``on_destroy`` calls, agent state still lives
+    on the host's persisted volume. If the host exposes that volume (is a
+    :class:`HostFileReadInterface`), each agent of ``agent_type`` whose config
+    opts in (``items_for_agent`` returns items) is preserved straight off the
+    volume via the same :func:`preserve_agent_data` used on the online path. A
+    host with no readable volume has nothing to preserve and is skipped.
+    """
+    if not isinstance(host, HostFileReadInterface):
+        logger.debug("Host {} is not readable (no volume); skipping agent preservation", host.id)
+        return
+
+    for ref in host.discover_agents():
+        if ref.agent_type != agent_type:
+            continue
+        items = items_for_agent(ref)
+        if not items:
+            continue
+        preserve_agent_data(
+            items,
+            host,
+            get_agent_state_dir_path(host.host_dir, ref.agent_id),
+            get_local_preserved_agent_dir(mngr_ctx, ref.agent_name, ref.agent_id),
+            mngr_ctx,
+        )

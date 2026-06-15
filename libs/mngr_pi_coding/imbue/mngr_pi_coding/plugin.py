@@ -14,6 +14,11 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -24,9 +29,13 @@ from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_pi_coding import resources as _pi_resources
@@ -201,6 +210,16 @@ class PiCodingAgentConfig(AgentTypeConfig):
             "'Trust project folder?' dialog (which would otherwise block the first message). "
             "Also implied by `mngr create --yes`. When False and the source repo is not already "
             "trusted, mngr prompts interactively and refuses to run non-interactively."
+        ),
+    )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description=(
+            "Preserve this agent's transcripts locally before its state directory is deleted on "
+            "destroy. When enabled, the raw and common transcripts and the recorded session-file "
+            "pointer are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring "
+            "the agent's state-directory layout. For remote agents, files are pulled to the local "
+            "machine so they survive host destruction. Set to False to discard transcript data on destroy."
         ),
     )
 
@@ -741,7 +760,43 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         """No post-provisioning steps needed."""
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
-        """No extra cleanup needed -- the per-agent config dir is deleted with the agent state."""
+        """Preserve transcripts and the session-file pointer before the state dir is deleted.
+
+        The per-agent config dir is deleted with the agent state, so there is no
+        other cleanup to do.
+        """
+        if self.agent_config.preserve_on_destroy:
+            preserve_agent_state(_pi_coding_preserved_items(), self, host)
+
+
+def _pi_coding_preserved_items() -> list[PreservedItem]:
+    """Return the files to preserve from a pi-coding agent's state directory.
+
+    The raw and common transcripts plus the recorded session-file pointer (which
+    records where pi stored the conversation, used to resume it).
+    """
+    return [
+        *build_transcript_preserved_items(_PI_AGENT_TYPE),
+        PreservedItem(rel_path=_SESSION_FILE_NAME, kind=FileType.FILE),
+    ]
+
+
+def _pi_coding_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) pi-coding agent, or None to skip it."""
+    return flag_gated_items(ref, "preserve_on_destroy", _pi_coding_preserved_items())
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve pi-coding transcripts from the host's volume before it is destroyed.
+
+    Mirrors ``PiCodingAgent.on_destroy`` for the offline path, where a host is
+    destroyed without per-agent ``on_destroy`` calls but agent state still lives
+    on the host's persisted volume.
+    """
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName(_PI_AGENT_TYPE), _pi_coding_items_to_preserve_for_discovered_agent
+    )
 
 
 @hookimpl

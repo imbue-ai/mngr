@@ -16,6 +16,7 @@ import pytest
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -33,6 +34,7 @@ from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
 from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import get_codex_auth_path
 from imbue.mngr_codex.codex_config import get_codex_config_path
@@ -715,3 +717,47 @@ def test_waiting_reason_returns_none_when_active(codex_agent: CodexAgent) -> Non
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ACTIVE_MARKER_FILENAME).touch()
     assert _waiting_reason(codex_agent, codex_agent.host) is None
+
+
+# =============================================================================
+# Preservation on destroy
+# =============================================================================
+
+
+def test_codex_config_preserves_on_destroy_by_default() -> None:
+    assert CodexAgentConfig().preserve_on_destroy is True
+
+
+def _populate_codex_transcripts(agent: CodexAgent) -> None:
+    """Write the raw/common transcripts and the root session-id history into the state dir."""
+    agent_dir = agent._get_agent_dir()
+    (agent_dir / "logs" / "codex_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "logs" / "codex_transcript" / "events.jsonl").write_text('{"type":"raw"}\n')
+    (agent_dir / "events" / "codex" / "common_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "events" / "codex" / "common_transcript" / "events.jsonl").write_text('{"type":"common"}\n')
+    (agent_dir / ROOT_SESSION_FILENAME).write_text("sess-codex\n")
+
+
+@pytest.mark.rsync
+def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy copies transcripts and session-id history to the mirrored preserved layout."""
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=True))
+    _populate_codex_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert (dest_dir / "logs" / "codex_transcript" / "events.jsonl").read_text() == '{"type":"raw"}\n'
+    assert (dest_dir / "events" / "codex" / "common_transcript" / "events.jsonl").read_text() == '{"type":"common"}\n'
+    assert (dest_dir / ROOT_SESSION_FILENAME).read_text() == "sess-codex\n"
+
+
+def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy preserves nothing when preserve_on_destroy is False."""
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=False))
+    _populate_codex_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert not dest_dir.exists()

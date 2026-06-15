@@ -72,6 +72,7 @@ import importlib.resources
 import json
 import shlex
 from collections.abc import Mapping
+from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -91,6 +92,11 @@ from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.common import classify_waiting_reason
@@ -99,10 +105,14 @@ from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_codex import resources as _codex_resources
@@ -266,6 +276,14 @@ class CodexAgentConfig(AgentTypeConfig):
         default=True,
         description="When True, emit a common-schema transcript that `mngr transcript` reads.",
     )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description="Preserve this agent's transcripts locally before its state directory is "
+        "deleted on destroy. When enabled, the raw and common transcripts and the root session-id "
+        "history are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the "
+        "agent's state-directory layout. For remote agents, files are pulled to the local machine "
+        "so they survive host destruction. Set to False to discard transcript data on destroy.",
+    )
 
 
 class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin):
@@ -344,6 +362,11 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         the same file.
         """
         return self._get_agent_dir() / ROOT_SESSION_FILENAME
+
+    def on_destroy(self, host: OnlineHostInterface) -> None:
+        """Preserve transcripts and session-id history before the state dir is deleted."""
+        if self.agent_config.preserve_on_destroy:
+            preserve_agent_state(_codex_preserved_items(), self, host)
 
     def _resolve_user_codex_home(self, host: OnlineHostInterface) -> Path:
         """Resolve the user's real ``CODEX_HOME`` over the host shell.
@@ -806,6 +829,37 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
             f"{background_cmd} {mkdir_cmd} && {cd_cmd} "
             f'&& {{ {reset_marker_cmd}; {resume_prelude}; {codex_invocation} "$@"{extra_str} ; }}'
         )
+
+
+def _codex_preserved_items() -> list[PreservedItem]:
+    """Return the files to preserve from a codex agent's state directory.
+
+    The raw and common transcripts plus the root session-id history (used to
+    resume the conversation). Native rollout JSONLs under ``CODEX_HOME`` are not
+    preserved -- that directory also holds the auth-token symlink and config.
+    """
+    return [
+        *build_transcript_preserved_items("codex"),
+        PreservedItem(rel_path=ROOT_SESSION_FILENAME, kind=FileType.FILE),
+    ]
+
+
+def _codex_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) codex agent, or None to skip it."""
+    return flag_gated_items(ref, "preserve_on_destroy", _codex_preserved_items())
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve codex transcripts from the host's volume before it is destroyed.
+
+    Mirrors ``CodexAgent.on_destroy`` for the offline path, where a host is
+    destroyed without per-agent ``on_destroy`` calls but agent state still lives
+    on the host's persisted volume.
+    """
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName("codex"), _codex_items_to_preserve_for_discovered_agent
+    )
 
 
 @hookimpl
