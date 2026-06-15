@@ -45,6 +45,10 @@ class FileExtension(NonEmptyStr):
         return super().__new__(cls, value)
 
 
+class InvalidRegexPatternError(ValueError):
+    """Raised when a RegexPattern is constructed from a string that does not compile."""
+
+
 class RegexPattern(str):
     """A compiled regular expression pattern."""
 
@@ -60,7 +64,7 @@ class RegexPattern(str):
         try:
             object.__setattr__(self, "_compiled_pattern", re.compile(value, flags))
         except re.error as e:
-            raise ValueError(f"Invalid regex pattern: {value}") from e
+            raise InvalidRegexPatternError(f"Invalid regex pattern: {value}") from e
 
     @property
     def compiled(self) -> re.Pattern[str]:

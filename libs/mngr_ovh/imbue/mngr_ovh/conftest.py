@@ -42,7 +42,7 @@ def ovh_provider_factory(tmp_path: Path) -> Iterator[Callable[..., OvhProvider]]
             *,
             provider_name: str = "alice-ovh",
             enable_recycle_cancelled: bool = True,
-            vps_boot_timeout: float = 600.0,
+            instance_boot_timeout: float = 600.0,
         ) -> OvhProvider:
             host_dir = tmp_path / ".mngr"
             host_dir.mkdir(exist_ok=True)
@@ -62,7 +62,7 @@ def ovh_provider_factory(tmp_path: Path) -> Iterator[Callable[..., OvhProvider]]
             ovh_config = OvhProviderConfig(
                 host_dir=host_dir,
                 enable_recycle_cancelled=enable_recycle_cancelled,
-                vps_boot_timeout=vps_boot_timeout,
+                instance_boot_timeout=instance_boot_timeout,
             )
             return OvhProvider(
                 name=ProviderInstanceName(provider_name),

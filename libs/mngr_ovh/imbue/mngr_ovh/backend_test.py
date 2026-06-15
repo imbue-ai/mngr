@@ -23,6 +23,7 @@ from imbue.mngr_ovh.mock_ovh_client_test import make_fake_ovh_vps_client
 from imbue.mngr_ovh.ordering import OvhOrderDeliveryTimeoutError
 from imbue.mngr_ovh.pending_orders import read_pending_order_markers
 from imbue.mngr_ovh.pending_orders import write_pending_order_marker
+from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 
 
 def test_backend_name() -> None:
@@ -45,9 +46,8 @@ def test_backend_config_class() -> None:
 
 def test_backend_build_args_help() -> None:
     help_text = OvhProviderBackend.get_build_args_help()
-    assert "--vps-datacenter" in help_text
-    assert "--vps-plan" in help_text
-    assert "--vps-os" in help_text
+    assert "--ovh-datacenter" in help_text
+    assert "--ovh-plan" in help_text
 
 
 def test_backend_start_args_help() -> None:
@@ -74,17 +74,20 @@ def test_register_provider_backend_returns_tuple() -> None:
 
 
 def _provision_kwargs(*, vps_ssh_key_id: str) -> dict[str, Any]:
-    """Standard ``_provision_vps`` arguments for a US-EAST-VA / Debian-Docker VPS.
+    """Standard ``_provision_vps`` arguments for a US-EAST-VA VPS.
 
-    ``vps_host_key_path`` / ``vps_host_public_key`` are accepted by the
-    method but immediately discarded (OVH can't inject host keys), so any
-    placeholder is fine.
+    Region/plan now ride on ``ParsedVpsBuildOptions``; image selection moved
+    onto the provider config (``default_image_name``). ``vps_host_key_path`` /
+    ``vps_host_public_key`` are accepted by the method but immediately
+    discarded (OVH can't inject host keys), so any placeholder is fine.
     """
     return {
         "name": HostName("ovh-test-host"),
-        "region": "US-EAST-VA",
-        "plan": "vps-2025-model1",
-        "os_id": "Debian 12 - Docker",
+        "parsed": ParsedVpsBuildOptions(
+            region="US-EAST-VA",
+            plan="vps-2025-model1",
+            docker_build_args=(),
+        ),
         "vps_host_key_path": Path("/unused/host_key"),
         "vps_host_public_key": "",
         "vps_ssh_key_id": vps_ssh_key_id,
@@ -135,7 +138,7 @@ def test_provision_vps_writes_pending_marker_when_order_delivery_times_out(
 
     The reconcile sweep is useless if the failure path doesn't leave a
     marker for it to find. Drives the real order/cart flow to checkout, then
-    -- with ``vps_boot_timeout=0.0`` so the delivery-poll loop is skipped --
+    -- with ``instance_boot_timeout=0.0`` so the delivery-poll loop is skipped --
     the real ``order_and_wait_for_vps`` raises ``OvhOrderDeliveryTimeoutError``
     carrying the order id. The test asserts a marker with that id (plus the
     requested plan/region) actually lands under the provider's state dir.
@@ -145,7 +148,7 @@ def test_provision_vps_writes_pending_marker_when_order_delivery_times_out(
     client = make_fake_ovh_vps_client(_cart_checkout_transport(order_id))
     client.upload_ssh_key("vps-key", "ssh-ed25519 AAAAtest")
     # Disable recycling so the run goes straight to the fresh-order path.
-    provider = ovh_provider_factory(client, enable_recycle_cancelled=False, vps_boot_timeout=0.0)
+    provider = ovh_provider_factory(client, enable_recycle_cancelled=False, instance_boot_timeout=0.0)
 
     with pytest.raises(OvhOrderDeliveryTimeoutError):
         provider._provision_vps(host_id=HostId.generate(), **_provision_kwargs(vps_ssh_key_id="vps-key"))
@@ -213,7 +216,7 @@ def _cart_checkout_transport(order_id: int) -> Callable[..., Any]:
 
     Models only the pre-delivery half of ``order_and_wait_for_vps`` (cart ->
     item -> required config -> configure -> assign -> checkout). With
-    ``vps_boot_timeout=0.0`` the delivery-poll loop never runs, so the order
+    ``instance_boot_timeout=0.0`` the delivery-poll loop never runs, so the order
     times out immediately after checkout -- exactly the slow-delivery
     failure ``_provision_vps`` must convert into a pending-order marker.
     """

@@ -163,7 +163,7 @@ def test_list_instances_passes_through() -> None:
 def test_create_instance_raises_not_implemented() -> None:
     client = make_fake_ovh_vps_client(lambda *a, **k: None)
     with pytest.raises(NotImplementedError):
-        client.create_instance(label="x", region="r", plan="p", os_id=0, user_data="", ssh_key_ids=[], tags=[])
+        client.create_instance(label="x", region="r", plan="p", user_data="", ssh_key_ids=[], tags={})
 
 
 def test_wait_for_task_returns_payload_on_done() -> None:

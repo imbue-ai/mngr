@@ -24,6 +24,7 @@ import shutil
 import socket
 import threading
 import time
+from collections.abc import Collection
 from collections.abc import Mapping
 from enum import auto
 from importlib import resources
@@ -79,6 +80,9 @@ _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 _SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
 _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
+# Empirically, reencryption takes around 0.1s.
+_REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
+
 # ``latchkey --version`` is a print-and-exit; 5s is generous slack for
 # Node-runtime startup on cold filesystems.
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
@@ -86,7 +90,7 @@ _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 # Minimum version of the upstream ``latchkey`` CLI this package will
 # operate against. 2.14.0 is the first release that supports GitHub git
 # operations over the gateway (including permissions) which is used for backups.
-LATCHKEY_MIN_VERSION: Final[str] = "2.14.0"
+LATCHKEY_MIN_VERSION: Final[str] = "2.16.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -757,9 +761,66 @@ class Latchkey(MutableModel):
             )
         return jwt
 
+    # -- Credential export ---------------------------------------------------
+
+    def export_credentials_subset(self, destination: Path, service_names: Collection[str]) -> None:
+        """Write a re-encrypted copy of the credential store, filtered to ``service_names``.
+
+        Shells out to ``latchkey auth re-encrypt <destination> --services <service> ...``.
+        ``destination`` is an output *directory* (which must already exist): the
+        source store (this :class:`Latchkey`'s ``LATCHKEY_DIRECTORY``) is
+        decrypted with the current per-directory encryption key and a
+        re-encrypted copy containing *only* the listed services' credentials is
+        written into it as ``credentials.json.enc``. The new key is read
+        from the child's stdin; we pass an empty stdin (``DEVNULL``) so
+        ``re-encrypt`` reuses the same encryption key, keeping the copy
+        readable by the same gateway -- and the same derived password /
+        permissions-override JWTs -- as the canonical store.
+
+        ``service_names`` must be non-empty: ``--services`` requires at
+        least one service, and an empty bundle is meaningless. The caller
+        resolves the host's granted services (and drops the ones with no
+        stored credentials) first, and handles the "nothing to ship" case
+        itself rather than calling this with an empty set. The only
+        credentials that ever reach a host are the ones its permissions
+        allow and that are actually stored.
+
+        Raises:
+            LatchkeyError: if ``service_names`` is empty, the binary
+                cannot be launched, or the ``re-encrypt`` command exits
+                non-zero.
+        """
+        if not service_names:
+            raise LatchkeyError("export_credentials_subset requires at least one service; got an empty set")
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        # Sorted for a deterministic command line (stable logs / tests);
+        # the set of services is order-independent.
+        command = [self.latchkey_binary, "auth", "re-encrypt", str(destination), "--services", *sorted(service_names)]
+        cg = ConcurrencyGroup(name="latchkey-reencrypt")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=command,
+                    timeout=_REENCRYPT_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            raise LatchkeyError(f"Failed to launch 'latchkey auth re-encrypt': {group}") from group
+        if result.returncode != 0:
+            raise LatchkeyError(
+                "'latchkey auth re-encrypt' exited {} writing {}: {}".format(
+                    result.returncode,
+                    destination,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+            )
+
     # -- Service introspection -----------------------------------------------
 
-    def services_info(self, service_name: str) -> LatchkeyServiceInfo:
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
         """Run ``latchkey services info <service>`` and return the parsed output.
 
         Latchkey emits pretty-printed JSON to stdout; we parse it and pull
@@ -768,13 +829,22 @@ class Latchkey(MutableModel):
         string) yields a service info with ``CredentialStatus.UNKNOWN`` and
         empty ``auth_options``, so the caller can fall back to its legacy
         behaviour rather than wrongly assuming credentials are valid.
+
+        When ``is_offline`` is set, ``--offline`` is passed so latchkey
+        reports the *stored* credential state without any network
+        validation -- enough to tell ``MISSING`` (nothing stored) from a
+        present credential, which is all the credential-export filter
+        needs and avoids a per-service network round-trip.
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        command = [self.latchkey_binary, "services", "info", service_name]
+        if is_offline:
+            command.append("--offline")
         cg = ConcurrencyGroup(name="latchkey-services-info")
         try:
             with cg:
                 result = cg.run_process_to_completion(
-                    command=[self.latchkey_binary, "services", "info", service_name],
+                    command=command,
                     timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
                     is_checked_after=False,
                     env=env,
