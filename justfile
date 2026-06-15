@@ -182,6 +182,10 @@ test-integration:
 test-quick args="":
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --no-cov {{args}}
 
+# Regenerate the code-derived agent capability matrix doc (libs/mngr/docs/concepts/agent_capabilities.md)
+regenerate-agent-capabilities-doc:
+  MNGR_REGEN_CAPABILITY_DOC=1 uv run pytest -p no:xdist --no-cov libs/mngr/imbue/mngr/agents/test_agent_capabilities.py::test_capability_matrix_doc_is_current
+
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "not release"

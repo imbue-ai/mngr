@@ -1,8 +1,11 @@
 from collections.abc import Sequence
 from enum import auto
+from types import ModuleType
 from typing import Final
 from typing import assert_never
+from typing import cast
 
+import pluggy
 from pydantic import ConfigDict
 from pydantic import Field
 
@@ -12,6 +15,12 @@ from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+
+# The key that an agent_field_generators hookimpl uses for the waiting-reason field;
+# a plugin that exposes a *different* field (e.g. kanpan's `muted`) does not count.
+_WAITING_REASON_FIELD_KEY: Final[str] = "waiting_reason"
+# A sibling usage plugin lives in the agent plugin's package + this suffix.
+_USAGE_PACKAGE_SUFFIX: Final[str] = "_usage"
 
 
 class CapabilityDetectionKind(UpperCaseStrEnum):
@@ -140,3 +149,85 @@ def render_capability_matrix(
         body_rows.append(f"| {capability.key} | " + " | ".join(cells) + " |")
 
     return "\n".join([header_row, separator_row, *body_rows])
+
+
+def _module_package(module: ModuleType) -> str:
+    """Return a plugin module's package (e.g. 'imbue.mngr_claude' for '...mngr_claude.plugin')."""
+    module_name = getattr(module, "__name__", "")
+    return module_name.rsplit(".", 1)[0] if "." in module_name else module_name
+
+
+def build_agent_class_infos(
+    pm: pluggy.PluginManager,
+    capabilities: Sequence[AgentCapability] = AGENT_CAPABILITIES,
+) -> tuple[AgentClassInfo, ...]:
+    """Build one AgentClassInfo per registered agent type from a loaded plugin manager."""
+    # Map each registered agent type to its class and the plugin module that registered it.
+    # pluggy types hookimpl.function() as returning `object`, so re-apply the declared shape.
+    class_and_plugin_by_type: dict[str, tuple[type, ModuleType]] = {}
+    for hookimpl in pm.hook.register_agent_type.get_hookimpls():
+        registration = cast("tuple[str, type | None, type | None] | None", hookimpl.function())
+        if registration is None:
+            continue
+        agent_type_name, agent_class, _config_class = registration
+        if agent_class is None:
+            continue
+        class_and_plugin_by_type[agent_type_name] = (agent_class, cast(ModuleType, hookimpl.plugin))
+
+    # Agent type names whose plugin exposes a waiting_reason field generator (not some other field).
+    field_generator_agent_type_names = frozenset(
+        result[0]
+        for result in pm.hook.agent_field_generators()
+        if result is not None and _WAITING_REASON_FIELD_KEY in result[1]
+    )
+
+    # For each hook referenced by a PLUGIN_HOOKIMPL capability, the plugin modules that implement it.
+    hook_names = frozenset(c.hook_name for c in capabilities if c.hook_name is not None)
+    plugins_by_hook_name: dict[str, frozenset[ModuleType]] = {}
+    for hook_name in hook_names:
+        hook_caller = getattr(pm.hook, hook_name, None)
+        impls = hook_caller.get_hookimpls() if hook_caller is not None else ()
+        plugins_by_hook_name[hook_name] = frozenset(impl.plugin for impl in impls)
+
+    # Packages of plugins that claim a usage source (e.g. 'imbue.mngr_claude_usage').
+    usage_hook_caller = getattr(pm.hook, "aggregate_usage_source", None)
+    usage_impls = usage_hook_caller.get_hookimpls() if usage_hook_caller is not None else ()
+    usage_plugin_packages = frozenset(_module_package(impl.plugin) for impl in usage_impls)
+
+    infos: list[AgentClassInfo] = []
+    for agent_type_name, (agent_class, plugin_module) in class_and_plugin_by_type.items():
+        plugin_hook_names = frozenset(
+            hook_name for hook_name in hook_names if plugin_module in plugins_by_hook_name[hook_name]
+        )
+        usage_package = _module_package(plugin_module) + _USAGE_PACKAGE_SUFFIX
+        infos.append(
+            AgentClassInfo(
+                agent_type_name=agent_type_name,
+                agent_class=agent_class,
+                field_generator_agent_type_names=field_generator_agent_type_names,
+                plugin_hook_names=plugin_hook_names,
+                is_usage_source_claimed=usage_package in usage_plugin_packages,
+            )
+        )
+    return tuple(infos)
+
+
+_GENERATED_DOC_HEADER: Final[str] = """# Agent capabilities
+
+<!-- GENERATED FILE -- do not edit by hand.
+     Regenerate with `just regenerate-agent-capabilities-doc` (see `mngr.agents.agent_capabilities`). -->
+
+Which agent types implement which capabilities, **derived from the code** (the agent classes
+and their plugins), not maintained by hand. A `Y` means the capability is present; `-` means
+absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
+"""
+
+
+def generate_capability_matrix_doc(
+    capabilities: Sequence[AgentCapability],
+    infos: Sequence[AgentClassInfo],
+) -> str:
+    """Render the full generated `agent_capabilities.md` document (header + matrix + descriptions)."""
+    matrix = render_capability_matrix(capabilities, infos)
+    description_lines = [f"- **{capability.key}** -- {capability.description}" for capability in capabilities]
+    return "\n".join([_GENERATED_DOC_HEADER, matrix, "", "## Capabilities", "", *description_lines, ""])
