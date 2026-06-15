@@ -115,10 +115,12 @@ def test_transcript_assistant_event_with_tool_use_emits_tool_use_block() -> None
     assert converted is not None
     content = converted["message"]["content"]
     # The text block comes first, then one tool_use block per tool call with the
-    # input_preview parsed back into structured JSON.
+    # input_preview parsed back into structured JSON. Both blocks are dumped from
+    # anthropic.types.Message, so they also carry the API's optional, null-here
+    # metadata fields (`citations` on text, `caller` on tool_use).
     assert content == [
-        {"type": "text", "text": "look"},
-        {"type": "tool_use", "id": "call-1", "name": "Bash", "input": {"cmd": "ls"}},
+        {"type": "text", "text": "look", "citations": None},
+        {"type": "tool_use", "id": "call-1", "name": "Bash", "input": {"cmd": "ls"}, "caller": None},
     ]
 
 
