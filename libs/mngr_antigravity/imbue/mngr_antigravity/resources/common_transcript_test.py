@@ -59,18 +59,13 @@ def _make_event(
 
 
 def _user_input(conv_id: str, step_index: int, prompt_text: str) -> str:
-    """USER_EXPLICIT/USER_INPUT shaped exactly the way agy 1.0.0 wraps it."""
-    envelope = (
-        f"<USER_REQUEST>\n{prompt_text}\n</USER_REQUEST>\n"
-        "<ADDITIONAL_METADATA>\nThe current local time is: 2026-05-21T00:00:00-07:00.\n"
-        "</ADDITIONAL_METADATA>\n"
-    )
+    """USER_EXPLICIT/USER_INPUT carrying the clean typed text agy's SQLite store records."""
     return _make_event(
         conv_id=conv_id,
         step_index=step_index,
         source="USER_EXPLICIT",
         type_="USER_INPUT",
-        content=envelope,
+        content=prompt_text,
     )
 
 
@@ -168,7 +163,12 @@ def _read_common_events(state_dir: Path) -> list[dict[str, Any]]:
 
 
 def test_user_input_is_converted_to_user_message(state_dir: Path) -> None:
-    """USER_EXPLICIT/USER_INPUT -> user_message with the USER_REQUEST envelope stripped."""
+    """USER_EXPLICIT/USER_INPUT -> user_message carrying agy's clean typed text.
+
+    agy's SQLite store (via decode_agy_transcript.py) records the bare typed text in
+    ``CortexStepUserInput.query``; the converter passes it through, stripped of surrounding
+    whitespace, with no envelope handling.
+    """
     _write_raw_transcript(state_dir, [_user_input("conv-A", 0, "What is 2+2?")])
 
     _run_converter(state_dir)
@@ -178,36 +178,10 @@ def test_user_input_is_converted_to_user_message(state_dir: Path) -> None:
     event = events[0]
     assert event["type"] == "user_message"
     assert event["role"] == "user"
-    # The inner text only; the ADDITIONAL_METADATA preamble must be discarded.
     assert event["content"] == "What is 2+2?"
     assert event["conversation_id"] == "conv-A"
     assert event["step_index"] == 0
     assert event["source"] == "antigravity/common_transcript"
-
-
-def test_user_input_without_user_request_envelope_drops_event_with_loud_error(state_dir: Path) -> None:
-    """If a future agy version drops the <USER_REQUEST> envelope, surface a loud error and drop the event.
-
-    Silently falling through to the raw content would bake agy's bookkeeping
-    (metadata preamble, future fields) into the user-visible transcript and
-    hide the schema break. Better to drop and shout so the schema mismatch is
-    visible upstream when it happens for the first time.
-    """
-    raw = _make_event(
-        conv_id="conv-A",
-        step_index=0,
-        source="USER_EXPLICIT",
-        type_="USER_INPUT",
-        content="plain text without envelope",
-    )
-    _write_raw_transcript(state_dir, [raw])
-
-    stderr = _run_converter(state_dir)
-
-    assert _read_common_events(state_dir) == []
-    assert "USER_INPUT content missing <USER_REQUEST> envelope" in stderr
-    assert "conv=conv-A" in stderr
-    assert "step=0" in stderr
 
 
 def test_planner_response_without_tool_calls_is_assistant_message(state_dir: Path) -> None:
@@ -483,7 +457,7 @@ def test_events_without_mngr_conv_id_are_dropped(state_dir: Path) -> None:
             "source": "USER_EXPLICIT",
             "type": "USER_INPUT",
             "created_at": "2026-05-21T07:00:00Z",
-            "content": "<USER_REQUEST>\nhi\n</USER_REQUEST>",
+            "content": "hi",
         }
     )
     _write_raw_transcript(state_dir, [raw])
