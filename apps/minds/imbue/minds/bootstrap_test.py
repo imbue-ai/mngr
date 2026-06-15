@@ -28,7 +28,6 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(MINDS_ROOT_NAME_ENV_VAR, raising=False)
     monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
     monkeypatch.delenv("MNGR_PREFIX", raising=False)
-    monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
 
 
 def test_defaults_to_minds_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,27 +158,6 @@ def test_apply_bootstrap_sets_env_vars_when_root_name_set(monkeypatch: pytest.Mo
 
     assert os.environ["MNGR_HOST_DIR"] == str(Path.home() / ".minds-dev-testname" / "mngr")
     assert os.environ["MNGR_PREFIX"] == "minds-dev-testname-"
-
-
-def test_apply_bootstrap_enables_unknown_config_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """minds spawns mngr with MNGR_ALLOW_UNKNOWN_CONFIG so the curated bundle
-    can omit provider plugins without aborting on config that references them.
-    """
-    _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-testname")
-    apply_bootstrap()
-    assert os.environ["MNGR_ALLOW_UNKNOWN_CONFIG"] == "1"
-
-
-def test_apply_bootstrap_keeps_explicit_unknown_config_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A developer who explicitly sets MNGR_ALLOW_UNKNOWN_CONFIG (e.g. to "0"
-    to debug a config error) is not overridden by the bundle default.
-    """
-    _clear_env(monkeypatch)
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-testname")
-    monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "0")
-    apply_bootstrap()
-    assert os.environ["MNGR_ALLOW_UNKNOWN_CONFIG"] == "0"
 
 
 def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.MonkeyPatch) -> None:

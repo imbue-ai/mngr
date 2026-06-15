@@ -317,15 +317,6 @@ def apply_bootstrap() -> None:
     root_name = resolve_minds_root_name()
     os.environ["MNGR_HOST_DIR"] = str(mngr_host_dir_for(root_name))
     os.environ["MNGR_PREFIX"] = mngr_prefix_for(root_name)
-    # minds ships a curated subset of mngr's plugin catalog. Config it reads
-    # (a shared/synced profile, a project `.mngr/`, an account whose pool
-    # offers a backend this build doesn't carry) can reference a provider
-    # plugin the bundle deliberately omitted; mngr's strict loader would
-    # otherwise abort the whole parse with "references unknown backend".
-    # Downgrade unknown-config to a warning for every mngr subprocess minds
-    # spawns so the bundle can safely omit plugins it doesn't need. This is
-    # the policy mngr documents for a pinned install meeting newer config.
-    os.environ.setdefault("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
     _ensure_mngr_settings(root_name)
     # Provider reconciliation moved out of apply_bootstrap because it now
     # requires the per-env connector URL; callers (i.e. `minds run`) invoke
