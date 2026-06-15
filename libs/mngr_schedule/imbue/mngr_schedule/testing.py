@@ -158,7 +158,10 @@ def cleanup_modal_app(
                     app_id = app.get("App ID", "")
                     if app_id:
                         subprocess.run(
-                            ["uv", "run", "modal", "app", "stop", app_id, "--env", modal_environment],
+                            # --yes: newer Modal CLIs prompt to confirm `app
+                            # stop` and abort when run non-interactively (as in
+                            # CI), which would otherwise leak the test app.
+                            ["uv", "run", "modal", "app", "stop", app_id, "--env", modal_environment, "--yes"],
                             capture_output=True,
                             timeout=30,
                             env=env,

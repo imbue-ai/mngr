@@ -1,13 +1,13 @@
 [project]
 name = "imbue-mngr-imbue-cloud"
-version = "0.1.1"
+version = "0.1.2"
 description = "Imbue Cloud provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.2.12",
-    "imbue-mngr-vps-docker==0.1.5",
-    "imbue-common==0.1.19",
+    "imbue-mngr==0.2.13",
+    "imbue-mngr-vps-docker==0.1.6",
+    "imbue-common==0.1.20",
     "httpx>=0.27.0",
     "loguru",
     "pluggy",
