@@ -11,10 +11,11 @@ Authentication semantics:
   session files itself.
 """
 
+from collections.abc import Callable
 from typing import Any
+from typing import TypeVar
 
 import httpx
-from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
@@ -41,6 +42,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
@@ -274,15 +276,7 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         body = self._check(response, ImbueCloudConnectorError)
         items = body.get("hosts") if isinstance(body, dict) else body
-        if not isinstance(items, list):
-            return []
-        result: list[LeasedHostInfo] = []
-        for entry in items:
-            try:
-                result.append(LeasedHostInfo.model_validate(entry))
-            except ValueError:
-                logger.debug("Skipped unparseable leased host entry: {}", entry)
-        return result
+        return _parse_connector_list(items, ImbueCloudConnectorError, "leased host", LeasedHostInfo.model_validate)
 
     # ------------------------------------------------------------------
     # Keys (LiteLLM)
@@ -327,15 +321,7 @@ class ImbueCloudConnectorClient(MutableModel):
         except httpx.HTTPError as exc:
             raise ImbueCloudKeyError(f"Key list HTTP request failed: {exc}") from exc
         body = self._check(response, ImbueCloudKeyError)
-        if not isinstance(body, list):
-            return []
-        result: list[LiteLLMKeyInfo] = []
-        for entry in body:
-            try:
-                result.append(LiteLLMKeyInfo.model_validate(entry))
-            except ValueError:
-                logger.debug("Skipped unparseable key entry: {}", entry)
-        return result
+        return _parse_connector_list(body, ImbueCloudKeyError, "LiteLLM key", LiteLLMKeyInfo.model_validate)
 
     def get_litellm_key_info(self, access_token: SecretStr, key_id: str) -> LiteLLMKeyInfo:
         response = httpx.get(
@@ -392,7 +378,14 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body_json = self._check(response, ImbueCloudTunnelError)
-        return _parse_tunnel_info(body_json)
+        # The missing-name case raises ImbueCloudTunnelError from inside
+        # _parse_tunnel_info and passes straight through; this catch handles a
+        # residual pydantic ValidationError (a ValueError) from TunnelInfo
+        # construction, mirroring _parse_connector_list's per-entry wrapping.
+        try:
+            return _parse_tunnel_info(body_json)
+        except ValueError as exc:
+            raise ImbueCloudTunnelError(f"Connector returned an unparseable tunnel: {body_json!r}") from exc
 
     def list_tunnels(self, access_token: SecretStr) -> list[TunnelInfo]:
         response = httpx.get(
@@ -401,9 +394,7 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudTunnelError)
-        if not isinstance(body, list):
-            return []
-        return [_parse_tunnel_info(entry) for entry in body if isinstance(entry, dict)]
+        return _parse_connector_list(body, ImbueCloudTunnelError, "tunnel", _parse_tunnel_info)
 
     def delete_tunnel(self, access_token: SecretStr, tunnel_name: str) -> None:
         response = httpx.delete(
@@ -427,7 +418,13 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudTunnelError)
-        return _parse_service_info(body)
+        # As in create_tunnel: the missing-name case raises a typed error that
+        # passes through; this catch handles a residual pydantic ValidationError
+        # from ServiceInfo construction.
+        try:
+            return _parse_service_info(body)
+        except ValueError as exc:
+            raise ImbueCloudTunnelError(f"Connector returned an unparseable service: {body!r}") from exc
 
     def list_services(self, access_token: SecretStr, tunnel_name: str) -> list[ServiceInfo]:
         response = httpx.get(
@@ -436,9 +433,7 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudTunnelError)
-        if not isinstance(body, list):
-            return []
-        return [_parse_service_info(entry) for entry in body if isinstance(entry, dict)]
+        return _parse_connector_list(body, ImbueCloudTunnelError, "service", _parse_service_info)
 
     def remove_service(self, access_token: SecretStr, tunnel_name: str, service_name: str) -> None:
         response = httpx.delete(
@@ -540,9 +535,7 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check_bucket(response)
-        if not isinstance(body, list):
-            return []
-        return [R2BucketInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
+        return _parse_connector_list(body, ImbueCloudBucketError, "bucket", R2BucketInfo.model_validate)
 
     def get_bucket_info(self, access_token: SecretStr, name: str) -> R2BucketInfo:
         response = httpx.get(
@@ -587,9 +580,7 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check_bucket(response)
-        if not isinstance(body, list):
-            return []
-        return [R2KeyInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
+        return _parse_connector_list(body, ImbueCloudBucketError, "bucket key", R2KeyInfo.model_validate)
 
     def destroy_bucket_key(self, access_token: SecretStr, access_key_id: str) -> None:
         response = httpx.delete(
@@ -617,9 +608,9 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudPaidListError)
-        if not isinstance(body, list):
-            return []
-        return [_parse_paid_list_entry(entry, value_key) for entry in body if isinstance(entry, dict)]
+        return _parse_connector_list(
+            body, ImbueCloudPaidListError, "paid-list", lambda entry: _parse_paid_list_entry(entry, value_key)
+        )
 
     def _post_paid_entry(self, admin_api_key: SecretStr, path: str, value: str) -> dict[str, Any]:
         response = httpx.post(
@@ -664,15 +655,67 @@ def _detail_from_response(response: httpx.Response) -> str:
     return response.text[:300]
 
 
+_T = TypeVar("_T")
+
+
+def _parse_connector_list(
+    body: Any,
+    exc_cls: type[ImbueCloudError],
+    what: str,
+    parse_one: Callable[[Any], _T],
+) -> list[_T]:
+    """Validate a connector list response and parse each entry, or raise ``exc_cls``.
+
+    A non-list body, a non-dict entry, or any single unparseable entry is a
+    connector contract violation -- not a smaller / empty result -- so it is
+    surfaced as the endpoint's typed error rather than silently coerced to
+    ``[]`` or having the offending rows dropped. Callers that previously relied
+    on the lenient behavior would otherwise see connector schema drift as a
+    spurious "you have zero X" or a quietly shorter list.
+    """
+    if not isinstance(body, list):
+        raise exc_cls(f"Connector returned a non-list {what} body: got {type(body).__name__}")
+    result: list[_T] = []
+    for index, entry in enumerate(body):
+        if not isinstance(entry, dict):
+            raise exc_cls(f"Connector returned a non-dict {what} entry at index {index}: {entry!r}")
+        try:
+            result.append(parse_one(entry))
+        except (ValueError, TypeError) as exc:
+            raise exc_cls(f"Connector returned an unparseable {what} entry at index {index}: {entry!r}") from exc
+    return result
+
+
+def _require_str_field(
+    raw: dict[str, Any], primary_key: str, fallback_key: str, what: str, exc_cls: type[ImbueCloudError]
+) -> str:
+    """Return a non-empty identity string from ``raw``, or raise ``exc_cls``.
+
+    Connector records carry the value under ``primary_key`` (with an older
+    ``fallback_key`` alias). These names are used as URL path segments in later
+    operations (delete/remove/get_*_auth), so an empty one would silently
+    target the wrong URL. Treat a missing/empty value as a typed parse error
+    rather than defaulting to ``""``.
+    """
+    value = raw.get(primary_key, raw.get(fallback_key, ""))
+    if not isinstance(value, str) or not value:
+        raise exc_cls(f"connector {what} record is missing a usable {primary_key!r}: {raw!r}")
+    return value
+
+
 def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry:
     """Coerce a connector paid-list row into a ``PaidListEntry``.
 
     ``value_key`` is ``"domain"`` or ``"email"`` -- the connector names the
     value column differently for each table; this maps it onto the generic
-    ``value`` field.
+    ``value`` field. A missing/empty value is a contract violation (the row
+    identifies a domain or email), so raise rather than default to ``""``.
     """
+    value = raw.get(value_key, "")
+    if not isinstance(value, str) or not value:
+        raise ImbueCloudPaidListError(f"connector paid-list row is missing a usable {value_key!r}: {raw!r}")
     return PaidListEntry(
-        value=str(raw.get(value_key, "")),
+        value=value,
         is_paid=bool(raw.get("is_paid", False)),
         created_at=str(raw.get("created_at", "")),
         updated_at=str(raw.get("updated_at", "")),
@@ -680,7 +723,14 @@ def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry
 
 
 def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:
-    """Best-effort coerce a connector tunnel dict into our TunnelInfo."""
+    """Coerce a connector tunnel dict into our TunnelInfo.
+
+    Raises ``ImbueCloudTunnelError`` when ``tunnel_name`` is missing/empty: the
+    name is a URL path segment for delete/service operations, so a blank one
+    would silently target the wrong resource. (In the list path the typed error
+    is the same class ``_parse_connector_list`` would re-raise, so it passes
+    straight through that helper's per-entry catch.)
+    """
     services = raw.get("services") or ()
     if isinstance(services, list):
         # Connector returns either ['name1', 'name2'] or [{service_name: ...}, ...].
@@ -695,7 +745,7 @@ def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:
         services_tuple = ()
     token_value = raw.get("token") or raw.get("tunnel_token")
     return TunnelInfo(
-        tunnel_name=str(raw.get("tunnel_name", raw.get("name", ""))),
+        tunnel_name=_require_str_field(raw, "tunnel_name", "name", "tunnel", ImbueCloudTunnelError),
         tunnel_id=str(raw.get("tunnel_id", raw.get("id", ""))),
         token=SecretStr(str(token_value)) if token_value else None,
         services=services_tuple,
@@ -703,8 +753,14 @@ def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:
 
 
 def _parse_service_info(raw: dict[str, Any]) -> ServiceInfo:
+    """Coerce a connector service dict into our ServiceInfo.
+
+    Raises ``ImbueCloudTunnelError`` when ``service_name`` is missing/empty:
+    like the tunnel name, it is used as a URL path segment for remove/auth
+    operations.
+    """
     return ServiceInfo(
-        service_name=str(raw.get("service_name", raw.get("name", ""))),
+        service_name=_require_str_field(raw, "service_name", "name", "service", ImbueCloudTunnelError),
         service_url=str(raw.get("service_url", raw.get("url", ""))),
         hostname=str(raw.get("hostname", "")),
     )

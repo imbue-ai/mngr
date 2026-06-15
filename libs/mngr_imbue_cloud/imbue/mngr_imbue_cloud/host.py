@@ -34,6 +34,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
@@ -54,16 +55,21 @@ from imbue.mngr_imbue_cloud.errors import FixedAgentIdError
 def _parse_create_time(value: Any) -> datetime:
     """Parse a ``create_time`` ISO string from a serialized ``data.json``.
 
-    Returns the parsed datetime. Falls back to ``datetime.now()`` when the
-    field is missing or malformed; both cases are unexpected on a healthy
-    pool host but still leave us with a usable agent rather than crashing
-    create_agent_state.
+    Returns the parsed datetime. ``create_time`` is non-behavioral metadata
+    (the agent's recorded creation timestamp), so unlike the identity fields
+    ``name``/``type`` -- which the adopt path hard-requires -- a missing or
+    malformed value falls back to ``datetime.now()`` rather than crashing the
+    whole ``mngr create``. Both fallback cases are unexpected on a healthy pool
+    host, so we ``warning``-log them: a corrupt bake should be visible even
+    though it doesn't block adoption.
     """
     if isinstance(value, str) and value:
         try:
             return datetime.fromisoformat(value)
         except ValueError:
-            pass
+            logger.warning("imbue_cloud adopt: bake data.json has a malformed create_time {!r}; using now()", value)
+            return datetime.now(timezone.utc)
+    logger.warning("imbue_cloud adopt: bake data.json is missing create_time ({!r}); using now()", value)
     return datetime.now(timezone.utc)
 
 
@@ -193,11 +199,21 @@ class ImbueCloudHost(Host):
         # host now). ``options.name`` is the minds-supplied default agent
         # name ("system-services"), kept around for non-imbue_cloud modes;
         # for adoption we ignore it.
-        agent_type = AgentTypeName(str(existing.get("type", "claude")))
+        # ``name`` and ``type`` are hard-required: a bake healthy enough to
+        # adopt always wrote them, so a missing value means a corrupt data.json
+        # we want to fail on loudly rather than silently substitute a guess. A
+        # defaulted ``type`` in particular would mistype the agent and drive
+        # ``resolve_agent_type``, the assembled command, and provisioning down
+        # the wrong path.
+        baked_name = AgentName(str(existing["name"]))
+        agent_type = AgentTypeName(str(existing["type"]))
         resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
+        # ``work_dir`` is intentionally allowed to fall back to the freshly
+        # computed ``work_dir_path``: this mirrors ``create_agent_work_dir``
+        # above, which deliberately tolerates a missing recorded work_dir by
+        # delegating to the standard transfer path. Keeping the two consistent.
         baked_work_dir = Path(str(existing.get("work_dir", str(work_dir_path))))
         create_time = _parse_create_time(existing.get("create_time"))
-        baked_name = AgentName(str(existing["name"]))
 
         agent = resolved.agent_class(
             id=self.pre_baked_agent_id,

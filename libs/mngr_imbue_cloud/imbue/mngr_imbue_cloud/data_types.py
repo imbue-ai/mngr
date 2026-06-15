@@ -202,7 +202,10 @@ class LeasedHostInfo(FrozenModel):
     host_id: str
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict)
-    leased_at: str = Field(description="ISO-8601 timestamp")
+    leased_at: str | None = Field(
+        default=None,
+        description="ISO-8601 timestamp, or None when not yet known (e.g. synthesized from a fresh lease)",
+    )
 
 
 class AuthUser(FrozenModel):

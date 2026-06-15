@@ -83,7 +83,12 @@ def _refresh_locked(
             f"Run `mngr imbue_cloud auth signin --account {session.email}` again."
         )
     refreshed = client.auth_refresh_session(session.refresh_token)
-    if refreshed.get("status") not in (None, "OK"):
+    # The connector tags a successful refresh with ``status="OK"`` and a failed
+    # one with ``status="ERROR"`` (see app.py ``auth_refresh_session``). Require
+    # "OK" explicitly: a missing or other status is a contract violation, not a
+    # silent success -- treating it as success would persist whatever tokens
+    # (if any) the anomalous body happened to carry.
+    if refreshed.get("status") != "OK":
         raise ImbueCloudAuthError(
             f"Refresh rejected by connector: {refreshed.get('message') or refreshed.get('status')}"
         )
@@ -94,7 +99,22 @@ def _refresh_locked(
     tokens: dict[str, object] = nested_tokens if isinstance(nested_tokens, dict) else refreshed
     new_access = tokens.get("access_token")
     new_refresh_raw = tokens.get("refresh_token")
-    new_refresh = new_refresh_raw if isinstance(new_refresh_raw, str) else session.refresh_token.get_secret_value()
+    if new_refresh_raw is None:
+        # SuperTokens did not rotate the refresh token this cycle (the connector
+        # maps a falsy ``refreshToken`` to null); keeping the current one is correct.
+        new_refresh = session.refresh_token.get_secret_value()
+    elif isinstance(new_refresh_raw, str) and new_refresh_raw:
+        new_refresh = new_refresh_raw
+    else:
+        # A present-but-unusable refresh token is an anomaly. Falling back to the
+        # old, already-consumed token here would send a stale token on the next
+        # refresh and trip SuperTokens' token-theft detection, revoking the whole
+        # session family -- the exact failure this module's lock exists to
+        # prevent. Raise instead, mirroring the access-token branch below.
+        raise ImbueCloudAuthError(
+            "Refresh response contained a refresh_token of unexpected shape "
+            f"({type(new_refresh_raw).__name__}); refusing to reuse the consumed token."
+        )
     if not isinstance(new_access, str) or not new_access:
         raise ImbueCloudAuthError("Refresh response missing access_token")
     refreshed_session = AuthSession(

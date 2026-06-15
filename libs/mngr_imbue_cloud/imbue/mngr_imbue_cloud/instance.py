@@ -221,8 +221,15 @@ def _derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
         return HostState.DESTROYED
     container_state = raw.get("container_state")
     if not container_state:
-        # Outer SSH succeeded but produced no state -- treat as crashed
-        # (no info to be more specific).
+        # Outer SSH succeeded but the listing script emitted no CONTAINER_STATE.
+        # We deliberately report CRASHED rather than UNKNOWN: HostState.UNKNOWN
+        # is reserved for "the provider could not be accessed at all" -- but we
+        # DID reach the outer host here, and a reachable outer host that can't
+        # even report its container's state means something is wrong with the
+        # container, not with our access. CRASHED is the alarming-but-actionable
+        # choice, and is consistent with _map_docker_status_to_host_state
+        # defaulting unrecognized docker states to CRASHED so we never silently
+        # misreport a broken host as fine.
         return HostState.CRASHED
     exit_code = raw.get("container_exit_code") or 0
     has_certified_data = bool(raw.get("certified_data"))
@@ -951,8 +958,25 @@ class ImbueCloudProvider(BaseProviderInstance):
         if not agent_id_str or not agent_name_str:
             logger.warning("imbue_cloud[{}] skipping agent missing id/name in listing data", self.name)
             return None
-        agent_type = str(agent_data.get("type", "unknown"))
-        command = CommandString(agent_data.get("command", "bash"))
+        # We have id+name (guard above), so a missing-or-empty type/command means
+        # a partially-written data.json -- unexpected enough to warn about. The
+        # defaults applied below ("unknown" type, "bash" command, 800s idle
+        # timeout, "DISABLED" idle mode, "/" work_dir, start_on_boot False) are
+        # display stand-ins that keep the listing row renderable rather than
+        # dropping the agent; they are not real configured values.
+        missing_fields = [field for field in ("type", "command") if not agent_data.get(field)]
+        if missing_fields:
+            logger.warning(
+                "imbue_cloud[{}] agent {} listing data missing {}; using display defaults",
+                self.name,
+                agent_id_str,
+                ", ".join(missing_fields),
+            )
+        # ``or`` (not ``.get(k, default)``) so a present-but-empty value also
+        # falls back -- matching the missing_fields check above, and avoiding a
+        # ``CommandString("")`` crash on an empty command in the listing path.
+        agent_type = str(agent_data.get("type") or "unknown")
+        command = CommandString(agent_data.get("command") or "bash")
         create_time_str = agent_data.get("create_time")
         try:
             create_time = (
@@ -1099,11 +1123,20 @@ class ImbueCloudProvider(BaseProviderInstance):
         for entry in leased:
             if entry.host_id == str(host.id):
                 attrs = entry.attributes
-                cpus = int(attrs.get("cpus", 1)) if isinstance(attrs.get("cpus"), int) else 1
+                # Accept int OR float for cpus to match the same coercion in
+                # _build_host_details_from_raw: a lease whose cpus came back as a
+                # JSON float (e.g. 4.0) must not silently fall through to default 1.
+                cpus = int(attrs.get("cpus", 1)) if isinstance(attrs.get("cpus"), (int, float)) else 1
                 memory = (
                     float(attrs.get("memory_gb", 1.0)) if isinstance(attrs.get("memory_gb"), (int, float)) else 1.0
                 )
                 return HostResources(cpu=CpuResources(count=cpus), memory_gb=memory, disk_gb=None, gpu=None)
+        # Not in the lease list: return the deliberate "limits unknown" default
+        # rather than raising. This provider only learns resources from the
+        # lease's requested attributes, so a default HostResources is the
+        # honest answer (the docker provider returns the same default
+        # unconditionally). Unlike get_host, get_host_resources has no
+        # not-found contract, so a missing host maps to unknown-limits here.
         return HostResources(cpu=CpuResources(count=1), memory_gb=1.0, disk_gb=None, gpu=None)
 
     # ------------------------------------------------------------------
@@ -1592,7 +1625,10 @@ class ImbueCloudProvider(BaseProviderInstance):
             host_id=lease_result.host_id,
             host_name=lease_result.host_name,
             attributes=lease_result.attributes,
-            leased_at="",
+            # A fresh LeaseResult carries no timestamp; None means "not known
+            # yet" rather than smuggling an invalid empty string through a field
+            # typed as a real ISO-8601 timestamp.
+            leased_at=None,
         )
 
     def _resolve_container_id_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> str | None:

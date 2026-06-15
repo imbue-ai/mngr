@@ -1,8 +1,34 @@
 import pytest
 
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
+from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.primitives import FastMode
+from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+
+
+def _leased_host_kwargs() -> dict:
+    return dict(
+        host_db_id=LeaseDbId("00000000-0000-0000-0000-000000000001"),
+        vps_address="10.0.0.1",
+        ssh_port=22,
+        ssh_user="root",
+        container_ssh_port=2222,
+        agent_id="agent-abc",
+        host_id="host-xyz",
+        host_name="my-host",
+    )
+
+
+def test_leased_host_info_leased_at_defaults_to_none() -> None:
+    """A freshly-synthesized LeasedHostInfo has no timestamp; it must be None, not ''."""
+    info = LeasedHostInfo(**_leased_host_kwargs())
+    assert info.leased_at is None
+
+
+def test_leased_host_info_accepts_explicit_timestamp() -> None:
+    info = LeasedHostInfo(**_leased_host_kwargs(), leased_at="2025-01-01T00:00:00Z")
+    assert info.leased_at == "2025-01-01T00:00:00Z"
 
 
 def test_lease_attributes_drops_none_fields() -> None:

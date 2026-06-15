@@ -20,9 +20,8 @@ def tunnels() -> None:
     """Manage Cloudflare tunnels for forwarded agent services."""
 
 
-def _parse_policy_arg(policy_json: str | None) -> AuthPolicy | None:
-    if policy_json is None:
-        return None
+def _parse_policy_json(policy_json: str) -> AuthPolicy:
+    """Parse a required policy JSON string into an ``AuthPolicy`` (or exit on error)."""
     try:
         parsed = _json.loads(policy_json)
     except _json.JSONDecodeError as exc:
@@ -31,6 +30,13 @@ def _parse_policy_arg(policy_json: str | None) -> AuthPolicy | None:
     if not isinstance(parsed, dict):
         fail_with_json("--policy must be a JSON object", error_class="UsageError")
     return AuthPolicy.model_validate(parsed)
+
+
+def _parse_optional_policy_json(policy_json: str | None) -> AuthPolicy | None:
+    """Wrapper for the optional ``--policy`` flag: None passes through as None."""
+    if policy_json is None:
+        return None
+    return _parse_policy_json(policy_json)
 
 
 @tunnels.command(name="create")
@@ -45,7 +51,7 @@ def _parse_policy_arg(policy_json: str | None) -> AuthPolicy | None:
 @handle_imbue_cloud_errors
 def create_tunnel(agent_id: str, account: str | None, policy: str | None, connector_url: str | None) -> None:
     """Create a Cloudflare tunnel for the given agent."""
-    parsed_policy = _parse_policy_arg(policy)
+    parsed_policy = _parse_optional_policy_json(policy)
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
@@ -224,12 +230,7 @@ def set_auth(
 
     POLICY_JSON is a JSON object with optional emails / email_domains / require_idp keys.
     """
-    parsed_policy = _parse_policy_arg(policy_json)
-    # _parse_policy_arg returns None only when its input is None; we passed a
-    # required positional argument, so this is just a safety belt for the type
-    # checker.
-    if parsed_policy is None:
-        fail_with_json("Policy cannot be empty", error_class="UsageError")
+    parsed_policy = _parse_policy_json(policy_json)
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
