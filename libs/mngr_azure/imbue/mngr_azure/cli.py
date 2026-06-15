@@ -3,9 +3,10 @@
 ``mngr azure prepare`` does the one-time privileged setup: it registers the
 Compute/Network/Storage resource providers and creates the mngr-owned resource
 group + vnet + subnet + NSG (tagged ``managed-by=mngr``). After it succeeds, the
-regular ``mngr create`` path runs with a restricted role -- it only resolves the
-existing subnet (no network-write permission). Conventional split: an operator
-runs prepare once; developers run create with limited credentials.
+regular ``mngr create`` path needs only VM/NIC/IP-create permissions -- it just
+resolves the existing subnet, never writing network resources. Conventional
+split: an operator runs prepare once; developers run create with limited
+credentials.
 
 ``mngr azure cleanup`` is the safe inverse of prepare: it deletes the mngr-owned
 resource group (cascading the vnet/subnet/NSG). It refuses while any mngr-managed

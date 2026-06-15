@@ -168,8 +168,8 @@ class AzureVpsClient(VpsClientInterface):
 
     The one-off infrastructure (resource group, vnet, subnet, NSG) is created by
     ``ensure_network`` (the privileged ``mngr azure prepare`` path); the hot
-    ``create_instance`` path is lookup-only (``resolve_subnet_id``) so a
-    restricted role with no network-write permission can still create VMs.
+    ``create_instance`` path is lookup-only (``resolve_subnet_id``) so it needs
+    only VM/NIC/IP-create permissions, never network-write.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
