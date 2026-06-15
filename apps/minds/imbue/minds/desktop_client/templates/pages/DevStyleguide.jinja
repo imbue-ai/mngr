@@ -4,7 +4,7 @@
   Mounted at /_dev/styleguide. Always visible (no tier gate). Each swatch
   declares its token via data-token="--<name>"; the templates_test.py
   ratchet cross-checks this set against the :root declarations in
-  static/tokens.css and fails if either side drifts.
+  static/app.css and fails if either side drifts.
 #}
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
@@ -18,7 +18,7 @@
       <h1 class="text-2xl font-semibold text-zinc-900">Minds Styleguide</h1>
       <p class="text-sm text-zinc-500 mt-1">
         Tokens are in
-        <code class="text-zinc-700">apps/minds/imbue/minds/desktop_client/static/tokens.css</code>.
+        <code class="text-zinc-700">apps/minds/imbue/minds/desktop_client/static/app.css</code>.
       </p>
     </header>
 
@@ -27,7 +27,7 @@
       <h2 class="text-lg font-semibold text-zinc-900 mb-1">Tokens</h2>
       <p class="text-xs text-zinc-500 mb-4">
         CSS custom properties declared on <code>:root</code> in
-        <code>static/tokens.css</code>.
+        <code>static/app.css</code>.
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <div data-token="--shadow-seam"
@@ -189,7 +189,7 @@
 
       {# ColorSwatch primitive: the circular radio buttons the workspace
          color pickers (settings + create form) compose. aria-checked drives
-         the blue selection ring via tokens.css; the create page additionally
+         the blue selection ring via app.css; the create page additionally
          narrows the rim to 1px via its own picker-scoped override. #}
       <div class="mt-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Color swatches</div>
@@ -205,7 +205,7 @@
           <ColorSwatch hex="#9fbbd3" name="peace" size="sm" />
           <ColorSwatch hex="#cecd0c" name="energy" size="sm" />
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + tokens.css :: .color-swatch</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + app.css :: .color-swatch</div>
       </div>
     </section>
 
@@ -242,7 +242,7 @@
             <TitlebarButton title="Requests" extra="relative"><Icon24 name="messages" /></TitlebarButton>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav") + .titlebar-title (tokens.css)</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav") + .titlebar-title (app.css)</div>
       </div>
 
       {# Notification badge #}
@@ -294,7 +294,7 @@
         <div class="accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 overflow-hidden">
           <div class="text-sm text-zinc-700">Card with workspace accent stripe on the left edge.</div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from tokens.css</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from app.css</div>
       </div>
 
       {# Focus ring -- shared by TextInput, Select, Textarea via INPUT_BASE #}
@@ -324,7 +324,7 @@
             Below the titlebar, separating chrome from workspace content.
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: --shadow-seam</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">app.css :: --shadow-seam</div>
       </div>
 
       {# Spinner #}
@@ -342,7 +342,7 @@
             <Spinner size="lg" tone="accent" />
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">app.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
       </div>
 
       {# Icons -- 24x24 lucide-style stroke icons + 12x12 chrome glyphs.
@@ -520,7 +520,7 @@
             <span class="text-xs text-zinc-500">click anywhere</span>
           </Card>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Card.jinja :: .minds-card from tokens.css</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Card.jinja :: .minds-card from app.css</div>
       </div>
 
       {# Page container #}
@@ -544,7 +544,7 @@
           <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
           <Opt val="example-c" title="Editable" desc="Expands a textarea when selected." editable preset="prefilled text" placeholder="placeholder text" />
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Opt.jinja (.opt / .opt-selected from tokens.css)</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Opt.jinja (.opt / .opt-selected from app.css)</div>
       </div>
 
       {# OAuth icons #}

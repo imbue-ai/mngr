@@ -29,7 +29,9 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
 
-_TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "tokens.css"
+# The hand-written Tailwind v4 source. Holds the :root design tokens (the
+# styleguide cross-checks these) plus the component CSS; compiled to app.min.css.
+_TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "app.css"
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -758,19 +760,19 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
 
 
 def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
-    """Drift guard: every ``:root`` token in ``tokens.css`` must have a
+    """Drift guard: every ``:root`` token in ``app.css`` must have a
     matching ``data-token`` swatch in the styleguide template (and vice
     versa). Failure means the catalog is out of sync with the live tokens.
     """
     root_block = re.search(r":root\s*\{([^}]*)\}", _TOKENS_CSS_PATH.read_text(), re.DOTALL)
-    assert root_block is not None, "tokens.css must declare a :root block"
+    assert root_block is not None, "app.css must declare a :root block"
     declared = {f"--{name}" for name in re.findall(r"--([a-z][a-z0-9-]*)\s*:", root_block.group(1))}
 
     html = render_dev_styleguide_page()
     surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', html))
 
     assert declared == surfaced, (
-        f"tokens.css :root declares {sorted(declared)} but the styleguide "
+        f"app.css :root declares {sorted(declared)} but the styleguide "
         f"surfaces {sorted(surfaced)}. Add or remove a "
         f'`data-token="--<name>"` swatch in templates/pages/DevStyleguide.jinja '
         f"to match."
@@ -891,7 +893,7 @@ def test_color_swatch_unselected_and_small_and_disabled() -> None:
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
     # nav variant => w-8 h-7 rounded-md, default tone => the .titlebar-btn
-    # class (defined in tokens.css) carries the accent-aware color +
+    # class (defined in app.css) carries the accent-aware color +
     # hover + active rules.
     assert "w-8" in html
     assert "h-7" in html
@@ -913,7 +915,7 @@ def test_titlebar_button_control_variant_renders_window_control_geometry() -> No
 
 def test_titlebar_button_danger_tone_applies_red_hover() -> None:
     html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
-    # ``.titlebar-btn-danger`` (in tokens.css) supplies the red hover.
+    # ``.titlebar-btn-danger`` (in app.css) supplies the red hover.
     assert "titlebar-btn-danger" in html
     # Base ``.titlebar-btn`` still applies (geometry + base colors).
     assert "titlebar-btn " in html
@@ -1106,7 +1108,7 @@ def test_pick_unused_create_color_is_case_insensitive() -> None:
 
 
 def test_tokens_css_defines_titlebar_utility_classes() -> None:
-    """Drift guard: the chrome HTML emits these class names; tokens.css must
+    """Drift guard: the chrome HTML emits these class names; app.css must
     define them, otherwise the bar paints with no foreground hierarchy."""
     css = _TOKENS_CSS_PATH.read_text()
     assert ".titlebar-title" in css
@@ -1118,7 +1120,7 @@ def test_tokens_css_defines_titlebar_utility_classes() -> None:
 
 def test_tokens_css_drops_page_workspace_top_stripe() -> None:
     """The 3px ``.page-workspace::before`` stripe is now redundant with
-    the colored chrome bar above; tokens.css must not redeclare it."""
+    the colored chrome bar above; app.css must not redeclare it."""
     css = _TOKENS_CSS_PATH.read_text()
     assert ".page-workspace::before" not in css
 
@@ -1140,16 +1142,20 @@ def test_tokens_css_accent_fallback_is_default_workspace_color() -> None:
 def test_no_legacy_oklch_accents_remain_in_templates_or_static() -> None:
     """The SHA-derived OKLCH accent system is gone: workspace accents are
     stored ``#rrggbb`` hexes, and every fallback / demo surface paints
-    the palette default. Scan the template and static-asset trees so a
-    lingering (or reintroduced) ``oklch(`` literal fails loudly; any
-    future legitimate oklch use should be a conscious decision recorded
-    by updating this guard."""
+    the palette default. Scan the hand-written template and static-asset
+    trees so a lingering (or reintroduced) ``oklch(`` literal fails loudly;
+    any future legitimate oklch use should be a conscious decision recorded
+    by updating this guard.
+
+    The compiled ``app.min.css`` is excluded: it is a generated, gitignored
+    build artifact, and Tailwind v4 defines its entire default palette in
+    ``oklch()`` -- so the scan targets only authored source, not output."""
     client_root = Path(_templates_module.__file__).resolve().parent
     offenders = [
         str(path.relative_to(client_root))
         for directory in (client_root / "templates", client_root / "static")
         for path in sorted(directory.rglob("*"))
-        if path.suffix in (".jinja", ".js", ".css") and "oklch(" in path.read_text()
+        if path.suffix in (".jinja", ".js", ".css") and path.name != "app.min.css" and "oklch(" in path.read_text()
     ]
     assert offenders == []
 
@@ -1171,7 +1177,7 @@ def test_card_renders_default_slot() -> None:
     html = CATALOG.render("Card", _content="<p>body</p>")
     assert "<p>body</p>" in html
     # The visual shell (bg/border/rounded; no baseline shadow) is in the
-    # ``.minds-card`` CSS class in tokens.css; the rendered HTML carries
+    # ``.minds-card`` CSS class in app.css; the rendered HTML carries
     # the class name rather than the underlying Tailwind utilities.
     assert "minds-card" in html
     # Default padding is "default" -> p-4.

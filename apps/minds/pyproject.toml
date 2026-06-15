@@ -57,6 +57,15 @@ imbue-mngr-ovh = { workspace = true }
 imbue-mngr-vps-docker = { workspace = true }
 imbue-common = { workspace = true }
 
+# Force-include the compiled Tailwind stylesheet for the desktop client. It is
+# built from static/app.css by `just minds-css` (pnpm run build:css) and is
+# gitignored, so hatchling would otherwise omit it from the wheel. `scripts/
+# build.js` rebuilds it before packaging the Electron app.
+[tool.hatch.build]
+artifacts = [
+    "imbue/minds/desktop_client/static/app.min.css",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
 exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]

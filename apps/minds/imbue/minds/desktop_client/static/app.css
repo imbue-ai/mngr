@@ -1,18 +1,72 @@
 /*
- * Design tokens + a handful of custom CSS that Tailwind doesn't cover
- * (per-workspace accent spine, spinner keyframes, titlebar drop shadow,
- * titlebar foreground tokens).
+ * Tailwind v4 source entry + design tokens for the minds desktop client chrome.
  *
- * This file is committed and loaded alongside the Tailwind Play CDN JS
- * (which generates utility classes at runtime -- see static/tailwind.js).
+ * This file is the hand-written SOURCE. It is compiled (minified, tree-shaken)
+ * to ``app.min.css`` by ``just minds-css`` (``pnpm run build:css`` -> the
+ * ``@tailwindcss/cli`` standalone compiler). Only ``app.min.css`` is served
+ * (Base.jinja links it) and shipped in the wheel -- there is no runtime JIT,
+ * so a new/changed Tailwind class only takes effect after a rebuild. ``just
+ * minds-start`` runs the compiler in ``--watch`` mode for live dev rebuilds.
  *
- * Chrome colors / focus rings / link color are not tokens here -- chrome
- * uses raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
+ * Why explicit sources (``source(none)`` + ``@source`` below): the chrome's
+ * Tailwind classes live in three places -- ``.jinja`` templates, the vanilla
+ * ``static/*.js`` files, AND Python string constants in ``templates.py``
+ * (``BTN_VARIANTS`` / ``INPUT_BASE`` / ``ICONS_*``). Enumerating them keeps the
+ * scan deterministic and off the rest of the monorepo. Classes assembled by
+ * string concatenation in JS are NOT detected -- safelist any such case with
+ * ``@source inline("...")``.
+ */
+@import "tailwindcss" source(none);
+
+@source "../templates/**/*.jinja";
+@source "./*.js";
+@source "../templates.py";
+
+/*
+ * Design tokens (light + dark) land here in a later stage. Empty for now so
+ * the stock Tailwind palette renders the chrome exactly as it did under the
+ * Play CDN. In v4 each ``@theme`` entry both generates a utility and is
+ * emitted as a ``:root`` custom property, which is what light/dark theming
+ * will hang off of.
+ */
+@theme {
+}
+
+/*
+ * v4 compatibility shim. Tailwind v3 defaulted un-colored borders / dividers
+ * to ``gray-200``; v4 defaults them to ``currentColor``. The chrome has many
+ * bare ``border`` / ``border-t`` / ... utilities that relied on the old
+ * default, so restore it globally in the lowest layer (explicit
+ * ``border-zinc-*`` utilities still win). Retire this once those call sites
+ * carry explicit token-based border colors.
+ */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentColor);
+  }
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Hand-written CSS that Tailwind doesn't cover (migrated verbatim from the
+ * former tokens.css): per-workspace accent spine, spinner keyframes, titlebar
+ * drop shadow, titlebar foreground tokens, shared card / pill / option /
+ * color-picker recipes. These stay UNLAYERED so they keep the same precedence
+ * over Tailwind utilities they had when tokens.css was a separate stylesheet.
+ *
+ * Chrome colors / focus rings / link color are not tokens here -- chrome uses
+ * raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
  * focus:ring-blue-600/15, ...) directly. The only token consumed by
- * non-styleguide code is --shadow-seam (titlebar drop shadow, templates/pages/Chrome.jinja)
- * and the implicit --workspace-accent / --titlebar-bg / --titlebar-fg
- * (set per-workspace via inline style by chrome.js; consumed by the
- * .accent-spine / .accent-swatch / .titlebar-* rules below).
+ * non-styleguide code is --shadow-seam (titlebar drop shadow,
+ * templates/pages/Chrome.jinja) and the implicit --workspace-accent /
+ * --titlebar-bg / --titlebar-fg (set per-workspace via inline style by
+ * chrome.js; consumed by the .accent-spine / .accent-swatch / .titlebar-*
+ * rules below).
+ * ---------------------------------------------------------------------------
  */
 
 :root {

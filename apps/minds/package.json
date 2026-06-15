@@ -7,13 +7,14 @@
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
   "scripts": {
-    "prestart": "node scripts/ensure-binaries.js",
-    "start": "electron .",
+    "prestart": "node scripts/ensure-binaries.js && pnpm run build:css",
+    "start": "concurrently -k -n css,electron -c blue,green \"pnpm:watch:css\" \"electron .\"",
     "build": "node scripts/build.js",
+    "build:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --minify",
+    "watch:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --watch",
     "dist": "pnpm build && pnpm exec todesktop build",
     "todesktop:beforeInstall": "./scripts/download-binaries.js",
-    "fetch-tailwind": "bash scripts/fetch_tailwind.sh",
-    "postinstall": "bash scripts/fetch_tailwind.sh",
+    "postinstall": "pnpm run build:css",
     "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
@@ -21,10 +22,13 @@
     "latchkey": "^2.16.0"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "4.2.1",
     "@todesktop/cli": "^1.8.0",
+    "concurrently": "9.2.1",
     "electron": "40.10.1",
     "@playwright/test": "1.60.0",
-    "playwright": "1.60.0"
+    "playwright": "1.60.0",
+    "tailwindcss": "4.2.1"
   },
   "engines": {
     "node": "24.15.0",

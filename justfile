@@ -242,13 +242,13 @@ minds-test-deployment-only *tests:
 minds-test-electron *args:
   xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
-# Download the Tailwind Play CDN JS bundle for the minds desktop client.
-# Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
-# same script also runs automatically as a pnpm `postinstall` hook, so
-# normally you do not need to invoke this recipe. Use it when you want to
-# force-verify the file or after nuking the static/ dir.
-minds-tailwind:
-  bash apps/minds/scripts/fetch_tailwind.sh
+# Compile the minds desktop client's Tailwind v4 stylesheet
+# (static/app.css -> static/app.min.css, minified + tree-shaken) via the
+# pinned @tailwindcss/cli. Runs automatically as a pnpm `postinstall` hook
+# and is watched live by `just minds-start`, so normally you do not need to
+# invoke this recipe -- use it after nuking static/ or to force a rebuild.
+minds-css:
+  bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
 # in FCT. Default FCT path is $HOME/project/forever-claude-template; override

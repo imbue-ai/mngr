@@ -4395,13 +4395,13 @@ def create_desktop_client(
         # stays in sync if a future code path ever rotates the key.
         app.mount("/api/v1/files", create_webdav_app(lambda: app.state.minds_api_key))
 
-    # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
-    # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`
-    # (plain curl, no build step) and is gitignored; if it's missing, the
-    # mount still works and the server logs a hint at startup.
+    # Static assets: the compiled Tailwind v4 stylesheet (app.min.css) +
+    # per-page JS. app.min.css is built from static/app.css by `just minds-css`
+    # (pnpm run build:css) and is gitignored; if it's missing, the mount still
+    # works and the server logs a hint at startup.
     _static_dir = Path(__file__).resolve().parent / "static"
-    if not (_static_dir / "tailwind.js").exists():
-        logger.warning("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
+    if not (_static_dir / "app.min.css").exists():
+        logger.warning("Missing static/app.min.css. Run `just minds-css` from the repo root to build it.")
     app.mount("/_static", StaticFiles(directory=str(_static_dir)), name="static")
 
     # Chrome (persistent shell) routes
