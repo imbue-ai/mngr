@@ -17,12 +17,12 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.data_types import AuthSession
-from imbue.mngr_imbue_cloud.plugin import on_load_config
+from imbue.mngr_imbue_cloud.plugin.entrypoints import on_load_config
 from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_BACKEND_NAME
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
-from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 
 
 def _make_session(email: str = "alice@imbue.com", user_id: str = "user-abc") -> AuthSession:

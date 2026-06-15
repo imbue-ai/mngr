@@ -416,6 +416,17 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Handle actions to take when a connection error occurs with a host."""
         ...
 
+    def get_outer_ssh_port(self, host_id: HostId) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default (the agent connection from
+        ``get_ssh_connection_info`` is the only SSH endpoint, or the host is
+        local). Providers whose host has a separate outer/management sshd on a
+        non-obvious port (e.g. a slice's VM-root sshd reached via a box-forwarded
+        port) override this so ``mngr create --format json`` can report it.
+        """
+        return None
+
     @abstractmethod
     def get_max_destroyed_host_persisted_seconds(self) -> float:
         """

@@ -13,12 +13,12 @@ from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud import hookimpl
-from imbue.mngr_imbue_cloud.backend import ImbueCloudProviderBackend
 from imbue.mngr_imbue_cloud.cli.root import imbue_cloud as imbue_cloud_group
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.plugin.backends import ImbueCloudProviderBackend
 from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_BACKEND_NAME
-from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 
 
 @hookimpl

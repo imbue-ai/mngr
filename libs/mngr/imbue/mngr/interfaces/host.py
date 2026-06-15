@@ -382,6 +382,17 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         """
         ...
 
+    def get_outer_ssh_port(self) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default. A provider whose host reaches a separate
+        outer sshd on a non-obvious port (e.g. a slice's VM-root sshd via a
+        box-forwarded port) surfaces it here so ``mngr create --format json``
+        can report it. The default is sufficient for hosts whose only SSH
+        endpoint is the one ``get_ssh_connection_info`` returns.
+        """
+        return None
+
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
 

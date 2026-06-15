@@ -534,6 +534,21 @@ class VpsDockerProvider(BaseProviderInstance):
     def _vps_known_hosts_path(self) -> Path:
         return self._key_dir() / "vps_known_hosts"
 
+    def record_outer_host_key(self, host: str, port: int, public_key: str) -> None:
+        """Pin an outer (VPS-root) sshd host key in this provider's known_hosts.
+
+        Callers operating on a VPS this provider did not itself order (e.g. the
+        imbue_cloud rebuild on a leased host) use this so the provider's own outer
+        connections -- including the certified-data sync callback -- pass strict
+        host-key checking instead of failing on a missing entry.
+        """
+        add_host_to_known_hosts(
+            known_hosts_path=self._vps_known_hosts_path(),
+            hostname=host,
+            port=port,
+            public_key=public_key,
+        )
+
     def _container_known_hosts_path(self) -> Path:
         return self._key_dir() / "container_known_hosts"
 
