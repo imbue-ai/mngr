@@ -1,0 +1,1 @@
+Updated the agent-plugin-parity spec to record that `opencode` now implements the `waiting_reason` field generator (online), and documented that the `@opencode-ai/sdk` type stubs are out of sync with the shipped opencode binary on the permission events (the stubs say `permission.updated`/`permissionID`; the running 1.16.2 server emits `permission.asked`/`requestID`).
