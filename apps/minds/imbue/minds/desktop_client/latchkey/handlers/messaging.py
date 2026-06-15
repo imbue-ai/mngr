@@ -8,7 +8,6 @@ so neither sibling has to import from the other.
 """
 
 import json
-from collections.abc import Callable
 from typing import Final
 
 from loguru import logger
@@ -66,22 +65,11 @@ class MngrMessageSender(MutableModel):
     brand-new subprocess -- avoiding the multi-second interpreter+import startup
     cost. Production passes the shared, pre-warmed singleton; tests inject a
     recording double.
-
-    When ``provider_lookup`` is set, it resolves a target (agent id) to the
-    provider instance that owns it; the resolved provider is passed to
-    ``mngr message --provider`` so discovery queries only that provider instead
-    of scanning every enabled one. A lookup returning ``None`` (target unknown,
-    e.g. onboarding addressing an agent by host name before its id is known)
-    falls back to the full scan.
     """
 
     caller: MngrCaller = Field(
         default_factory=get_default_mngr_caller,
         description="Forkserver-backed in-app ``mngr`` CLI caller.",
-    )
-    provider_lookup: Callable[[str], str | None] | None = Field(
-        default=None,
-        description="Resolves a target to its provider name to narrow `mngr message` discovery; None disables it.",
     )
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
@@ -89,13 +77,6 @@ class MngrMessageSender(MutableModel):
     def _run_message(self, argv: list[str]) -> MngrCallResult:
         """Run a ``mngr`` ``argv`` through the caller."""
         return self.caller.call(argv, timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
-
-    def _provider_args(self, target: str) -> list[str]:
-        """Return ``["--provider", NAME]`` if the target's provider is known, else ``[]``."""
-        if self.provider_lookup is None:
-            return []
-        provider_name = self.provider_lookup(target)
-        return ["--provider", provider_name] if provider_name else []
 
     def send(self, agent_id: AgentId, text: str) -> None:
         is_delivered = self.try_send(str(agent_id), text)
@@ -115,7 +96,7 @@ class MngrMessageSender(MutableModel):
         # positional argument as an agent identifier (``nargs=-1``), so passing
         # the text as a positional would be parsed as a second agent and the
         # actual message content would be read from stdin (silently empty here).
-        result = self._run_message(["message", *self._provider_args(target), "-m", text, "--", target])
+        result = self._run_message(["message", "-m", text, "--", target])
         if result.returncode != 0:
             logger.warning(
                 "mngr message to target {} exited {}: {}",
@@ -135,9 +116,7 @@ class MngrMessageSender(MutableModel):
         when no agent matches the target, so a caller that retries until the
         agent exists must inspect the output, not the exit code.
         """
-        result = self._run_message(
-            ["message", "--format", "jsonl", *self._provider_args(target), "-m", text, "--", target]
-        )
+        result = self._run_message(["message", "--format", "jsonl", "-m", text, "--", target])
         is_delivered = stdout_reports_message_delivered(result.stdout)
         if not is_delivered:
             logger.debug(

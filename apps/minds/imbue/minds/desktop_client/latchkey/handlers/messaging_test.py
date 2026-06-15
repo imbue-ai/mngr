@@ -61,32 +61,3 @@ def test_deliver_false_when_exit_zero_but_no_message_sent_event() -> None:
     sender = MngrMessageSender(caller=caller)
 
     assert sender.deliver("assistant", "hello") is False
-
-
-def test_provider_lookup_narrows_try_send_to_one_provider() -> None:
-    caller = RecordingMngrCaller()
-    sender = MngrMessageSender(
-        caller=caller,
-        provider_lookup=lambda target: "imbue_cloud_x" if target == "agent-1" else None,
-    )
-
-    assert sender.try_send("agent-1", "hello") is True
-    # ``--provider`` skips scanning every enabled provider during discovery.
-    assert caller.calls == [["message", "--provider", "imbue_cloud_x", "-m", "hello", "--", "agent-1"]]
-
-
-def test_provider_lookup_returning_none_falls_back_to_full_scan() -> None:
-    caller = RecordingMngrCaller()
-    sender = MngrMessageSender(caller=caller, provider_lookup=lambda target: None)
-
-    assert sender.try_send("unknown-target", "hello") is True
-    assert caller.calls == [["message", "-m", "hello", "--", "unknown-target"]]
-
-
-def test_provider_lookup_narrows_deliver_to_one_provider() -> None:
-    delivered_stdout = '{"event": "message_sent", "agent": "assistant", "message": "ok"}\n'
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=delivered_stdout))
-    sender = MngrMessageSender(caller=caller, provider_lookup=lambda target: "prov-1")
-
-    assert sender.deliver("assistant", "hello") is True
-    assert caller.calls == [["message", "--format", "jsonl", "--provider", "prov-1", "-m", "hello", "--", "assistant"]]

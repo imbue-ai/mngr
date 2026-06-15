@@ -3,5 +3,3 @@ Sped up in-app `mngr` invocations (e.g. the `mngr message` sent when a permissio
 The forkserver imports `imbue.mngr.main` once at app startup (on a background thread, off the request path), so subsequent calls skip the multi-second interpreter-and-plugin import cost. Running in a forked child also keeps `mngr`'s global-state changes (loguru, `sys.argv`, stdout/stderr) out of the long-lived backend process.
 
 `MngrMessageSender` now always routes through this caller (defaulting to the shared, pre-warmed instance), so approving or denying a permission request no longer spawns a fresh `mngr` process. Other direct `mngr` CLI call sites can migrate onto `MngrCaller` incrementally.
-
-It also looks up the target agent's provider (from the backend resolver) and passes `mngr message --provider`, so message delivery queries only that agent's provider instead of scanning every enabled one -- removing the remaining multi-second provider-scan from the approve/deny path.

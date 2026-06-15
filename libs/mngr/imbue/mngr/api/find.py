@@ -479,7 +479,6 @@ def find_all_agents(
     target_state: AgentLifecycleState | None,
     mngr_ctx: MngrContext,
     include_destroyed: bool = False,
-    provider_names_override: Sequence[str] | None = None,
 ) -> list[AgentMatch]:
     """Find agents matching a sequence of :class:`AgentAddress` constraints.
 
@@ -487,18 +486,10 @@ def find_all_agents(
     discovery. Identifiers without host/provider components match by name/ID
     alone; identifiers with host/provider components are post-filtered to
     keep only matches on a satisfying host.
-
-    ``provider_names_override`` restricts discovery to the named providers
-    regardless of the addresses' own provider components -- a caller that
-    already knows which provider owns the target (e.g. minds sending a
-    ``mngr message``) can pass it to skip scanning every enabled provider.
     """
     agent_identifiers = [addr.agent for addr in addresses]
-    if provider_names_override is not None:
-        provider_names: tuple[str, ...] | None = tuple(provider_names_override)
-    else:
-        provider_filter = _collect_required_provider_names(addresses)
-        provider_names = tuple(str(p) for p in provider_filter) if provider_filter is not None else None
+    provider_filter = _collect_required_provider_names(addresses)
+    provider_names = tuple(str(p) for p in provider_filter) if provider_filter is not None else None
 
     matches = _find_agents_by_identifiers_or_state(
         agent_identifiers=agent_identifiers,

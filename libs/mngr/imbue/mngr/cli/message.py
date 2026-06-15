@@ -44,7 +44,6 @@ class MessageCliOptions(CommonCliOptions):
 
     agents: tuple[str, ...]
     agent_list: tuple[AgentAddress, ...]
-    provider_name: str | None
     message_content: str | None
     message_file: str | None
     on_error: str
@@ -60,11 +59,6 @@ class MessageCliOptions(CommonCliOptions):
     type=AGENT_ADDRESS,
     multiple=True,
     help="Agent address (NAME[@HOST[.PROVIDER]]) to send message to (can be specified multiple times)",
-)
-@optgroup.option(
-    "--provider",
-    "provider_name",
-    help="Restrict discovery to this provider instance (skips scanning every enabled provider)",
 )
 @optgroup.option(
     "--start/--no-start",
@@ -151,7 +145,6 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             filter_all=False,
             target_state=None,
             mngr_ctx=mngr_ctx,
-            provider_names_override=(opts.provider_name,) if opts.provider_name else None,
         )
     except AgentNotFoundError:
         if error_behavior == ErrorBehavior.ABORT:
@@ -291,7 +284,7 @@ def _emit_json_output(result: MessageResult) -> None:
 CommandHelpMetadata(
     key="message",
     one_line_description="Send a message to one or more agents",
-    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [--provider <PROVIDER>] [-m <MESSAGE>] [--message-file <FILE>] [--[no-]start] [--on-error <MODE>]",
+    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>] [--[no-]start] [--on-error <MODE>]",
     description="""Agent IDs can be specified as positional arguments for convenience. The
 message is sent to the agent's stdin.
 

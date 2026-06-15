@@ -8,59 +8,16 @@ from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-
-
-def test_find_all_agents_provider_override_restricts_discovery(
-    temp_work_dir: Path,
-    temp_mngr_ctx: MngrContext,
-    local_provider: LocalProviderInstance,
-) -> None:
-    """``provider_names_override`` queries only the named provider during discovery."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-    host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("provider-scope-test"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 1"),
-        ),
-    )
-    address = AgentAddress(agent=AgentName("provider-scope-test"))
-
-    # Override to the agent's real provider -> found.
-    matches = find_all_agents(
-        addresses=(address,),
-        filter_all=False,
-        target_state=None,
-        mngr_ctx=temp_mngr_ctx,
-        provider_names_override=(LOCAL_PROVIDER_NAME,),
-    )
-    assert [str(m.agent_name) for m in matches] == ["provider-scope-test"]
-
-    # Override to a different provider -> the local provider is never queried,
-    # so the agent is not found.
-    with pytest.raises(AgentNotFoundError):
-        find_all_agents(
-            addresses=(address,),
-            filter_all=False,
-            target_state=None,
-            mngr_ctx=temp_mngr_ctx,
-            provider_names_override=("some-other-provider",),
-        )
 
 
 def test_message_result_initializes_with_empty_lists() -> None:

@@ -23,7 +23,6 @@ from imbue.mngr.primitives import OutputFormat
 _DEFAULT_OPTS = MessageCliOptions(
     agents=(),
     agent_list=(),
-    provider_name=None,
     message_content=None,
     message_file=None,
     on_error="continue",
@@ -43,7 +42,6 @@ def test_message_cli_options_has_expected_fields() -> None:
     opts = MessageCliOptions(
         agents=("agent1", "agent2"),
         agent_list=(AgentAddress(agent=AgentName("agent3")),),
-        provider_name=None,
         message_content="Hello",
         message_file=None,
         on_error="continue",
