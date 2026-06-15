@@ -15,7 +15,7 @@ _CLIENT_ID = "client-1"
 
 
 def test_sync_command_uses_delete_destination_and_excludes() -> None:
-    command = _build_host_dir_sync_command(_HOST_DIR, _BLOB_URL, _CLIENT_ID)
+    command = _build_host_dir_sync_command(_HOST_DIR, _BLOB_URL)
     assert command.startswith(f'azcopy sync "{_HOST_DIR}" "{_BLOB_URL}"')
     assert "--delete-destination=true" in command
     # The known transient-cache excludes are present.

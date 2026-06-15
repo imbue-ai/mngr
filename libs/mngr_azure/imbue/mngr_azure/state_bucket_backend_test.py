@@ -285,7 +285,8 @@ def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(temp_mngr_ctx: Mng
     host_id = HostId.generate()
     bucket = provider._state_bucket()
     assert bucket is not None
-    bucket.fake_backend.blobs_by_name[f"hosts/{host_id.get_uuid().hex}/host_dir/events/e.jsonl"] = b"evt"
+    # Seed under the host's host_dir prefix via the bucket's own volume writer.
+    bucket.volume_for_host(host_id).write_files({"events/e.jsonl": b"evt"})
     reference = provider.get_volume_reference_for_host(host_id)
     assert reference is not None
     assert reference.volume.read_file("events/e.jsonl") == b"evt"
@@ -296,7 +297,7 @@ def test_get_volume_for_host_returns_volume_when_objects_present(temp_mngr_ctx: 
     host_id = HostId.generate()
     bucket = provider._state_bucket()
     assert bucket is not None
-    bucket.fake_backend.blobs_by_name[f"hosts/{host_id.get_uuid().hex}/host_dir/logs/a.log"] = b"a"
+    bucket.volume_for_host(host_id).write_files({"logs/a.log": b"a"})
     volume = provider.get_volume_for_host(host_id)
     assert volume is not None
     assert volume.volume.read_file("logs/a.log") == b"a"

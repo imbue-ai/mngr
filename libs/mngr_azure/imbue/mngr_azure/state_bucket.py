@@ -578,13 +578,14 @@ class BlobVolume(BaseVolume):
                 child = name[len(prefix) :]
                 if not child or "/" in child:
                     continue
-                last_modified = getattr(item, "last_modified", None)
+                # A file entry is a BlobProperties with typed last_modified / size.
+                last_modified = item.last_modified
                 entries.append(
                     VolumeFile(
                         path=child,
                         file_type=FileType.FILE,
                         mtime=int(last_modified.timestamp()) if last_modified is not None else 0,
-                        size=getattr(item, "size", 0) or 0,
+                        size=item.size or 0,
                     )
                 )
         return entries

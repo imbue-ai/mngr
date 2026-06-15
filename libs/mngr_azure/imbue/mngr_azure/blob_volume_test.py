@@ -3,6 +3,7 @@
 import pytest
 
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.testing import FakeBlobStorageBackend
@@ -21,7 +22,7 @@ def _seed(contents: dict[str, bytes]) -> FakeBlobStorageBackend:
     return backend
 
 
-def _volume(backend: FakeBlobStorageBackend, prefix: str) -> _StubbedBlobVolume:
+def _volume(backend: FakeBlobStorageBackend, prefix: str) -> Volume:
     return _StubbedBlobVolume(
         credential=None, account_name=_ACCOUNT, container_name=_CONTAINER, fake_backend=backend
     ).scoped(prefix)

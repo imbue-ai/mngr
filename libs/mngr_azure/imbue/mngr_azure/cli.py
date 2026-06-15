@@ -281,6 +281,29 @@ def _provision_host_identity(identity: BlobStateHostIdentity, host_dir_identity:
     return identity.identity_name
 
 
+def _provision_host_identity_for_prepare(
+    base: AzureProviderConfig, client: AzureVpsClient, host_dir_identity: str, *, was_account_set_up: bool
+) -> str | None:
+    """Provision the host-dir identity during prepare, gating on the state account existing.
+
+    The identity's Storage Blob Data Contributor role assignment is scoped to the
+    state account, so provisioning is only meaningful once that account is set up.
+    When the account setup was skipped (``was_account_set_up`` is False): ``require``
+    raises (it cannot deliver a working offline host_dir), while ``auto`` / ``skip``
+    return None (no identity, the documented degraded outcome). When the account is
+    present, defer to ``_provision_host_identity`` for the tri-state behavior.
+    """
+    if was_account_set_up:
+        return _provision_host_identity(_build_host_identity(base, client), host_dir_identity)
+    if host_dir_identity == _HOST_DIR_IDENTITY_REQUIRE:
+        raise click.ClickException(
+            "Cannot provision the host-dir managed identity: the state storage account could not be set up "
+            "(its Storage Blob Data Contributor role assignment is scoped to that account). Re-run with "
+            "sufficient Microsoft.Storage permissions, or use --host-dir-identity auto/skip."
+        )
+    return None
+
+
 def _perform_host_identity_cleanup(identity: BlobStateHostIdentity) -> str | None:
     """Delete the bucket-write managed identity, best-effort. Returns its name or None.
 
@@ -507,15 +530,9 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # identity's role assignment is scoped to the state account, so it is only
     # meaningful when the account was set up; skip it when the bucket setup was
     # itself skipped (state_account_name is None).
-    host_identity_name: str | None = None
-    if state_account_name is not None:
-        host_identity_name = _provision_host_identity(_build_host_identity(base, client), opts.host_dir_identity)
-    elif opts.host_dir_identity == _HOST_DIR_IDENTITY_REQUIRE:
-        raise click.ClickException(
-            "Cannot provision the host-dir managed identity: the state storage account could not be set up "
-            "(its Storage Blob Data Contributor role assignment is scoped to that account). Re-run with "
-            "sufficient Microsoft.Storage permissions, or use --host-dir-identity auto/skip."
-        )
+    host_identity_name = _provision_host_identity_for_prepare(
+        base, client, opts.host_dir_identity, was_account_set_up=state_account_name is not None
+    )
     _output_prepare_result(
         result, state_account_name, was_bucket_created, host_identity_name, output_opts.output_format
     )

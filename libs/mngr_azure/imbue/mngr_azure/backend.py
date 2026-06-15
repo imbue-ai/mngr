@@ -114,19 +114,18 @@ HOST_DIR_SYNC_INTERVAL_SECONDS: Final[int] = 60
 _HOST_DIR_SYNC_EXCLUDE_PATTERNS: Final[tuple[str, ...]] = ("*.tmp", "__pycache__", "node_modules")
 
 
-def _build_host_dir_sync_command(host_dir_on_outer: str, blob_prefix_url: str, identity_client_id: str) -> str:
+def _build_host_dir_sync_command(host_dir_on_outer: str, blob_prefix_url: str) -> str:
     """Build the ``azcopy sync ... --delete-destination`` command the oneshot service runs.
 
     Syncs the per-host ``host_dir`` tree to the ``hosts/<id>/host_dir/`` blob
     prefix, with ``--delete-destination=true`` so a removed file is removed offline
     too (the ``--delete`` analog), and a few excludes for large transient caches.
-    azcopy authenticates as the VM's *user-assigned* managed identity via MSI (its
-    client id pins which identity to use, since the VM also has a system-assigned
-    one). ``AZCOPY_AUTO_LOGIN_TYPE``/``AZCOPY_MSI_CLIENT_ID`` are set in the
-    service unit's environment.
+    azcopy authenticates as the VM's *user-assigned* managed identity via MSI; the
+    identity is pinned by ``AZCOPY_AUTO_LOGIN_TYPE``/``AZCOPY_MSI_CLIENT_ID`` set in
+    the service unit's environment (not on the command line), since the VM also
+    carries a system-assigned identity.
     """
     excludes = ";".join(_HOST_DIR_SYNC_EXCLUDE_PATTERNS)
-    del identity_client_id  # threaded via the unit Environment, not the command line
     return (
         f'azcopy sync "{host_dir_on_outer}" "{blob_prefix_url}" '
         f'--recursive --delete-destination=true --exclude-pattern "{excludes}"'
@@ -141,7 +140,7 @@ def _build_host_dir_sync_service_unit(host_dir_on_outer: str, blob_prefix_url: s
     completes (the offline copy is current before the VM deallocates). The MSI
     login env pins azcopy to the bucket-write user-assigned identity.
     """
-    command = _build_host_dir_sync_command(host_dir_on_outer, blob_prefix_url, identity_client_id)
+    command = _build_host_dir_sync_command(host_dir_on_outer, blob_prefix_url)
     return (
         "[Unit]\n"
         "Description=Sync this host's host_dir to the mngr Azure Blob state bucket for offline reads\n"
