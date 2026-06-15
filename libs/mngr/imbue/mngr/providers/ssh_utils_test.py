@@ -20,7 +20,9 @@ from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
 from imbue.mngr.providers.ssh_utils import generate_ssh_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
+from imbue.mngr.providers.ssh_utils import parse_openssh_public_key_blob
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
+from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 
 # =============================================================================
@@ -387,6 +389,34 @@ def test_wait_for_sshd_raises_on_non_listening_port() -> None:
 
     with pytest.raises(MngrError, match="SSH server not ready after"):
         wait_for_sshd("127.0.0.1", unused_port, timeout_seconds=0.0)
+
+
+# =============================================================================
+# parse_openssh_public_key_blob / wait_for_expected_host_key
+# =============================================================================
+
+
+def test_parse_openssh_public_key_blob_extracts_type_and_blob() -> None:
+    assert parse_openssh_public_key_blob("ssh-ed25519 AAAAblob comment here") == ("ssh-ed25519", "AAAAblob")
+
+
+def test_parse_openssh_public_key_blob_without_comment() -> None:
+    assert parse_openssh_public_key_blob("ssh-ed25519 AAAAblob") == ("ssh-ed25519", "AAAAblob")
+
+
+def test_parse_openssh_public_key_blob_raises_on_malformed() -> None:
+    with pytest.raises(MngrError, match="Malformed OpenSSH public key"):
+        parse_openssh_public_key_blob("ssh-ed25519")
+
+
+def test_wait_for_expected_host_key_raises_on_non_listening_port() -> None:
+    """Times out (and raises) when nothing is listening, so a key can never match."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        unused_port = s.getsockname()[1]
+
+    with pytest.raises(MngrError, match="did not present the expected SSH host key"):
+        wait_for_expected_host_key("127.0.0.1", unused_port, "ssh-ed25519 AAAA test", timeout_seconds=0.0)
 
 
 # =============================================================================

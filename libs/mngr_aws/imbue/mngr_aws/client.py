@@ -16,6 +16,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -44,6 +45,18 @@ _STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
     "shutting-down": VpsInstanceStatus.DESTROYING,
     "terminated": VpsInstanceStatus.DESTROYING,
 }
+
+
+class SecurityGroupPrepareResult(FrozenModel):
+    """Outcome of ``AwsVpsClient.ensure_security_group`` / ``mngr aws prepare``."""
+
+    security_group_id: str = Field(description="Id of the security group new instances will be attached to")
+    was_created: bool = Field(
+        description=(
+            "True if a new security group was created by this call; False if it already existed "
+            "(idempotent re-run, ingress re-authorized) or was a caller-supplied ExistingSecurityGroup"
+        )
+    )
 
 
 class AwsVpsClient(VpsClientInterface):
@@ -121,13 +134,15 @@ class AwsVpsClient(VpsClientInterface):
     # Security group management (idempotent)
     # =========================================================================
 
-    def ensure_security_group(self) -> str:
-        """Return the SG id to attach to new instances, creating it if needed.
+    def ensure_security_group(self) -> SecurityGroupPrepareResult:
+        """Return the SG to attach to new instances, creating it if needed.
 
         ``security_group`` is a tagged union:
-        - ``ExistingSecurityGroup(id=...)``: return the id as-is.
+        - ``ExistingSecurityGroup(id=...)``: return the id as-is
+          (``was_created=False``: nothing is created or modified).
         - ``AutoCreateSecurityGroup(name=...)``: look up by name (optionally
-          scoped to ``vpc_id``); create if absent. Open tcp/22 and
+          scoped to ``vpc_id``); create if absent (``was_created`` reflects
+          whether a new group was created). Open tcp/22 and
           tcp/``container_ssh_port`` to every CIDR in ``allowed_ssh_cidrs``.
 
         Empty ``allowed_ssh_cidrs`` means "no ingress rules added": the SG is
@@ -144,7 +159,7 @@ class AwsVpsClient(VpsClientInterface):
         """
         match self.security_group:
             case ExistingSecurityGroup(id=sg_id):
-                return sg_id
+                return SecurityGroupPrepareResult(security_group_id=sg_id, was_created=False)
             case AutoCreateSecurityGroup(name=sg_name):
                 return self._ensure_auto_created_security_group(sg_name)
             case _ as unreachable:
@@ -259,8 +274,7 @@ class AwsVpsClient(VpsClientInterface):
         if "0.0.0.0/0" in self.allowed_ssh_cidrs:
             logger.warning(
                 "AWS allowed_ssh_cidrs includes 0.0.0.0/0; auto-created security group {!r} will "
-                "permit SSH from the public internet. Acceptable for ephemeral dev hosts (key-only "
-                "auth); tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
+                "permit SSH from the public internet.",
                 sg_name,
             )
 
@@ -295,7 +309,7 @@ class AwsVpsClient(VpsClientInterface):
         required_cidrs = set(self.allowed_ssh_cidrs)
         return all(required_cidrs <= granted for granted in granted_cidrs_by_port.values())
 
-    def _ensure_auto_created_security_group(self, sg_name: str) -> str:
+    def _ensure_auto_created_security_group(self, sg_name: str) -> SecurityGroupPrepareResult:
         self._warn_about_cidrs_if_needed(sg_name)
 
         existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
@@ -307,9 +321,9 @@ class AwsVpsClient(VpsClientInterface):
             # rule is genuinely missing.
             if self._ssh_ingress_already_authorized(existing[0]):
                 logger.debug("Security group {} already has the required SSH ingress; skipping authorize", sg_id)
-                return sg_id
+                return SecurityGroupPrepareResult(security_group_id=sg_id, was_created=False)
             self._authorize_ssh_ingress_idempotent(sg_id)
-            return sg_id
+            return SecurityGroupPrepareResult(security_group_id=sg_id, was_created=False)
 
         create_kwargs: dict[str, Any] = {
             "GroupName": sg_name,
@@ -322,7 +336,7 @@ class AwsVpsClient(VpsClientInterface):
         sg_id = result["GroupId"]
         logger.info("Created security group {} in region {}", sg_id, self.region)
         self._authorize_ssh_ingress_idempotent(sg_id)
-        return sg_id
+        return SecurityGroupPrepareResult(security_group_id=sg_id, was_created=True)
 
     def _authorize_ssh_ingress_idempotent(self, sg_id: str) -> None:
         """Authorize ingress for SSH ports on the SG, swallowing duplicate errors.
