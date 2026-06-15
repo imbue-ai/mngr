@@ -1,10 +1,12 @@
 """`mngr imbue_cloud admin pool ...` -- operator-only pool provisioning.
 
-Provisions OVH classic VPSes via ``mngr create`` (the imbue-team operator must
-have an OVH-configured mngr provider available locally), waits for the agent,
-installs + configures ufw on the VPS, installs a management SSH key on both
-the VPS and the container, then writes a row to the connector's Neon
-``pool_hosts`` table.
+``pool create`` bakes pre-provisioned pool hosts on a chosen ``--backend``: an OVH
+classic VPS ordered on demand (``ovh_vps``, the default) or a lima-VM "slice" carved
+on one of our registered bare-metal boxes (``slice``; the shared implementation is
+``cli.server.allocate_slices``). Both bake the same FCT pool host and write the same
+kind of leasable row to the connector's Neon ``pool_hosts`` table -- only the
+machine-provisioning step differs (order-a-VPS vs. carve-a-VM). The OVH path also
+installs + configures ufw and a management SSH key on the VPS + container.
 
 Provider-generic by design: extra VPS-side tags (e.g. ``minds_env=<name>``
 threaded through by the ``minds pool`` env-aware wrapper) come from
@@ -21,7 +23,6 @@ is not involved in pool provisioning at all.
 import json as _json
 import os
 import shlex
-import tomllib
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -42,6 +43,8 @@ from imbue.mngr_imbue_cloud.bake.pool_bake import run_mngr_command
 from imbue.mngr_imbue_cloud.bake.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
+from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
+from imbue.mngr_imbue_cloud.cli.server import allocate_slices
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
@@ -50,96 +53,6 @@ from imbue.mngr_ovh.iam_tags import get_vps_resource
 from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
 from imbue.mngr_ovh.iam_tags import vps_urn_for
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
-
-# Env var name a minds-activated shell uses to flag the pool host DSN
-# for the activated env. Mirrors the field name written into
-# ``~/.minds-<env>/secrets.toml`` by ``minds env deploy`` so an operator
-# can also point us at a one-off DSN by exporting it directly.
-_MINDS_HOST_POOL_DSN_ENV_VAR: Final[str] = "MINDS_HOST_POOL_DSN"
-# Env vars the minds bootstrap exports on ``minds env activate`` so we
-# can locate the per-env secrets.toml without importing any minds
-# module (this CLI lives in mngr_imbue_cloud and is intentionally
-# decoupled from the minds package).
-_MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
-_MINDS_PREFIX: Final[str] = "minds"
-
-
-def _read_activated_minds_host_pool_dsn() -> str | None:
-    """Return the activated minds env's NEON_HOST_POOL_DSN, or None.
-
-    Walks the same on-disk layout ``minds env deploy`` writes:
-
-        $HOME/.<MINDS_ROOT_NAME>/secrets.toml -> [secrets].NEON_HOST_POOL_DSN
-
-    Returns None when ``MINDS_ROOT_NAME`` is unset, when the env root
-    is production (``MINDS_ROOT_NAME=minds``, no per-env secrets.toml),
-    when the file doesn't exist, or when the field is missing / empty.
-    All of those map to "this CLI has no opinion -- caller must pass
-    ``--database-url`` explicitly or set ``MINDS_HOST_POOL_DSN``."
-    """
-    root_name = os.environ.get(_MINDS_ROOT_NAME_ENV_VAR)
-    if not root_name or root_name == _MINDS_PREFIX:
-        return None
-    secrets_path = Path.home() / f".{root_name}" / "secrets.toml"
-    if not secrets_path.is_file():
-        return None
-    try:
-        raw = tomllib.loads(secrets_path.read_text())
-    except OSError as exc:
-        logger.warning("Could not read {} for pool DSN resolution: {}", secrets_path, exc)
-        return None
-    except tomllib.TOMLDecodeError as exc:
-        logger.warning(
-            "Could not parse {} for pool DSN resolution ({}); pass --database-url explicitly.",
-            secrets_path,
-            exc,
-        )
-        return None
-    secrets_block = raw.get("secrets")
-    if not isinstance(secrets_block, dict):
-        return None
-    dsn = secrets_block.get("NEON_HOST_POOL_DSN")
-    if not isinstance(dsn, str) or not dsn:
-        return None
-    return dsn
-
-
-def resolve_pool_database_url(explicit: str | None) -> str:
-    """Resolve the pool DSN for an admin pool command.
-
-    Precedence (highest first):
-
-    1. The explicit ``--database-url`` flag, if the operator passed it.
-    2. ``$MINDS_HOST_POOL_DSN`` env var.
-    3. The activated minds env's ``secrets.toml`` ``NEON_HOST_POOL_DSN``
-       field (written by ``minds env deploy`` for dev envs).
-    4. Refuse with a useful error.
-
-    Production / staging operators (or anyone running outside an
-    activated minds env) keep working: explicit ``--database-url`` is
-    still accepted, and ``$DATABASE_URL`` is intentionally NOT consulted
-    here -- it's a generic env var that the operator might have pointed
-    at a totally unrelated DB. ``MINDS_HOST_POOL_DSN`` is the explicit
-    opt-in.
-    """
-    if explicit:
-        return explicit
-    env_value = os.environ.get(_MINDS_HOST_POOL_DSN_ENV_VAR)
-    if env_value:
-        return env_value
-    activated_dsn = _read_activated_minds_host_pool_dsn()
-    if activated_dsn:
-        return activated_dsn
-    fail_with_json(
-        "No pool DSN available. Either pass --database-url explicitly, export "
-        f"{_MINDS_HOST_POOL_DSN_ENV_VAR}=<dsn>, or `minds env activate <dev-env>` "
-        "first (deploys write the DSN into the per-env secrets.toml).",
-        error_class="UsageError",
-    )
-    # ``fail_with_json`` raises; this line is unreachable but satisfies
-    # the type checker.
-    raise AssertionError("unreachable")
-
 
 _CONTAINER_SSH_PORT: Final[int] = 2222
 
@@ -448,12 +361,26 @@ def _create_single_pool_host(
 @pool.command(name="create")
 @click.option("--count", required=True, type=int, help="Number of pool hosts to create")
 @click.option(
+    "--backend",
+    type=click.Choice(["ovh_vps", "slice"]),
+    default="ovh_vps",
+    show_default=True,
+    help=(
+        "Which machine backs each pool host. ``ovh_vps`` orders an OVH classic VPS on demand; "
+        "``slice`` carves a lima VM on one of our registered bare-metal boxes (run `admin server "
+        "register` + `prep` first). Both bake the same FCT pool host and insert the same kind of "
+        "leasable row -- only the machine-provisioning step differs."
+    ),
+)
+@click.option(
     "--region",
     required=True,
     type=str,
     help=(
-        "OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). "
-        "Validated by OVH at order time; failure surfaces as a 'datacenter not allowed for this plan' error."
+        "Lease/region code stamped on every new row (e.g. ``US-EAST-VA``, ``US-WEST-OR``) -- this is "
+        "what the connector's region-filtered lease matches. For ``ovh_vps`` it is also the OVH "
+        "datacenter the VPS is ordered in. For ``slice`` it is the lease-region label only (NOT the "
+        "box's raw datacenter code)."
     ),
 )
 @click.option(
@@ -461,8 +388,8 @@ def _create_single_pool_host(
     "tags",
     multiple=True,
     help=(
-        "Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 "
-        "tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. "
+        "[ovh_vps only] Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the "
+        "OVH IAM v2 tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. "
         "Example: ``--tag minds_env=alice --tag pool-owner=bob``."
     ),
 )
@@ -470,19 +397,30 @@ def _create_single_pool_host(
     "--attributes",
     "attributes_json",
     required=True,
-    help='Lease-attributes JSON for the new pool rows (e.g. \'{"version":"v1.2.3","cpus":2,"memory_gb":4}\')',
+    help=(
+        'Lease-attributes JSON for the new pool rows (e.g. \'{"repo_branch_or_tag":"main"}\'). For '
+        "``slice`` the per-box size (``memory_gb`` / ``cpus``) is computed and stamped on top of these."
+    ),
 )
 @click.option(
     "--workspace-dir",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True),
-    help="Path to the template repo checkout",
+    help=(
+        "Path to the template (FCT) repo checkout to bake from. Required for ``ovh_vps``; for ``slice`` "
+        "it defaults to $HOME/project/forever-claude-template."
+    ),
 )
 @click.option(
     "--management-public-key-file",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True),
-    help="Path to the management SSH public key",
+    help=(
+        "[ovh_vps only] Path to the management SSH public key installed on the VPS + container. Slices "
+        "authorize the pool key from POOL_SSH_PRIVATE_KEY at carve time, so they do not use this."
+    ),
 )
 @click.option(
     "--database-url",
@@ -508,24 +446,33 @@ def _create_single_pool_host(
     flag_value=False,
     default=True,
     help=(
-        "Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH "
+        "[ovh_vps only] Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH "
         "provider recycles a cancelled (still-billable) VPS when one is available; pass this to "
         "test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false "
         "on the inner `mngr create`."
     ),
 )
+@click.option(
+    "--dry-run",
+    "is_dry_run",
+    is_flag=True,
+    default=False,
+    help="[slice only] Report placement + per-slice sizing; do not bake.",
+)
 def pool_create(
     count: int,
+    backend: str,
     region: str,
     tags: tuple[str, ...],
     attributes_json: str,
-    workspace_dir: str,
-    management_public_key_file: str,
+    workspace_dir: str | None,
+    management_public_key_file: str | None,
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    is_dry_run: bool,
 ) -> None:
-    """Create pre-provisioned pool hosts."""
+    """Create pre-provisioned pool hosts on the chosen backend (OVH VPS or bare-metal slice)."""
     resolved_database_url = resolve_pool_database_url(database_url)
     try:
         parsed_attributes = _json.loads(attributes_json)
@@ -534,6 +481,40 @@ def pool_create(
         fail_with_json(f"Invalid --attributes JSON: {exc}", error_class="UsageError")
     if not isinstance(parsed_attributes, dict):
         fail_with_json("--attributes must be a JSON object", error_class="UsageError")
+
+    # Slice backend: the machine is a lima VM on a registered box. Reject the
+    # OVH-only flags, then hand off to the shared slice provisioning path (which
+    # merges the per-box size onto these lease attributes and uses --region as the
+    # row's lease-region label).
+    if backend == "slice":
+        if tags:
+            fail_with_json("--tag is not applicable to --backend slice", error_class="UsageError")
+        if management_public_key_file is not None:
+            fail_with_json(
+                "--management-public-key-file is not applicable to --backend slice "
+                "(slices authorize the pool key from POOL_SSH_PRIVATE_KEY at carve time)",
+                error_class="UsageError",
+            )
+        if not is_recycle_enabled:
+            fail_with_json("--no-recycle is not applicable to --backend slice", error_class="UsageError")
+        allocate_slices(
+            count=count,
+            lease_attributes=parsed_attributes,
+            region=region,
+            workspace_dir=workspace_dir,
+            mngr_source=mngr_source,
+            database_url=resolved_database_url,
+            is_dry_run=is_dry_run,
+        )
+        return
+
+    # OVH VPS backend.
+    if is_dry_run:
+        fail_with_json("--dry-run is only supported for --backend slice", error_class="UsageError")
+    if not workspace_dir:
+        fail_with_json("--workspace-dir is required for --backend ovh_vps", error_class="UsageError")
+    if not management_public_key_file:
+        fail_with_json("--management-public-key-file is required for --backend ovh_vps", error_class="UsageError")
     # Validate ``--tag`` shapes up front so we don't bake the first
     # host and then trip over a typo on the second one.
     try:

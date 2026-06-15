@@ -91,5 +91,8 @@ def test_format_capacity_table_shows_per_server_and_fleet_totals() -> None:
 def test_server_group_help_lists_commands() -> None:
     result = CliRunner().invoke(server, ["--help"])
     assert result.exit_code == 0
-    for command in ("list", "register", "allocate-slice", "set-status"):
+    # The server group holds only the fleet-lifecycle verbs; slice baking moved to
+    # ``admin pool create --backend slice``.
+    for command in ("prep", "list", "register", "set-status"):
         assert command in result.output
+    assert "allocate-slice" not in result.output

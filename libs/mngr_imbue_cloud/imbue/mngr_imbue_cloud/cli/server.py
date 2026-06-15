@@ -1,13 +1,13 @@
-"""``mngr imbue_cloud admin server ...`` -- operator-only bare-metal server + slice management.
+"""``mngr imbue_cloud admin server ...`` -- operator-only bare-metal fleet management.
 
-Manages the OVH bare-metal servers we rent and the lima-VM "slices" we carve on
-them, as an alternative to ordering OVH VPSes. Writes the connector's host_pool
-Neon DB directly (laptop-side), mirroring ``admin pool create``; the connector
-only reads these rows (plus its release-time teardown). Every step is resumable:
-ordering and OS install can take a long time, and re-running advances a box one
-step. The OVH-touching steps (order / install / destroy) act on the real account
-and are validated against a delivered box; ``list`` / ``register`` / ``allocate``
-are exercised without OVH.
+Manages the OVH bare-metal servers we rent (the lima-VM "slices" we carve on them
+are baked via ``admin pool create --backend slice``, whose shared implementation
+lives here as :func:`allocate_slices`). Writes the connector's host_pool Neon DB
+directly (laptop-side), mirroring ``admin pool create``; the connector only reads
+these rows (plus its release-time teardown). Every step is resumable: ordering and
+OS install can take a long time, and re-running advances a box one step. The
+OVH-touching steps act on the real account and are validated against a delivered
+box; ``list`` / ``register`` are exercised without OVH.
 """
 
 import base64
@@ -39,7 +39,7 @@ from imbue.mngr_imbue_cloud.bake.pool_bake import bake_pool_host
 from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
 from imbue.mngr_imbue_cloud.bake.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.cli._common import emit_json
-from imbue.mngr_imbue_cloud.cli.admin import resolve_pool_database_url
+from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
@@ -92,7 +92,7 @@ def _format_capacity_table(capacities: list[BareMetalServerCapacity]) -> str:
 
 @click.group(name="server")
 def server() -> None:
-    """Bare-metal server + slice management (OVH + Neon)."""
+    """Bare-metal server fleet management (prep / list / register / set-status)."""
 
 
 @contextmanager
@@ -178,7 +178,7 @@ def prep_box(
     Idempotent. Authorizes the pool management key (POOL_SSH_PRIVATE_KEY) for the
     service user so the admin CLI can bake slices and the connector can tear them
     down, and stages the slice guest OS image once so bakes never depend on the
-    Debian mirror. Run after the OS install, before ``allocate-slice``.
+    Debian mirror. Run after the OS install, before ``admin pool create --backend slice``.
     """
     with _pool_private_key_path() as private_key_path:
         pool_public_key = _derive_public_key(private_key_path)
@@ -327,7 +327,7 @@ def compute_server_slice_sizing(server: BareMetalServer) -> dict[str, int]:
     """Compute the per-slice VM sizing for ``server`` from its stored inputs + specs.
 
     Returns ``{vcpus, memory_mib, disk_gib, advertised_memory_gb}`` -- identical for
-    every slice on this box (so a single ``allocate-slice`` batch is one server).
+    every slice on this box (so a single ``admin pool create --backend slice`` batch is one server).
     Raises ``BareMetalProvisioningError`` if the server is missing the inputs a
     pre-sizing registration would have set (re-register it first).
     """
@@ -366,6 +366,7 @@ def _build_slice_create_args(
     *,
     server: BareMetalServer,
     sizing: dict[str, int],
+    region: str,
     pool_public_key: str,
     private_key_path: Path,
     ssh_user: str,
@@ -386,7 +387,10 @@ def _build_slice_create_args(
         "box_ssh_user": ssh_user,
         "pool_private_key_path": str(private_key_path),
         "pool_authorized_public_key": pool_public_key,
-        "slice_region": server.region,
+        # Lease-region label (the app's region code, e.g. US-EAST-VA), NOT the
+        # box's raw datacenter code -- so the connector's region-filtered lease
+        # matches what the minds create form requests.
+        "slice_region": region,
         "slice_vcpus": str(sizing["vcpus"]),
         "slice_memory_mib": str(sizing["memory_mib"]),
         "slice_disk_gib": str(sizing["disk_gib"]),
@@ -465,6 +469,8 @@ def _bake_one_slice(
     *,
     server: BareMetalServer,
     sizing: dict[str, int],
+    lease_attributes: dict[str, Any],
+    region: str,
     workspace_dir: Path,
     pool_public_key: str,
     private_key_path: Path,
@@ -483,7 +489,10 @@ def _bake_one_slice(
     """
     ssh_user = server.lima_service_user or "limahost"
     host_name = f"slice-{uuid4().hex}"
-    attributes = slice_advertised_attributes(sizing)
+    # The slice advertises the operator's lease attributes (e.g. repo_branch_or_tag,
+    # so the minds fast-path lease matches) with the derived per-box size stamped on
+    # top (authoritative). Mirrors how OVH pool hosts carry the operator's attributes.
+    attributes = {**lease_attributes, **slice_advertised_attributes(sizing)}
     attributes_json = json.dumps(attributes)
     try:
         baked = bake_pool_host(
@@ -494,6 +503,7 @@ def _bake_one_slice(
             extra_create_args=_build_slice_create_args(
                 server=server,
                 sizing=sizing,
+                region=region,
                 pool_public_key=pool_public_key,
                 private_key_path=private_key_path,
                 ssh_user=ssh_user,
@@ -520,7 +530,7 @@ def _bake_one_slice(
                 vm_ssh_host_port=baked.outer_ssh_port,
                 container_ssh_host_port=baked.ssh_port,
                 attributes_json=attributes_json,
-                region=server.region,
+                region=region,
                 bare_metal_server_id=str(server.id),
                 lima_instance_name=slice_lima_instance_name(host_id_obj),
                 lima_disk_name=slice_lima_disk_name(host_id_obj),
@@ -562,6 +572,8 @@ def _bake_into_outcomes(
     *,
     server: BareMetalServer,
     sizing: dict[str, int],
+    lease_attributes: dict[str, Any],
+    region: str,
     workspace_dir: Path,
     pool_public_key: str,
     private_key_path: Path,
@@ -575,6 +587,8 @@ def _bake_into_outcomes(
     outcome = _bake_one_slice(
         server=server,
         sizing=sizing,
+        lease_attributes=lease_attributes,
+        region=region,
         workspace_dir=workspace_dir,
         pool_public_key=pool_public_key,
         private_key_path=private_key_path,
@@ -586,51 +600,41 @@ def _bake_into_outcomes(
         outcomes.append(outcome)
 
 
-@server.command(name="allocate-slice")
-@click.option("--count", type=int, default=1, help="Number of slices to bake on the chosen server.")
-@click.option(
-    "--workspace-dir",
-    type=click.Path(exists=True),
-    default=None,
-    help="forever-claude-template checkout to bake from (default: $HOME/project/forever-claude-template).",
-)
-@click.option(
-    "--mngr-source",
-    type=click.Path(exists=True),
-    default=None,
-    help="mngr monorepo root to vendor into the FCT workspace (default: this checkout).",
-)
-@click.option("--dry-run", is_flag=True, default=False, help="Report placement + slice sizing; do not bake.")
-@click.option("--database-url", default=None)
-def allocate_slice(
+def allocate_slices(
+    *,
     count: int,
+    lease_attributes: dict[str, Any],
+    region: str,
     workspace_dir: str | None,
     mngr_source: str | None,
-    dry_run: bool,
-    database_url: str | None,
+    database_url: str,
+    is_dry_run: bool,
 ) -> None:
-    """Bake ``--count`` slices onto a single ready bare-metal server and insert their pool rows.
+    """Bake ``count`` slices onto a single ready bare-metal server and insert their pool rows.
 
-    Picks the ready server with the most free slots (one server per invocation: a
-    server's per-slice vCPU/RAM/disk are fixed by its registration, so a batch is
-    homogeneous), vendors this branch's mngr into the FCT workspace once, then
-    bakes the slices in parallel from here -- each ``mngr create`` drives the slice
-    provider, which carves a lima VM over SSH on the box and bakes the shared
-    container, exactly like an OVH pool bake. Each bake authorizes the pool key,
-    tears down the bootstrap chat agent, and inserts an ``available`` slice
-    ``pool_hosts`` row. The per-slice sizing comes from the server's stored
-    memory-per-slice + CPU overcommit + disk. ``--dry-run`` only reports placement.
+    The slice backend of ``admin pool create``. Picks the ready server with the
+    most free slots (one server per invocation: a server's per-slice vCPU/RAM/disk
+    are fixed by its registration, so a batch is homogeneous), vendors this branch's
+    mngr into the FCT workspace once, then bakes the slices in parallel -- each
+    ``mngr create`` drives the slice provider, which carves a lima VM over SSH on
+    the box and bakes the shared container, exactly like an OVH pool bake. Each row
+    advertises ``lease_attributes`` (the operator's lease metadata) with the derived
+    per-box size stamped on top, and records ``region`` (the lease-region label, not
+    the box's raw datacenter code) so the connector's region-filtered lease matches.
+    ``database_url`` is already resolved by the caller. ``is_dry_run`` only reports
+    placement.
     """
     if count <= 0:
         raise click.UsageError("--count must be positive")
-    resolved_database_url = resolve_pool_database_url(database_url)
-    conn = psycopg2.connect(resolved_database_url)
+    conn = psycopg2.connect(database_url)
     try:
         capacities = fetch_server_capacities(conn)
     finally:
         conn.close()
     # One server per batch (homogeneous sizing): pick the ready box with the most
-    # free slots and require it to hold the whole batch.
+    # free slots and require it to hold the whole batch. Server selection is NOT
+    # filtered by ``region`` today (single-fleet assumption); multi-region fleet
+    # filtering is future work.
     chosen = choose_server_for_new_slice(capacities)
     server = chosen.server
     if chosen.free_slots < count:
@@ -640,17 +644,17 @@ def allocate_slice(
         )
     sizing = compute_server_slice_sizing(server)
 
-    if dry_run:
+    if is_dry_run:
         emit_json(
             {
                 "dry_run": True,
                 "server_id": str(server.id),
                 "public_address": server.public_address,
-                "region": server.region,
+                "region": region,
                 "count": count,
                 "free_slots": chosen.free_slots,
                 "per_slice_sizing": sizing,
-                "attributes": slice_advertised_attributes(sizing),
+                "attributes": {**lease_attributes, **slice_advertised_attributes(sizing)},
             }
         )
         return
@@ -690,10 +694,12 @@ def allocate_slice(
                 kwargs=dict(
                     server=server,
                     sizing=sizing,
+                    lease_attributes=lease_attributes,
+                    region=region,
                     workspace_dir=resolved_workspace_dir,
                     pool_public_key=pool_public_key,
                     private_key_path=private_key_path,
-                    database_url=resolved_database_url,
+                    database_url=database_url,
                     port_range_start=port_windows[idx][0],
                     port_range_end=port_windows[idx][1],
                     outcomes=outcomes,

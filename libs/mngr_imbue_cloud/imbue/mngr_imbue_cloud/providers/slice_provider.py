@@ -37,7 +37,7 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 # region/plan are meaningless for a locally-carved lima VM, but the shared
 # VpsDockerProvider finalize path persists them, so use stable placeholders.
 # Region falls back to this only if the owning bare-metal server's region is
-# unknown; ``allocate-slice`` always passes the real region via ``slice_region``.
+# unknown; the slice bake always passes the real region via ``slice_region``.
 _FALLBACK_SLICE_REGION: str = "lima"
 _SLICE_PLAN: str = "slice"
 
@@ -58,7 +58,7 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
         default=None,
         description=(
             "Path (on the machine running the bake) to the pool management private key used to SSH the box "
-            "for the limactl carve. Set by ``admin server allocate-slice`` from POOL_SSH_PRIVATE_KEY."
+            "for the limactl carve. Set by ``admin pool create --backend slice`` from POOL_SSH_PRIVATE_KEY."
         ),
     )
     slice_base_image_url: str | None = Field(
@@ -74,7 +74,7 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
         description=(
             "Pool management public key to authorize for the slice's VM root and inner container, so the "
             "connector can inject the leasing user's key at lease time and reach the VM at release time. "
-            "Set by the bake (``admin server allocate-slice``) from POOL_SSH_PRIVATE_KEY."
+            "Set by the bake (``admin pool create --backend slice``) from POOL_SSH_PRIVATE_KEY."
         ),
     )
     slice_region: str | None = Field(
@@ -83,7 +83,7 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
     )
     # Carving knobs: deliberately have NO defaults (None). They vary per box (a
     # function of its RAM/cores/disk + the chosen per-slice RAM and overcommit) and
-    # are computed by ``admin server allocate-slice`` and passed in per bake via
+    # are computed by ``admin pool create --backend slice`` and passed in per bake via
     # ``-S`` overrides. ``provision_slice_vm`` raises if any is unset when carving.
     slice_vcpus: int | None = Field(default=None, description="vCPUs per slice VM (no default; set per box)")
     slice_memory_mib: int | None = Field(default=None, description="RAM per slice VM in MiB (no default; set per box)")
@@ -224,7 +224,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         if vcpus is None or memory_mib is None or disk_gib is None:
             raise MngrError(
                 "slice_vcpus / slice_memory_mib / slice_disk_gib must all be set to carve a slice "
-                "(they are computed per box by `admin server allocate-slice`)"
+                "(they are computed per box by `admin pool create --backend slice`)"
             )
         region = self._resolved_region()
         # The pool management key (when configured) is authorized on both the VM
