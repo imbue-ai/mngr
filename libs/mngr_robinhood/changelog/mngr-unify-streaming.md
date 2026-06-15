@@ -9,7 +9,11 @@ Both robinhood stream-json producers now build their events through the shared
   (`message_start` ... `message_stop`) via the shared builders, and the `assistant` summary's inner
   message is now constructed through `anthropic.types.Message`.
 
-Because the framing events and the assistant message are now dumped from anthropic's own models,
-they additionally carry the API's optional, semantically-null metadata fields (e.g.
-`content_block.citations: null`, the `usage` cache/detail nulls). These are the API's native shapes
-and tolerated by permissive consumers; the token stream itself is unchanged.
+Because the framing events and the assistant message are now dumped from the `anthropic` Python
+models, they carry that SDK's optional, null-valued fields (e.g. `content_block.citations: null`,
+`tool_use.caller: null`, the `usage` cache/detail nulls). The token stream itself is unchanged and
+stays byte-identical to the real `claude` binary. The other events are shape-compatible but not
+byte-identical: the Python and TypeScript SDKs carry different optional fields, so the real binary
+omits `citations` and emits a populated `caller`, among other differences. These departures are
+cosmetic (consumers validate leniently) and documented in the `imbue.mngr_claude.stream_json`
+module docstring.

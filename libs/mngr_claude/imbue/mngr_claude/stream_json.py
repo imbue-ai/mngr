@@ -14,12 +14,11 @@ assistant summary. Two payoffs:
 
 - The emit side constructs the events via the SDK models and ``model_dump()``\\s them to the
   wire, so producers and the parser share one vocabulary instead of duplicating bare string
-  literals (``"content_block_delta"``, ``"text_delta"``, ...). Because the events are dumped from
-  anthropic's own models, the framing events and the assistant ``Message`` now carry the API's
-  optional, semantically-null metadata fields (e.g. ``citations``, the ``usage`` cache/detail
-  nulls) that the previous hand-rolled dicts omitted -- a deliberate widening to the API's native
-  shapes. Only ``content_block_delta`` (the CLI token stream), ``content_block_stop``, and
-  ``message_stop`` are byte-identical to the old dicts.
+  literals (``"content_block_delta"``, ``"text_delta"``, ...). We dump the ``anthropic`` *Python*
+  SDK models, whereas the real ``claude`` binary serializes the *TypeScript* SDK; the two have
+  different optional-field sets, so our output is shape-compatible but not byte-identical (see
+  "Known wire-shape departures" below). The hot path -- ``content_block_delta`` / ``text_delta`` --
+  plus ``content_block_stop`` and ``message_stop`` are byte-identical to the real binary.
 - The consume side validates into the union and dispatches with an exhaustive ``assert_never``
   match. When a future ``anthropic`` release adds an event variant, ``ty`` fails the
   exhaustiveness check and names the unhandled member -- an early warning our hand-written
@@ -29,6 +28,27 @@ The unavoidable caveat: the signal fires when we bump the ``anthropic`` *package
 versioned independently of the ``claude`` CLI *binary* that emits the JSON at runtime. So the
 runtime validation here degrades gracefully (an unmodeled variant validates to ``None`` and is
 skipped, never raised) -- the static exhaustiveness check is the real new-variant tripwire.
+
+Known wire-shape departures (measured against ``claude`` 2.1.177)
+----------------------------------------------------------------
+The Python and TypeScript SDKs carry different optional fields, so dumping the Python models does
+not byte-match the real CLI:
+
+- text blocks: the real binary emits ``{"type":"text","text":...}`` with no ``citations`` key; our
+  ``TextBlock`` dump adds ``"citations":null`` (the Python model has the field, the TS wire omits
+  it). Same for the empty text block inside ``content_block_start``.
+- ``tool_use`` blocks: the real binary emits ``"caller":{"type":"direct"}``; mngr cannot observe
+  the caller of a transcript-sourced tool call, so our ``ToolUseBlock`` dump emits ``"caller":null``.
+- the assistant ``Message`` wrapper: our dump adds ``"container":null`` (absent on the wire) and
+  omits ``diagnostics`` / ``context_management`` (present-but-null on the wire); neither field
+  exists on the Python ``Message`` model.
+
+These are cosmetic. The only consumer is mngr's own lenient ``Message.model_validate`` parser (the
+consume side below), which accepts each field present, absent, or null. We keep the plain
+``model_dump()`` rather than post-processing toward the exact TS shape because no single dump mode
+matches it -- the real binary omits some nulls (``citations``) while keeping others
+(``stop_reason`` / ``stop_details`` on the framing events) -- so chasing byte-fidelity would mean
+per-field special-casing for a consumer that does not care.
 """
 
 import json
