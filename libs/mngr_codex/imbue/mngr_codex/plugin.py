@@ -105,6 +105,7 @@ from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -287,7 +288,7 @@ class CodexAgentConfig(AgentTypeConfig):
     )
 
 
-class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin):
+class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin):
     """Agent implementation for the OpenAI Codex CLI (``codex``)."""
 
     # Stable substring of codex's header box, which renders together with the
@@ -367,10 +368,13 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         """
         return self._get_agent_dir() / ROOT_SESSION_FILENAME
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_codex_preserved_items(), self, host)
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_codex_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
     def _resolve_user_codex_home(self, host: OnlineHostInterface) -> Path:
         """Resolve the user's real ``CODEX_HOME`` over the host shell.

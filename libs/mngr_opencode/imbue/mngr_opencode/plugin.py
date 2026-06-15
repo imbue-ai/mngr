@@ -78,6 +78,7 @@ from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -220,7 +221,7 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
 
 
-class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
+class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin):
     """Agent implementation for OpenCode (driven via its server, not TUI keystrokes)."""
 
     # How long send_message waits for the launch script to have written the
@@ -527,10 +528,13 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
             launch_command = f"{launch_command} {forwarded_args}"
         return CommandString(launch_command)
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_opencode_preserved_items(), self, host)
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_opencode_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
 
 def _opencode_preserved_items() -> list[PreservedItem]:

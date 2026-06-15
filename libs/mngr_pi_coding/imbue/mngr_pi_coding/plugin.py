@@ -28,6 +28,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -281,7 +282,7 @@ def _has_api_credentials_available(
     return False
 
 
-class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
+class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin):
     """Agent implementation for the pi coding agent.
 
     pi's only lifecycle-event surface is its TypeScript extension API (no
@@ -759,6 +760,9 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
     ) -> None:
         """No post-provisioning steps needed."""
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_pi_coding_preserved_items(), self, host)
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and the session-file pointer before the state dir is deleted.
 
@@ -766,7 +770,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         other cleanup to do.
         """
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_pi_coding_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
 
 def _pi_coding_preserved_items() -> list[PreservedItem]:
