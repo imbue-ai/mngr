@@ -120,7 +120,7 @@ def test_build_provider_instance_prefers_configured_project_over_adc(
 class _FirewallStubClient(GcpVpsClient):
     """GcpVpsClient with firewall resolution stubbed, for hermetic create-hook tests.
 
-    The real ``resolve_firewall`` makes a GCE API call. The pre-create hook now
+    The real ``resolve_firewall`` makes a GCE API call, and the pre-create hook
     invokes it, so tests that exercise the hook stub it: ``resolve_firewall``
     returns the target tag, or (when ``stub_firewall_missing``) raises the same
     ``mngr gcp prepare`` MngrError the real method raises on a 404.
@@ -183,7 +183,7 @@ def test_validate_provider_args_under_pytest_raises_when_unset(temp_mngr_ctx: Mn
 
 def test_validate_provider_args_under_pytest_accepts_positive(temp_mngr_ctx: MngrContext) -> None:
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
-    # No exception raised (auto_shutdown set, firewall present).
+    # auto_shutdown set and firewall present, so the hook passes.
     provider._validate_provider_args_for_create()
 
 
