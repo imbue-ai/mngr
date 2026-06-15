@@ -58,6 +58,7 @@ from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
@@ -1383,7 +1384,12 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
-class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMixin, HasStreamingSnapshotMixin):
+class ClaudeAgent(
+    InteractiveTuiAgent[ClaudeAgentConfig],
+    HasCommonTranscriptMixin,
+    HasStreamingSnapshotMixin,
+    HasSessionPreservationMixin,
+):
     """Agent implementation for Claude with session resumption support."""
 
     TUI_READY_INDICATOR = "Claude Code"
@@ -2394,6 +2400,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         self._finalize_adopted_session(host, dest_projects_dir / dest_project_name, adopted_session_id)
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_claude_preserved_items(self.agent_config.use_env_config_dir), self, host)
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.
 
@@ -2420,7 +2429,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """
         # Preserve session files before the state dir is deleted
         if self.agent_config.preserve_sessions_on_destroy:
-            preserve_agent_state(_claude_preserved_items(self.agent_config.use_env_config_dir), self, host)
+            self.preserve_session_state(host)
 
         if self.agent_config.use_env_config_dir:
             # Shared-config mode: mngr never wrote per-agent keychain entries or

@@ -593,3 +593,18 @@ class HasStreamingSnapshotMixin(ABC):
     def get_stream_buffer_path(self) -> Path:
         """Return the path to this agent's response-streaming buffer file."""
         ...
+
+
+class HasSessionPreservationMixin(ABC):
+    """Mixin for agent types that preserve their session/transcript files on destroy.
+
+    When the agent (or its host) is destroyed, its native session files, raw +
+    common transcripts, and resume pointers should be copied to a durable
+    preserved location before the state dir is removed, so the conversation is
+    not lost. The agent's ``on_destroy`` calls this, gated by its own config.
+    """
+
+    @abstractmethod
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        """Copy this agent's session/transcript files to the preserved location before cleanup."""
+        ...

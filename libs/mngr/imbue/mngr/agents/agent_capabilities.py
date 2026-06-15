@@ -12,6 +12,7 @@ from pydantic import Field
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
@@ -135,6 +136,12 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         description="Publishes a live, in-progress view of the agent's assistant text. Lowest-priority; only needed if a consuming UI wants live streaming.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasStreamingSnapshotMixin,
+    ),
+    AgentCapability(
+        key="session_preservation",
+        description="Preserves session/transcript files when the agent is destroyed, so the conversation is not lost. Baseline; every port wants it.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=HasSessionPreservationMixin,
     ),
 )
 
