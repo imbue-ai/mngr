@@ -118,6 +118,13 @@ class CatalogEntry(FrozenModel):
         default=(),
         description="Top-level CLI command names this plugin registers, when different from entry_point_name",
     )
+    requires_packages: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Packages that must be present -- already installed or selected earlier in the wizard -- for this"
+            " DEPENDENT entry to be offered. Empty falls back to gating on `signal` alone."
+        ),
+    )
 
 
 # Descriptions sourced from each plugin's pyproject.toml.
@@ -231,7 +238,49 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         tier=PluginTier.DEPENDENT,
         signal=_CLAUDE_SIGNAL,
     ),
+    # Per-harness usage data providers: each only makes sense once you have both
+    # the matching agent plugin and the base usage plugin, so they are offered in
+    # phase 2 gated on both being present (installed or selected in phase 1).
+    CatalogEntry(
+        entry_point_name="claude_usage",
+        package_name="imbue-mngr-claude-usage",
+        description="Claude usage data provider for `mngr usage`",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        requires_packages=("imbue-mngr-claude", "imbue-mngr-usage"),
+    ),
+    CatalogEntry(
+        entry_point_name="codex_usage",
+        package_name="imbue-mngr-codex-usage",
+        description="Codex usage data provider for `mngr usage`",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        requires_packages=("imbue-mngr-codex", "imbue-mngr-usage"),
+    ),
+    CatalogEntry(
+        entry_point_name="opencode_usage",
+        package_name="imbue-mngr-opencode-usage",
+        description="OpenCode usage data provider for `mngr usage`",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        requires_packages=("imbue-mngr-opencode", "imbue-mngr-usage"),
+    ),
+    CatalogEntry(
+        entry_point_name="pi_coding_usage",
+        package_name="imbue-mngr-pi-coding-usage",
+        description="pi usage data provider for `mngr usage`",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        requires_packages=("imbue-mngr-pi-coding", "imbue-mngr-usage"),
+    ),
     # --- INDEPENDENT, no signal ---
+    CatalogEntry(
+        entry_point_name="usage",
+        package_name="imbue-mngr-usage",
+        description="Cost / quota usage tracking for mngr agents (`mngr usage`)",
+        tier=PluginTier.INDEPENDENT,
+        is_recommended=True,
+    ),
     CatalogEntry(
         entry_point_name="ttyd",
         package_name="imbue-mngr-ttyd",

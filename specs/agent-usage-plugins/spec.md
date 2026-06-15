@@ -401,6 +401,25 @@ is what usage data the tool exposes.
 | pi        | in-process TS extension         | cost + tokens          | reported (est. fallback) | no   | Easy     |
 | Codex     | rollout transcript streamer     | tokens + rate_limits   | estimated           | yes (sub) | Moderate |
 
+## Install-wizard recommendation
+
+`mngr plugin install-wizard` (and `mngr extras -i`) surface these plugins in their
+two-phase picker via `PLUGIN_CATALOG`:
+
+- **Phase 1** recommends the base `imbue-mngr-usage` plugin (the agent-agnostic
+  `mngr usage` reader/CLI) for everyone -- it has no binary signal, so it is always
+  pre-checked.
+- **Phase 2** offers each per-harness provider (`imbue-mngr-<harness>-usage`) only
+  when both its agent plugin and the base usage plugin are *present* -- already
+  installed or selected in phase 1 -- expressed by the catalog entry's
+  `requires_packages` gate, and pre-checks it when shown.
+
+Antigravity has no usage provider (see
+[Out of scope](#out-of-scope-and-deferred-work)), so the wizard offers a per-agent
+usage extra for every agent type **except** antigravity. If an
+`imbue-mngr-antigravity-usage` package is ever built, adding its catalog entry
+(gated on `imbue-mngr-antigravity` + `imbue-mngr-usage`) is all the wizard needs.
+
 ## Edge cases and failure modes
 
 - **Unknown / new model:** `compute_cost` returns `None`; the record keeps its

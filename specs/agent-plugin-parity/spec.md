@@ -176,6 +176,7 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Onboarding NUX seed | Y | Y | n/a (no NUX) | n/a (no NUX) | Y (`.personality_migration` + `[notice]` suppressors) |
 | Raw transcript | Y | Y | Y | Y (in-process, raw-seeded) | Y (tail rollout JSONL) |
 | Common transcript | Y | Y | Y | Y (in-process, rebuilt on idle) | Y (converter, derived from raw) |
+| Usage tracking plugin | Y (`mngr_claude_usage`) | - (deferred; no cost/token source) | Y (`mngr_pi_coding_usage`) | Y (`mngr_opencode_usage`) | Y (`mngr_codex_usage`) |
 | Conversation resume (stop/start) | Y | Y | Y (`--session`) | Y (`attach --session`) | Y (`codex resume <id>`) |
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
@@ -226,6 +227,12 @@ Notable observations:
 - **`antigravity` is missing session-preservation-on-destroy, the streaming snapshot,
   deploy contributions, and field generators** relative to claude. These are the claude
   features no port has yet matched.
+- **`antigravity` is the one port with no usage-tracking plugin** -- claude, codex,
+  opencode, and pi each ship a `mngr_<harness>_usage` provider, but `agy`'s statusline
+  payload exposes no cost / token / rate-limit data, so there is nothing to write (deferred;
+  see the [agent-usage-plugins spec](../agent-usage-plugins/spec.md)). Consequently the
+  `mngr plugin install-wizard` offers a per-agent usage provider for every agent type except
+  antigravity.
 
 ---
 

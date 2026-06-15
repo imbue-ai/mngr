@@ -3,6 +3,8 @@ from urwid.widget.wimp import CheckBox
 from imbue.mngr.cli.plugin_install_wizard import _filter_already_installed
 from imbue.mngr.cli.plugin_install_wizard import _get_accepted_signals
 from imbue.mngr.cli.plugin_install_wizard import _get_selected_entries
+from imbue.mngr.cli.plugin_install_wizard import _is_dependent_visible
+from imbue.mngr.cli.plugin_install_wizard import _phase2_dependent_entries
 from imbue.mngr.cli.plugin_install_wizard import _should_preselect_basic
 from imbue.mngr.plugin_catalog import CatalogEntry
 from imbue.mngr.plugin_catalog import ClaudeSignalCheck
@@ -12,6 +14,32 @@ from imbue.mngr.primitives import PluginTier
 _PASSING_SIGNAL = SignalCheck(command=("true",))
 _FAILING_SIGNAL = SignalCheck(command=("false",))
 _CLAUDE_SIGNAL = ClaudeSignalCheck()
+
+# A base + agent plugin + agent-usage provider triple mirroring the real catalog
+# shape: the usage provider is package-gated on both the agent and base usage.
+_CLAUDE = CatalogEntry(
+    entry_point_name="claude",
+    package_name="imbue-mngr-claude",
+    description="Claude agent",
+    tier=PluginTier.INDEPENDENT,
+    signal=_CLAUDE_SIGNAL,
+    is_recommended=True,
+)
+_USAGE = CatalogEntry(
+    entry_point_name="usage",
+    package_name="imbue-mngr-usage",
+    description="Usage tracking",
+    tier=PluginTier.INDEPENDENT,
+    is_recommended=True,
+)
+_CLAUDE_USAGE = CatalogEntry(
+    entry_point_name="claude_usage",
+    package_name="imbue-mngr-claude-usage",
+    description="Claude usage provider",
+    tier=PluginTier.DEPENDENT,
+    is_recommended=True,
+    requires_packages=("imbue-mngr-claude", "imbue-mngr-usage"),
+)
 
 # =============================================================================
 # Tests for _should_preselect_basic
@@ -163,3 +191,65 @@ def test_filter_already_installed_none_installed() -> None:
     )
     result = _filter_already_installed(plugins, frozenset())
     assert result == plugins
+
+
+# =============================================================================
+# Tests for _is_dependent_visible (package-gated vs legacy signal-gated)
+# =============================================================================
+
+
+def test_is_dependent_visible_package_gated_all_present() -> None:
+    present = frozenset({"imbue-mngr-claude", "imbue-mngr-usage"})
+    assert _is_dependent_visible(_CLAUDE_USAGE, set(), present) is True
+
+
+def test_is_dependent_visible_package_gated_one_missing() -> None:
+    # Base usage present but the agent plugin is not -> not offered.
+    present = frozenset({"imbue-mngr-usage"})
+    assert _is_dependent_visible(_CLAUDE_USAGE, set(), present) is False
+
+
+def test_is_dependent_visible_package_gated_ignores_signals() -> None:
+    """A package-gated entry is decided purely by package presence, not signals."""
+    assert _is_dependent_visible(_CLAUDE_USAGE, {_CLAUDE_SIGNAL}, frozenset()) is False
+
+
+def test_is_dependent_visible_legacy_signal_gated() -> None:
+    legacy = CatalogEntry(
+        entry_point_name="code_guardian",
+        package_name="imbue-mngr-claude",
+        description="legacy dependent",
+        tier=PluginTier.DEPENDENT,
+        signal=_CLAUDE_SIGNAL,
+    )
+    assert _is_dependent_visible(legacy, {_CLAUDE_SIGNAL}, frozenset()) is True
+    assert _is_dependent_visible(legacy, set(), frozenset()) is False
+
+
+# =============================================================================
+# Tests for _phase2_dependent_entries ("present" = installed or selected)
+# =============================================================================
+
+
+def test_phase2_usage_offered_when_agent_and_usage_both_selected() -> None:
+    """Selecting both the agent plugin and base usage in phase 1 unlocks the provider."""
+    result = _phase2_dependent_entries((_CLAUDE_USAGE,), [_CLAUDE, _USAGE], frozenset())
+    assert result == (_CLAUDE_USAGE,)
+
+
+def test_phase2_usage_offered_when_agent_installed_and_usage_selected() -> None:
+    """The agent plugin already installed (filtered out of phase 1) still counts as present."""
+    result = _phase2_dependent_entries((_CLAUDE_USAGE,), [_USAGE], frozenset({"imbue-mngr-claude"}))
+    assert result == (_CLAUDE_USAGE,)
+
+
+def test_phase2_usage_not_offered_without_base_usage() -> None:
+    """Having the agent plugin but not base usage does not unlock the provider."""
+    result = _phase2_dependent_entries((_CLAUDE_USAGE,), [_CLAUDE], frozenset())
+    assert result == ()
+
+
+def test_phase2_usage_not_offered_without_agent() -> None:
+    """Having base usage but not the agent plugin does not unlock the provider."""
+    result = _phase2_dependent_entries((_CLAUDE_USAGE,), [_USAGE], frozenset())
+    assert result == ()
