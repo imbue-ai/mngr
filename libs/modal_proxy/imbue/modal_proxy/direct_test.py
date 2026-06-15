@@ -19,6 +19,7 @@ from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
 from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.direct import DirectApp
+from imbue.modal_proxy.direct import DirectFunction
 from imbue.modal_proxy.direct import DirectImage
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.direct import DirectSecret
@@ -363,3 +364,44 @@ def test_deploy_does_not_retry_on_non_lock_error(tmp_path: Path, monkeypatch: py
 
     assert not isinstance(exc_info.value, ModalProxyAppLockedError)
     assert counter.read_text().strip() == "1", "non-lock failures must not be retried"
+
+
+# --- Post-deploy lookup retry tests ---
+
+
+class _FakeFunction:
+    """A stand-in modal.Function whose get_web_url raises a fixed number of times.
+
+    Used to drive DirectFunction.get_web_url through its retry path without a
+    real Modal connection.
+    """
+
+    def __init__(self, error: Exception, *, fail_times: int, web_url: str | None = "https://example.com") -> None:
+        self._error = error
+        self._fail_times = fail_times
+        self._web_url = web_url
+        self.call_count = 0
+
+    def get_web_url(self) -> str | None:
+        self.call_count += 1
+        if self.call_count <= self._fail_times:
+            raise self._error
+        return self._web_url
+
+
+def test_get_web_url_retries_on_not_found_then_succeeds() -> None:
+    fake = _FakeFunction(modal.exception.NotFoundError("Lookup failed for Function 'foo'"), fail_times=1)
+    function = DirectFunction.model_construct(function=fake)
+
+    assert function.get_web_url() == "https://example.com"
+    assert fake.call_count == 2, "expected one failed lookup followed by a successful retry"
+
+
+def test_get_web_url_does_not_retry_on_other_error() -> None:
+    fake = _FakeFunction(modal.exception.InvalidError("bad request"), fail_times=10)
+    function = DirectFunction.model_construct(function=fake)
+
+    with pytest.raises(ModalProxyInvalidError):
+        function.get_web_url()
+
+    assert fake.call_count == 1, "non-NotFound failures must not be retried"
