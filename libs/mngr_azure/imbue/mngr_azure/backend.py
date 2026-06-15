@@ -1147,10 +1147,10 @@ class AzureProvider(VpsDockerProvider):
         swallowed (this is purely advisory). Mirrors
         ``AwsProvider._warn_if_host_dir_identity_missing``.
         """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
         try:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                return
             identity_ids = self.azure_client.get_instance_user_assigned_identity_ids(VpsInstanceId(instance["id"]))
         except (MngrError, AzureError) as e:
             logger.debug(

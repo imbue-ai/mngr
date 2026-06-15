@@ -1208,12 +1208,12 @@ class AwsProvider(VpsDockerProvider):
         the host so it picks up the profile). Best-effort: any probe failure is
         swallowed (this is purely advisory).
         """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
         try:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                return
             profile_arn = self.aws_client.get_instance_iam_profile_arn(VpsInstanceId(instance["id"]))
-        except VpsApiError as e:
+        except MngrError as e:
             logger.debug("Could not check IAM profile for host {} while diagnosing empty host_dir: {}", host_id, e)
             return
         if profile_arn is None:
