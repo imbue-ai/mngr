@@ -79,6 +79,7 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.container_setup import CONTAINER_ENTRYPOINT_CMD
@@ -370,40 +371,38 @@ def _wait_for_cloud_init_marker(
     *,
     poll_interval_seconds: float = 5.0,
     slow_threshold_seconds: float = 30.0,
-    clock: Callable[[], float] = time.monotonic,
-    sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
     """Poll the VPS for the ``mngr-ready`` first-boot completion marker.
 
     Returns once the marker file appears. The marker is written by whichever
     first-boot mechanism the backend uses -- cloud-init ``runcmd`` (Vultr / AWS /
-    OVH) or the GCE ``startup-script`` (GCP). Swallows ``HostConnectionError``
-    from each poll: the bootstrap runs ``apt-get install`` and Docker setup
-    which can momentarily disrupt SSH (e.g. ``systemctl restart ssh`` after
-    writing the sshd tuning). Each poll's underlying retry budget already
-    absorbs single in-flight disruptions; a connection error that propagates
-    past that means the system is still settling. Keep polling --
-    ``timeout_seconds`` is the hard wall.
+    OVH) or the GCE ``startup-script`` (GCP). A ``HostConnectionError`` on a poll
+    counts as "not ready yet" (returns None): the bootstrap runs ``apt-get
+    install`` and Docker setup which can momentarily disrupt SSH (e.g. ``systemctl
+    restart ssh`` after writing the sshd tuning), so keep polling until
+    ``timeout_seconds`` -- the hard wall.
 
-    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters
-    so tests can drive this without slow real-time waits; defaults preserve
-    the production cadence (poll every 5s, warn if total > 30s).
-
-    ``clock`` and ``sleeper`` are injected so tests can run against a
-    virtual clock and avoid any real-time sleep.
+    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters so
+    tests can drive this with short intervals; defaults preserve the production
+    cadence (poll every 5s, warn if total > 30s).
     """
-    start = clock()
-    while clock() - start < timeout_seconds:
+
+    def _is_marker_present() -> bool | None:
         try:
-            if check_file_exists_on_outer(outer, Path(MNGR_READY_MARKER_PATH)):
-                elapsed = clock() - start
-                if elapsed > slow_threshold_seconds:
-                    logger.warning("Cloud-init took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
-                return
+            return True if check_file_exists_on_outer(outer, Path(MNGR_READY_MARKER_PATH)) else None
         except HostConnectionError as e:
-            logger.debug("Transient SSH error during cloud-init poll (will retry): {}", e)
-        sleeper(poll_interval_seconds)
-    raise MngrError(f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS.")
+            logger.debug("Transient SSH error during host-bootstrap poll (will retry): {}", e)
+            return None
+
+    _value, _poll_count, elapsed = poll_for_value(
+        _is_marker_present, timeout=timeout_seconds, poll_interval=poll_interval_seconds
+    )
+    if _value is None:
+        raise MngrError(
+            f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
+        )
+    if elapsed > slow_threshold_seconds:
+        logger.warning("Host bootstrap took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
 
 
 class VpsDockerProvider(BaseProviderInstance):
