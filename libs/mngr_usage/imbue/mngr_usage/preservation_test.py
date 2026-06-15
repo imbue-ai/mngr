@@ -17,7 +17,7 @@ from typing import Any
 
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host

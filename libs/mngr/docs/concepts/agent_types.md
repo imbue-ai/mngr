@@ -30,6 +30,19 @@ When you run `mngr create my-agent <type>` (or `mngr create my-agent --type <typ
 
 If `<type>` is not found in either, `mngr create` fails. Use `--type command -- <shell command>` to run an arbitrary command without registering a type.
 
+### Aliases
+
+Some plugins register short aliases for their agent types. An alias is accepted anywhere the canonical type name is, and behaves identically. For example, the antigravity plugin aliases `agy` to `antigravity`, and the pi-coding plugin aliases `pi` to `pi-coding`:
+
+```bash
+mngr create my-agent agy    # same as: mngr create my-agent antigravity
+mngr create my-agent pi     # same as: mngr create my-agent pi-coding
+```
+
+Plugins declare aliases via the `register_agent_aliases` hook (see [the plugin API](./plugins.md)).
+
+If you define a [custom agent type](#custom-agent-types) whose name matches an alias, your custom type takes precedence: the alias is dropped (with a warning) and the name resolves to your custom type instead.
+
 ## Custom Agent Types
 
 You can define your own agent types in your config file without writing a plugin. Custom types inherit from an existing type and override specific settings.

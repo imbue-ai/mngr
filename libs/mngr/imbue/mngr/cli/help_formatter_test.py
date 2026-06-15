@@ -591,7 +591,6 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "start": frozenset({"--connect-command"}),
     "stop": frozenset({"--graceful-timeout"}),
     "destroy": frozenset(),
-    "message": frozenset({"--provider"}),
     "exec": frozenset(),
     "cleanup": frozenset({"--action", "--snapshot-before"}),
     "limit": frozenset(
@@ -910,6 +909,32 @@ def test_render_markdown_rewrites_links_when_ansi() -> None:
     """With ANSI and a link_base, relative links are rewritten to absolute URLs."""
     output = render_markdown("[x](../README.md#y)", use_ansi=True, width=80, link_base=_DOC_URL)
     assert "https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/README.md#y" in output
+
+
+def test_ansi_description_section_is_indented() -> None:
+    """The DESCRIPTION prose is indented to man-page depth in the ANSI (pager) path.
+
+    Regression test: the rich-rendered description used to render flush-left while
+    the surrounding section bodies stayed indented by seven spaces. It must match
+    the indentation the plain (piped) path produces.
+    """
+    metadata = CommandHelpMetadata(
+        key="test",
+        one_line_description="A test command",
+        synopsis="mngr test [options]",
+        description="A description paragraph that occupies the DESCRIPTION section.",
+    )
+
+    @click.command()
+    def test_cmd() -> None:
+        """A test command."""
+
+    ctx = click.Context(test_cmd, info_name="test")
+    output = format_git_style_help(ctx, test_cmd, metadata, use_ansi=True)
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    description_line = next(line for line in plain.splitlines() if "description paragraph" in line)
+    assert description_line.startswith("       ")
 
 
 # =============================================================================

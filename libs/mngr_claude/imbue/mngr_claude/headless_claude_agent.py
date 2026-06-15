@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shlex
 import time
 from collections.abc import Iterable
@@ -32,172 +31,16 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_claude.stream_json import assistant_message_id
+from imbue.mngr_claude.stream_json import assistant_text
+from imbue.mngr_claude.stream_json import classify_stream_event
+from imbue.mngr_claude.stream_json import decode_stream_line
+from imbue.mngr_claude.stream_json import validate_stream_event
 
 # Grace period before trusting lifecycle state. Claude can take several seconds
 # to start (especially on first run or via nvm), during which the tmux pane shows
 # bash as the current command, making the agent look DONE/STOPPED.
 _STARTUP_GRACE_SECONDS: float = 10.0
-
-
-@pure
-def _parse_stream_line(line: str) -> dict[str, Any] | None:
-    """Decode a single stream-json line into a dict.
-
-    Returns the parsed dict on success, or None if the line is not valid
-    JSON or does not decode to a JSON object. Non-JSON lines (blank lines,
-    debug output that claude sometimes leaks to stdout) are expected and
-    silently skipped.
-    """
-    try:
-        parsed = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return parsed
-
-
-@pure
-def _extract_text_delta_from_parsed(parsed: dict[str, Any]) -> str | None:
-    """Extract text from an already-parsed stream-json content_block_delta event."""
-    if parsed.get("type") != "stream_event":
-        return None
-
-    event = parsed.get("event")
-    if not isinstance(event, dict):
-        return None
-
-    if event.get("type") != "content_block_delta":
-        return None
-
-    delta = event.get("delta")
-    if not isinstance(delta, dict):
-        return None
-
-    if delta.get("type") != "text_delta":
-        return None
-
-    text = delta.get("text")
-    if isinstance(text, str):
-        return text
-
-    return None
-
-
-@pure
-def extract_text_delta(line: str) -> str | None:
-    """Extract text from a stream-json content_block_delta event.
-
-    Returns the delta text if the line is a content_block_delta with a text_delta,
-    or None otherwise. This handles the partial-message envelope emitted by
-    `claude --output-format stream-json --include-partial-messages`.
-    """
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-    return _extract_text_delta_from_parsed(parsed)
-
-
-@pure
-def _extract_assistant_text_from_parsed(parsed: dict[str, Any]) -> str | None:
-    """Extract concatenated text from an already-parsed top-level `assistant` event."""
-    if parsed.get("type") != "assistant":
-        return None
-
-    message = parsed.get("message")
-    if not isinstance(message, dict):
-        return None
-
-    content_blocks = message.get("content")
-    if not isinstance(content_blocks, list):
-        return None
-
-    text_parts: list[str] = []
-    for block in content_blocks:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") != "text":
-            continue
-        text = block.get("text")
-        if isinstance(text, str):
-            text_parts.append(text)
-
-    if not text_parts:
-        return None
-    return "".join(text_parts)
-
-
-@pure
-def extract_assistant_text(line: str) -> str | None:
-    """Extract concatenated text from a top-level `assistant` event's content blocks.
-
-    Without `--include-partial-messages`, `claude --output-format stream-json`
-    emits one `{"type":"assistant","message":{"content":[{"type":"text","text":...},...]}}`
-    line per assistant turn. Returns the concatenation of all text blocks, or
-    None if the line is not an `assistant` event with at least one text block.
-    """
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-    return _extract_assistant_text_from_parsed(parsed)
-
-
-@pure
-def _extract_assistant_message_id_from_parsed(parsed: dict[str, Any]) -> str | None:
-    """Extract `message.id` from an already-parsed top-level `assistant` event."""
-    if parsed.get("type") != "assistant":
-        return None
-    message = parsed.get("message")
-    if not isinstance(message, dict):
-        return None
-    message_id = message.get("id")
-    if isinstance(message_id, str):
-        return message_id
-    return None
-
-
-@pure
-def extract_assistant_message_id(line: str) -> str | None:
-    """Extract `message.id` from a top-level `assistant` event, if present."""
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-    return _extract_assistant_message_id_from_parsed(parsed)
-
-
-@pure
-def _extract_message_start_id_from_parsed(parsed: dict[str, Any]) -> str | None:
-    """Extract `message.id` from an already-parsed partial-stream `message_start` event."""
-    if parsed.get("type") != "stream_event":
-        return None
-    event = parsed.get("event")
-    if not isinstance(event, dict):
-        return None
-    if event.get("type") != "message_start":
-        return None
-    message = event.get("message")
-    if not isinstance(message, dict):
-        return None
-    message_id = message.get("id")
-    if isinstance(message_id, str):
-        return message_id
-    return None
-
-
-@pure
-def extract_message_start_id(line: str) -> str | None:
-    """Extract `message.id` from a partial-stream `message_start` event, if present.
-
-    With `--include-partial-messages`, claude emits a
-    `{"type":"stream_event","event":{"type":"message_start","message":{"id":"...",...}}}`
-    line at the start of each assistant message. The id lets us correlate
-    subsequent text deltas with a later top-level `assistant` summary that
-    carries the same id.
-    """
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-    return _extract_message_start_id_from_parsed(parsed)
 
 
 @pure
@@ -224,7 +67,7 @@ def _extract_result_error(line: str) -> str | None:
 
     Returns the error message if this is an error result, None otherwise.
     """
-    parsed = _parse_stream_line(line)
+    parsed = decode_stream_line(line)
     if parsed is None:
         return None
     return _result_error_from_parsed(parsed)
@@ -286,10 +129,10 @@ class _StreamTailState(MutableModel):
         self.yielded_text_chunks = []
 
     def _yield_text_for_parsed(self, parsed: dict[str, Any]) -> Iterator[str]:
-        # Dispatch an already-parsed stream-json line on its `type`, then
-        # delegate to the module-level extract helpers (their dict-accepting
-        # variants) so dict-walking logic lives in one place. The string-
-        # accepting public helpers are thin wrappers around the same dict logic.
+        # Dispatch an already-parsed stream-json line on its (CLI-level) `type`, then
+        # delegate to the shared typed boundary in `stream_json` for the envelope
+        # vocabulary. `stream_event` / `assistant` are claude-CLI wrappers; their inner
+        # payloads are the Anthropic-API shapes that `stream_json` models.
         match parsed.get("type"):
             case "stream_event":
                 yield from self._handle_stream_event(parsed)
@@ -302,30 +145,34 @@ class _StreamTailState(MutableModel):
                 logger.trace("Skipped stream-json event of type {!r} (no text to surface)", other_event_type)
 
     def _handle_stream_event(self, parsed: dict[str, Any]) -> Iterator[str]:
+        event = validate_stream_event(parsed.get("event"))
+        if event is None:
+            # The inner payload was not a JSON object, or it matched no event variant this
+            # `anthropic` package models (e.g. a CLI running ahead of our pinned package).
+            # Nothing to surface; the static exhaustiveness check in `classify_stream_event`
+            # is what flags new variants on a package bump.
+            logger.trace("Skipped stream_event with no modeled inner event to surface")
+            return
+        info = classify_stream_event(event)
+
         # message_start (partial stream): begin a new turn. Any deltas for
         # the previous turn whose summary never arrived have already been
         # yielded directly, so dropping the buffer here is safe.
-        start_id = _extract_message_start_id_from_parsed(parsed)
-        if start_id is not None:
+        if info.message_start_id is not None:
             self._reset_turn_state()
-            self.streaming_message_id = start_id
+            self.streaming_message_id = info.message_start_id
             return
 
         # text_delta (partial stream): yield the delta and record it in the
         # per-turn buffer so we can subtract it from the matching summary.
-        delta_text = _extract_text_delta_from_parsed(parsed)
-        if delta_text is not None:
-            self.yielded_text_chunks.append(delta_text)
-            yield delta_text
+        if info.delta_text is not None:
+            self.yielded_text_chunks.append(info.delta_text)
+            yield info.delta_text
             return
 
-        # Other inner stream_event types (content_block_start, content_block_stop,
-        # message_stop, ping, future event types, etc.) carry no text to surface
-        # and are intentionally skipped. Trace-log for consistency with the
-        # outer dispatcher's handling of unknown top-level types.
-        event = parsed.get("event")
-        inner_event_type = event.get("type") if isinstance(event, dict) else None
-        logger.trace("Skipped stream-json stream_event with inner type {!r} (no text to surface)", inner_event_type)
+        # Other inner event types (content_block_start/stop, message_delta/stop) carry no
+        # text to surface and are intentionally skipped.
+        logger.trace("Skipped stream_event inner type {!r} (no text to surface)", event.type)
 
     def _handle_assistant_event(self, parsed: dict[str, Any]) -> Iterator[str]:
         # Top-level assistant event: reconcile against the per-turn buffer.
@@ -336,9 +183,11 @@ class _StreamTailState(MutableModel):
         # The truthiness check skips the empty-text case for free, matching
         # the `if trailing_text:` guard one branch deeper that prevents
         # yielding an empty string.
-        assistant_text = _extract_assistant_text_from_parsed(parsed)
-        if assistant_text:
-            assistant_id = _extract_assistant_message_id_from_parsed(parsed)
+        raw_message = parsed.get("message")
+        message = raw_message if isinstance(raw_message, dict) else None
+        summary_text = assistant_text(message)
+        if summary_text:
+            assistant_id = assistant_message_id(message)
             is_definitely_different_message = (
                 self.streaming_message_id is not None
                 and assistant_id is not None
@@ -349,15 +198,15 @@ class _StreamTailState(MutableModel):
                 # The streamed deltas belonged to a previous message whose summary
                 # never arrived. Yield the full summary for this new message; the
                 # per-turn buffer is irrelevant here so we don't bother joining it.
-                yield assistant_text
+                yield summary_text
             else:
                 # Materialize the per-turn buffer once, here, instead of after every
                 # delta -- this turns an O(N*M) per-turn cost into O(M).
                 yielded_so_far = "".join(self.yielded_text_chunks)
-                if assistant_text.startswith(yielded_so_far):
+                if summary_text.startswith(yielded_so_far):
                     # Summary continues / matches what we already yielded; emit only
                     # the trailing extra text (empty string when they match exactly).
-                    trailing_text = assistant_text[len(yielded_so_far) :]
+                    trailing_text = summary_text[len(yielded_so_far) :]
                     if trailing_text:
                         yield trailing_text
                 else:
@@ -365,7 +214,7 @@ class _StreamTailState(MutableModel):
                     # the summary or this is a different message we cannot disambiguate
                     # by id. Yield the full summary; better a possible partial double-
                     # emit than dropping the assistant message entirely.
-                    yield assistant_text
+                    yield summary_text
 
         self._reset_turn_state()
 
@@ -381,7 +230,7 @@ class _StreamTailState(MutableModel):
             stripped = line.strip()
             if not stripped:
                 continue
-            parsed = _parse_stream_line(stripped)
+            parsed = decode_stream_line(stripped)
             if parsed is None:
                 # Non-JSON output that claude leaked to stdout (debug, banners,
                 # warnings) or, more rarely, valid JSON that isn't an object.
