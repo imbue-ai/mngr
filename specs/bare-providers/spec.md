@@ -261,13 +261,17 @@ the Docker realizer rather than reimplement them.
 ### Configuration surface
 
 ```python
-class VpsDockerProviderConfig(ProviderInstanceConfig):  # name TBD; see Open Questions
-    mode: HostMode = Field(default=HostMode.DOCKER, ...)  # DOCKER | BARE
+class VpsProviderConfig(ProviderInstanceConfig):  # renamed from VpsDockerProviderConfig in Stage 1
+    isolation: IsolationMode = Field(default=IsolationMode.CONTAINER, ...)  # CONTAINER | NONE
 ```
 
-`mode` is per provider-instance, so a user can configure both an `aws` (docker)
-and an `aws-bare` instance. Inputs whose meaning is Docker-specific must fail fast
-and clearly in bare mode:
+`isolation` is per provider-instance, so a user can configure both an `aws`
+(`isolation = "container"`) and an `aws-bare` (`isolation = "none"`) instance.
+`IsolationMode` names the isolation *level* as the axis, which leaves clean room
+for a future `GVISOR`/`SANDBOXED` value that folds today's separate
+`docker_runtime = "runsc"` knob into the same enum; Stage 1 ships only
+`CONTAINER` | `NONE`. Inputs whose meaning is Docker-specific must fail fast and
+clearly when `isolation = none`:
 
 - `image` changes meaning: in Docker mode it is a Docker image; in bare mode there
   is no container, so a Docker image reference or `docker build` args are rejected

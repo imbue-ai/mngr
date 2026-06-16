@@ -22,7 +22,8 @@ So `local : docker :: aws-bare : aws-docker`.
 only), injected like the existing `VpsClient`. `DockerRealizer` = today's container
 logic moved behind it, unchanged. `BareRealizer` = agent runs on the VM OS, reached
 at `vps_ip:22`; `host_dir` on the root disk; a systemd unit owns the agent + idle
-watcher. Provider picks the realizer from `config.mode` (`docker | bare`). Keeps the
+watcher. Provider picks the realizer from `config.isolation` (`container | none`,
+enum `IsolationMode`). Keeps the
 grid to 3 clients x 2 realizers composed at config time -- no class matrix.
 
 **Bare drops** (because motivations are perf + no-Docker, and v1 has no snapshots):
@@ -39,7 +40,7 @@ container cleanup); snapshots deferred (`supports_snapshots = False`).
 
 **Rollout:**
 - Stage 1 (this branch): extract `BaseVpsProvider`, add the realizer seam, build
-  `BareRealizer`, add `mode`, wire bare on aws/gcp/azure (no snapshots). Land
+  `BareRealizer`, add `isolation`, wire bare on aws/gcp/azure (no snapshots). Land
   AWS-bare first as a vertical slice. Preserve vultr/ovh/imbue_cloud docker behavior.
 - Stage 2 (follow-up): promote substrate to an interface; fold `local`/`lima`/`ssh`
   into the grid; consolidate the two Docker implementations into one `DockerRealizer`.

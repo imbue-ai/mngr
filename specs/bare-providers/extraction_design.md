@@ -29,26 +29,29 @@ back-reference to the provider.
 
 ## Realizer construction: internal, config-selected, not injected
 
-The base provider builds its own realizer from `config.mode`; subclasses
+The base provider builds its own realizer from `config.isolation`; subclasses
 (`aws`/`gcp`/`azure`/`vultr`/`ovh`) are **unchanged** for the Docker path -- they
-do not pass a realizer. This keeps Stage-1's blast radius to `instance.py`,
-`realizer.py` (new), and `config.py` (add `mode`).
+do not pass a realizer. This keeps Stage-1's blast radius to `instance.py`, the new
+realizer files, and `config.py` (add `isolation`).
 
 ```python
 # in VpsDockerProvider, a cached_property or model_validator:
 def _build_realizer(self) -> HostRealizer:
-    match self.config.mode:
-        case HostMode.DOCKER:
+    match self.config.isolation:
+        case IsolationMode.CONTAINER:
             return DockerRealizer(config=self.config, mngr_ctx=self.mngr_ctx, key_dir=self._key_dir())
-        case HostMode.BARE:
-            return BareRealizer(config=self.config, mngr_ctx=self.mngr_ctx, key_dir=self._key_dir())
+        case IsolationMode.NONE:
+            # Stage 1 keystone ships only the Docker path; BareRealizer lands in step 3.
+            raise BareIsolationNotYetSupportedError(...)
         case _ as unreachable:
             assert_never(unreachable)
 ```
 
-`HostMode` (`DOCKER` | `BARE`) goes in `primitives.py`; `mode: HostMode =
-Field(default=HostMode.DOCKER, ...)` goes on `VpsDockerProviderConfig`. Default
-`DOCKER` => no behavior change.
+`IsolationMode` (`CONTAINER` | `NONE`) goes in `primitives.py`; `isolation:
+IsolationMode = Field(default=IsolationMode.CONTAINER, ...)` goes on the provider
+config. Default `CONTAINER` => no behavior change. (`IsolationMode` names the
+isolation *level*, leaving room for a future `GVISOR`/`SANDBOXED` value that folds
+the current `docker_runtime = "runsc"` knob into the same enum.)
 
 ## `HostRealizer` interface
 
@@ -149,9 +152,10 @@ unaffected.
 
 ## Commit sequence (intra-PR)
 
-1. Add `HostMode` + `mode` config + `HostRealizer` interface + seam data types +
-   `DockerRealizer` (verbatim move of the container logic) + base delegation.
-   Existing tests green, zero behavior change. **Keystone.**
+1. Add `IsolationMode` + `isolation` config + `HostRealizer` interface + seam data
+   types + `DockerRealizer` (verbatim move of the container logic) + base
+   delegation (the `IsolationMode.NONE` arm raises until step 3). Existing tests
+   green, zero behavior change. **Keystone.**
 2. Make `VpsHostConfig.container_name`/`volume_name` nullable; assert-non-None in
    `DockerRealizer`.
 3. `BareRealizer`: agent-runtime host-setup step, systemd watcher unit, bare host
