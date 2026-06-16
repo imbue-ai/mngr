@@ -25,8 +25,8 @@ from collections.abc import Sequence
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.templates import CATALOG
-from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 
 # The catch-all ``any`` permission is stored and submitted verbatim (it is
 # Detent's wildcard schema), but users find ``all`` clearer, so the dialog
