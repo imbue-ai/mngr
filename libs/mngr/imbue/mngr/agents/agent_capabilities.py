@@ -84,14 +84,14 @@ class CapabilityScope(UpperCaseStrEnum):
 
     # Applies to every agent type.
     ALL = auto()
-    # Applies only to agents that interactively prompt for tool approval -- i.e. a
-    # CLI-backed agent that is not headless. Headless and bare-command agents never prompt,
-    # so e.g. a waiting-reason field is meaningless for them.
+    # Applies only to interactive (non-headless) CLI-backed agents -- the ones a user drives
+    # in a live session. Headless and bare-command agents are excluded: they have no
+    # interactive tool-approval prompt to surface (waiting_reason_field) and no live session
+    # to resume (session_resume).
     INTERACTIVE_ONLY = auto()
     # Applies only to agents that wrap a specific external CLI (CliBackedAgentMixin) -- i.e.
     # not the bare command runners. CLI-specific concerns (install, version, usage, per-tool
-    # policy, an agent-native transcript, session adoption) do not apply to a generic shell
-    # command.
+    # policy, an agent-native transcript) do not apply to a generic shell command.
     CLI_BACKED_ONLY = auto()
     # Applies only to headless agents (HeadlessAgentMixin). Headless-specific concerns
     # (exposing output() non-interactively) are meaningless for an interactive agent.
@@ -229,9 +229,9 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
     ),
     AgentCapability(
         key="session_resume",
-        description="Adopts an existing conversation into a freshly created agent (e.g. `--adopt-session <id>` or `--from <agent>` carry-forward), so it resumes prior context. The read-side counterpart to session_preservation.",
+        description="Adopts an existing conversation into a freshly created interactive agent (e.g. `--adopt-session <id>` or `--from <agent>` carry-forward), so it resumes prior context in a live session. The read-side counterpart to session_preservation; interactive-only, since a headless run has no live session to resume.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
-        scope=CapabilityScope.CLI_BACKED_ONLY,
+        scope=CapabilityScope.INTERACTIVE_ONLY,
         mixin=HasSessionAdoptionMixin,
     ),
     AgentCapability(

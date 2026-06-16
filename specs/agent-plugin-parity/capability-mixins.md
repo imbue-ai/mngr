@@ -133,8 +133,8 @@ hand-maintained per agent):
 | Scope | Applies to | Example capabilities |
 |---|---|---|
 | `ALL` | every agent | `unattended_operation`, `deploy_contributions`, `live_output` |
-| `CLI_BACKED_ONLY` | agents that wrap a specific CLI | transcripts, `auto_install`, `permission_policy`, `version_management`, `usage_tracking`, `session_resume` |
-| `INTERACTIVE_ONLY` | CLI-backed and not headless | `waiting_reason_field` |
+| `CLI_BACKED_ONLY` | agents that wrap a specific CLI | transcripts, `auto_install`, `permission_policy`, `version_management`, `usage_tracking` |
+| `INTERACTIVE_ONLY` | CLI-backed and not headless | `waiting_reason_field`, `session_resume` |
 | `HEADLESS_ONLY` | headless agents | `headless_output` |
 
 The kind traits come from two positive marker mixins: `HeadlessAgentMixin` (headless) and
@@ -151,11 +151,12 @@ they declare the mixin trivially (`BaseHeadlessAgent`, and `CommandAgent` direct
 coding agent that did not auto-allow would correctly show `-`.
 
 A cell renders `n/a` when the capability is out of scope for the agent's kind. One subtlety:
-a class mixin can be *inherited* by a kind that the scope excludes (a CLI-only transcript mixin
-could be inherited by a hypothetical command-runner subclass), so an out-of-scope class-mixin
-hit renders `n/a` rather than erroring. The deliberately-registered kinds (a field generator
-keyed by agent type, a usage source, a deploy hookimpl) cannot be inherited by accident, so an
-out-of-scope hit *there* means the scope is wrong and rendering raises -- a drift guard.
+a class mixin can be *inherited* by a kind that the scope excludes -- e.g. `headless_claude`
+inherits `HasSessionAdoptionMixin` from `ClaudeAgent` but is headless, so the interactive-only
+`session_resume` is `n/a` for it -- so an out-of-scope class-mixin hit renders `n/a` rather than
+erroring. The deliberately-registered kinds (a field generator keyed by agent type, a usage
+source, a deploy hookimpl) cannot be inherited by accident, so an out-of-scope hit *there* means
+the scope is wrong and rendering raises -- a drift guard.
 
 ## The capability registry
 
