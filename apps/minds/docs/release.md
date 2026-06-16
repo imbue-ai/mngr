@@ -35,14 +35,18 @@ Both repos release from **`main`** via **two PRs that both target `main`** (one 
 |---|---|
 | Version string | `apps/minds/package.json` `version` |
 | Baked FCT tag | `apps/minds/imbue/minds/desktop_client/templates.py` `FALLBACK_BRANCH` |
-| `forever-claude-template` checkout | **set `$FCT_DIR`** to its absolute path (per-user, never committed; consumed by `just sync-vendor-mngr` in step 3) |
+| `forever-claude-template` checkout | set `FCT_DIR` in a gitignored `apps/minds/.env` (per-user, never committed; read by `just sync-vendor-mngr`, step 3 — see `apps/minds/.env.example`) |
 | `mngr` monorepo checkout | wherever you cloned it — you run `just` / `git archive` from here |
 | Build / e2e CI | `.github/workflows/minds-launch-to-msg.yml` (`workflow_dispatch`) |
 | Traditional CI | `.github/workflows/ci.yml` (auto on push) |
 
-Set two env vars for the whole session (do this first — later steps assume both):
-- `export GH_TOKEN=$(gh auth token --user weishi-imbue)` — the imbue-org token. Pre-flight any push with `gh api user --jq .login` → must print `weishi-imbue` (the keychain "active" account drifts between parallel agents).
-- `export FCT_DIR=/abs/path/to/forever-claude-template` — your `forever-claude-template` checkout. `just sync-vendor-mngr` (step 3) reads it; no path is baked into the justfile because everyone's checkout is elsewhere. **An agent must set this itself before step 3.**
+Two bits of config, set up front (later steps assume both):
+- **`GH_TOKEN`** (derived, per session) — `export GH_TOKEN=$(gh auth token --user weishi-imbue)`. Pre-flight any push with `gh api user --jq .login` → must print `weishi-imbue` (the keychain "active" account drifts between parallel agents).
+- **`FCT_DIR`** (static, set once) — your `forever-claude-template` checkout path, read by `just sync-vendor-mngr` (step 3). Because it's a static per-user path, put it in a gitignored `apps/minds/.env`; the recipe reads it (minds-scoped — only that recipe loads it), so no shell-rc edit, and it reaches non-interactive agent shells. See `apps/minds/.env.example`:
+  ```bash
+  echo 'FCT_DIR=/abs/path/to/forever-claude-template' >> apps/minds/.env
+  ```
+  An agent: if `apps/minds/.env` doesn't already define `FCT_DIR`, ask the user for their checkout path — don't guess.
 
 ## Procedure
 
@@ -58,16 +62,15 @@ For an iteration of the same version, skip. To bump: set `apps/minds/package.jso
 
 On the FCT PR branch (cut from `origin/main`, clean tree), with the **mngr checkout positioned at the green SHA from step 2** (i.e. on the mngr release PR branch), run the sync recipe.
 
-`just sync-vendor-mngr` needs to know where your `forever-claude-template` checkout lives. **No path is baked into the justfile** — everyone's checkout is somewhere different — so the recipe takes the path from the positional arg, else from a per-user `$FCT_DIR` env var. If you're an agent running this: **set `FCT_DIR` first** (export it in this shell / your agent env) so the recipe and the later steps can find FCT; it is per-user and never committed.
+`just sync-vendor-mngr` reads `FCT_DIR` from your `apps/minds/.env` (Session setup) — no path is baked into the justfile. It does `git archive HEAD` → FCT `vendor/mngr` (tracked files only; keep `apps/minds/`), commits `Sync vendor/mngr to <branch> (<short>)`, aborts if FCT is dirty, and **does not push** — it prints the exact `cd … && git push` line (with the resolved FCT path) for you to run.
 
 ```bash
-export FCT_DIR=/abs/path/to/your/forever-claude-template   # once; per-user, never committed
-just sync-vendor-mngr                                       # uses $FCT_DIR
-# (or pass it explicitly, ignoring $FCT_DIR: just sync-vendor-mngr /abs/path/to/forever-claude-template)
-(cd "$FCT_DIR" && git push)
+just sync-vendor-mngr                       # reads FCT_DIR from .env
+# (or pass the path explicitly: just sync-vendor-mngr /abs/path/to/forever-claude-template)
+# then run the `cd <fct> && git push origin <branch>` line the recipe printed
 ```
 
-`just sync-vendor-mngr` does `git archive HEAD` → FCT `vendor/mngr` (tracked files only; keep `apps/minds/`) and commits `Sync vendor/mngr to <branch> (<short>)`; it aborts if FCT is dirty and does not push. If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`), fix that consumer in this same PR.
+If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`), fix that consumer in this same PR.
 
 ### 4. Prove the pair green pre-merge
 
