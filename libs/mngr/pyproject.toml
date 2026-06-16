@@ -24,15 +24,19 @@ dependencies = [
     "click-option-group>=0.5.6",
     "concurrency-group==0.1.20",
     "coolname>=3.0.0",
-    # Upper-cap pins cryptography <47 because 47.0.0+ ships an aarch64 Rust
-    # OpenSSL wheel whose code uses a CPU instruction that lima-VZ on Apple
-    # Silicon M5 does not expose to the guest -- importing the wheel
-    # SIGILLs (exit 132). 46.x is the last release that imports cleanly in
-    # that environment; M4 Max + native Linux are unaffected either way.
-    # Empirically bisected on the launch-to-msg CI runner (Apple M5):
-    # 46.0.3 import OK; 47.0.0 / 48.0.0 Illegal instruction. Do not drop this
-    # cap without re-verifying launch-to-msg on the M5 runner (it was reverted
-    # once in 68f3f6b7a and silently regressed the agent into recovery).
+    # Upper-cap pins cryptography <47. Root cause (gdb-pinpointed on the M5
+    # launch-to-msg runner, see FCT PR #151): lima-VZ on Apple M5 advertises
+    # SVE/SVE2 in the guest's /proc/cpuinfo but traps the SVE `cntb` instruction
+    # OpenSSL runs in its CPU-cap init (_armv8_sve_get_vl_bytes). cryptography
+    # >=47's Rust openssl binding runs that init at import, so it SIGILLs
+    # (exit 132) in the lima-VZ guest -- taking down anything that imports
+    # paramiko (mngr CLI, system-interface), i.e. most of the in-VM agent.
+    # Upstream (open): https://github.com/pyca/cryptography/issues/14733.
+    # Bisected on the runner: 46.0.3 OK; 47.0.0 / 48.0.0 Illegal instruction.
+    # Capping <47 keeps the binding off the SVE path. The alternative root-cause
+    # fix is OPENSSL_armcap=0 (NEON-only), used in FCT's agent env but not wired
+    # through here. Do not drop this cap without re-verifying launch-to-msg
+    # (reverted once in 68f3f6b7a -> silent agent-recovery regress).
     "cryptography>=42.0,<47",
     # pinning docker because the guard registration module
     # (register_guards_docker.py) monkeypatches its internal methods for test
