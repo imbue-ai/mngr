@@ -32,6 +32,7 @@ from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
@@ -307,6 +308,7 @@ def _has_api_credentials_available(
 
 class PiCodingAgent(
     BaseAgent[PiCodingAgentConfig],
+    CliBackedAgentMixin,
     HasCommonTranscriptMixin,
     HasSessionPreservationMixin,
     HasUnattendedModeMixin,

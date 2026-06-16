@@ -18,7 +18,7 @@ Gave the capability matrix a fixed column order (claude, headless_claude, antigr
 
 Added a third matrix state, `n/a`, for capabilities that do not apply to an agent kind (distinct from `-`, which means applicable but absent). Each capability now declares a code-derived scope based on the agent's kind:
 
-- CLI-backed-only (`raw_transcript`, `common_transcript`, `auto_install`, `permission_policy`, `version_management`, `usage_tracking`): `n/a` for the bare command runners.
+- CLI-backed-only (`raw_transcript`, `common_transcript`, `auto_install`, `permission_policy`, `version_management`, `usage_tracking`, `session_resume`): `n/a` for the bare command runners.
 
 - Interactive-only (`waiting_reason_field`): `n/a` for headless and bare-command agents.
 
@@ -26,6 +26,8 @@ Added a third matrix state, `n/a`, for capabilities that do not apply to an agen
 
 A genuinely-registered capability (field generator, usage source, deploy hook) that lands out of scope raises, keeping the matrix honest; an inherited capability mixin that lands out of scope just renders `n/a`.
 
-Introduced `GenericCommandAgentMixin` to mark the bare command-running agent types (`command`, `headless_command`); it records that they are not CLI-backed and makes them inherently unattended (so `unattended_operation` now shows as present for them). The `command` type is now registered as a small `CommandAgent` subclass of `BaseAgent` carrying this marker.
+CLI-backed scope is derived from a positive marker, `CliBackedAgentMixin`, inherited by every agent that wraps a specific external CLI (claude, codex, antigravity, opencode, pi, and headless variants). A bare command runner is simply the agent without that marker, so it needs no command-specific class for scoping; a minimal `CommandAgent` subclass of `BaseAgent` survives only to declare `HasUnattendedModeMixin`. `unattended_operation` shows present for every agent: interactive coding agents earn it by auto-allowing in-run tool prompts, while headless and bare-command agents have it by construction (no prompt to gate on), declared via `BaseHeadlessAgent` and `CommandAgent`.
 
 Unified the TUI streaming snapshot and headless incremental output into a single `live_output` capability via a shared bare marker, `SupportsLiveOutputMixin`, inherited by both `HasStreamingSnapshotMixin` (the TUI agent's snapshot file) and `StreamingHeadlessAgentMixin` (a headless agent's incremental stdout). `headless_output` (plain `HeadlessAgentMixin`) remains a separate row.
+
+Added a `session_resume` capability (the read-side counterpart to `session_preservation`) via `HasSessionAdoptionMixin`, whose `adopt_session` contract method an agent's `on_after_provisioning` calls to resume an existing conversation. Currently claude-only (its `--adopt-session` / `--from` carry-forward); other CLI agents show it as an available-but-absent gap.

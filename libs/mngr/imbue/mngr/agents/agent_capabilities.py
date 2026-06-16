@@ -13,10 +13,11 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import list_registered_agent_class_types
 from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
-from imbue.mngr.interfaces.agent import GenericCommandAgentMixin
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
@@ -87,9 +88,10 @@ class CapabilityScope(UpperCaseStrEnum):
     # CLI-backed agent that is not headless. Headless and bare-command agents never prompt,
     # so e.g. a waiting-reason field is meaningless for them.
     INTERACTIVE_ONLY = auto()
-    # Applies only to agents that wrap a specific external CLI -- i.e. not the bare
-    # command runners. CLI-specific concerns (install, version, usage, per-tool policy,
-    # an agent-native transcript) do not apply to a generic shell command.
+    # Applies only to agents that wrap a specific external CLI (CliBackedAgentMixin) -- i.e.
+    # not the bare command runners. CLI-specific concerns (install, version, usage, per-tool
+    # policy, an agent-native transcript, session adoption) do not apply to a generic shell
+    # command.
     CLI_BACKED_ONLY = auto()
     # Applies only to headless agents (HeadlessAgentMixin). Headless-specific concerns
     # (exposing output() non-interactively) are meaningless for an interactive agent.
@@ -141,9 +143,9 @@ class AgentClassInfo(FrozenModel):
     is_usage_source_claimed: bool = Field(description="Whether a mngr_<harness>_usage plugin covers this agent")
     # Whether this agent runs headlessly (HeadlessAgentMixin) and so never prompts.
     is_headless: bool = Field(description="Whether the agent runs headlessly (no interactive prompts)")
-    # Whether this is a bare command runner (GenericCommandAgentMixin) rather than a
-    # CLI-backed agent. Drives CLI_BACKED_ONLY applicability.
-    is_generic_command: bool = Field(description="Whether the agent is a bare command runner, not CLI-backed")
+    # Whether this agent wraps a specific external CLI (CliBackedAgentMixin) rather than being
+    # a bare command runner. Drives CLI_BACKED_ONLY and INTERACTIVE_ONLY applicability.
+    is_cli_backed: bool = Field(description="Whether the agent wraps a specific external CLI")
 
 
 def is_capability_applicable(capability: AgentCapability, info: AgentClassInfo) -> bool:
@@ -153,9 +155,9 @@ def is_capability_applicable(capability: AgentCapability, info: AgentClassInfo) 
             return True
         case CapabilityScope.INTERACTIVE_ONLY:
             # Interactive prompting = a CLI-backed agent that is not headless.
-            return not info.is_generic_command and not info.is_headless
+            return info.is_cli_backed and not info.is_headless
         case CapabilityScope.CLI_BACKED_ONLY:
-            return not info.is_generic_command
+            return info.is_cli_backed
         case CapabilityScope.HEADLESS_ONLY:
             return info.is_headless
         case _ as unreachable:
@@ -226,6 +228,13 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         mixin=HasSessionPreservationMixin,
     ),
     AgentCapability(
+        key="session_resume",
+        description="Adopts an existing conversation into a freshly created agent (e.g. `--adopt-session <id>` or `--from <agent>` carry-forward), so it resumes prior context. The read-side counterpart to session_preservation.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
+        mixin=HasSessionAdoptionMixin,
+    ),
+    AgentCapability(
         key="auto_install",
         description="Installs its CLI binary at provision time if missing (gated by consent locally, a config flag remotely). Baseline; every real agent wants it.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
@@ -234,7 +243,7 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
     ),
     AgentCapability(
         key="unattended_operation",
-        description="Can complete a run with no human by auto-allowing in-run tool prompts. The load-bearing capability for remote / scheduled / headless agents.",
+        description="Can complete a run with no human. Interactive coding agents earn this by auto-allowing in-run tool prompts; headless and bare-command agents have it by construction (no prompt to gate on). The load-bearing capability for remote / scheduled / headless agents.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasUnattendedModeMixin,
     ),
@@ -377,7 +386,7 @@ def build_agent_class_infos(
                 plugin_hook_names=plugin_hook_names,
                 is_usage_source_claimed=(owner + _USAGE_PLUGIN_SUFFIX) in usage_plugin_names,
                 is_headless=issubclass(agent_class, HeadlessAgentMixin),
-                is_generic_command=issubclass(agent_class, GenericCommandAgentMixin),
+                is_cli_backed=issubclass(agent_class, CliBackedAgentMixin),
             )
         )
     return tuple(infos)

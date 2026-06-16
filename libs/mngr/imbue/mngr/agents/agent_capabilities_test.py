@@ -9,37 +9,43 @@ from imbue.mngr.agents.agent_capabilities import CapabilityScope
 from imbue.mngr.agents.agent_capabilities import is_capability_applicable
 from imbue.mngr.agents.agent_capabilities import is_capability_present
 from imbue.mngr.agents.agent_capabilities import render_capability_matrix
-from imbue.mngr.interfaces.agent import GenericCommandAgentMixin
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 
 
-# A TUI-style agent that emits both transcript layers but is not headless.
-class _FakeTranscriptAgent(HasCommonTranscriptMixin): ...
+# A CLI-backed agent that emits both transcript layers but is not headless (claude-style).
+class _FakeTranscriptAgent(CliBackedAgentMixin, HasCommonTranscriptMixin): ...
 
 
-# A headless streaming agent (StreamingHeadlessAgentMixin extends HeadlessAgentMixin and
-# SupportsLiveOutputMixin, so it is headless and has live output).
-class _FakeStreamingHeadlessAgent(StreamingHeadlessAgentMixin): ...
+# A CLI-backed headless agent (StreamingHeadlessAgentMixin extends HeadlessAgentMixin and
+# SupportsLiveOutputMixin), so it is CLI-backed, headless, and has live output (headless_claude).
+class _FakeStreamingHeadlessAgent(CliBackedAgentMixin, StreamingHeadlessAgentMixin): ...
 
 
-# A TUI agent that publishes a streaming snapshot (HasStreamingSnapshotMixin extends
+# A CLI-backed agent that publishes a streaming snapshot (HasStreamingSnapshotMixin extends
 # SupportsLiveOutputMixin), so it has live output and is not headless.
-class _FakeTuiSnapshotAgent(HasStreamingSnapshotMixin): ...
+class _FakeTuiSnapshotAgent(CliBackedAgentMixin, HasStreamingSnapshotMixin): ...
 
 
-# A bare command runner (carries the generic-command marker, hence also unattended).
-class _FakeGenericCommandAgent(GenericCommandAgentMixin): ...
+# A CLI-backed agent that can adopt an existing session.
+class _FakeAdoptingAgent(CliBackedAgentMixin, HasSessionAdoptionMixin): ...
 
 
-# A command runner that also structurally inherits a CLI-only transcript mixin: used to
-# exercise that an out-of-scope CLASS_MIXIN capability renders n/a (not a raise), since a
-# mixin can legitimately be inherited by a kind the capability does not apply to.
-class _FakeCommandWithTranscript(GenericCommandAgentMixin, HasCommonTranscriptMixin): ...
+# A bare command runner: not CLI-backed, unattended by construction.
+class _FakeCommandAgent(HasUnattendedModeMixin): ...
+
+
+# A non-CLI-backed agent that nonetheless structurally inherits a CLI-only transcript mixin:
+# used to exercise that an out-of-scope CLASS_MIXIN capability renders n/a (not a raise), since
+# a mixin can legitimately be inherited by a kind the capability does not apply to.
+class _FakeCommandWithTranscript(HasCommonTranscriptMixin): ...
 
 
 # A bare agent with none of the capability mixins.
@@ -62,7 +68,7 @@ def _info(
         plugin_hook_names=plugin_hook_names,
         is_usage_source_claimed=is_usage_source_claimed,
         is_headless=issubclass(agent_class, HeadlessAgentMixin),
-        is_generic_command=issubclass(agent_class, GenericCommandAgentMixin),
+        is_cli_backed=issubclass(agent_class, CliBackedAgentMixin),
     )
 
 
@@ -157,13 +163,13 @@ def test_capability_applicability_by_scope() -> None:
     )
     interactive = _info("claude", _FakeTuiSnapshotAgent)
     headless = _info("headless_claude", _FakeStreamingHeadlessAgent)
-    command = _info("command", _FakeGenericCommandAgent)
+    command = _info("command", _FakeCommandAgent)
 
-    # INTERACTIVE_ONLY: only the non-headless, non-command agent prompts.
+    # INTERACTIVE_ONLY: only the CLI-backed, non-headless agent prompts.
     assert is_capability_applicable(interactive_only, interactive) is True
     assert is_capability_applicable(interactive_only, headless) is False
     assert is_capability_applicable(interactive_only, command) is False
-    # CLI_BACKED_ONLY: applies to everything except the bare command runner.
+    # CLI_BACKED_ONLY: applies to the CLI-backed agents (interactive or headless), not the command runner.
     assert is_capability_applicable(cli_backed_only, interactive) is True
     assert is_capability_applicable(cli_backed_only, headless) is True
     assert is_capability_applicable(cli_backed_only, command) is False
@@ -206,7 +212,7 @@ def test_render_capability_matrix_orders_columns_by_fixed_order() -> None:
 def test_render_capability_matrix_marks_command_runner_cells_na() -> None:
     infos = [
         _info("claude", _FakeTranscriptAgent, field_generator_agent_type_names=frozenset({"claude"})),
-        _info("command", _FakeGenericCommandAgent),
+        _info("command", _FakeCommandAgent),
     ]
     matrix = render_capability_matrix(AGENT_CAPABILITIES, infos)
     lines = matrix.splitlines()
@@ -217,9 +223,13 @@ def test_render_capability_matrix_marks_command_runner_cells_na() -> None:
     # Interactive-only capability: n/a for the command runner.
     waiting_row = next(line for line in lines if line.startswith("| waiting_reason_field |"))
     assert waiting_row == "| waiting_reason_field | Y | n/a |"
-    # Unattended applies to all kinds and the marker makes the command runner unattended.
+    # Unattended applies to all kinds; the command runner is unattended by construction (Y),
+    # while this CLI-backed fake does not declare auto-allow, so it is applicable-but-absent (-).
     unattended_row = next(line for line in lines if line.startswith("| unattended_operation |"))
     assert unattended_row == "| unattended_operation | - | Y |"
+    # CLI-only session_resume: n/a for the command runner (claude here does not adopt, so -).
+    resume_row = next(line for line in lines if line.startswith("| session_resume |"))
+    assert resume_row == "| session_resume | - | n/a |"
 
 
 def test_render_capability_matrix_renders_na_for_inherited_out_of_scope_mixin() -> None:
@@ -248,9 +258,22 @@ def test_render_capability_matrix_raises_when_genuine_capability_is_out_of_scope
     # Unlike an inherited mixin, a field generator is registered deliberately per agent type.
     # If such a genuine capability is present but the scope says n/a, the scope is wrong --
     # so rendering raises rather than silently hiding the contradiction.
-    infos = [_info("command", _FakeGenericCommandAgent, field_generator_agent_type_names=frozenset({"command"}))]
+    infos = [_info("command", _FakeCommandAgent, field_generator_agent_type_names=frozenset({"command"}))]
     with pytest.raises(AgentCapabilityError, match="waiting_reason_field"):
         render_capability_matrix(AGENT_CAPABILITIES, infos)
+
+
+def test_render_capability_matrix_session_resume_tracks_adoption_mixin() -> None:
+    # session_resume is CLI-backed-only and detected by HasSessionAdoptionMixin: Y for the
+    # adopting CLI agent, - for a CLI agent that does not adopt, n/a for the command runner.
+    infos = [
+        _info("claude", _FakeAdoptingAgent),
+        _info("codex", _FakeTranscriptAgent),
+        _info("command", _FakeCommandAgent),
+    ]
+    matrix = render_capability_matrix(AGENT_CAPABILITIES, infos)
+    resume_row = next(line for line in matrix.splitlines() if line.startswith("| session_resume |"))
+    assert resume_row == "| session_resume | Y | - | n/a |"
 
 
 def test_render_capability_matrix_rejects_unlisted_agent_type() -> None:

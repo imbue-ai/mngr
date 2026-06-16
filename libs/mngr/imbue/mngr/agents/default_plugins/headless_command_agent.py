@@ -12,7 +12,6 @@ from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
 from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.agent import GenericCommandAgentMixin
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.polling import poll_until
@@ -69,13 +68,14 @@ class HeadlessCommandConfig(AgentTypeConfig):
     """Config for the headless_command agent type."""
 
 
-class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig], GenericCommandAgentMixin):
+class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
     """Agent type that runs an arbitrary command headlessly and captures its output.
 
     Redirects stdout/stderr to files so callers can read output programmatically
     via stream_output(). Does not support interactive messages, paste detection,
-    or TUI readiness checking. The ``GenericCommandAgentMixin`` marker records that
-    this is a bare command runner (not a CLI-backed agent) and that it runs unattended.
+    or TUI readiness checking. It does not wrap a known CLI (so the CLI-oriented
+    capabilities are ``n/a``) and runs unattended by construction via
+    ``BaseHeadlessAgent``.
     """
 
     def assemble_command(

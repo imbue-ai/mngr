@@ -4,4 +4,4 @@ Added a `just regenerate-agent-capabilities-doc` recipe that regenerates the cod
 
 Removed the throwaway synthetic-base doc (`dev/agent-mixins-synthetic-base.md`); the synthetic base branch is no longer needed.
 
-Updated the capability-mixins design doc to match what shipped: the three-state `Y`/`-`/`n/a` matrix with the code-derived `CapabilityScope` model and the `GenericCommandAgentMixin` / `InteractiveTuiMixin` kind markers (the original doc forbade `n/a` entirely).
+Updated the capability-mixins design doc to match what shipped: the three-state `Y`/`-`/`n/a` matrix with the code-derived `CapabilityScope` model, the positive `CliBackedAgentMixin` kind marker, the unified `live_output` capability, and the `session_resume` capability (the original doc forbade `n/a` entirely).

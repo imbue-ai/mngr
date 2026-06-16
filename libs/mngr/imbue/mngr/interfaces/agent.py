@@ -627,6 +627,22 @@ class HasSessionPreservationMixin(ABC):
         ...
 
 
+class HasSessionAdoptionMixin(ABC):
+    """Mixin for agent types that can adopt an existing conversation session into a new agent.
+
+    The read-side counterpart to :class:`HasSessionPreservationMixin`: it consumes an existing
+    session (a live agent's, a preserved one's, or a config dir's) so a freshly created agent
+    resumes that context. Covers both an explicitly named session (e.g. claude's
+    ``--adopt-session <id>``) and the source agent's session when cloning (``--from <agent>``).
+    The agent's ``on_after_provisioning`` calls this, gated by the relevant create options.
+    """
+
+    @abstractmethod
+    def adopt_session(self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
+        """Adopt the session(s) named in the create options into this newly provisioned agent."""
+        ...
+
+
 class HasUnattendedModeMixin(ABC):
     """Mixin for agent types that can run with no human (auto-allow in-run tool prompts).
 
@@ -697,15 +713,14 @@ class HasAutoInstallMixin(ABC):
         ...
 
 
-class GenericCommandAgentMixin(HasUnattendedModeMixin):
-    """Marker for the bare command-running agent types (``command``, ``headless_command``).
+class CliBackedAgentMixin:
+    """Marker for agents that wrap a specific external coding-model CLI (claude, codex,
+    antigravity, opencode, pi), as opposed to the bare ``command`` / ``headless_command``
+    runners that execute an arbitrary shell command.
 
-    These run an arbitrary shell command rather than wrapping a specific external CLI, so
-    the CLI-oriented capabilities (common transcript, auto-install, permission policy,
-    version management, usage tracking) do not apply to them. They also run with no human
-    by nature -- a plain command has no in-run tool prompts to approve -- so they are
-    always unattended.
+    A bare marker with no contract of its own. The CLI-oriented capabilities (a native
+    transcript, auto-install, version management, per-tool permission policy, usage tracking,
+    session adoption) only apply to these agents; the generic command runners, which do not
+    wrap a known CLI, render those rows as ``n/a``. Every real CLI-backed agent inherits this,
+    so the matrix scopes those rows positively rather than by the absence of a command marker.
     """
-
-    def is_unattended_enabled(self) -> bool:
-        return True
