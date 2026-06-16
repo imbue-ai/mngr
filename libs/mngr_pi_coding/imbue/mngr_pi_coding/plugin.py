@@ -37,6 +37,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -190,15 +191,6 @@ def _get_pi_home_dir(home_dir: Path | None = None) -> Path:
         home_dir = Path.home()
     return home_dir / _PI_HOME_DIR_NAME / _PI_AGENT_SUBDIR
 
-
-# Interim trigger seam for session adoption. While a public ``--adopt-session``
-# flag (which will arrive as ``plugin_data["adopt_session"]``) is built centrally,
-# adoption is triggered by this env var (the value is an id or a path resolved by
-# ``_resolve_adopt_session``). Hardcoded here on purpose -- the shared release
-# harness sets the same name, but importing it would pull in pytest. When the flag
-# lands, the env var becomes a fallback to the plugin_data read (see
-# ``_resolve_adopt_session_arg``).
-_MNGR_ADOPT_SESSION_ENV_VAR: str = "MNGR_ADOPT_SESSION"
 
 # The first line of a pi session JSONL is a ``{"type": "session", ..., "cwd": ...}``
 # record; ``cwd`` is the absolute (realpath) directory pi resumes into. When that
@@ -437,6 +429,7 @@ class PiCodingAgent(
     BaseAgent[PiCodingAgentConfig],
     CliBackedAgentMixin,
     HasCommonTranscriptMixin,
+    HasSessionAdoptionMixin,
     HasSessionPreservationMixin,
     HasUnattendedModeMixin,
     HasAutoInstallMixin,
@@ -902,29 +895,22 @@ class PiCodingAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt an existing pi session so the new agent resumes its conversation.
+        """Adopt an existing pi session (if requested) so the new agent resumes its conversation."""
+        self.adopt_session(host, options, mngr_ctx)
 
-        Triggered by ``plugin_data["adopt_session"]`` (the future ``--adopt-session``
-        flag) or, as an interim seam, the ``MNGR_ADOPT_SESSION`` env var. When set,
-        the named session is resolved across the user-native store, live mngr agents,
-        and preserved agents, copied into this agent's session store, rebound to this
-        agent's work_dir, and recorded as the resume pointer.
+    def adopt_session(self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
+        """Adopt the session named by ``--adopt-session`` into this newly provisioned agent.
+
+        ``--adopt-session`` is ``multiple=True``, so ``plugin_data["adopt_session"]``
+        is a tuple; when set, the last entry's session (resolved across the
+        user-native store, live mngr agents, and preserved agents) is copied into
+        this agent's session store, rebound to this agent's work_dir, and recorded
+        as the resume pointer. Empty means no adoption (the agent starts fresh).
         """
-        adopt_arg = self._resolve_adopt_session_arg(options)
-        if adopt_arg is not None:
-            self._adopt_session(host, adopt_arg)
-
-    def _resolve_adopt_session_arg(self, options: CreateAgentOptions) -> str | None:
-        """Return the adopt-session argument, preferring plugin_data over the env-var seam.
-
-        ``plugin_data["adopt_session"]`` is the future public-flag path; until that
-        flag exists it is unset and the ``MNGR_ADOPT_SESSION`` env var (the interim
-        trigger) supplies the value.
-        """
-        from_plugin_data = options.plugin_data.get("adopt_session")
-        if from_plugin_data:
-            return str(from_plugin_data)
-        return os.environ.get(_MNGR_ADOPT_SESSION_ENV_VAR) or None
+        adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        if not adopt_args:
+            return
+        self._adopt_session(host, adopt_args[-1])
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
         """Copy the resolved session into this agent's store, rebind it, and point resume at it.
