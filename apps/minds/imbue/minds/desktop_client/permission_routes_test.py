@@ -15,6 +15,7 @@ from fastapi.responses import Response
 from fastapi.testclient import TestClient
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
@@ -43,6 +44,7 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
@@ -191,7 +193,12 @@ def _make_recording_handler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
         services_catalog=ServicesCatalog.from_catalog_payload(_TEST_SERVICES_CATALOG_PAYLOAD),
-        mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
+        mngr_message_sender=MngrMessageSender(
+            mngr_caller=RecordingMngrCaller(),
+            # ``_RecordingHandler`` overrides grant/deny, so the sender is never
+            # used; an un-entered group satisfies the required field.
+            concurrency_group=ConcurrencyGroup(name="permission-routes-test-unused"),
+        ),
         gateway_client=gateway_client,
         grant_outcome=grant_outcome,
         grant_message=grant_message,
