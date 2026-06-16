@@ -1,8 +1,6 @@
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -15,24 +13,21 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SnapshotId
 from imbue.mngr_azure import hookimpl
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureVpsClient
@@ -43,14 +38,11 @@ from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
-from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
-from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
@@ -64,19 +56,16 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 
-
-# Self-stopping idle watcher (host-side). Like AWS/GCP, the in-container activity
-# watcher writes ``IDLE_SENTINEL_FILENAME`` onto the shared volume when idle and a
-# host-side systemd ``.path`` unit fires a oneshot ``.service``. Unlike AWS/GCP --
-# where a guest poweroff stops the instance and halts billing -- an Azure OS
-# shutdown leaves the VM "Stopped (not deallocated)", STILL billing compute. So
-# the Azure ``.service`` runs a script that DEALLOCATES the VM via its
-# managed-identity IMDS token + the ARM API (the only in-guest way to halt compute
-# billing). If the deallocate is refused (no role assignment -- the
-# graceful-degradation path) it just logs and exits: an OS poweroff would not halt
-# billing on Azure, so falling back to ``shutdown`` would only strand the VM
-# unreachable while it keeps billing.
-IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-azure-idle-watcher"
+# Self-stopping idle watcher (host-side). The shared sentinel script + ``.path``
+# unit come from ``OfflineCapableVpsDockerProvider``; Azure differs only in the
+# ``.service`` action. Unlike AWS/GCP -- where a guest poweroff stops the instance
+# and halts billing -- an Azure OS shutdown leaves the VM "Stopped (not
+# deallocated)", STILL billing compute. So the Azure ``.service`` runs a script
+# that DEALLOCATES the VM via its managed-identity IMDS token + the ARM API (the
+# only in-guest way to halt compute billing). If the deallocate is refused (no
+# role assignment -- the graceful-degradation path) it just logs and exits: an OS
+# poweroff would not halt billing on Azure, so falling back to ``shutdown`` would
+# only strand the VM unreachable while it keeps billing.
 # Where the host-side deallocate script is installed on the outer VM.
 _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
 
@@ -186,30 +175,6 @@ def _build_host_dir_blob_url(account_name: str, container_name: str, host_id: Ho
     """Return the ``https://<account>.blob.core.windows.net/<container>/hosts/<id>/host_dir`` sync target."""
     prefix = host_dir_blob_prefix_for(host_id).rstrip("/")
     return f"https://{account_name}.blob.core.windows.net/{container_name}/{prefix}"
-
-
-def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
-    """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
-
-    Unlike the base ``VpsDockerProvider`` script (``kill -TERM 1``, stops only the
-    container), the Azure variant touches a sentinel on the shared volume; a
-    host-side systemd path unit observes it and deallocates the whole VM (a
-    container cannot deallocate its host).
-    """
-    return f'#!/bin/bash\ntouch "{sentinel_in_container}"\n'
-
-
-def _build_idle_watcher_path_unit(sentinel_on_outer: str) -> str:
-    """Build the systemd ``.path`` unit that fires when the idle sentinel appears."""
-    return (
-        "[Unit]\n"
-        "Description=Watch for the mngr idle sentinel and deallocate this Azure VM when idle\n"
-        "[Path]\n"
-        f"PathExists={sentinel_on_outer}\n"
-        f"Unit={IDLE_WATCHER_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
 
 
 def _build_idle_watcher_service_unit() -> str:
@@ -576,122 +541,50 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         return vps_ips
 
     # =========================================================================
-    # Deallocate/start (idle-pause + resume)
+    # Deallocate/start + idle-watcher hooks (for OfflineCapableVpsDockerProvider)
     # =========================================================================
 
-    def stop_host(
-        self,
-        host: HostInterface | HostId,
-        create_snapshot: bool = True,
-        timeout_seconds: float = 60.0,
-        stop_reason: HostState | None = None,
-    ) -> None:
-        """Stop the agent container *and* deallocate the Azure VM, halting compute billing.
+    def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
+        """Deallocate the VM -- the only in-guest-free way to halt Azure compute billing.
 
-        The base ``VpsDockerProvider.stop_host`` only stops the inner Docker
-        container, leaving the VM allocated and billing. This override additionally
-        *deallocates* the VM (NOT a mere OS shutdown, which on Azure leaves the VM
-        "Stopped (not deallocated)" still billing compute), so a paused Azure agent
-        costs only OS-disk storage; the disk and all state survive for
-        ``start_host``. ``create_snapshot`` is ignored. Mirrors
-        ``AwsProvider.stop_host``.
+        NOT a mere OS shutdown, which leaves the VM "Stopped (not deallocated)" and
+        STILL billing compute; the OS disk and all state survive for ``start_host``.
         """
-        del create_snapshot
-        host_id = host.id if isinstance(host, HostInterface) else host
-        host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(self.name, host_id)
-        super().stop_host(
-            host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
-        )
-        # Push host_dir one final time while the VM is still reachable, so the
-        # offline copy in the bucket is current the moment it deallocates. The
-        # container is already stopped (super() above), so host_dir is quiesced.
-        self._trigger_final_host_dir_sync(host_id, host_record.vps_ip)
         with log_span("Deallocating Azure VM"):
-            self.azure_client.deallocate_instance(host_record.config.vps_instance_id)
+            self.azure_client.deallocate_instance(instance_id)
 
-    def start_host(
-        self,
-        host: HostInterface | HostId,
-        snapshot_id: SnapshotId | None = None,
-    ) -> Host:
-        """Resume a deallocated Azure agent: start the VM, then its container.
-
-        A deallocated VM is located by its ``mngr-host-id`` tag (it is SSH-
-        unreachable). Azure allocates the public IP ``Static``, so the IP is
-        PRESERVED across deallocate/start and the SSH host keys persist on the OS
-        disk -- so, unlike AWS/GCP, no known_hosts rebind is needed. We just start
-        the VM, clear the idle sentinel and ``stop_reason``, and delegate the
-        container start to ``super()``.
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            raise HostNotFoundError(self.name, host_id)
-        instance_id = VpsInstanceId(instance["id"])
+    def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
+        """Start the VM and return its public IP (allocated ``Static``, so unchanged across the pause)."""
         with log_span("Starting Azure VM"):
-            vps_ip = self.azure_client.start_instance(instance_id)
-        # The cached instance list predates the start (stale power state); drop it.
-        self._instances_cache = None
-        with log_span("Waiting for VPS SSH after start"):
-            self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
-        with self._make_outer_for_vps_ip(vps_ip) as outer:
-            host_store = open_host_store(outer, host_volume_name_for(host_id))
-            record = host_store.read_host_record()
-            if record is None or record.config is None:
-                raise HostNotFoundError(self.name, host_id)
-            # Clear any stale idle sentinel so the freshly-resumed VM isn't
-            # immediately re-deallocated by the systemd path unit (belt-and-
-            # suspenders; the self-deallocate script also removes it when it fires).
-            outer.execute_idempotent_command(f"rm -f {self._idle_sentinel_path_on_outer(host_id)}")
-            certified = record.certified_host_data
-            updated_data = certified.model_copy_update(
-                to_update(certified.field_ref().stop_reason, None),
-                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
-            )
-            # vps_ip is unchanged (static IP), but write it back for robustness.
-            updated_record = record.model_copy_update(
-                to_update(record.field_ref().vps_ip, vps_ip),
-                to_update(record.field_ref().certified_host_data, updated_data),
-            )
-            host_store.write_host_record(updated_record)
-        self._evict_cached_host(host_id)
-        self._host_record_cache[host_id] = updated_record
-        return super().start_host(host_id, snapshot_id)
+            return self.azure_client.start_instance(instance_id)
 
-    # =========================================================================
-    # Self-stopping idle watcher (sentinel + host-side systemd deallocate)
-    # =========================================================================
+    def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
+        """No-op: Azure's public IP is allocated ``Static``, so it is unchanged across deallocate/start.
 
-    def _create_shutdown_script(self, host: Host) -> None:
-        """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
-
-        For Azure an idle container should *deallocate* the whole VM (so a paused
-        agent costs only disk), but a container cannot deallocate its host. The
-        in-container watcher touches a sentinel; a host-side systemd path unit
-        (installed in ``_on_host_finalized``) observes it and runs the
-        self-deallocate script. Mirrors ``AwsProvider._create_shutdown_script``.
+        The SSH host keys persist on the OS disk and the address does not move, so
+        the resume path needs no known_hosts rebind (unlike AWS/GCP).
         """
-        sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
-        shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
-    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Assign the self-deallocate role and install the host-side idle watcher.
+    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+        """No-op: see ``_rebind_known_hosts`` -- the static IP needs no pre-connect rebind."""
 
-        Best-effort (the base contract says this MUST NOT raise): a failure just
-        means no idle self-deallocate (manual ``mngr stop`` still works). The role
-        assignment degrades gracefully when the operator lacks
-        roleAssignments/write (see ``AzureVpsClient.assign_self_deallocate_role``).
+    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
+        """Idle action: run the self-deallocate script (an Azure OS poweroff would not halt billing)."""
+        # The script has the sentinel path baked in at install time (see
+        # _write_idle_watcher_aux_files), so the service unit needs no argument.
+        del sentinel_on_outer
+        return _build_idle_watcher_service_unit()
+
+    def _prepare_idle_self_stop(self, host_id: HostId) -> None:
+        """Assign the VM's self-deallocate role so the in-guest idle watcher can deallocate it.
+
+        Best-effort and MUST NOT raise (the base ``_on_host_finalized`` relies on
+        that): ``_find_instance_for_host`` raises ``MngrError`` on an ambiguous
+        host-id match and ``assign_self_deallocate_role`` surfaces Azure API
+        failures as ``VpsApiError``/``AzureError``. It degrades gracefully when the
+        operator lacks roleAssignments/write, leaving ``mngr stop`` as the way to
+        halt billing.
         """
-        # The base contract says this hook MUST NOT raise, so guard the whole
-        # role-assignment path: _find_instance_for_host raises MngrError on an
-        # ambiguous host-id match, and assign_self_deallocate_role surfaces Azure
-        # API failures as VpsApiError (a MngrError, not an AzureError).
         try:
             instance = self._find_instance_for_host(host_id)
             if instance is not None:
@@ -703,27 +596,27 @@ class AzureProvider(TagMirrorVpsDockerProvider):
                 host_id,
                 e,
             )
-        try:
-            self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            logger.warning(
-                "Azure idle watcher install failed for host {} ({}); the agent will not "
-                "auto-stop on idle, but `mngr stop` still works",
-                host_id,
-                e,
-            )
+
+    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Install the base idle watcher and, when enabled, the host_dir-to-bucket sync daemon.
+
+        Best-effort per the base contract: a host_dir-sync install failure only costs
+        offline host_dir readability, so it is logged rather than failing create_host.
+        """
+        super()._on_host_finalized(host_id=host_id, vps_ip=vps_ip)
         try:
             self._install_host_dir_sync(host_id=host_id, vps_ip=vps_ip)
         except MngrError as e:
-            # Same best-effort contract as the idle watcher: a failure just means
-            # the deallocated host's host_dir won't be readable offline (manual
-            # reads over SSH while running still work), so log and move on.
             logger.warning(
                 "Azure host_dir sync install failed for host {} ({}); the deallocated host's host_dir "
                 "will not be readable offline",
                 host_id,
                 e,
             )
+
+    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
+        """Push host_dir to the bucket one final time before the Azure VM deallocates."""
+        self._trigger_final_host_dir_sync(host_id, vps_ip)
 
     def _install_host_dir_sync(self, *, host_id: HostId, vps_ip: str) -> None:
         """Install the host-side host_dir-to-bucket sync daemon on the outer host.
@@ -791,39 +684,18 @@ class AzureProvider(TagMirrorVpsDockerProvider):
                 e,
             )
 
-    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the self-deallocate script + systemd path/service idle watcher on the outer host."""
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            logger.warning(
-                "Azure idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
-                host_id,
-            )
-            return
-        sentinel_on_outer = self._idle_sentinel_path_on_outer(host_id)
-        with log_span("Installing Azure idle self-deallocate watcher"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # The self-deallocate script calls the IMDS + ARM API with curl;
-                # ensure it's present (idempotent -- a no-op when already installed)
-                # so idle self-deallocate doesn't silently degrade to a poweroff.
-                outer.execute_idempotent_command(
-                    "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl)"
-                )
-                outer.write_text_file(
-                    Path(_DEALLOCATE_SCRIPT_PATH), _build_self_deallocate_script(str(sentinel_on_outer))
-                )
-                outer.execute_idempotent_command(f"chmod +x {_DEALLOCATE_SCRIPT_PATH}")
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.path"),
-                    _build_idle_watcher_path_unit(str(sentinel_on_outer)),
-                )
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
-                    _build_idle_watcher_service_unit(),
-                )
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
-        logger.info("Azure idle self-deallocate watcher installed for host {}", host_id)
+    def _write_idle_watcher_aux_files(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
+        """Install the self-deallocate script the watcher ``.service`` runs (and ensure curl is present).
+
+        The script calls the IMDS + ARM API with curl; ensure curl exists
+        (idempotent -- a no-op when already installed) so idle self-deallocate
+        doesn't silently degrade.
+        """
+        outer.execute_idempotent_command(
+            "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl)"
+        )
+        outer.write_text_file(Path(_DEALLOCATE_SCRIPT_PATH), _build_self_deallocate_script(sentinel_on_outer))
+        outer.execute_idempotent_command(f"chmod +x {_DEALLOCATE_SCRIPT_PATH}")
 
     # =========================================================================
     # Offline metadata (so DEALLOCATED hosts list + resolve by name): the Blob
