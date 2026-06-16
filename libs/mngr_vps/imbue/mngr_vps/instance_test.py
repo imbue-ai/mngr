@@ -665,3 +665,31 @@ def test_create_host_rejects_bare_on_a_provider_without_machine_lifecycle(temp_m
     provider = _minimal_provider(temp_mngr_ctx, IsolationMode.NONE)
     with pytest.raises(BareIsolationNotSupportedError, match="does not support isolation=NONE"):
         provider.create_host(HostName("test-host"))
+
+
+class _BareCapableMinimalProvider(MinimalVpsProvider):
+    """MinimalVpsProvider that claims bare support, to exercise the bare create-input guard.
+
+    The base gate would otherwise reject ``isolation=NONE`` before the
+    container-only-input check (Minimal has no machine lifecycle), so this stub
+    flips the predicate to reach the guard under test.
+    """
+
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        return True
+
+
+def test_create_host_rejects_container_only_inputs_for_bare(temp_mngr_ctx: MngrContext) -> None:
+    """A bare create rejects an image build / start-args rather than silently ignoring them."""
+    provider = _BareCapableMinimalProvider(
+        name=ProviderInstanceName("test-vps"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsProviderConfig(backend=ProviderBackendName("test-vps"), isolation=IsolationMode.NONE),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    with pytest.raises(MngrError, match="does not support.*Docker build args"):
+        provider.create_host(HostName("test-host"), build_args=["--file=Dockerfile", "."])
+    with pytest.raises(MngrError, match="does not support.*start args"):
+        provider.create_host(HostName("test-host"), start_args=["--cpus=2"])

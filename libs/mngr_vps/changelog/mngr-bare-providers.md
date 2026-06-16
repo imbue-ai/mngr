@@ -71,3 +71,6 @@ dropped "Docker" from their names: `VpsDockerProvider` -> `VpsProvider`,
 `VpsError`. The genuinely Docker-specific `DockerRealizer` and the
 `container_setup` helpers keep their names. Mechanical rename; no behavior
 change.
+
+A bare create also rejects container-only inputs up front (an image override, a
+Dockerfile build, or docker run start-args) rather than silently ignoring them.

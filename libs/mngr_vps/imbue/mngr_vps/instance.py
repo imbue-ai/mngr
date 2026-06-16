@@ -660,6 +660,27 @@ class VpsProvider(BaseProviderInstance):
 
         parsed = self._parse_build_args(build_args)
 
+        # A bare placement runs the agent on the VM's OS, with no Docker image or
+        # container. Reject container-only create inputs up front rather than
+        # silently ignore them: an image override, a Dockerfile build, or docker
+        # run start-args all have no effect on a bare host.
+        if self.config.isolation is IsolationMode.NONE:
+            container_only = [
+                label
+                for present, label in (
+                    (image is not None, "an image override"),
+                    (bool(parsed.docker_build_args), "Docker build args"),
+                    (bool(start_args), "start args (docker run flags)"),
+                )
+                if present
+            ]
+            if container_only:
+                raise MngrError(
+                    f"isolation=NONE (bare placement) does not support {', '.join(container_only)}: "
+                    "a bare host runs the agent on the VM's OS with no Docker image or container. "
+                    "Remove these inputs, or use isolation=CONTAINER."
+                )
+
         # Fail fast before provisioning a (billable) VPS: a DEPOT build needs
         # DEPOT_TOKEN, but the build only runs after the VPS exists and
         # cloud-init completes -- so a missing token would otherwise waste a
