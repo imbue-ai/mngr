@@ -17,9 +17,12 @@ one is composed), and loud failure on a missing state dir. (`tmux wait-for` is
 
 from __future__ import annotations
 
+import importlib.resources
 import os
 import subprocess
 from pathlib import Path
+
+from imbue.mngr import resources as mngr_resources
 
 _SCRIPT_PATH = Path(__file__).parent / "statusline.sh"
 
@@ -188,3 +191,62 @@ def test_failing_user_statusline_does_not_break_side_effects(tmp_path: Path) -> 
     result = _run(tmp_path, _payload(agent_state="working"))
     assert _marker(tmp_path).exists()
     assert result.stdout == ""
+
+
+def _install_flush_stubs(state_dir: Path) -> Path:
+    """Install the real shared common-transcript lib (so statusline.sh's source
+    succeeds and mngr_common_transcript_flush is defined) plus stub stream/common
+    transcript scripts that record that they ran (and whether the active marker
+    was still present at that moment, to pin the flush-before-clear ordering).
+    Returns the sentinel path the stubs append to."""
+    commands = state_dir / "commands"
+    commands.mkdir(parents=True, exist_ok=True)
+    (commands / "mngr_common_transcript_lib.sh").write_text(
+        importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+    )
+    sentinel = state_dir / "flush_sentinel"
+    for name in ("stream_transcript.sh", "common_transcript.sh"):
+        script = commands / name
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "{name}:marker=$([ -e "$MNGR_AGENT_STATE_DIR/active" ] && echo present || echo gone)" '
+            '>> "$MNGR_AGENT_STATE_DIR/flush_sentinel"\n'
+        )
+        script.chmod(0o755)
+    return sentinel
+
+
+def test_busy_to_idle_edge_flushes_before_clearing_marker(tmp_path: Path) -> None:
+    """On the busy->idle edge the transcript converters are flushed (single-pass)
+    BEFORE the active marker is cleared, so a WAITING-signal consumer that reads
+    the common transcript can't outrun the converter."""
+    sentinel = _install_flush_stubs(tmp_path)
+    # A prior busy sample left the marker present; this idle is the busy->idle edge.
+    _marker(tmp_path).touch()
+
+    _run(tmp_path, _payload(agent_state="idle"))
+
+    assert not _marker(tmp_path).exists()
+    # Both converters ran (marker still present at flush time -> flush precedes
+    # the clear), in pipeline order: raw streamer first, then common converter.
+    assert sentinel.read_text().splitlines() == [
+        "stream_transcript.sh:marker=present",
+        "common_transcript.sh:marker=present",
+    ]
+
+
+def test_idle_without_prior_busy_does_not_flush(tmp_path: Path) -> None:
+    """Idle/startup samples with no marker present (not a busy->idle edge) must
+    not pay for a synchronous flush."""
+    sentinel = _install_flush_stubs(tmp_path)
+    _run(tmp_path, _payload(agent_state="idle"))
+    assert not _marker(tmp_path).exists()
+    assert not sentinel.exists()
+
+
+def test_working_does_not_flush(tmp_path: Path) -> None:
+    """Entering a busy state sets the marker and never flushes."""
+    sentinel = _install_flush_stubs(tmp_path)
+    _run(tmp_path, _payload(agent_state="working"))
+    assert _marker(tmp_path).exists()
+    assert not sentinel.exists()
