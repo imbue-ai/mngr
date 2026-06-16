@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.16.0"
+    "latchkey": "^2.16.1"
   },
   "devDependencies": {
     "@todesktop/cli": "^1.8.0",

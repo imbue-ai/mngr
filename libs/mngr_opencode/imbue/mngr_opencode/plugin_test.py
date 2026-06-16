@@ -12,6 +12,7 @@ import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import SendMessageError
@@ -30,6 +31,7 @@ from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
+from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
@@ -446,6 +448,52 @@ def test_wait_for_ready_signal_raises_when_sentinel_never_appears(
     agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     with pytest.raises(AgentStartError):
         agent.wait_for_ready_signal(is_creating=True, start_action=_noop_start, timeout=0.2)
+
+
+# =============================================================================
+# Preservation on destroy
+# =============================================================================
+
+
+def test_opencode_config_preserves_on_destroy_by_default() -> None:
+    assert OpenCodeAgentConfig().preserve_on_destroy is True
+
+
+def _populate_opencode_transcripts(agent: OpenCodeAgent) -> None:
+    """Write the raw/common transcripts and the root session-id history into the state dir."""
+    agent_dir = agent._get_agent_dir()
+    (agent_dir / "logs" / "opencode_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "logs" / "opencode_transcript" / "events.jsonl").write_text('{"type":"raw"}\n')
+    (agent_dir / "events" / "opencode" / "common_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "events" / "opencode" / "common_transcript" / "events.jsonl").write_text('{"type":"common"}\n')
+    (agent_dir / ROOT_SESSION_FILENAME).write_text("sess-opencode\n")
+
+
+@pytest.mark.rsync
+def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy copies transcripts and session-id history to the mirrored preserved layout."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(preserve_on_destroy=True))
+    _populate_opencode_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert (dest_dir / "logs" / "opencode_transcript" / "events.jsonl").read_text() == '{"type":"raw"}\n'
+    assert (
+        dest_dir / "events" / "opencode" / "common_transcript" / "events.jsonl"
+    ).read_text() == '{"type":"common"}\n'
+    assert (dest_dir / ROOT_SESSION_FILENAME).read_text() == "sess-opencode\n"
+
+
+def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy preserves nothing when preserve_on_destroy is False."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(preserve_on_destroy=False))
+    _populate_opencode_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert not dest_dir.exists()
 
 
 # =============================================================================
