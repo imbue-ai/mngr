@@ -61,6 +61,7 @@ def gc(
     - Orphaned volumes
     - Old log files
     - Build cache entries
+    - Orphaned provider-level cloud resources (e.g. Azure NICs/public IPs)
     """
     result = GcResult()
     logger.trace("Configured GC: dry_run={} error_behavior={}", dry_run, error_behavior)
