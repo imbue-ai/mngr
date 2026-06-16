@@ -670,6 +670,11 @@ class HasAutoInstallMixin(ABC):
     """
 
     @abstractmethod
+    def get_install_binary_name(self) -> str:
+        """Return the name of the CLI binary to check for on PATH (e.g. 'claude')."""
+        ...
+
+    @abstractmethod
     def get_install_command(self) -> str:
         """Return the shell command that installs this agent's CLI binary."""
         ...

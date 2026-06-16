@@ -403,6 +403,9 @@ class CodexAgent(
         # codex follows an update policy (ask / auto / never) rather than pinning a version.
         return str(self.agent_config.update_policy)
 
+    def get_install_binary_name(self) -> str:
+        return "codex"
+
     def get_install_command(self) -> str:
         return "npm i -g @openai/codex"
 
@@ -469,7 +472,7 @@ class CodexAgent(
            ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
         if self.agent_config.check_installation:
-            ensure_cli_installed(host, mngr_ctx, self.get_expected_process_name(), self.get_install_command())
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
         user_codex_home = self._resolve_user_codex_home(host)
         canonical_work_dir = self._resolve_canonical_path(host, self.work_dir)
         self._ensure_source_repo_trusted(host, user_codex_home, mngr_ctx)

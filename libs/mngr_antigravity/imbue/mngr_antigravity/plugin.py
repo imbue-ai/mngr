@@ -548,6 +548,9 @@ class AntigravityAgent(
         policy = self.agent_config.settings_overrides.get("permissions", {})
         return policy if isinstance(policy, Mapping) else {}
 
+    def get_install_binary_name(self) -> str:
+        return "agy"
+
     def get_install_command(self) -> str:
         return "curl -fsSL https://antigravity.google/cli/install.sh | bash"
 
@@ -583,7 +586,7 @@ class AntigravityAgent(
            under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
         if self.agent_config.check_installation:
-            ensure_cli_installed(host, mngr_ctx, self.get_expected_process_name(), self.get_install_command())
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
         host_home, host_uname = self._resolve_host_home_and_os(host)
         self._ensure_source_repo_trusted(host, host_home, mngr_ctx)
         self._provision_agy_home(host, host_home, host_uname)

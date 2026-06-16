@@ -1,16 +1,21 @@
-"""Forcing function: every agent capability must be exercised by a real test.
+"""Forcing function: every agent capability must name where its behavior is tested.
 
-The capability registry (``AGENT_CAPABILITIES``) is the single source of truth for
-"what each agent can do". This module makes it also drive *test coverage*: every
-capability key must appear in ``_EXERCISE_BY_CAPABILITY`` pointing at the test(s)
-that actually exercise it against a real agent. Adding a capability without an
-exercise fails ``test_every_capability_has_an_exercise`` -- so coverage cannot
-silently lag the matrix.
+This is a **bookkeeping** check, not a behavioral one. The registry
+(``AGENT_CAPABILITIES``) already gives the matrix and the drift guard for free via
+detection (``issubclass`` / hookimpl) -- but detection only proves a capability is
+*declared*, not that it *works*. So every capability key must appear in
+``_EXERCISE_BY_CAPABILITY`` pointing at the test(s) that exercise its behavior. Adding
+a capability without registering such a pointer fails
+``test_every_capability_has_an_exercise``, so a new capability cannot ship with zero
+behavioral test on record.
 
-The exercises themselves live where they can use real agents: the per-plugin unit
-tests for contract methods that read config (permission policy, version policy,
-unattended, install command), and the per-plugin release/e2e tests for behavior
-that needs a live CLI (transcripts, waiting_reason markers, auto-install on a host).
+What this test does **not** do: it does not run the exercises, nor verify the named
+tests exist. The pointers are prose. The actual behavioral exercises live in the
+per-plugin unit tests (for contract methods that read config) and the per-plugin
+release/e2e tests (for behavior needing a live CLI -- transcripts, waiting_reason
+markers, auto-install on a host). A registry-driven release harness that walks each
+agent's declared capabilities and runs each exercise against a real agent is the
+intended stronger form (see the e2e section of specs/agent-plugin-parity/capability-mixins.md).
 """
 
 import importlib.metadata

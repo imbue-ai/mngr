@@ -619,7 +619,7 @@ class PiCodingAgent(
         config = self.agent_config
 
         if config.check_installation:
-            ensure_cli_installed(host, mngr_ctx, self.get_expected_process_name(), self.get_install_command())
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
 
         # Trust gate first (consent + durable global record), so a declined /
         # non-interactive-without-opt-in case exits cleanly before any setup.
@@ -777,6 +777,9 @@ class PiCodingAgent(
         # pi has no tool-approval gate, so it always runs unattended; the config
         # field is pinned True (False is rejected at validation).
         return self.agent_config.auto_allow_permissions
+
+    def get_install_binary_name(self) -> str:
+        return "pi"
 
     def get_install_command(self) -> str:
         return f"npm install -g {_PI_NPM_PACKAGE}"

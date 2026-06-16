@@ -6,6 +6,7 @@ from typing import assert_never
 import pluggy
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import model_validator
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -32,6 +33,13 @@ _USAGE_PLUGIN_SUFFIX: Final[str] = "_usage"
 # The hookspec a usage plugin implements to claim an agent's usage source. Defined in
 # the optional `mngr_usage` package, so it may be absent when usage is not installed.
 _USAGE_SOURCE_HOOK: Final[str] = "aggregate_usage_source"
+
+# Agent types excluded from the matrix: task-specialized skill variants that reuse a
+# parent agent's class wholesale (only injecting a SKILL.md). They are not distinct
+# enough to warrant their own column -- a reader wants the parent's row. (headless_claude
+# is deliberately NOT here: it runs `claude --print` with genuinely different logic, so
+# its capabilities can legitimately diverge from claude's and are worth showing.)
+_NON_MATRIX_AGENT_TYPES: Final[frozenset[str]] = frozenset({"code-guardian", "fixme-fairy"})
 
 
 class CapabilityDetectionKind(UpperCaseStrEnum):
@@ -63,6 +71,15 @@ class AgentCapability(FrozenModel):
     mixin: type | None = Field(default=None, description="The capability mixin for CLASS_MIXIN detection")
     # Required when detection_kind is PLUGIN_HOOKIMPL; the hook the agent's plugin must implement.
     hook_name: str | None = Field(default=None, description="The pluggy hook name for PLUGIN_HOOKIMPL detection")
+
+    @model_validator(mode="after")
+    def _require_detection_field(self) -> "AgentCapability":
+        # Fail at construction (not at detection time) if the kind's required field is missing.
+        if self.detection_kind == CapabilityDetectionKind.CLASS_MIXIN and self.mixin is None:
+            raise AgentCapabilityError(f"Capability '{self.key}' is CLASS_MIXIN but has no mixin")
+        if self.detection_kind == CapabilityDetectionKind.PLUGIN_HOOKIMPL and self.hook_name is None:
+            raise AgentCapabilityError(f"Capability '{self.key}' is PLUGIN_HOOKIMPL but has no hook_name")
+        return self
 
 
 class AgentClassInfo(FrozenModel):
@@ -247,6 +264,8 @@ def build_agent_class_infos(
 
     infos: list[AgentClassInfo] = []
     for agent_type_name in list_registered_agent_class_types():
+        if agent_type_name in _NON_MATRIX_AGENT_TYPES:
+            continue
         owner = get_agent_type_owner(agent_type_name)
         # Only plugin-registered agent types appear in the matrix. A type registered
         # directly (no owner) -- e.g. a test placeholder -- is not a shipped agent.

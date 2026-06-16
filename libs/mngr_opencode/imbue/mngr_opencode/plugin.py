@@ -435,7 +435,7 @@ class OpenCodeAgent(
         4. Install the launch orchestrator under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
         if self.agent_config.check_installation:
-            ensure_cli_installed(host, mngr_ctx, self.get_expected_process_name(), self.get_install_command())
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
         host_home = self._resolve_host_home(host)
         self._provision_opencode_config(host, host_home)
         self._provision_plugin(host)
@@ -556,6 +556,9 @@ class OpenCodeAgent(
         # opencode's per-resource policy lives in the `permission` config-overrides key.
         policy = self.agent_config.config_overrides.get("permission", {})
         return policy if isinstance(policy, Mapping) else {}
+
+    def get_install_binary_name(self) -> str:
+        return "opencode"
 
     def get_install_command(self) -> str:
         return "curl -fsSL https://opencode.ai/install | bash"

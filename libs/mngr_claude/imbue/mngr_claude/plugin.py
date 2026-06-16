@@ -2420,6 +2420,9 @@ class ClaudeAgent(
         # claude pins a specific version when set, otherwise follows its own auto-update.
         return self.agent_config.version or "auto-update"
 
+    def get_install_binary_name(self) -> str:
+        return "claude"
+
     def get_install_command(self) -> str:
         return _build_claude_install_command(self.agent_config.version)
 
