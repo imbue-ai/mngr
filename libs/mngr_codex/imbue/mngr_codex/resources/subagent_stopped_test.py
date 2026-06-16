@@ -15,6 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from imbue.mngr_codex.resources.testing import install_common_transcript_flush_stub
 from imbue.mngr_codex.resources.testing import provision_commands_dir
 from imbue.mngr_codex.resources.testing import run_codex_hook
 
@@ -83,6 +84,35 @@ def test_stop_keeps_marker_while_other_subagent_in_flight(tmp_path: Path) -> Non
     _start(tmp_path, _AGENT_B)
     _stop(tmp_path, _AGENT_A)
     assert _marker(tmp_path).exists()
+
+
+def test_last_subagent_stop_flushes_common_transcript_when_waiting(tmp_path: Path) -> None:
+    """When the last subagent stops and the root turn is done (marker clears),
+    the hook runs the turn-end common-transcript flush."""
+    provision_commands_dir(tmp_path, _SCRIPTS)
+    _start(tmp_path, _AGENT_A)
+    sentinel = tmp_path / "flush_ran"
+    install_common_transcript_flush_stub(tmp_path, sentinel)
+
+    _stop(tmp_path, _AGENT_A)
+
+    assert not _marker(tmp_path).exists()
+    assert sentinel.exists(), "turn-end flush must run once the agent goes WAITING"
+
+
+def test_subagent_stop_skips_flush_while_root_active(tmp_path: Path) -> None:
+    """If the root turn is still active after a subagent stops (marker stays), the
+    flush must not run."""
+    provision_commands_dir(tmp_path, _SCRIPTS)
+    _start(tmp_path, _AGENT_A)
+    _root_active(tmp_path).touch()
+    sentinel = tmp_path / "flush_ran"
+    install_common_transcript_flush_stub(tmp_path, sentinel)
+
+    _stop(tmp_path, _AGENT_A)
+
+    assert _marker(tmp_path).exists()
+    assert not sentinel.exists(), "flush must not run while the agent is still RUNNING"
 
 
 def test_unknown_agent_id_is_a_noop(tmp_path: Path) -> None:
