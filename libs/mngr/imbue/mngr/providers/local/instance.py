@@ -244,7 +244,8 @@ class LocalProviderInstance(BaseProviderInstance):
         """Destroy the host.
 
         Always raises LocalHostNotDestroyableError because the local computer
-        cannot be destroyed by mngr.
+        cannot be destroyed by mngr. The orchestration layer classifies this as a
+        PROVIDER_INACCESSIBLE cleanup failure.
         """
         raise LocalHostNotDestroyableError(self.name)
 

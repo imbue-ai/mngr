@@ -73,6 +73,11 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = False
     asserts_usage = False
+    # Only the SQLite db is reliably present after a short turn; the WAL sidecars and
+    # the storage/ dir are conditional (created only when there are uncheckpointed writes
+    # / on-disk message parts), so the plugin preserves them when present but the arc does
+    # not require them.
+    native_session_preserved_relpaths = ("plugin/opencode/data/opencode/opencode.db",)
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("opencode") is None:
@@ -108,6 +113,7 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.rsync
 @pytest.mark.timeout(1500)
 def test_opencode_agent_full_lifecycle(tmp_path: Path) -> None:
     run_agent_release_lifecycle(_OpenCodeReleaseProfile(), tmp_path)
