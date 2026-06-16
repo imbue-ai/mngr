@@ -1,7 +1,7 @@
 [project]
 name = "imbue-mngr-vps"
 version = "0.1.7"
-description = "VPS Docker provider base classes for mngr"
+description = "VPS provider base classes for mngr (container and bare placement)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
