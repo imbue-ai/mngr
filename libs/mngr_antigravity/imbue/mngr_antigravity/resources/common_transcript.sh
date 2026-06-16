@@ -213,6 +213,10 @@ def convert():
                         "source": "antigravity/common_transcript",
                         "role": "assistant",
                         "model": None,
+                        # PLANNER_RESPONSE.content is always a string in agy
+                        # 1.0.0; the isinstance guard defends against a future
+                        # non-string shape by degrading to empty text rather
+                        # than crashing the whole converter on a single event.
                         "text": text if isinstance(text, str) else "",
                         "tool_calls": tool_calls,
                         "stop_reason": None,
@@ -231,6 +235,12 @@ def convert():
                 if event_id in existing_ids:
                     continue
                 output = _truncate(raw.get("content", ""), _MAX_OUTPUT_LENGTH)
+                # A CODE_ACTION always carries a `status` in agy 1.0.0 (observed
+                # value: DONE for a successful action); any other value means the
+                # action did not complete cleanly, so is_error is True. The
+                # "DONE" default only applies if the field is entirely absent --
+                # treat that unobserved shape as success rather than flagging an
+                # otherwise-normal result as a scary error in the transcript.
                 new_events.append((timestamp, {
                     "timestamp": timestamp,
                     "type": "tool_result",
