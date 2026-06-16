@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from inline_snapshot import snapshot
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import CreateTemplate
@@ -45,14 +46,18 @@ def test_sanitize_simple_name() -> None:
 
 
 def test_sanitize_truncates_long_names() -> None:
-    result = sanitize_for_agent_name("a" * 100)
-    assert len(result) <= 40
+    # 100 'a's must truncate to exactly 40 'a's, not merely "<= 40 chars"
+    # (which an empty or over-trimmed result would also satisfy).
+    assert sanitize_for_agent_name("a" * 100) == "a" * 40
 
 
 def test_sanitize_special_characters() -> None:
-    result = sanitize_for_agent_name("test_with spaces_and___underscores")
-    assert " " not in result
-    assert "--" not in result
+    # Spaces and underscores become hyphens, runs of hyphens collapse, and
+    # the result lowercases -- assert the whole slug, not just the absence
+    # of spaces / double-hyphens.
+    assert sanitize_for_agent_name("test_with spaces_and___underscores") == snapshot(
+        "test-with-spaces-and-underscores"
+    )
 
 
 def test_sanitize_strips_leading_and_trailing_hyphens() -> None:
