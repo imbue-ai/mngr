@@ -6,9 +6,11 @@ import json
 import shlex
 import shutil
 import tomllib
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 from typing import cast
 
 import pytest
@@ -18,6 +20,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -104,6 +107,90 @@ def test_register_agent_type_returns_codex_class_and_config() -> None:
 
 
 # =============================================================================
+# Capability-mixin contract methods (install / unattended / permission / version)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_codex() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert agent.get_install_binary_name() == "codex"
+
+
+def test_get_install_command_installs_codex() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert agent.get_install_command() == "npm i -g @openai/codex"
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = CodexAgent.model_construct(agent_config=CodexAgentConfig(auto_allow_permissions=True))
+    attended = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def test_get_permission_policy_carries_sandbox_mode() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(sandbox_mode="read-only"))
+    policy = agent.get_permission_policy()
+    assert policy["sandbox_mode"] == "read-only"
+
+
+def test_get_permission_policy_includes_approval_policy_override() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(config_overrides={"approval_policy": "never"}))
+    policy = agent.get_permission_policy()
+    assert policy["sandbox_mode"] == "workspace-write"
+    assert policy["approval_policy"] == "never"
+
+
+def test_get_version_policy_returns_update_policy_label() -> None:
+    ask = CodexAgent.model_construct(agent_config=CodexAgentConfig(update_policy=CodexUpdatePolicy.ASK))
+    auto = CodexAgent.model_construct(agent_config=CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO))
+    assert ask.get_version_policy() == "ASK"
+    assert auto.get_version_policy() == "AUTO"
+
+
+class _BinaryPresentStubHost(FakeHost):
+    """FakeHost that reports the install-check binary as present and records commands.
+
+    Lets ``provision`` run its install-check line (``command -v codex``) without
+    triggering an install: the binary is reported present, so ``ensure_cli_installed``
+    returns after the check. Other commands fall through to the local FakeHost.
+    """
+
+    executed_commands: list[str] = []
+
+    def _execute_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.executed_commands.append(command)
+        if command.startswith("command -v "):
+            return CommandResult(stdout="/usr/local/bin/codex", stderr="", success=True)
+        return super()._execute_command(command, user, cwd, env, timeout_seconds)
+
+
+def test_provision_runs_install_check_when_enabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """With ``check_installation=True``, provision issues the ``command -v codex`` install check.
+
+    The binary is reported present so no install command runs; reaching the
+    ``command -v`` probe proves the install-check line executed.
+    """
+    agent = _make_codex_agent(
+        CodexAgent, local_provider, tmp_path, CodexAgentConfig(check_installation=True), is_auto_approve=True
+    )
+    stub_host: Any = _BinaryPresentStubHost(host_dir=tmp_path, is_local=True)
+    agent.provision(
+        stub_host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("codex")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    assert any(command.startswith("command -v codex") for command in stub_host.executed_commands)
+
+
+# =============================================================================
 # Construction helpers
 # =============================================================================
 
@@ -117,6 +204,11 @@ def _make_codex_agent(
     is_interactive: bool = False,
     is_auto_approve: bool = False,
 ) -> CodexAgent:
+    # These setup tests run against a real local host where codex is not installed; the
+    # install check is irrelevant to provision setup (files/trust/config) and is covered
+    # separately, so skip it unless a caller opted in explicitly.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir(exist_ok=True)
