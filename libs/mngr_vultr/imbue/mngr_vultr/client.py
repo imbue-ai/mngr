@@ -1,4 +1,5 @@
 import base64
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -39,6 +40,17 @@ class VultrVpsClient(VpsClientInterface):
         frozen=True,
         description="Vultr OS image ID used by create_instance (e.g., 2136 = Debian 12 x64)",
     )
+    # The HTTP transport is injected (defaulting to ``requests.request``) so tests
+    # can supply a real callable that records the outgoing request and returns a
+    # canned ``requests.Response`` -- letting them assert on what the client sends
+    # without ``unittest.mock`` and without making live network calls.
+    request_func: Callable[..., requests.Response] = Field(
+        default=requests.request,
+        frozen=True,
+        exclude=True,
+        repr=False,
+        description="HTTP transport callable, injectable for testing",
+    )
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -58,7 +70,7 @@ class VultrVpsClient(VpsClientInterface):
         logger.trace("Vultr API {} {}", method, path)
 
         try:
-            response = requests.request(
+            response = self.request_func(
                 method=method,
                 url=url,
                 headers=self._headers(),
