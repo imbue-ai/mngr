@@ -471,33 +471,8 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
         self._host_record_cache[host_id] = updated_record
         return super().start_host(host_id, snapshot_id)
 
-    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
-        """Locate this host's GCE instance by its ``mngr-host-id`` label (works while stopped).
-
-        Unlike ``_find_host_record`` (which SSHes into the VPS), this reads only the
-        instance labels returned by ``instances.list``, so it resolves an instance
-        that is stopped and therefore unreachable over SSH. Refuses (raises) when
-        more than one instance carries the same ``mngr-host-id`` -- the label is
-        account-writable, so a duplicate could otherwise steer ``mngr start`` onto
-        the wrong instance. Mirrors ``AwsProvider._find_instance_for_host``.
-        """
-        matches = self._instances_matching_host_id(host_id)
-        if not matches:
-            # The cached list can predate this instance (e.g. a discovery pass during
-            # create populated it first); refresh once and retry before giving up.
-            self._instances_cache = None
-            matches = self._instances_matching_host_id(host_id)
-        if len(matches) > 1:
-            ids = sorted(str(m.get("id")) for m in matches)
-            raise MngrError(
-                f"GCP provider {self.name!r}: {len(matches)} GCE instances are labeled "
-                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
-                "Resolve the duplicate labels (or delete the stray instance) and retry."
-            )
-        return matches[0] if matches else None
-
     def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Return every cached instance labeled ``mngr-host-id=<host_id>``."""
+        """Return every cached instance labeled ``mngr-host-id=<host_id>`` (GCE label-encoded)."""
         wanted = f"mngr-host-id={to_gce_label_value(str(host_id))}"
         return [instance for instance in self._list_instances_cached() if wanted in instance.get("tags", ())]
 

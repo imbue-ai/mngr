@@ -619,42 +619,6 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
         # idle keeps working across resumes without an AWS-specific step here.
         return started
 
-    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
-        """Locate this host's EC2 instance by its ``mngr-host-id`` tag (works while stopped).
-
-        Unlike ``_find_host_record`` (which SSHes into the VPS), this reads only
-        EC2 ``DescribeInstances`` tags, so it resolves an instance that is
-        stopped and therefore unreachable over SSH. ``list_instances`` already
-        filters out terminated instances, so a destroyed host returns ``None``.
-
-        Refuses (raises) when more than one non-terminated instance carries the
-        same ``mngr-host-id`` tag. ``mngr-host-id`` is meant to be unique, but the
-        tag is account-writable, so a duplicate could otherwise silently steer
-        ``mngr start`` (and the agent-tag writes keyed off this lookup) onto the
-        wrong instance; failing loudly is safer than acting on an ambiguous match.
-        """
-        matches = self._instances_matching_host_id(host_id)
-        if not matches:
-            # Not in the (possibly stale) cached list. During `mngr create` the
-            # cache can be populated -- e.g. by an earlier discovery/name-conflict
-            # check -- before the new instance exists, so `persist_agent_data` for
-            # the new agent would miss it. Refresh once and retry before giving up.
-            self._instances_cache = None
-            matches = self._instances_matching_host_id(host_id)
-        if len(matches) > 1:
-            ids = sorted(str(m.get("id")) for m in matches)
-            raise MngrError(
-                f"AWS provider {self.name!r}: {len(matches)} non-terminated EC2 instances are tagged "
-                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
-                "Resolve the duplicate tags (or terminate the stray instance) and retry."
-            )
-        return matches[0] if matches else None
-
-    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Return every cached non-terminated instance tagged ``mngr-host-id=<host_id>``."""
-        wanted_tag = f"mngr-host-id={host_id}"
-        return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
-
     def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
         """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
 

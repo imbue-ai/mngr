@@ -2392,10 +2392,45 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
     metadata write APIs differ too much to share.
     """
 
-    @abstractmethod
     def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
-        """Locate this host's instance by its mngr-host-id tag/label (works while stopped), or None."""
-        ...
+        """Locate this host's instance by its ``mngr-host-id`` tag/label (works while stopped), or None.
+
+        Reads only the cached instance listing (no SSH), so it resolves an
+        instance that is stopped/deallocated and therefore unreachable. The
+        listing already excludes terminated/deleted instances, so a destroyed
+        host returns ``None``.
+
+        Refuses (raises) when more than one instance carries the same
+        ``mngr-host-id``. The tag/label is meant to be unique but is
+        account-writable, so a duplicate could otherwise silently steer ``mngr
+        start`` (and the agent-tag writes keyed off this lookup) onto the wrong
+        instance; failing loudly is safer than acting on an ambiguous match.
+        """
+        matches = self._instances_matching_host_id(host_id)
+        if not matches:
+            # Not in the (possibly stale) cached list. During `mngr create` the
+            # cache can be populated -- e.g. by an earlier discovery/name-conflict
+            # check -- before the new instance exists, so `persist_agent_data` for
+            # the new agent would miss it. Refresh once and retry before giving up.
+            self._instances_cache = None
+            matches = self._instances_matching_host_id(host_id)
+        if len(matches) > 1:
+            ids = sorted(str(m.get("id")) for m in matches)
+            raise MngrError(
+                f"Provider {self.name!r}: {len(matches)} instances are tagged "
+                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
+                "Resolve the duplicate tags (or remove the stray instance) and retry."
+            )
+        return matches[0] if matches else None
+
+    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
+        """Return every cached instance tagged ``mngr-host-id=<host_id>``.
+
+        Providers whose tag/label values are encoded (e.g. GCE labels) override
+        this to match on the encoded value.
+        """
+        wanted_tag = f"mngr-host-id={host_id}"
+        return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
 
     @abstractmethod
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
