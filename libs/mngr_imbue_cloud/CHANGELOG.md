@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.4] - 2026-06-16
+
 ### Added
 
 - Added: OVH bare-metal "slices" feature — carve VPS-like hosts (lima/QEMU VMs) out of rented OVH bare-metal servers as an alternative to ordering OVH VPSes. A slice is indistinguishable from a baked VPS pool host to minds and the imbue_cloud provider, with cleaner btrfs (the lima data disk, no loopback). Includes the slice data model + lifecycle (`bare_metal.py`), lima slice creation (`build_slice_lima_yaml`, `LimaSliceVpsClient`), and a `SliceVpsDockerProvider` that runs the shared vps_docker bake on the VM.

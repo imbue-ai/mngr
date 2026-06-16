@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.2] - 2026-06-16
+
 ### Changed
 
 - Changed: `mngr aws prepare` and `mngr aws cleanup` now respect `--format`, emitting a structured `{security_group_id, region, created/deleted}` object in `json` mode and a `prepared`/`cleaned_up` event in `jsonl` mode; the `created`/`deleted` booleans let a caller distinguish a first-run create from an idempotent no-op.

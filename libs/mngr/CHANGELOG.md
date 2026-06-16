@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.15] - 2026-06-16
+
 ### Added
 
 - Added: `mngr create --format json` (and `jsonl`) now also reports the created host's name, its agent SSH connection (`ssh_user` / `ssh_host` / `ssh_port` / `ssh_key_path`), and an `outer_ssh_port` when the provider exposes a separate outer/management sshd (e.g. an OVH-slice's box-forwarded VM-root port). Backed by a new default-`None` `HostInterface.get_outer_ssh_port` hook.

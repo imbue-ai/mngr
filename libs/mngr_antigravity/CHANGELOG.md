@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-16
+
 ### Changed
 
 - Changed: `statusline.sh` now flushes the transcript pipeline (synchronous `--single-pass` of the raw streamer and common-transcript converter) on the busy->idle edge before clearing the `active` marker, so consumers reading the common transcript on a WAITING transition cannot outrun the converter. The flush and the convert lock come from the shared `mngr_common_transcript_lib.sh` rather than being duplicated per agent.
