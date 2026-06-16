@@ -190,30 +190,21 @@
 
     // The predefined-permission dialog offers a catch-all permission
     // (stored as ``any``, shown to users as ``all``) alongside the
-    // specific permissions. Granting it is mutually exclusive with
-    // picking individual permissions, so we disable the other side
-    // whenever one side is in use: ticking ``all`` disables the specific
-    // checkboxes, and ticking any specific permission disables ``all``.
-    // The disabled checkboxes keep their checked state (and so are still
-    // part of the DOM), but the browser omits disabled inputs from the
-    // submission, so only the active side is actually granted. The
-    // wildcard checkbox is tagged with ``data-wildcard`` in the template;
-    // dialogs without one (e.g. file-sharing) are left untouched.
+    // specific permissions. While ``all`` is ticked, the specific
+    // checkboxes are disabled (they keep their own checked/unchecked
+    // state) to communicate that the catch-all already covers them;
+    // unticking ``all`` re-enables them. The browser omits disabled
+    // inputs from the submission, so only the active side is granted.
+    // The wildcard checkbox is tagged with ``data-wildcard`` in the
+    // template; dialogs without one (e.g. file-sharing) are left
+    // untouched.
     function syncPermissionWildcardExclusivity() {
       var form = document.getElementById("permissions-form");
       if (!form) return;
       var wildcard = form.querySelector('input[name="permissions"][data-wildcard]');
       if (!wildcard) return;
-      var others = [];
       form.querySelectorAll('input[name="permissions"]').forEach(function (box) {
-        if (box !== wildcard) others.push(box);
-      });
-      var anyOtherChecked = others.some(function (box) {
-        return box.checked;
-      });
-      wildcard.disabled = !wildcard.checked && anyOtherChecked;
-      others.forEach(function (box) {
-        box.disabled = wildcard.checked;
+        if (box !== wildcard) box.disabled = wildcard.checked;
       });
     }
 
