@@ -3,7 +3,6 @@
 import json
 import os
 import platform
-import shutil
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -14,9 +13,7 @@ import click
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
@@ -38,6 +35,8 @@ from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
+from imbue.mngr.utils.deps import CLAUDE
+from imbue.mngr.utils.deps import SUBPROCESS_ERRORS
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
@@ -211,13 +210,6 @@ class ClaudeCodePlugin(FrozenModel):
     )
 
 
-# ConcurrencyGroup wraps a synchronous subprocess failure (or spawn error)
-# from inside its `with` block in a ConcurrencyExceptionGroup before
-# re-raising, so a bare `except ProcessError` would miss it. Mirror the
-# tuple used by imbue.mngr.utils.deps.
-_SUBPROCESS_ERRORS: Final[tuple[type[Exception], ...]] = (OSError, ProcessError, ConcurrencyExceptionGroup)
-
-
 # The Claude Code plugins mngr knows how to install. Each lives in its own
 # GitHub repo, published as a Claude Code plugin marketplace.
 _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
@@ -236,21 +228,21 @@ _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
 )
 
 
-def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
+def _claude_native_plugin_status() -> tuple[bool, dict[str, bool]]:
     """Return (claude_available, {plugin_name: is_installed}).
 
     When Claude Code is not on PATH, the per-plugin map reports every plugin
     as not installed.
     """
     not_installed = {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}
-    claude_available = shutil.which("claude") is not None
+    claude_available = CLAUDE.is_available()
     if not claude_available:
         return False, not_installed
 
     try:
         with ConcurrencyGroup(name="extras-claude-check") as cg:
             result = cg.run_process_to_completion(["claude", "plugin", "list", "--json"], is_checked_after=False)
-    except _SUBPROCESS_ERRORS:
+    except SUBPROCESS_ERRORS:
         return True, not_installed
 
     if result.returncode != 0:
@@ -290,7 +282,7 @@ def _install_one_claude_plugin(plugin: ClaudeCodePlugin) -> bool:
                     detail = result.stderr.strip() or result.stdout.strip()
                     logger.warning("Failed to install {}. {}", plugin.name, detail)
                     return False
-    except _SUBPROCESS_ERRORS as e:
+    except SUBPROCESS_ERRORS as e:
         logger.warning("Failed to install {}. {}", plugin.name, str(e))
         return False
 
@@ -325,7 +317,7 @@ def _install_claude_plugin(
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables.
-    status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_plugin_status,
+    status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_native_plugin_status,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
     select_fn: Callable[[tuple[ClaudeCodePlugin, ...]], tuple[ClaudeCodePlugin, ...]] = _prompt_claude_plugins_choice,
     install_fn: Callable[[ClaudeCodePlugin], bool] = _install_one_claude_plugin,
@@ -527,13 +519,15 @@ def _install_default_agent_type(
 
 def _print_extras_status(
     *,
-    claude_status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_plugin_status,
+    claude_native_plugin_status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_native_plugin_status,
 ) -> None:
     """Print the status of all extras.
 
-    ``claude_status_fn`` is injectable (mirroring the ``status_fn`` seam on the
-    ``_install_*`` helpers) so tests can avoid shelling out to the ``claude``
-    CLI -- a Node process whose startup is the slow, variable part of this call.
+    ``claude_native_plugin_status_fn`` reports whether claude is available and which
+    known Claude Code plugins are installed. It is injectable (mirroring the
+    ``status_fn`` seam on the ``_install_*`` helpers) so tests can avoid shelling
+    out to ``claude plugin list`` -- a Node process whose startup is the slow,
+    variable part of this call.
     """
     write_human_line("Extras")
     write_human_line("")
@@ -550,7 +544,7 @@ def _print_extras_status(
         write_human_line("  completion       not configured")
 
     # Claude Code plugins
-    claude_available, installed_by_name = claude_status_fn()
+    claude_available, installed_by_name = claude_native_plugin_status_fn()
     if not claude_available:
         write_human_line("  claude-plugin    claude not installed")
     else:

@@ -98,11 +98,36 @@ If your agent errors on the first message with the "not supported" 400, set `mod
 your account supports (e.g. `"gpt-5.5"`), or authenticate with an API key (which carries the
 full model entitlement).
 
+## Waiting reason
+
+`mngr list` shows a `waiting_reason` field for each codex agent, telling you why
+it is waiting:
+
+- `PERMISSIONS` -- blocked on a tool-approval dialog, waiting for you to respond.
+- `END_OF_TURN` -- idle, its turn complete, waiting for your next message.
+
+This only applies in supervised mode: with `auto_allow_permissions = true`
+(`approval_policy = "never"`) codex never prompts for approval, so an agent never
+waits with reason `PERMISSIONS`.
+
+### Known limitation: a cancelled dialog can briefly mislabel the reason
+
+If you *cancel* an approval dialog (Esc / "No"), codex 0.139.0 fires no terminal
+hook for that turn -- no `PostToolUse`, no `Stop`, no `Notification` (verified
+live). The turn is left "interrupted", so both the `active` and
+`permissions_waiting` markers persist until the *next* turn's `Stop`. During that
+window the agent's lifecycle state is still correctly `WAITING` (it is waiting for
+you), but its `waiting_reason` may read `PERMISSIONS` rather than `END_OF_TURN`
+even though the dialog is closed. It self-heals once the next turn completes. Only
+the reason sub-field is affected, never the `WAITING`/`RUNNING` state itself. This
+is a consequence of codex clearing the `active` marker only on `Stop`; an
+authoritative app-server-backed variant (see below) would remove the ambiguity.
+
 ## Not yet implemented
 
 Relative to `mngr_claude`, these are not yet ported (tracked for follow-up): session
-preservation on destroy, deploy/scheduling contributions, field generators (`waiting_reason`),
-the streaming snapshot, and installation/version management.
+preservation on destroy, deploy/scheduling contributions, the streaming snapshot, and
+installation/version management.
 
 ## Future direction: an app-server-backed agent variant
 

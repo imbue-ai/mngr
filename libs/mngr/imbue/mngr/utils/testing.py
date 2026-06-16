@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import typing
+from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -44,7 +45,9 @@ from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.plugins import hookspecs
@@ -62,6 +65,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import wait_for
@@ -905,6 +909,22 @@ def make_ctx_with_plugins(
     return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().pm, pm))
 
 
+def get_cleanup_failures(operation: Callable[[], None]) -> list[CleanupFailure]:
+    """Run a best-effort cleanup operation and return its real failures as a list.
+
+    Cleanup operations (``Host.destroy_agent``, ``Host.stop_agents``,
+    ``ProviderInstance.destroy_host``) raise ``CleanupFailedGroup`` when they leave real
+    resources behind and return normally when they don't. This helper lets a test assert on
+    the aggregated failures uniformly: an empty list means the operation completed cleanly,
+    a non-empty list holds the failures the operation would otherwise have surfaced.
+    """
+    try:
+        operation()
+    except CleanupFailedGroup as group:
+        return list(group.failures)
+    return []
+
+
 def make_test_agent_details(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
@@ -1066,7 +1086,7 @@ def get_stash_count(path: Path) -> int:
 
 def is_claude_installed() -> bool:
     """Check if the Claude Code CLI is installed and available on PATH."""
-    return shutil.which("claude") is not None
+    return CLAUDE.is_available()
 
 
 def write_executable_script(path: Path, content: str) -> None:

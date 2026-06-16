@@ -360,11 +360,6 @@ def test_plugins_status_returns_string() -> None:
     assert len(status) > 0
 
 
-# Exercises plugin / shell-completion / claude-plugin status, which can stall on
-# a contended CI sandbox and trip the global 10s pytest-timeout even though it
-# runs in well under a second locally (same reason as test_extras_no_args_shows_status
-# below). Bump the per-test timeout for headroom.
-@pytest.mark.timeout(30)
 def test_print_extras_status_runs_without_error() -> None:
     """_print_extras_status completes without error."""
     # Inject a fast claude-plugin status so the test does not shell out to the
@@ -372,7 +367,9 @@ def test_print_extras_status_runs_without_error() -> None:
     # and made it flaky under the 10s offload timeout (observed at 10.05s in CI;
     # ~0.4s locally). Report claude as available so the richer status-formatting
     # branch is still exercised. The other status paths are fast local reads.
-    _print_extras_status(claude_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}))
+    _print_extras_status(
+        claude_native_plugin_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS})
+    )
 
 
 # Probes plugin / shell-completion / claude-plugin status, which can stall on a

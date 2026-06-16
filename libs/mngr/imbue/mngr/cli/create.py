@@ -1873,12 +1873,41 @@ def _find_agent_in_host(host: OnlineHostInterface, agent_id: AgentId) -> AgentIn
     raise AgentNotFoundError(str(agent_id))
 
 
+def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
+    """Build the machine-readable create result payload.
+
+    Always includes ``agent_id`` / ``host_id`` / ``host_name``. For a remote
+    host it adds the agent SSH connection (``ssh_user`` / ``ssh_host`` /
+    ``ssh_port`` / ``ssh_key_path``); when the provider exposes a separate
+    outer/management sshd (e.g. a slice's VM-root port reached via a
+    box-forwarded port) it also adds ``outer_ssh_port``. Pool-bake tooling
+    consumes these to build a pool row -- and to reach the host for any
+    post-bake SSH steps -- without a second ``mngr list`` round-trip.
+    """
+    result_data: dict[str, Any] = {
+        "agent_id": str(result.agent.id),
+        "host_id": str(result.host.id),
+        "host_name": str(result.host.get_name()),
+    }
+    ssh_connection = result.host.get_ssh_connection_info()
+    if ssh_connection is not None:
+        ssh_user, ssh_host, ssh_port, key_path = ssh_connection
+        result_data["ssh_user"] = ssh_user
+        result_data["ssh_host"] = ssh_host
+        result_data["ssh_port"] = ssh_port
+        result_data["ssh_key_path"] = str(key_path)
+    outer_ssh_port = result.host.get_outer_ssh_port()
+    if outer_ssh_port is not None:
+        result_data["outer_ssh_port"] = outer_ssh_port
+    return result_data
+
+
 def _output_result(result: CreateAgentResult, opts: OutputOptions) -> None:
     """Output the create result according to output options."""
     if opts.is_quiet:
         return
 
-    result_data = {"agent_id": str(result.agent.id), "host_id": str(result.host.id)}
+    result_data = _build_create_result_data(result)
     match opts.output_format:
         case OutputFormat.JSON:
             write_json_line(result_data)

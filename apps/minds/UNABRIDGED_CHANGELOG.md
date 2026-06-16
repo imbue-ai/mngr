@@ -4,6 +4,73 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+Remove potentially confusing parts of the messages sent to agents after approving or denying permission requests
+
+`minds pool create` gained a `--skip-deferred-install-wait` passthrough (forwarded to the admin bake) for faster dev pool bakes.
+
+imbue_cloud workspace creation now sends the form's repository to the lease, so the fast path can only adopt a pre-baked host that genuinely matches the requested repo (previously the repo was dropped and only an operator-chosen branch label was matched, so a request for one repo could silently adopt a host running another).
+
+- The desktop client passes the create form's repository through as `-b repo_url=<repository>` (a remote URL in production, a local clone path in dev); the imbue_cloud provider canonicalizes it (resolving a local path to its `origin` remote). The client does no git logic itself.
+
+- `minds pool create` (the OVH pool bake wrapper) now takes the bake source as exactly one of `--from-tag <tag>` (production) or `--workspace-dir <dir>` (dev) and derives the stamped identity from it; `--attributes` is optional and must not carry `repo_url` / `repo_branch_or_tag`.
+
+## test: mark a flaky desktop-client timeout test
+
+- `test_start_creation_subscription_ai_does_not_mint_litellm_key` is now `@pytest.mark.flaky`, matching its already-marked API_KEY twin: both occasionally exceed the 10s pytest-timeout when offload sandboxes are contended (unrelated to product behavior). No source change.
+
+minds: bump test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key timeout to 30s wallclock (pytest-timeout 30s, _wait_until_finished deadline 20s -- the 10s headroom lets the helper's "creation X did not finish within 20s" AssertionError surface instead of racing pytest-timeout's generic "Timeout (>30s)" message). The test occasionally exceeds 10s under heavy CI load -- same root cause as its already-@pytest.mark.flaky sibling.
+
+Fix the `macos_launch` cold-launch smoke test to match the redesigned welcome splash.
+
+- The `macos-launch.spec.js` Playwright smoke test (the `macos_launch` job in `minds-launch-to-msg.yml`, run on a vanilla `macos-latest` runner with no auth state) was asserting the old login screen: a `Create` link or a `Log in` **button**. The welcome screen was redesigned to a "Welcome to Minds" splash where `Sign Up` / `Log In` are now **links** (`ButtonLink` -> `<a>`) and there is a `Continue without an account` button. The stale `getByRole('button', { name: /^log in$/i })` selector matched nothing, so the test timed out at 120s and failed the whole launch-to-first-message run even though the app launched fine and the real `launch_to_msg` job (which auths via one-time code and drives the logged-in UI) passed.
+
+- The smoke test now asserts against the **content window** (`pickContentWindow`) rather than `firstWindow()`. `firstWindow()` races between the `/_chrome` title-bar view (which carries no auth/landing UI) and the content view, so the old assertion intermittently inspected the wrong window and timed out even when the app had launched correctly.
+
+- On the content window it keys off stable structural hooks instead of visible copy / role: the welcome splash is detected via the skip-account button id (`#skip-account-btn`) or the login link href (`a[href="/auth/login"]`), and the logged-in home via the `Create` link. Any one proves the cold-launch path completed, and a future wording or link-vs-button redesign of the splash no longer breaks the test.
+
+- Updated `test/e2e/README.md` to describe the new welcome-splash landing state and to point at the current workflow (`minds-launch-to-msg.yml` `macos_launch` job, twice-daily schedule + dispatch) instead of the retired `minds-macos-launch.yml`.
+
+- Fixed the `launch_to_msg` job's `mngr list` cross-check, which was aborting with `Provider 'aws' references unknown backend 'aws'` (empty output -> W1 looked absent). Root cause: the cross-check ran the bundled mngr inheriting the e2e's cwd (the mngr monorepo checkout), and mngr's project-config discovery walks up from cwd to the git-worktree root and reads `<root>/.mngr/settings.toml` -- which declares an `[providers.aws]` block for the repo's own image builds. A bundled mngr without the `aws` plugin rejects that project-layer block, aborting the parse before any agent is listed. This is a pure artifact of the cwd: minds.app spawns `mngr forward` / `mngr list` with `cwd=$HOME` (see `forward_cli.py` and `laptop_agent_types_seed.py`), where there is no `.mngr/` project layer. The cross-check now runs the subprocess with `cwd=Path.home()`, matching production exactly, so it reads only the minds host profile and never the repo's config. Parse stays strict, so a genuinely bad host-profile config still fails loudly. Verified against the bundled mngr: from the repo root the list aborts (exit 1); from `$HOME` it lists cleanly (exit 0).
+
+- Completed the bundling of `imbue-mngr-aws` so the packaged-app build resolves again. The AWS-provider work added `imbue-mngr-aws` as a minds dependency but did not add it to the four bundled-workspace-package lists (`scripts/build.js`, `electron/env-setup.js`, `scripts/build_test.py`, and `electron/pyproject/pyproject.toml`'s `[project] dependencies` + `[tool.uv.sources]`). Without a local-wheel source override, the build's `uv lock` resolved `imbue-mngr-aws` from PyPI, where the packaged app's 14-day dependency cooldown (`exclude-newer = "14 days"`) rejected the freshly-published `v0.1.1` -- failing `pnpm dist` on every build (including `main`'s scheduled runs). Added `imbue-mngr-aws` to all four lists (the `test_workspace_package_lists_are_consistent` drift guard enforces their agreement), so its wheel is bundled and `uv lock` resolves it locally, bypassing the cooldown. Verified: drift guard passes and `uv lock` against the updated pyproject resolves cleanly.
+
+- Hardened the `launch_to_msg` W2-destroy wait against slow lima teardown. The e2e polled `/api/destroying/<id>/status` and raised immediately on `status == "failed"`. But that status is derived fresh per poll as pid-dead + `is_host_still_active` (see `destroying.read_destroying`): the detached `mngr destroy` subprocess exits before the lima VM finishes dropping out of discovery, so on a slow runner the status reads `failed` transiently (subprocess gone, host not yet) before flipping to `done` once the host is actually torn down. A failure probe confirmed W2's VM was already absent from `limactl list` while the destroy was reported `failed`. The wait now polls for actual completion (`done`/404), treating `failed` as "not done yet", and only fails if the host is still active at the 240s deadline -- which still surfaces a genuine silent-orphan teardown. (The destroy endpoint reporting a transient `failed` during normal slow teardown is arguably worth smoothing server-side too, in the provider/destroy layer the AWS-era "destroy whole host" change introduced.)
+
+Cut minds `0.3.1` and standardize the release tag convention on the `minds-v<version>` prefix across both repos.
+
+- The minds release now tags **both** `imbue-ai/mngr` and `imbue-ai/forever-claude-template` with the same `minds-v<version>` tag (e.g. `minds-v0.3.1`). mngr already used the `minds-` prefix (`minds-v0.3.0`, `minds-v0.2.4`); FCT was the odd one out on a bare `v<version>` (`v0.3.0`). The `minds-` prefix namespaces minds-app releases so they don't collide with either repo's own `v<version>` / package versioning.
+- Bumped `apps/minds/package.json` `version` to `0.3.1` and `templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"` (the FCT tag the shipped binary clones at runtime).
+- Rewrote `apps/minds/docs/release.md` for the **`main`-based, two-PR flow**: a release is two PRs (mngr + FCT) that both target `main`, proven green as a pair, reviewed, merged, tagged `minds-v<version>` on each repo's `main`, then re-verified against the tags (which concludes the release). It documents the **vendor-match invariant** (FCT `vendor/mngr` must be the `git archive` of the exact mngr SHA it is tagged with), and records that the Apple-Silicon lima-VZ `cryptography` SIGILL is handled by the FCT template's `OPENSSL_armcap=0`, not an mngr pin.
+- Hardened the `launch_to_msg` e2e diagnostics. (1) Snapshot names are now slugified before use as filenames (`_safe_snap_name`): a failed-redirect snapshot embedded the agent's `/recovery?return_to=...` URL, and the `?` made `actions/upload-artifact` reject the whole artifact -- which lost *every* diagnostic for the failing run. (2) The whole-desktop `screencapture` "could not create image from display" failure (expected on the headless CI runner, which has no Aqua session) is downgraded from a per-snapshot warning to a single debug line; the Playwright per-page screenshots remain the real diagnostics there.
+
+## 2026-06-14
+
+Added **AWS** as a compute-provider option in the workspace create form, alongside Docker, Lima, Vultr, and Imbue Cloud. Selecting AWS launches the workspace in a runsc-hardened Docker container on an Amazon EC2 instance (the same outer-host/container model as the Vultr and OVH providers, so the secure latchkey gateway runs on the EC2 host outside the agent's container).
+
+- The create form requires picking an AWS region (from the regions with pinned default AMIs) and shows an inline note that AWS credentials are read from the environment (`AWS_*` / `AWS_PROFILE` / `~/.aws`).
+
+- The existing "Cloud" compute option was renamed to "Vultr" to name its provider plainly.
+
+- The workspace listing now shows a compute-provider label on every row (AWS, Vultr, Docker, Lima, Imbue Cloud).
+
+- AWS hosts are long-lived: they never idle-shut-down and have no max-lifetime timer.
+
+- minds writes one per-region AWS provider block into its mngr settings at startup (only when AWS credentials are present) and ensures the region's security group exists before each create.
+
+- minds now suppresses the default region-less `aws` provider in its mngr settings (the same way it already suppresses the default `imbue_cloud` provider), so `mngr list` no longer logs a spurious "credentials not configured" discovery warning every cycle. The usable AWS providers remain the per-region `aws-<region>` blocks.
+
+Destroying a workspace now reliably tears down its entire host, fixing a bug where a destroy could report success in the UI while the underlying cloud instance kept running (and billing).
+
+- Destroy always tears down the whole host (the workspace agent plus the per-host `system-services` agent), so the cloud instance is actually terminated. The previous single-agent fallback -- which could remove only the workspace agent and leave the host alive -- has been removed.
+
+- The destroy no longer shells out to a slow `mngr list` to find the workspace's host: the host id is immutable and already known from in-memory discovery. If the host genuinely can't be determined, the destroy is refused with a clear error instead of doing a partial teardown.
+
+- A workspace now stays visible (as "destroying", then "failed" if teardown didn't finish) until its host is confirmed gone, and is only removed from your account at that point. A failed or partial destroy no longer silently vanishes from the UI while the host keeps running.
+
+- The AWS region picker now offers only the US datacenters (`us-east-1`, `us-east-2`, `us-west-1`, `us-west-2`) by default. Each configured region adds a provider that `mngr list` queries every discovery cycle, and the non-US regions roughly doubled listing latency for little benefit.
+
 ## 2026-06-13
 
 Fixed: a stopped or unresponsive workspace could get stranded on the "Loading workspace" loader and never advance to the recovery page. The desktop shell decides to show the recovery page from a one-shot "system interface status" event; if the chrome window reloaded after a workspace went stuck, that status was lost and never replayed, so the auto-redirect never fired even though the backend had correctly detected the stuck workspace.

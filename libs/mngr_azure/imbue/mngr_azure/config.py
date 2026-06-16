@@ -1,6 +1,5 @@
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -10,6 +9,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
@@ -19,25 +19,43 @@ from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 AZURE_MANAGED_BY_TAG_KEY: Final[str] = "managed-by"
 AZURE_MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
 
-# Default marketplace image: Ubuntu 24.04 LTS (gen2). Ubuntu runs cloud-init
-# with the Azure datasource, so the shared ``mngr_vps_docker`` cloud-init flow
-# (Docker install, SSH host-key injection, mngr bootstrap) works unchanged. The
-# four-part publisher/offer/sku/version URN is configurable for users who want a
-# different distro or a custom image; ``test_release_azure`` validates that the
-# default still resolves.
-DEFAULT_IMAGE_PUBLISHER: Final[str] = "Canonical"
-DEFAULT_IMAGE_OFFER: Final[str] = "ubuntu-24_04-lts"
-DEFAULT_IMAGE_SKU: Final[str] = "server"
+# Default marketplace image: Debian 12 (gen2), matching the Debian-12 default of
+# the other mngr providers (aws / gcp / ovh / vultr). Debian's Azure image runs
+# cloud-init with the Azure datasource, so the shared ``mngr_vps_docker``
+# cloud-init flow (Docker install, SSH host-key injection, mngr bootstrap) works
+# unchanged. The four-part publisher/offer/sku/version URN is configurable for
+# users who want a different distro or a custom image; ``test_release_azure``
+# validates that the default still resolves.
+DEFAULT_IMAGE_PUBLISHER: Final[str] = "Debian"
+DEFAULT_IMAGE_OFFER: Final[str] = "debian-12"
+DEFAULT_IMAGE_SKU: Final[str] = "12-gen2"
 DEFAULT_IMAGE_VERSION: Final[str] = "latest"
 
 
 # The az CLI rewrites azureProfile.json in place (open-truncate-write, not an
 # atomic rename) on token refresh and on most ``az`` commands, so a read that
 # races a write can momentarily see a truncated file that fails to decode/parse.
-# Retry a few times -- spaced by a short sleep so the (concurrent) writer can
-# finish -- before giving up. The window is sub-second, so this stays small.
-_AZ_PROFILE_READ_ATTEMPTS: Final[int] = 3
-_AZ_PROFILE_READ_RETRY_SECONDS: Final[float] = 0.05
+# Poll for a short, sub-second window -- spaced so the (concurrent) writer can
+# finish -- before giving up.
+_AZ_PROFILE_READ_TIMEOUT_SECONDS: Final[float] = 0.2
+_AZ_PROFILE_READ_RETRY_SECONDS: Final[float] = 0.1
+
+
+def _read_az_profile_subscriptions(profile_path: Path) -> list[Any] | None:
+    """Parse the az profile's ``subscriptions`` list; None on a transient torn read.
+
+    Returning None tells the poll loop to retry (the az CLI rewrites the file
+    non-atomically, so a racing read can see a truncated/unparseable file).
+    FileNotFoundError propagates: a genuinely absent file is terminal.
+    """
+    try:
+        # UnicodeDecodeError (bad bytes) and json's ValueError (bad JSON) are both
+        # ValueError; a non-dict top level makes ``.get`` raise AttributeError.
+        return json.loads(profile_path.read_text(encoding="utf-8-sig")).get("subscriptions", [])
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def read_az_cli_default_subscription() -> str | None:
@@ -64,34 +82,27 @@ def read_az_cli_default_subscription() -> str | None:
     """
     config_dir = os.environ.get("AZURE_CONFIG_DIR") or str(Path.home() / ".azure")
     profile_path = Path(config_dir) / "azureProfile.json"
-    last_error: Exception | None = None
-    for attempt in range(_AZ_PROFILE_READ_ATTEMPTS):
-        try:
-            # UnicodeDecodeError (bad bytes) and json's ValueError (bad JSON) are
-            # both ValueError; a non-dict top level makes ``.get`` raise AttributeError.
-            raw = profile_path.read_text(encoding="utf-8-sig")
-            subscriptions = json.loads(raw).get("subscriptions", [])
-        except FileNotFoundError:
-            # Genuinely absent (azure never set up) -- not a transient mid-write
-            # state, so don't waste retries waiting for a file that won't appear.
-            return None
-        except (OSError, ValueError, AttributeError) as e:
-            last_error = e
-            if attempt < _AZ_PROFILE_READ_ATTEMPTS - 1:
-                time.sleep(_AZ_PROFILE_READ_RETRY_SECONDS)
-            continue
-        for subscription in subscriptions:
-            if subscription.get("isDefault") and subscription.get("state", "Enabled") == "Enabled":
-                subscription_id = subscription.get("id")
-                if subscription_id:
-                    return str(subscription_id)
+    try:
+        subscriptions, _, _ = poll_for_value(
+            lambda: _read_az_profile_subscriptions(profile_path),
+            timeout=_AZ_PROFILE_READ_TIMEOUT_SECONDS,
+            poll_interval=_AZ_PROFILE_READ_RETRY_SECONDS,
+        )
+    except FileNotFoundError:
+        # Genuinely absent (azure never set up) -- not a transient mid-write state.
         return None
-    logger.debug(
-        "Could not read az profile {} for default subscription after {} attempts: {}",
-        profile_path,
-        _AZ_PROFILE_READ_ATTEMPTS,
-        last_error,
-    )
+    if subscriptions is None:
+        logger.debug(
+            "Could not read az profile {} for default subscription within {}s (torn reads).",
+            profile_path,
+            _AZ_PROFILE_READ_TIMEOUT_SECONDS,
+        )
+        return None
+    for subscription in subscriptions:
+        if subscription.get("isDefault") and subscription.get("state", "Enabled") == "Enabled":
+            subscription_id = subscription.get("id")
+            if subscription_id:
+                return str(subscription_id)
     return None
 
 
@@ -169,20 +180,18 @@ class AzureProviderConfig(VpsDockerProviderConfig):
     allowed_ssh_cidrs: tuple[str, ...] = Field(
         default=("0.0.0.0/0",),
         description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the NSG created by "
-            "`mngr azure prepare`. Default ('0.0.0.0/0',) allows any IP (fail-open, matching the AWS / "
-            "GCP providers; a warning is logged -- tighten for production). Use e.g. ['203.0.113.4/32'] "
-            "to restrict to your own IP, or [] for no SSH ingress (the NSG is created with no allow "
-            "rule, so its default deny leaves instances unreachable from outside the vnet). SSH auth is "
-            "key-only (passwords disabled), so 0.0.0.0/0 exposes the port but not a usable login."
+            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the NSG `mngr azure "
+            "prepare` creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ['203.0.113.4/32'] to "
+            "restrict to your own IP, or [] for no SSH ingress (the NSG is created with no allow rule, "
+            "so its default deny leaves instances unreachable from outside the vnet). A warning is logged "
+            "when the effective range is 0.0.0.0/0 or empty."
         ),
     )
     associate_public_ip: bool = Field(
         default=True,
         description=(
             "Assign a public IPv4 address to the VM. Required for the current "
-            "mngr-from-developer-laptop SSH access model. For a more secure deployment, set to False "
-            "and run mngr from a bastion inside the vnet."
+            "mngr-from-developer-laptop SSH access model."
         ),
     )
 
@@ -224,8 +233,8 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         if az_default_subscription:
             return az_default_subscription
         raise AzureSubscriptionError(
-            "No Azure subscription resolved. Run `az login` (and optionally "
-            "`az account set --subscription <id>`) so the active subscription is used automatically, "
-            "or run 'mngr config set providers.azure.subscription_id <your-subscription-id>', "
-            "or set the AZURE_SUBSCRIPTION_ID environment variable."
+            "No Azure subscription resolved. Set one of:\n"
+            "  - run `az login` (optionally `az account set --subscription <id>`) to use the active subscription;\n"
+            "  - `mngr config set providers.azure.subscription_id <id>`;\n"
+            "  - the AZURE_SUBSCRIPTION_ID environment variable."
         )

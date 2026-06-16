@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.8] - 2026-06-16
+
+### Changed
+
+- Changed: `prepare_btrfs_on_outer` now skips the loopback allocation/format/mount/fstab steps when the btrfs filesystem is already mounted at the configured mount path (e.g. on an OVH-slice's lima data disk), so a host whose btrfs is provided by an already-mounted real disk can reuse the shared vps_docker bake and slow-path rebuild unchanged.
+
+### Fixed
+
+- Fixed: `host_backup` btrfs snapshot helper (`snapshot_helper.sh`, the `OUTER_TRIGGER` mechanism) no longer re-processes a request it has already serviced; the spurious "snapshot path already exists" failure that masked a successful backup is gone. The helper now skips any request whose `request_id` already appears in `result.json`.
+
+## [v0.1.7] - 2026-06-15
+
+### Fixed
+
+- Fixed: Agent discovery on VPS Docker providers (AWS, OVH, Vultr) now reads agents **live** from each host's container instead of from the persisted `agents/*.json` outer store, so agents created *inside* a container (e.g. by an in-container `mngr create`) are visible to `mngr message`, `mngr connect`, and any other command that resolves agents through discovery. Previously such agents only showed up in `mngr list`, so onboarding messages to an in-container chat agent were never delivered. Each host's running state is derived from the same live read, removing a per-host inspect round-trip.
+
 ## [v0.1.6] - 2026-06-13
 
 ### Added

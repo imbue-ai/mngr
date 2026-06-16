@@ -8,7 +8,10 @@ from typing import Any
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AzureVmName
+from imbue.mngr_azure.client import LinuxHostname
+from imbue.mngr_azure.client import _computer_name
 from imbue.mngr_azure.client import _make_vm_name
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_azure.testing import FakeComputeClient
@@ -88,6 +91,29 @@ def test_azure_vm_name_rejects_invalid() -> None:
         AzureVmName("has space")
     with pytest.raises(InvalidAzureIdentifierError):
         AzureVmName("a" * 65)
+
+
+def test_computer_name_caps_at_63_and_strips_trailing_dash() -> None:
+    """_computer_name truncates a 64-char VM name to a valid 63-char LinuxHostname."""
+    computer_name = _computer_name(AzureVmName("a" * 64))
+    assert isinstance(computer_name, LinuxHostname)
+    assert len(computer_name) == 63
+    # Truncation that lands on a dash must not leave a trailing dash.
+    trimmed = _computer_name(AzureVmName("a" * 62 + "-b"))
+    assert trimmed == "a" * 62
+    assert not trimmed.endswith("-")
+
+
+def test_linux_hostname_rejects_invalid() -> None:
+    """The hostname type rejects empty, over-long, and out-of-charset strings."""
+    with pytest.raises(InvalidAzureIdentifierError):
+        LinuxHostname("")
+    with pytest.raises(InvalidAzureIdentifierError):
+        LinuxHostname("a" * 64)
+    with pytest.raises(InvalidAzureIdentifierError):
+        LinuxHostname("ends-with-dash-")
+    with pytest.raises(InvalidAzureIdentifierError):
+        LinuxHostname("Has-Upper")
 
 
 # =========================================================================
@@ -247,6 +273,11 @@ def test_create_instance_cleans_up_nic_and_ip_when_vm_create_fails() -> None:
     assert network.public_ip_addresses.deleted[0].endswith("-ip")
 
 
+# =========================================================================
+# reclaim_orphaned_network_resources (GC-time NIC/IP reclaim)
+# =========================================================================
+
+
 def _orphan_resource(name: str, *, age_seconds: float, attached: bool, attach_attr: str, tagged: bool = True) -> Any:
     created_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
     tags = (
@@ -257,9 +288,9 @@ def _orphan_resource(name: str, *, age_seconds: float, attached: bool, attach_at
     )
 
 
-def test_create_instance_reclaims_aged_orphan_nic_and_ip() -> None:
+def test_reclaim_deletes_aged_orphan_nic_and_ip() -> None:
     # A NIC + public IP left unattached by an earlier failed create, now older
-    # than the reservation window, are reclaimed at the start of the next create.
+    # than the reservation window, are reclaimed at GC time and reported back.
     network = FakeNetworkClient()
     network.network_interfaces.list_result = [
         _orphan_resource("old-nic", age_seconds=600, attached=False, attach_attr="virtual_machine")
@@ -268,17 +299,11 @@ def test_create_instance_reclaims_aged_orphan_nic_and_ip() -> None:
         _orphan_resource("old-ip", age_seconds=600, attached=False, attach_attr="ip_configuration")
     ]
     client = _make_client(network=network)
-    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
-    client.create_instance(
-        label="agent",
-        region=_REGION,
-        plan="Standard_B2s",
-        user_data="#cloud-config\n",
-        ssh_key_ids=["k1"],
-        tags={"mngr-host-id": "host-abc"},
-    )
+    reclaimed = client.reclaim_orphaned_network_resources(provider_name=ProviderInstanceName("azure"))
     assert "old-nic" in network.network_interfaces.deleted
     assert "old-ip" in network.public_ip_addresses.deleted
+    assert {(r.kind, r.name) for r in reclaimed} == {("network_interface", "old-nic"), ("public_ip", "old-ip")}
+    assert all(r.provider_name == "azure" for r in reclaimed)
 
 
 def test_reclaim_skips_recent_attached_and_untagged() -> None:
@@ -292,16 +317,24 @@ def test_reclaim_skips_recent_attached_and_untagged() -> None:
         _orphan_resource("foreign-nic", age_seconds=600, attached=False, attach_attr="virtual_machine", tagged=False),
     ]
     client = _make_client(network=network)
-    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
-    client.create_instance(
-        label="agent",
-        region=_REGION,
-        plan="Standard_B2s",
-        user_data="#cloud-config\n",
-        ssh_key_ids=["k1"],
-        tags={"mngr-host-id": "host-abc"},
-    )
+    reclaimed = client.reclaim_orphaned_network_resources(provider_name=ProviderInstanceName("azure"))
     assert network.network_interfaces.deleted == []
+    assert reclaimed == []
+
+
+def test_reclaim_dry_run_reports_without_deleting() -> None:
+    network = FakeNetworkClient()
+    network.network_interfaces.list_result = [
+        _orphan_resource("old-nic", age_seconds=600, attached=False, attach_attr="virtual_machine")
+    ]
+    network.public_ip_addresses.list_result = [
+        _orphan_resource("old-ip", age_seconds=600, attached=False, attach_attr="ip_configuration")
+    ]
+    client = _make_client(network=network)
+    reclaimed = client.reclaim_orphaned_network_resources(provider_name=ProviderInstanceName("azure"), dry_run=True)
+    assert network.network_interfaces.deleted == []
+    assert network.public_ip_addresses.deleted == []
+    assert {(r.kind, r.name) for r in reclaimed} == {("network_interface", "old-nic"), ("public_ip", "old-ip")}
 
 
 def test_create_instance_requires_uploaded_ssh_key() -> None:
@@ -458,14 +491,16 @@ def test_list_instances_empty_when_rg_missing() -> None:
 
 
 def test_list_mngr_managed_vms_spans_provider_names() -> None:
+    """Returns every managed-by=mngr VM across provider names, excluding untagged VMs."""
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure-west"}),
-        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr"}),
+        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure-west"}),
+        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr", "mngr-provider": "azure-east"}),
+        SimpleNamespace(name="vm-c", tags={"team": "infra"}),
     ]
     client = _make_client(compute=compute)
     managed = client.list_mngr_managed_vms()
-    assert [vm["id"] for vm in managed] == ["vm-a"]
+    assert sorted(vm["id"] for vm in managed) == ["vm-a", "vm-b"]
 
 
 # =========================================================================

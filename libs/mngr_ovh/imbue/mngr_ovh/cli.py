@@ -13,6 +13,7 @@ from typing import Any
 from typing import Final
 
 import click
+from click_option_group import optgroup
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -80,7 +81,8 @@ def ovh() -> None:
 
 
 @ovh.command(name="list")
-@click.option(
+@optgroup.group("Provider")
+@optgroup.option(
     "--provider",
     "provider",
     default="ovh",
@@ -92,7 +94,7 @@ def ovh() -> None:
         "still fall back to env / ~/.ovh.conf when unset."
     ),
 )
-@click.option(
+@optgroup.option(
     "--all",
     "show_all",
     is_flag=True,

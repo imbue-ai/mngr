@@ -19,6 +19,16 @@ mngr azure prepare [OPTIONS]
 ```
 **Options:**
 
+## Provider
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--provider` | text | Name of the [providers.NAME] block in settings.toml to read defaults from (subscription_id, default_region, resource_group, vnet/subnet/nsg names, allowed_ssh_cidrs). When the block does not exist, AzureProviderConfig class defaults are used as the fallback. CLI options below override either source. | `azure` |
+| `--subscription-id` | text | Azure subscription ID. Defaults to the resolved provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription. | None |
+| `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
+| `--resource-group` | text | Resource group to create / reuse. Defaults to the resolved provider config's resource_group. | None |
+| `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production. | None |
+
 ## Common
 
 | Name | Type | Description | Default |
@@ -33,16 +43,6 @@ mngr azure prepare [OPTIONS]
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--provider` | text | Name of the [providers.NAME] block in settings.toml to read defaults from (subscription_id, default_region, resource_group, vnet/subnet/nsg names, allowed_ssh_cidrs). When the block does not exist, AzureProviderConfig class defaults are used as the fallback. CLI options below override either source. | `azure` |
-| `--subscription-id` | text | Azure subscription ID. Defaults to the resolved provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription. | None |
-| `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
-| `--resource-group` | text | Resource group to create / reuse. Defaults to the resolved provider config's resource_group. | None |
-| `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production. | None |
 
 ## mngr azure cleanup
 
@@ -53,6 +53,15 @@ mngr azure cleanup [OPTIONS]
 ```
 **Options:**
 
+## Provider
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--provider` | text | Name of the [providers.NAME] block in settings.toml to read defaults from (subscription_id, default_region, resource_group). When the block does not exist, AzureProviderConfig class defaults are used as the fallback. | `azure` |
+| `--subscription-id` | text | Azure subscription ID. Defaults to the resolved provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription. | None |
+| `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
+| `--resource-group` | text | Resource group to delete. Defaults to the resolved provider config's resource_group. | None |
+
 ## Common
 
 | Name | Type | Description | Default |
@@ -67,12 +76,3 @@ mngr azure cleanup [OPTIONS]
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--provider` | text | Name of the [providers.NAME] block in settings.toml to read defaults from (subscription_id, default_region, resource_group). When the block does not exist, AzureProviderConfig class defaults are used as the fallback. | `azure` |
-| `--subscription-id` | text | Azure subscription ID. Defaults to the resolved provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription. | None |
-| `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
-| `--resource-group` | text | Resource group to delete. Defaults to the resolved provider config's resource_group. | None |

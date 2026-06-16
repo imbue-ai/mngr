@@ -58,9 +58,10 @@ Azure nests every resource in a *resource group*, and a fresh subscription has n
 default vnet. `mngr azure prepare` does the one-time privileged setup: it
 registers the `Microsoft.Compute` / `Microsoft.Network` / `Microsoft.Storage`
 resource providers and creates the resource group, vnet, subnet, and NSG (tagged
-`managed-by=mngr`). After it succeeds, `mngr create --provider azure` runs with a
-restricted role — it only resolves the existing subnet, no network-write
-permission.
+`managed-by=mngr`). After it succeeds, `mngr create --provider azure` needs only
+VM/NIC/IP-create permissions, not the network-management permissions that build the
+vnet/subnet/NSG — it just resolves the existing subnet, so you can run it with
+limited credentials.
 
 ```bash
 mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
@@ -153,9 +154,9 @@ reaped automatically via their `delete_option=Delete` (no orphaned resources).
 
 If a `mngr create` fails *after* the public IP + NIC are provisioned but before
 the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up —
-immediately when possible, or otherwise reclaimed at the start of the next
-`mngr create` (Azure reserves the NIC for the would-be VM for 180s, so immediate
-deletion can be briefly blocked). A `SkuNotAvailable` error means the chosen VM
+immediately when possible, or otherwise reclaimed at GC time by `mngr gc` (which
+also runs after every `mngr destroy`) (Azure reserves the NIC for the would-be VM
+for 180s, so immediate deletion can be briefly blocked). A `SkuNotAvailable` error means the chosen VM
 size has no capacity in the region right now; pick another size with
 `-b --azure-vm-size=...` or another region.
 
@@ -168,9 +169,10 @@ size has no capacity in the region right now; pick another size with
 - **SSH keys** are injected inline at VM create (`os_profile.linux_configuration.ssh`);
   Azure has no per-key resource. Cloud-init also forwards the key into root's
   `authorized_keys`, so mngr's root SSH works.
-- **Image:** Ubuntu 24.04 LTS by default (runs cloud-init with the Azure
-  datasource, so the shared `mngr_vps_docker` bootstrap works unchanged).
-  Configurable via `image_publisher` / `image_offer` / `image_sku` / `image_version`.
+- **Image:** Debian 12 by default (matching the other mngr providers; runs
+  cloud-init with the Azure datasource, so the shared `mngr_vps_docker` bootstrap
+  works unchanged). Configurable via `image_publisher` / `image_offer` /
+  `image_sku` / `image_version`.
 - **No snapshot workflow:** the Azure client exposes no managed-disk-snapshot surface (the speculative `create_snapshot` / `list_snapshots` / `delete_snapshot` client methods are not part of `VpsClientInterface`). Restore from a fresh `mngr create` instead.
 - **Spot** (`--azure-spot`): `priority=Spot`, `eviction_policy=Delete`,
   `max_price=-1` — evicted only on capacity, and deleted (not stopped) on
