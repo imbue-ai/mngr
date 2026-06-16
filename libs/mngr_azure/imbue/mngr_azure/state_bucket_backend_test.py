@@ -24,20 +24,9 @@ from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
 from imbue.mngr_azure.testing import _StubbedBlobStateHostIdentity
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.testing import seed_stopped_host_record
 
 _ACCOUNT_NAME = "mngrststateacct1234"
-
-
-def _seed_stopped_host_record(provider: AzureProvider, host_id: HostId) -> None:
-    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits."""
-    certified = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="myhost",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        stop_reason=HostState.STOPPED.value,
-    )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
 
 
 def _build_bucket_provider(mngr_ctx: MngrContext) -> tuple[AzureProvider, FakeComputeClient]:
@@ -92,7 +81,7 @@ def test_bucket_mode_persists_agent_to_bucket_and_writes_no_vm_tags(temp_mngr_ct
     provider, compute = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     big_labels = {"k": "v" * 1000}
     agent_data = {"id": str(agent_id), "name": "alpha", "type": "claude", "labels": big_labels}
 
@@ -135,7 +124,7 @@ def test_bucket_mode_remove_agent_clears_bucket_record(temp_mngr_ctx: MngrContex
     provider, _compute = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
 
     provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha"})
     assert len(provider.list_persisted_agent_data_for_host(host_id)) == 1
@@ -190,7 +179,7 @@ def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
 
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
 
     compute.virtual_machines.list_result = [
         SimpleNamespace(

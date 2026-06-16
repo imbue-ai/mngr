@@ -36,6 +36,7 @@ from imbue.mngr_aws.testing import clear_aws_env
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.testing import seed_stopped_host_record
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -114,26 +115,6 @@ def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber
 
 def _describe_instances_response(instances: list[dict]) -> dict:
     return {"Reservations": [{"Instances": instances}]}
-
-
-def _seed_stopped_host_record(provider: AwsProvider, host_id: HostId) -> None:
-    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits.
-
-    The agent-data hooks call ``super()`` first (the authoritative on-volume
-    store) and only fall back to / additionally write EC2 tags. For a *stopped*
-    host the base raises ``HostNotFoundError`` (no reachable ``vps_ip``); seeding
-    such a record makes the base short-circuit immediately without any SSH or
-    discovery sweep, so these tag-path tests exercise the stopped-host fallback
-    without standing up a fake VPS.
-    """
-    certified = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="myhost",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        stop_reason=HostState.STOPPED.value,
-    )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
 
 
 def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
@@ -273,7 +254,7 @@ def test_persist_agent_data_writes_per_field_agent_tags(temp_mngr_ctx: MngrConte
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     stubber.add_response(
         "describe_instances",
         _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
@@ -304,7 +285,7 @@ def test_persist_agent_data_writes_labels_in_their_own_tag(temp_mngr_ctx: MngrCo
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     stubber.add_response(
         "describe_instances",
         _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
