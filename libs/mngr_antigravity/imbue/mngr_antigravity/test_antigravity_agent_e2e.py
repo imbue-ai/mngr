@@ -79,6 +79,16 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
     forces_tool_call = False
     asserts_usage = False
     native_session_preserved_relpaths = ("plugin/antigravity/home/.gemini/antigravity-cli/conversations",)
+    # After destroy, the harness creates a fresh agent in a new worktree that adopts the
+    # just-preserved conversation (via MNGR_ADOPT_SESSION) and asserts it recalls the secret.
+    adopts_preserved_session = True
+
+    def adopt_session_arg(self, preserved_dir: Path) -> str:
+        # agy resumes by conversation id (directory-agnostic), so hand the adopting create the
+        # root conversation id -- the plugin resolves it against the preserved store and copies
+        # it into the new agent's home. The preserved dir mirrors the agent state dir, so the
+        # root_conversation pointer file sits at its top level.
+        return (preserved_dir / "root_conversation").read_text().strip()
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("agy") is None or not (_REAL_GEMINI / "oauth_creds.json").exists():

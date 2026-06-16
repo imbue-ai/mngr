@@ -337,7 +337,9 @@ def _resolve_adopt_session(adopt_arg: str, mngr_ctx: MngrContext) -> tuple[str, 
             if len(ids) == 1:
                 return ids[0], resolved
             if not ids:
-                raise UserInputError(f"No conversation store ({'/'.join(_CONVERSATION_STORE_SUFFIXES)}) found in {resolved}")
+                raise UserInputError(
+                    f"No conversation store ({'/'.join(_CONVERSATION_STORE_SUFFIXES)}) found in {resolved}"
+                )
             raise UserInputError(
                 f"Conversations directory {resolved} holds multiple conversations; "
                 "pass the full path to the <id>.db file to specify which one."
@@ -734,7 +736,10 @@ class AntigravityAgent(
         is seeded with the same id so the streamer tails the adopted conversation
         from the first turn (subagent ids are appended later by the capture hook).
         """
-        host.write_text_file(self._get_root_conversation_file_path(), f"{conversation_id}\n")
+        # Match statusline.sh / capture_conversation_id.sh write formats exactly: the
+        # root file holds the bare id (no newline), the ids file is newline-terminated
+        # lines (the capture hook's `grep -qxF` whole-line match depends on the newline).
+        host.write_text_file(self._get_root_conversation_file_path(), conversation_id)
         host.write_text_file(self._get_conversation_ids_file_path(), f"{conversation_id}\n")
 
     def provision(
