@@ -82,16 +82,20 @@ def resolve_target(address: AgentOrHostAddress, mngr_ctx: MngrContext) -> Resolv
         return ResolvedTarget(
             identifier=str(address), provider=provider, host_id=host_ref.host_id, agent_id=agent_ref.agent_id
         )
-    host_ref = _resolve_host_ref(address, mngr_ctx)
+    host_ref, _ = _discover_one_host(address, mngr_ctx)
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     return ResolvedTarget(identifier=str(address), provider=provider, host_id=host_ref.host_id, agent_id=None)
 
 
-def _resolve_host_ref(address: HostAddress, mngr_ctx: MngrContext) -> DiscoveredHost:
-    """Discover and return the single :class:`DiscoveredHost` matching a host address.
+def _discover_one_host(
+    address: HostAddress, mngr_ctx: MngrContext
+) -> tuple[DiscoveredHost, dict[DiscoveredHost, list[DiscoveredAgent]]]:
+    """Discover the single :class:`DiscoveredHost` matching a host address, with its agents.
 
     Discovery is narrowed to ``address.provider`` when the address pins one, so a
-    fully-qualified ``host.provider`` only queries that provider.
+    fully-qualified ``host.provider`` only queries that provider. Returns the
+    resolved host ref plus the full ``agents_by_host`` mapping, so callers that
+    also need the host's agent refs avoid a second discovery pass.
     """
     provider_names = (str(address.provider),) if address.provider is not None else None
     agents_by_host, _ = discover_hosts_and_agents(
@@ -101,7 +105,8 @@ def _resolve_host_ref(address: HostAddress, mngr_ctx: MngrContext) -> Discovered
         include_destroyed=False,
         reset_caches=False,
     )
-    return filter_one_host(address, list(agents_by_host.keys()))
+    host_ref = filter_one_host(address, list(agents_by_host.keys()))
+    return host_ref, agents_by_host
 
 
 def poll_combined_state(resolved: ResolvedTarget) -> CombinedState:
@@ -194,15 +199,7 @@ def get_host_details(address: HostAddress, mngr_ctx: MngrContext) -> tuple[HostD
     busy host does not trigger per-agent detail collection -- which would defeat
     the point of an addressed single-target lookup.
     """
-    provider_names = (str(address.provider),) if address.provider is not None else None
-    agents_by_host, _ = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=provider_names,
-        agent_identifiers=None,
-        include_destroyed=False,
-        reset_caches=False,
-    )
-    host_ref = filter_one_host(address, list(agents_by_host.keys()))
+    host_ref, agents_by_host = _discover_one_host(address, mngr_ctx)
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     return build_host_details(provider, host_ref, mngr_ctx), tuple(agents_by_host[host_ref])
 
