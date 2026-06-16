@@ -50,7 +50,7 @@ def test_call_result_defaults() -> None:
 
 
 @pytest.mark.flaky
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(30)
 def test_call_runs_mngr_version_in_forkserver_child() -> None:
     """End-to-end: a real ``mngr --version`` runs in a forkserver child.
 
@@ -59,23 +59,26 @@ def test_call_runs_mngr_version_in_forkserver_child() -> None:
     stdout/exit-code. ``--version`` is used because it does no provider
     discovery, so the call is fast and deterministic.
 
-    The per-test timeout is raised well above the call's own 120s timeout (and
-    flaky retries are enabled): the ``_stop_forkserver_after_test`` fixture tears
-    the forkserver down after every test, so each call pays a full cold start
-    (forkserver boot + preloading all of ``imbue.mngr.main`` + running the CLI),
-    which can exceed the default 10s under a loaded CI runner.
+    The slow part is ``child.start()`` -- a cold forkserver boot + preload of all
+    of ``imbue.mngr.main`` -- which the ``_stop_forkserver_after_test`` fixture
+    forces on every test (it tears the forkserver down after each). That preload
+    is bounded by the *per-test* timeout (not the ``call`` timeout, which only
+    bounds the in-child CLI run), so it is raised from the default 10s -- which it
+    occasionally exceeds on a loaded CI runner -- to 30s, with flaky retries for
+    the tail. The ``call`` timeout caps just the (fast) CLI run.
     """
-    result = MngrCaller().call(["--version"], timeout=120.0)
+    result = MngrCaller().call(["--version"], timeout=20.0)
     assert result.returncode == 0
     assert result.is_timed_out is False
     assert "mngr" in result.stdout
 
 
 @pytest.mark.flaky
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(30)
 def test_call_reports_nonzero_exit_for_unknown_command() -> None:
-    # Same cold-start exposure as the version test above: a full forkserver boot
-    # + ``imbue.mngr.main`` preload, so the per-test timeout is raised above the
-    # call's own 120s timeout and flaky retries are enabled.
-    result = MngrCaller().call(["definitely-not-a-real-subcommand"], timeout=120.0)
+    # Same cold-start exposure as the version test above (forkserver boot +
+    # ``imbue.mngr.main`` preload in ``child.start()``), so the per-test timeout
+    # is raised to 30s and flaky retries are enabled; the ``call`` timeout caps
+    # just the fast in-child CLI run.
+    result = MngrCaller().call(["definitely-not-a-real-subcommand"], timeout=20.0)
     assert result.returncode != 0
