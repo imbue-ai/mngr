@@ -1,9 +1,7 @@
 """Tests for OVH image / datacenter resolution."""
 
 from typing import Any
-from unittest.mock import MagicMock
 
-import ovh
 import pytest
 
 from imbue.mngr.errors import MngrError
@@ -11,13 +9,7 @@ from imbue.mngr_ovh.catalog import find_required_field
 from imbue.mngr_ovh.catalog import list_available_image_names
 from imbue.mngr_ovh.catalog import resolve_image_id
 from imbue.mngr_ovh.catalog import validate_datacenter
-from imbue.mngr_ovh.client import OvhVpsClient
-
-
-def _client(call_side_effect: Any) -> OvhVpsClient:
-    m = MagicMock(spec=ovh.Client)
-    m.call = MagicMock(side_effect=call_side_effect)
-    return OvhVpsClient(ovh_client=m, subsidiary="US", task_poll_interval=0.0)
+from imbue.mngr_ovh.mock_ovh_client_test import make_fake_ovh_vps_client
 
 
 def test_resolve_image_id_returns_uuid_for_matching_name() -> None:
@@ -30,7 +22,7 @@ def test_resolve_image_id_returns_uuid_for_matching_name() -> None:
             return {"id": "uuid-b", "name": "Debian 12 - Docker"}
         raise AssertionError(f"unexpected {path}")
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     assert resolve_image_id(client, "vps-x", "Debian 12 - Docker") == "uuid-b"
 
 
@@ -40,7 +32,7 @@ def test_resolve_image_id_raises_when_name_not_found() -> None:
             return ["uuid-a"]
         return {"id": "uuid-a", "name": "Ubuntu 24.04"}
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     with pytest.raises(MngrError, match="No OVH image named 'Debian 12 - Docker'"):
         resolve_image_id(client, "vps-x", "Debian 12 - Docker")
 
@@ -55,7 +47,7 @@ def test_list_available_image_names() -> None:
             return {"id": "2", "name": "Debian 12 - Docker"}
         raise AssertionError(path)
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     assert sorted(list_available_image_names(client, "vps-x")) == ["Debian 12 - Docker", "Ubuntu 24.04"]
 
 

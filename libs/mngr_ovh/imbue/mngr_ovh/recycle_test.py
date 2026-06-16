@@ -4,9 +4,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import Any
-from unittest.mock import MagicMock
 
-import ovh
 import pytest
 from ovh.exceptions import APIError
 
@@ -15,15 +13,10 @@ from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
+from imbue.mngr_ovh.mock_ovh_client_test import make_fake_ovh_vps_client
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
-
-
-def _client(call_side_effect: Any, *, is_unconfigured: bool = False) -> OvhVpsClient:
-    m = MagicMock(spec=ovh.Client)
-    m.call = MagicMock(side_effect=call_side_effect)
-    return OvhVpsClient(ovh_client=m, subsidiary="US", task_poll_interval=0.0, is_unconfigured=is_unconfigured)
 
 
 def _iam_payload(
@@ -153,13 +146,13 @@ def _make_fake_client_with_one_candidate(
         expiration_days_from_now=days_to_expiration,
     )
     fake.vps_details_by_name["vps-x.vps.ovh.us"] = _vps_details(state=state, plan_code=plan, zone=zone)
-    return _client(fake), fake
+    return make_fake_ovh_vps_client(fake), fake
 
 
 def test_returns_none_when_unconfigured() -> None:
     fake = _FakeOvh()
     fake.iam_payload = []
-    client = _client(fake, is_unconfigured=True)
+    client = make_fake_ovh_vps_client(fake, is_unconfigured=True)
     assert (
         try_recycle_cancelled_vps(
             client=client,
@@ -179,7 +172,7 @@ def test_returns_none_when_unconfigured() -> None:
 def test_returns_none_when_no_candidates() -> None:
     fake = _FakeOvh()
     fake.iam_payload = []
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     assert (
         try_recycle_cancelled_vps(
             client=client,
@@ -376,7 +369,7 @@ def test_skips_candidate_already_locked_by_someone_else() -> None:
     fake.iam_payload = [_iam_payload("vps-x.vps.ovh.us", lock_holder="other-process-uuid")]
     fake.service_info_by_name["vps-x.vps.ovh.us"] = _service_info()
     fake.vps_details_by_name["vps-x.vps.ovh.us"] = _vps_details()
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     result = try_recycle_cancelled_vps(
         client=client,
         provider_name="alice-ovh",
@@ -400,7 +393,7 @@ def test_picks_candidate_with_latest_expiration() -> None:
     fake.service_info_by_name["vps-far.vps.ovh.us"] = _service_info(expiration_days_from_now=27)
     fake.vps_details_by_name["vps-near.vps.ovh.us"] = _vps_details()
     fake.vps_details_by_name["vps-far.vps.ovh.us"] = _vps_details()
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     result = try_recycle_cancelled_vps(
         client=client,
         provider_name="alice-ovh",
@@ -421,7 +414,7 @@ def test_caps_candidates_considered() -> None:
     for entry in fake.iam_payload:
         fake.service_info_by_name[entry["name"]] = _service_info()
         fake.vps_details_by_name[entry["name"]] = _vps_details()
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     result = try_recycle_cancelled_vps(
         client=client,
         provider_name="alice-ovh",
@@ -445,7 +438,7 @@ def test_skips_candidate_with_active_engagement() -> None:
     fake.iam_payload = [_iam_payload("vps-x.vps.ovh.us")]
     fake.service_info_by_name["vps-x.vps.ovh.us"] = _service_info(engaged_up_to="2027-01-01")
     fake.vps_details_by_name["vps-x.vps.ovh.us"] = _vps_details()
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     result = try_recycle_cancelled_vps(
         client=client,
         provider_name="alice-ovh",
@@ -502,7 +495,7 @@ def test_returns_none_when_host_id_tag_swap_fails() -> None:
             raise APIError("simulated IAM tag DELETE failure")
         return fake(method, path, body, need_auth)
 
-    client = _client(call)
+    client = make_fake_ovh_vps_client(call)
     result = try_recycle_cancelled_vps(
         client=client,
         provider_name="alice-ovh",

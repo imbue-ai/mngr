@@ -93,9 +93,19 @@ def test_pin_host_key_times_out_when_connect_keeps_failing(tmp_path: Path) -> No
 
 
 def test_wait_for_ssh_returns_when_socket_connects() -> None:
-    with patch("socket.create_connection", autospec=True) as mock_conn:
-        mock_conn.return_value = MagicMock(spec=socket.socket)
+    connect_targets: list[Any] = []
+
+    def fake_create_connection(address: Any, timeout: float | None = None) -> Any:
+        connect_targets.append(address)
+        return MagicMock(spec=socket.socket)
+
+    with patch("socket.create_connection", side_effect=fake_create_connection):
         wait_for_ssh_after_rebuild(hostname="vps-x", port=22, timeout_seconds=5.0)
+
+    # Must attempt exactly one connection to the right (host, port) and
+    # return on first success rather than continuing to poll. Without this
+    # the test was a bare "no exception raised" smoke test.
+    assert connect_targets == [("vps-x", 22)]
 
 
 def test_wait_for_ssh_times_out_when_socket_refuses() -> None:

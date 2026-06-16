@@ -95,7 +95,6 @@ def write_pending_order_marker(
     eventually produces, which is worse than failing loudly.
     """
     directory = pending_orders_dir(provider_state_dir)
-    directory.mkdir(parents=True, exist_ok=True)
     record = PendingOrderRecord(
         order_id=order_id,
         plan_code=plan_code,
@@ -105,6 +104,12 @@ def write_pending_order_marker(
     target = directory / _MARKER_FILENAME_FMT.format(order_id=order_id)
     tmp_path = target.with_suffix(target.suffix + ".tmp")
     try:
+        # The mkdir is inside the try so a directory-creation failure
+        # (parent unwritable, the path occupied by a regular file, ...)
+        # surfaces as MngrError too -- the contract is "any failure to
+        # persist the marker fails loudly", and mkdir is part of that
+        # persistence.
+        directory.mkdir(parents=True, exist_ok=True)
         tmp_path.write_text(record.model_dump_json())
         os.replace(tmp_path, target)
     except OSError as exc:

@@ -1,13 +1,10 @@
 """Tests for the IAM v2 tag wrappers."""
 
 from typing import Any
-from unittest.mock import MagicMock
 
-import ovh
 import pytest
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import attach_tag
@@ -17,12 +14,7 @@ from imbue.mngr_ovh.iam_tags import list_vps_resources
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
 from imbue.mngr_ovh.iam_tags import parse_extra_tags_env
 from imbue.mngr_ovh.iam_tags import vps_urn_for
-
-
-def _client(call_side_effect: Any) -> OvhVpsClient:
-    m = MagicMock(spec=ovh.Client)
-    m.call = MagicMock(side_effect=call_side_effect)
-    return OvhVpsClient(ovh_client=m, subsidiary="US", task_poll_interval=0.0)
+from imbue.mngr_ovh.mock_ovh_client_test import make_fake_ovh_vps_client
 
 
 def test_vps_urn_for_us_account() -> None:
@@ -40,7 +32,7 @@ def test_attach_tag_issues_post() -> None:
         captured.append((method, path, body or {}))
         return None
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     attach_tag(client, "urn:v1:us:resource:vps:vps-x", MNGR_HOST_ID_TAG_KEY, "abc")
     assert captured == [
         (
@@ -55,15 +47,23 @@ def test_attach_tag_issues_post() -> None:
 
 
 def test_attach_tags_issues_one_post_per_pair() -> None:
-    captured: list[str] = []
+    captured: list[tuple[str, str, Any]] = []
 
     def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-        captured.append(method)
+        captured.append((method, path, body))
         return None
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     attach_tags(client, "urn:v1:us:resource:vps:vps-x", {"a": "1", "b": "2"})
-    assert captured == ["POST", "POST"]
+    # Each pair must POST to the resource's tag endpoint with its own
+    # ``{key, value}`` body -- not just "two POSTs happened". A bug that
+    # swapped key/value, posted to the wrong urn, or dropped a pair would
+    # still produce two POSTs but fail this comparison.
+    by_key = sorted(captured, key=lambda c: c[2]["key"])
+    assert by_key == [
+        ("POST", "/v2/iam/resource/urn:v1:us:resource:vps:vps-x/tag", {"key": "a", "value": "1"}),
+        ("POST", "/v2/iam/resource/urn:v1:us:resource:vps:vps-x/tag", {"key": "b", "value": "2"}),
+    ]
 
 
 def test_delete_tag_issues_delete() -> None:
@@ -73,7 +73,7 @@ def test_delete_tag_issues_delete() -> None:
         captured.append((method, path))
         return None
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     delete_tag(client, "urn:v1:us:resource:vps:vps-x", MNGR_HOST_ID_TAG_KEY)
     assert captured == [("DELETE", f"/v2/iam/resource/urn:v1:us:resource:vps:vps-x/tag/{MNGR_HOST_ID_TAG_KEY}")]
 
@@ -93,7 +93,7 @@ def test_list_vps_resources_parses_payload() -> None:
         assert path == "/v2/iam/resource?resourceType=vps"
         return payload
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     resources = list_vps_resources(client)
     assert len(resources) == 1
     assert resources[0].name == "vps-a.vps.ovh.us"
@@ -126,7 +126,7 @@ def test_list_vps_resources_for_provider_filters_by_provider_tag() -> None:
     def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return payload
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     matching = list_vps_resources_for_provider(client, provider_name="alice-ovh")
     assert [r.name for r in matching] == ["a"]
 
@@ -145,7 +145,7 @@ def test_list_vps_resources_skips_malformed_entries() -> None:
     def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         return payload
 
-    client = _client(fake)
+    client = make_fake_ovh_vps_client(fake)
     assert [r.name for r in list_vps_resources(client)] == ["b"]
 
 

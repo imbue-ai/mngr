@@ -30,19 +30,24 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Bumped from 9 -> 10 for `OvhVpsClient.wait_for_no_active_tasks`, which
-    # polls OVH's `/vps/{s}/tasks?state=todo|doing` after order delivery
-    # before the post-delivery `/rebuild` (the fix for the "Action not
-    # available while there are running tasks on the VPS" race). OVH exposes
-    # no push/event mechanism for task completion, so polling-and-sleeping
-    # is the same shape `wait_for_task` already uses.
+    # `OvhVpsClient.wait_for_no_active_tasks` polls OVH's
+    # `/vps/{s}/tasks?state=todo|doing` after order delivery before the
+    # post-delivery `/rebuild` (the fix for the "Action not available while
+    # there are running tasks on the VPS" race). OVH exposes no push/event
+    # mechanism for task completion, so polling-and-sleeping is the same
+    # shape `wait_for_task` already uses.
     #
-    # Bumped 10 -> 11 for `_post_rebuild_retrying_in_flight_task` in
-    # ordering.py: the task listing above is eventually consistent and can
-    # report no active tasks while OVH still rejects `/rebuild` with the same
+    # `_post_rebuild_retrying_in_flight_task` in ordering.py also sleeps:
+    # the task listing above is eventually consistent and can report no
+    # active tasks while OVH still rejects `/rebuild` with the same
     # "running tasks" error, so the POST itself is retried with a sleep
     # between attempts. Same no-push-mechanism justification.
-    rc.check_time_sleep(_DIR, snapshot(11))
+    #
+    # (The two release-test settle sleeps were consolidated into one
+    # `_destroy` helper, keeping a single test-side sleep.) The remaining
+    # count is dominated by the polling loops in client.py / ordering.py /
+    # recycle.py / bootstrap.py noted above.
+    rc.check_time_sleep(_DIR, snapshot(12))
 
 
 def test_prevent_global_keyword() -> None:
@@ -203,7 +208,7 @@ def test_prevent_logger_exception() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(10))
+    rc.check_unittest_mock_imports(_DIR, snapshot(5))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
@@ -211,7 +216,7 @@ def test_prevent_monkeypatch_setattr() -> None:
 
 
 def test_prevent_test_container_classes() -> None:
-    rc.check_test_container_classes(_DIR, snapshot(8))
+    rc.check_test_container_classes(_DIR, snapshot(0))
 
 
 def test_prevent_pytest_mark_integration() -> None:
