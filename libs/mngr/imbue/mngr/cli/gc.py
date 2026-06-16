@@ -129,6 +129,7 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
         is_work_dirs=True,
         is_logs=True,
         is_build_cache=True,
+        is_provider_resources=True,
     )
 
     # Call the API
@@ -164,6 +165,8 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
         _emit_destroyed("log", log, output_opts.output_format, opts.dry_run)
     for cache in result.build_cache_destroyed:
         _emit_destroyed("build_cache", cache, output_opts.output_format, opts.dry_run)
+    for provider_resource in result.provider_resources_destroyed:
+        _emit_destroyed("provider_resource", provider_resource, output_opts.output_format, opts.dry_run)
 
     # Emit final summary
     _emit_final_summary(result=result, output_format=output_opts.output_format, dry_run=opts.dry_run)
@@ -178,6 +181,7 @@ _RESOURCE_TYPE_MESSAGES: dict[str, str] = {
     "volumes": "Cleaning volumes...",
     "logs": "Cleaning logs...",
     "build_cache": "Cleaning build cache...",
+    "provider_resources": "Cleaning orphaned provider resources...",
 }
 
 
@@ -205,6 +209,8 @@ def _format_destroyed_message(resource_type: str, resource: Any, dry_run: bool) 
         return f"{action} log: {resource.path}"
     if resource_type == "build_cache":
         return f"{action} build cache: {resource.path}"
+    if resource_type == "provider_resource":
+        return f"{action} {resource.kind}: {resource.name} ({resource.provider_name})"
     return f"{action} {resource_type}: {resource}"
 
 
@@ -248,6 +254,7 @@ def _emit_json_summary(result: GcResult, dry_run: bool) -> None:
         "volumes_destroyed": [v.model_dump(mode="json") for v in result.volumes_destroyed],
         "logs_destroyed": [log.model_dump(mode="json") for log in result.logs_destroyed],
         "build_cache_destroyed": [cache.model_dump(mode="json") for cache in result.build_cache_destroyed],
+        "provider_resources_destroyed": [pr.model_dump(mode="json") for pr in result.provider_resources_destroyed],
         "errors": result.errors,
         "failures": [failure.model_dump(mode="json") for failure in result.failures],
         "dry_run": dry_run,
@@ -304,6 +311,10 @@ def _emit_human_summary(result: GcResult, dry_run: bool) -> None:
         )
         total_count += len(result.build_cache_destroyed)
 
+    if result.provider_resources_destroyed:
+        write_human_line("\nProvider resources: {}", len(result.provider_resources_destroyed))
+        total_count += len(result.provider_resources_destroyed)
+
     if total_count == 0:
         write_human_line("\nNo resources found to destroy")
     else:
@@ -334,6 +345,7 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
         + len(result.volumes_destroyed)
         + len(result.logs_destroyed)
         + len(result.build_cache_destroyed)
+        + len(result.provider_resources_destroyed)
     )
 
     event = {
@@ -347,6 +359,7 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
         "volumes_count": len(result.volumes_destroyed),
         "logs_count": len(result.logs_destroyed),
         "build_cache_count": len(result.build_cache_destroyed),
+        "provider_resources_count": len(result.provider_resources_destroyed),
         "errors_count": len(result.errors),
         "errors": result.errors,
         "failures": [failure.model_dump(mode="json") for failure in result.failures],
