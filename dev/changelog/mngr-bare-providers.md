@@ -6,4 +6,6 @@ substrate-x-realizer architecture (a `HostRealizer` seam injected like the exist
 than a per-cloud class matrix, with a staged rollout that later folds
 local/docker/lima/ssh into the same grid. Also adds `specs/uncertainties.md` noting
 that the bare mode supersedes the "single mode of operation" framing in
-`specs/vps-docker-provider/spec.md`.
+`specs/vps-docker-provider/spec.md`, and `specs/bare-providers/extraction_design.md`
+giving the implementation-level `HostRealizer` seam contract, state-ownership
+split, host-record evolution, and per-method migration for Stage 1.
