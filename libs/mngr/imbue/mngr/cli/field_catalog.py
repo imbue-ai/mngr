@@ -19,7 +19,7 @@ model: the computed fields (``age`` / ``runtime`` / ``idle``) produced by
 Those are listed explicitly in ``_EXTRA_ROWS`` below. The completeness of that
 hand-written list is pinned to reality by tests in ``field_catalog_test.py``:
 ``_CEL_SYNTHESIZED_KEYS`` is cross-checked against what ``agent_details_to_cel_context``
-actually emits, and the alias rows against ``_FIELD_ALIASES``.
+actually emits, and the alias rows against ``FIELD_ALIASES``.
 
 ``mngr list --schema`` renders this catalog directly; the ``list`` command's
 help "Available Fields" section is rendered from it too, so the docs (including
