@@ -1,3 +1,5 @@
 mngr_vultr: add a session-end leak detector to test_release_vultr. Tags every test-created VPS with a per-session UUID and destroys any survivors at pytest session end, matching the Modal leak-detection pattern. Catches cost leaks from tests that crash between create and their finally-block destroy, or whose destroy itself fails silently.
 
 Also tags every test-created VPS with a UTC session-start timestamp (``mngr-vultr-test-created=<YYYY-MM-DD-HH-MM-SS>``, mirroring Modal's test-env timestamp format) so an out-of-band, age-based reaper can later clean up orphans from sessions that were killed before the in-process session-end check could run.
+
+Adds that reaper (``imbue.mngr_vultr.cleanup.cleanup_old_vultr_test_instances``): it lists the account's instances, keeps those whose ``mngr-vultr-test-created`` tag is older than a max age, and destroys them. Production VPSes never carry that tag, so they are never touched. Driven by ``scripts/cleanup_old_vultr_test_instances.py`` (wired into CI), analogous to Modal's ``cleanup_old_modal_test_environments``.
