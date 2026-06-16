@@ -1001,6 +1001,7 @@ def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadlin
     raise AssertionError(f"creation {creation_id} did not finish within {deadline_seconds}s")
 
 
+@pytest.mark.timeout(30)
 def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_path: Path) -> None:
     """The AIProvider.IMBUE_CLOUD branch must mint a LiteLLM key even when the compute
     provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
@@ -1018,7 +1019,7 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
         ai_provider=AIProvider.IMBUE_CLOUD,
         account_email="alice@imbue.com",
     )
-    _wait_until_finished(creator, creation_id)
+    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
