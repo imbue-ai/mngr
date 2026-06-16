@@ -24,13 +24,7 @@ dependencies = [
     "click-option-group>=0.5.6",
     "concurrency-group==0.1.20",
     "coolname>=3.0.0",
-    # Cap <47: cryptography >=47's aarch64 Rust OpenSSL wheel runs a CPU
-    # instruction the lima-VZ guest advertises but can't execute, so it SIGILLs
-    # (exit 132) at import inside the launch-to-msg VM. Bisected on the M5 CI
-    # runner: 46.0.3 imports OK; 47.0.0 / 48.0.0 illegal instruction. Upstream
-    # (open): https://github.com/pyca/cryptography/issues/14733. Re-verify
-    # launch-to-msg on the M5 runner before raising this cap.
-    "cryptography>=42.0,<47",
+    "cryptography>=42.0",
     # pinning docker because the guard registration module
     # (register_guards_docker.py) monkeypatches its internal methods for test
     # resource guards; new versions may move or rename them.
