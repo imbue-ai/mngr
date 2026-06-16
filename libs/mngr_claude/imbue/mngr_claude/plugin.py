@@ -1866,8 +1866,8 @@ class ClaudeAgent(
         else:
             is_changed = True
 
-        # Merge permission auto-allow hooks if configured
-        if self.agent_config.auto_allow_permissions:
+        # Merge permission auto-allow hooks if configured (driven by the unattended contract)
+        if self.is_unattended_enabled():
             permission_hooks = build_permission_auto_allow_hooks_config()
             merged_with_permissions = merge_hooks_config(merged, permission_hooks)
             if merged_with_permissions is not None:

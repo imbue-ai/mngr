@@ -1054,7 +1054,7 @@ class AntigravityAgent(
         # does not gate run_command confirmations; see the config field comment).
         # A finer-grained policy instead lives in the per-agent settings.json
         # ``permissions`` block (settings_overrides).
-        if self.agent_config.auto_allow_permissions:
+        if self.is_unattended_enabled():
             extra_args.append(_DANGEROUSLY_SKIP_PERMISSIONS_FLAG)
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         background_cmd = self._build_background_tasks_command()

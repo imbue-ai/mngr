@@ -458,7 +458,7 @@ class OpenCodeAgent(
         per_agent_config = build_opencode_config(
             base_config,
             self.agent_config.config_overrides,
-            self.agent_config.auto_allow_permissions,
+            self.is_unattended_enabled(),
         )
         config_path = get_opencode_config_file_path(self._get_opencode_config_dir())
         with log_span("Writing per-agent opencode config to {}", config_path):

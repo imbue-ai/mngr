@@ -513,7 +513,7 @@ class CodexAgent(
         codex_home = self._get_codex_home()
         self._provision_auth_symlink(host, user_codex_home, codex_home)
 
-        approval_policy = _APPROVAL_POLICY_NEVER if self.agent_config.auto_allow_permissions else None
+        approval_policy = _APPROVAL_POLICY_NEVER if self.is_unattended_enabled() else None
         config = build_codex_config(
             model=self.agent_config.model,
             model_reasoning_effort=self.agent_config.model_reasoning_effort,

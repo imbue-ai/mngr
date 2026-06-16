@@ -5,3 +5,5 @@ Also declares the `HasUnattendedModeMixin` capability (`is_unattended_enabled` r
 Also declares `HasPermissionPolicyMixin` (per-resource permission policy via the `permission` config-override key).
 
 Also declares `HasAutoInstallMixin`: provisioning now checks whether the `opencode` CLI is installed and installs it (`curl -fsSL https://opencode.ai/install | bash`) if missing, gated by consent on local hosts and the remote-install config flag on remote hosts. A new `check_installation` config field (default `True`) disables the check when set to `False`.
+
+The auto-allow permission apply-path (the wildcard `permission` config) now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
