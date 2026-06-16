@@ -228,11 +228,23 @@ def _assert_transcripts_preserved(
     (``build_transcript_preserved_items``'s other half) are checked, plus each
     ``native_session_relpaths`` entry (the agent's own resumable session store).
 
-    FIXME(adopt-session): once `mngr create --adopt-session` is implemented for these
-    agents (only claude has it today), extend this arc to actually resume from the
-    preserved native store -- create a fresh agent adopting the preserved session and
-    assert it recalls the pre-destroy secret -- rather than only asserting the files
-    landed on disk. Until then this proves the bytes are preserved, not that they resume.
+    FIXME(adopt-session): this asserts the bytes landed on disk, not that they resume.
+    Once `mngr create --adopt-session` exists for these agents (only claude has it today),
+    extend the arc to adopt the preserved store into a fresh agent and assert it recalls
+    the pre-destroy secret. Manual validation confirmed all four preserved stores *are*
+    resumable, but adoption into a fresh agent (a new worktree) needs per-agent handling
+    of the native session's original-cwd binding -- a plain file copy is not enough:
+      - antigravity: nothing extra; resumes by conversation id, directory-agnostic.
+      - codex: resumes by session id, but pops an interactive "Choose working directory
+        to resume this session" modal (recorded cwd != new worktree) that must be
+        auto-answered.
+      - opencode: the `session` row stores an absolute `directory` (the destroyed source
+        worktree); the recall POST returns 200 but silently no-ops against it. Must rebind
+        `session.directory` (and `project.worktree`) in opencode.db to the new work_dir.
+        Bytes incl. the `-wal`/`-shm` sidecars are sufficient once rebound.
+      - pi-coding: rewrite the `pi_session_file` pointer to the adopted jsonl's new path,
+        AND clear pi's blocking "cwd from session file does not exist" dialog (the cwd is
+        embedded in the session jsonl) -- ideally by rewriting that cwd before launch.
     """
     preserved_dir = _preserved_agent_dir(host_dir, agent_name)
     common = preserved_dir / "events" / subdir / "common_transcript" / "events.jsonl"
