@@ -101,11 +101,10 @@ def _filter_already_installed(
 def _should_preselect_basic(entry: CatalogEntry) -> bool:
     """Determine if a BASIC-tier entry should be preselected in phase 1.
 
-    Preselected if there is no signal, or if the signal check passes.
+    Preselected unless it carries a detection signal whose check does not pass.
     """
-    if entry.signal is None:
-        return True
-    return check_signal(entry.signal)
+    signal = entry.gate.detection_signal() if entry.gate is not None else None
+    return True if signal is None else check_signal(signal)
 
 
 def _run_selection_screen(
@@ -183,8 +182,15 @@ def _run_selection_screen(
 
 
 def _get_accepted_signals(selected: list[CatalogEntry]) -> set[SignalCheck]:
-    """Return the set of signals whose BASIC plugin was selected."""
-    return {entry.signal for entry in selected if entry.signal is not None}
+    """Return the detection signals carried by the selected entries' gates."""
+    signals: set[SignalCheck] = set()
+    for entry in selected:
+        if entry.gate is None:
+            continue
+        signal = entry.gate.detection_signal()
+        if signal is not None:
+            signals.add(signal)
+    return signals
 
 
 @pure
@@ -195,14 +201,14 @@ def _is_dependent_visible(
 ) -> bool:
     """Whether a DEPENDENT entry should appear in phase 2.
 
-    Package-gated entries (``requires_packages`` set) appear only when every
-    required package is present -- already installed or selected in phase 1.
-    Signal-gated entries (the legacy path) appear when their signal was among
-    those accepted in phase 1.
+    Delegated to the entry's gate: a signal gate is unlocked when its signal was
+    accepted in phase 1; a required-packages gate is unlocked when all its packages
+    are present (already installed, or selected in phase 1). A dependent with no
+    gate is never unlocked.
     """
-    if entry.requires_packages:
-        return all(package in present_packages for package in entry.requires_packages)
-    return entry.signal in accepted_signals
+    if entry.gate is None:
+        return False
+    return entry.gate.is_unlocked(accepted_signals=accepted_signals, present_packages=present_packages)
 
 
 @pure
@@ -213,9 +219,8 @@ def _phase2_dependent_entries(
 ) -> tuple[CatalogEntry, ...]:
     """The DEPENDENT entries to show in phase 2, given phase-1 selections.
 
-    A package is "present" if it is already installed or was selected in
-    phase 1; a package-gated entry is shown only when all of its
-    ``requires_packages`` are present.
+    A package is "present" if it is already installed or was selected in phase 1;
+    each dependent is shown when its gate is unlocked (see ``_is_dependent_visible``).
     """
     accepted_signals = _get_accepted_signals(phase1_selected)
     present_packages = installed_names | frozenset(e.package_name for e in phase1_selected)
@@ -234,7 +239,7 @@ def _run_two_phase_wizard(available: tuple[CatalogEntry, ...], installed_names: 
 
     ``installed_names`` are the already-installed package names; together with
     the phase-1 selections they form the set of packages a DEPENDENT entry's
-    ``requires_packages`` is checked against.
+    ``RequiredPackagesGate`` is unlocked against.
 
     Returns the list of selected package names, or an empty list if cancelled.
     """

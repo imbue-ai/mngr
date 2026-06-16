@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr_usage.api import aggregate_session_cumulative
+from imbue.mngr_usage.api import parse_usage_events
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostProvenance
 
@@ -49,7 +50,9 @@ def _event(
 
 
 def _aggregate(events: list[dict[str, Any]]):
-    return aggregate_session_cumulative("codex", {"agent-1": events}, since_seconds=_SINCE, now=_NOW)
+    return aggregate_session_cumulative(
+        "codex", {"agent-1": parse_usage_events(events, "codex")}, since_seconds=_SINCE, now=_NOW
+    )
 
 
 def test_reported_cost_is_used_verbatim_with_reported_provenance() -> None:

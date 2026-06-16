@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from imbue.mngr_claude_usage.plugin import aggregate_usage_source
+from imbue.mngr_usage.api import parse_usage_events
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostProvenance
 
@@ -24,7 +25,7 @@ def _claude_event(session_id: str, second: int, total_cost_usd: float) -> dict[s
 def test_claude_hookimpl_aggregates_the_claude_source_as_reported() -> None:
     snapshot = aggregate_usage_source(
         source_name="claude",
-        agents_events={"agent-1": [_claude_event("s1", 1, 2.5)]},
+        agents_events={"agent-1": parse_usage_events([_claude_event("s1", 1, 2.5)], "claude")},
         since_seconds=_SINCE,
         now=_NOW,
     )
@@ -41,7 +42,7 @@ def test_claude_hookimpl_declines_non_claude_sources() -> None:
     # (or the dispatcher's process-cumulative fallback).
     snapshot = aggregate_usage_source(
         source_name="codex",
-        agents_events={"agent-1": [_claude_event("s1", 1, 2.5)]},
+        agents_events={"agent-1": parse_usage_events([_claude_event("s1", 1, 2.5)], "codex")},
         since_seconds=_SINCE,
         now=_NOW,
     )

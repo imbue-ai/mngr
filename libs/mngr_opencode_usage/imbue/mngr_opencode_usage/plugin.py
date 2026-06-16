@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import importlib.resources
 from pathlib import Path
-from typing import Any
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
@@ -31,6 +30,7 @@ from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 from imbue.mngr_opencode.plugin import OpenCodeAgent
 from imbue.mngr_opencode_usage import resources as _resources
 from imbue.mngr_usage.api import aggregate_session_incremental
+from imbue.mngr_usage.data_types import UsageEvent
 from imbue.mngr_usage.data_types import UsageSnapshot
 
 # The usage writer plugin dropped alongside mngr_opencode's lifecycle plugin in
@@ -75,7 +75,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
 @hookimpl
 def aggregate_usage_source(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     since_seconds: int,
     now: int,
 ) -> UsageSnapshot | None:

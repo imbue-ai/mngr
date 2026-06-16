@@ -52,6 +52,10 @@ emit_new_usage_events() {
 
 main() {
     mkdir -p "$(dirname "$OUTPUT_FILE")"
+    # Ensure the stderr-log dir exists before emit_new_usage_events redirects to
+    # it; otherwise the redirect-open fails under `set -e` and the emitter is
+    # silently skipped. Self-contained rather than relying on launch order.
+    mkdir -p "$AGENT_DATA_DIR/events/logs"
     if [ "${1:-}" = "--single-pass" ]; then
         emit_new_usage_events
         return

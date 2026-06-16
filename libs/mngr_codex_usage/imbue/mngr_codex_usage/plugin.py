@@ -18,8 +18,6 @@ usage piece:
 
 from __future__ import annotations
 
-from typing import Any
-
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
@@ -29,6 +27,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex_usage import resources as _resources
 from imbue.mngr_usage.api import aggregate_session_cumulative
+from imbue.mngr_usage.data_types import UsageEvent
 from imbue.mngr_usage.data_types import UsageSnapshot
 
 # Writer script dropped into the agent's commands/ dir; codex_background_tasks.sh
@@ -71,7 +70,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
 @hookimpl
 def aggregate_usage_source(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     since_seconds: int,
     now: int,
 ) -> UsageSnapshot | None:

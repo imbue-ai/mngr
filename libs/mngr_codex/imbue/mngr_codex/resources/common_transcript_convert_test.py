@@ -157,3 +157,80 @@ def test_long_tool_output_is_truncated(tmp_path: Path) -> None:
     result = [e for e in _events(output_file) if e["type"] == "tool_result"][0]
     assert result["output"].endswith("...")
     assert len(result["output"]) == common_transcript_convert._MAX_OUTPUT_LENGTH + 3
+
+
+def test_join_content_text_handles_non_list_and_non_matching_items() -> None:
+    # Non-list content yields the empty string.
+    assert common_transcript_convert._join_content_text("not a list", "input_text") == ""
+    # Bare-string items and type-mismatched items are skipped; only the matching
+    # item's text is joined.
+    content = ["bare", {"type": "other", "text": "skip"}, {"type": "input_text", "text": "keep"}]
+    assert common_transcript_convert._join_content_text(content, "input_text") == "keep"
+
+
+def test_stringify_output_json_dumps_non_text_items_and_scalars() -> None:
+    # A content-array item without a string .text is JSON-dumped.
+    assert common_transcript_convert._stringify_output([{"image": "x"}]) == '{"image":"x"}'
+    # A bare (non-str, non-list) value is JSON-dumped whole.
+    assert common_transcript_convert._stringify_output({"k": 1}) == '{"k":1}'
+
+
+def test_blank_non_dict_and_non_dict_payload_input_lines_are_skipped(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    # A blank line, a JSON array (non-dict), and a response_item whose payload is
+    # not a dict are all skipped; the real message still converts.
+    _write(
+        input_file,
+        [
+            "",
+            "[1, 2, 3]",
+            {"timestamp": "t", "type": "response_item", "payload": "not-a-dict"},
+            _user("real"),
+        ],
+    )
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
+    assert _events(output_file)[0]["content"] == "real"
+
+
+def test_unknown_response_item_payload_type_is_ignored(tmp_path: Path) -> None:
+    # A response_item with an unrecognized payload.type is bookkeeping, not content.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_line("response_item", {"type": "reasoning", "summary": "..."}), _user("real")])
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
+
+
+def test_function_call_without_call_id_is_skipped(tmp_path: Path) -> None:
+    # An empty call_id can't be paired, so the call (and its later output) is dropped.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_function_call("shell", "{}", ""), _function_call_output("", "out")])
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 0
+
+
+def test_non_string_function_call_arguments_are_json_dumped(tmp_path: Path) -> None:
+    # arguments emitted as an object (not a string) is JSON-dumped for the preview.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    call = _line(
+        "response_item", {"type": "function_call", "name": "shell", "arguments": {"cmd": "ls"}, "call_id": "c1"}
+    )
+    _write(input_file, [call, _function_call_output("c1", "done")])
+    common_transcript_convert.convert(str(input_file), str(output_file))
+    result = [e for e in _events(output_file) if e["type"] == "tool_result"][0]
+    assert result["tool_name"] == "shell"
+
+
+def test_dedup_skips_existing_assistant_and_tool_result(tmp_path: Path) -> None:
+    # Re-running convert must not re-append the assistant message or the tool_result
+    # already present in the output.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_assistant("hi"), _function_call("shell", "{}", "c1"), _function_call_output("c1", "ok")])
+    first = common_transcript_convert.convert(str(input_file), str(output_file))
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 0
+    assert len(_events(output_file)) == first
+
+
+def test_blank_line_in_existing_output_is_skipped(tmp_path: Path) -> None:
+    # A blank line in the existing output file is ignored while loading event ids.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    output_file.write_text("\n")
+    _write(input_file, [_user("real")])
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
