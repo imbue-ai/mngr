@@ -4,6 +4,24 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-15
+
+### Added
+
+- Added: `just minds-install` recipe that installs the minds desktop client's node deps (electron, etc.) using the Node version pinned in `apps/minds/.nvmrc` (selected via `select_node_version.sh`), so installs no longer fail with `ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's default node has drifted off the pin. `just minds-start`'s "not installed yet" hint points at it.
+- Added: Design doc `blueprint/ovh-baremetal-slices/` for extending the imbue_cloud pool to allocate lima/QEMU VM "slices" on rented OVH bare-metal servers, and `blueprint/mngr-imbue-cloud-module-layers/` proposing the layered sub-package structure for `mngr_imbue_cloud` (with the `import-linter` ordering contract).
+- Added: `import-linter` "mngr_imbue_cloud layers contract" (root `pyproject.toml`) plus a `test_meta_ratchets.py` test that enforces it.
+
+### Changed
+
+- Changed: Replaced `just bake-pool-host` with `just bake-pool-host-dev` (bake from a working tree — best-effort branch label) and `just bake-pool-host-prod` (clone an exact FCT tag — strict), reflecting that the imbue_cloud pool bake now derives the stamped repo identity from its source rather than from hand-typed `--attributes`. `just bake-pool-host-dev` also passes `--skip-deferred-install-wait` so dev pool bakes skip the few-minute deferred Playwright/apt install before stopping the services agent. The `minds-justfile` skill documents the dev-vs-production distinction.
+- Changed: Expanded CLAUDE.md flaky-test guidance — first investigate why a test is flaky and try to make it more robust; if it is correct but fundamentally needs more time, bump that test's timeout (avoid unreasonably long timeouts — prefer leaving it marked flaky for infrastructure-level flukes).
+- Changed: Bumped the per-test timeout on the `test_cli_docs_are_up_to_date` meta-ratchet — the enlarged imbue_cloud CLI surface (the new `admin server` + slice commands) made full CLI-doc regeneration exceed the default 10s pytest-timeout in the slower offload sandbox.
+
+### Fixed
+
+- Fixed: Per-PR changelog enforcement check, which had been passing vacuously in CI. The check previously ran as an acceptance test inside the offload Modal sandbox, but the sandbox's fresh `git init` made `main == HEAD` so the base-branch diff always came back empty — and any PR could merge without changelog entries. Enforcement now lives in a dedicated CI gate (`scripts/check_changelog_entries.py`, run via the `check-changelog` GitHub Actions job and `just check-changelog`) that computes the changed-file set against the real base branch on the orchestrator, and refuses to run with a non-zero exit if it cannot resolve a diff base distinct from HEAD.
+
 ## 2026-06-14
 
 ### Added
