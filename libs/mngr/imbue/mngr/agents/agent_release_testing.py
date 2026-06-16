@@ -239,9 +239,11 @@ def _assert_transcripts_preserved(
         to resume this session" modal (recorded cwd != new worktree) that must be
         auto-answered.
       - opencode: the `session` row stores an absolute `directory` (the destroyed source
-        worktree); the recall POST returns 200 but silently no-ops against it. Must rebind
-        `session.directory` (and `project.worktree`) in opencode.db to the new work_dir.
-        Bytes incl. the `-wal`/`-shm` sidecars are sufficient once rebound.
+        worktree); the recall POST returns 204 but silently no-ops against it. Adoption must
+        rebind the session to the new work_dir -- `session.directory`, `project.worktree`, and
+        `project_directory.directory` (upsert; PK is (project_id, directory)) -- after a
+        `wal_checkpoint`. The bytes (db + `-wal`/`-shm`) are sufficient; content lives entirely
+        in the db, so `storage/` being empty on current opencode is fine.
       - pi-coding: rewrite the `pi_session_file` pointer to the adopted jsonl's new path,
         AND clear pi's blocking "cwd from session file does not exist" dialog (the cwd is
         embedded in the session jsonl) -- ideally by rewriting that cwd before launch.
