@@ -234,3 +234,13 @@ def test_blank_line_in_existing_output_is_skipped(tmp_path: Path) -> None:
     output_file.write_text("\n")
     _write(input_file, [_user("real")])
     assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
+
+
+def test_non_utf8_byte_in_input_does_not_abort(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    # Raw rollout streams can carry arbitrary bytes; a single undecodable byte must
+    # not abort the (append-only) conversion pass.
+    valid_line = json.dumps(_user("real")).encode()
+    input_file.write_bytes(b"\xff\xfe garbage byte line\n" + valid_line + b"\n")
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
+    assert _events(output_file)[0]["type"] == "user_message"

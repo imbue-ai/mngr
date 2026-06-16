@@ -1,6 +1,6 @@
-"""Claude usage data writer for `mngr usage`.
+"""Claude usage data writer and reader for `mngr usage`.
 
-Single responsibility: install a host-stable statusline shim that, when invoked
+Install a host-stable statusline shim that, when invoked
 by Claude Code, appends one ``cost_snapshot`` event (carrying rate_limits +
 cost + session_id) to ``$MNGR_AGENT_STATE_DIR/events/claude/usage/events.jsonl``
 and chains to any user-defined ``statusLine.command``.
@@ -19,9 +19,10 @@ e.g. claude is invoked standalone, outside of an mngr agent -- the shim exits
 Discovery is by convention -- ``mngr usage`` enumerates agents via
 ``list_agents`` and reads each agent's ``events/<source>/usage/events.jsonl``
 via the events API (``discover_event_sources`` + ``read_event_content``), the
-same mechanism ``mngr event`` uses. We don't implement a reader hookspec; we
-just write to the conventional path and let the generic CLI find the data
-uniformly for local and remote agents.
+same mechanism ``mngr event`` uses. This module also provides the matching
+``aggregate_usage_source`` reader hookimpl (like the other usage packages): it
+claims the ``claude`` source and aggregates it with the process-cumulative
+strategy, declining every other source.
 
 Provisioning runs from a single ``on_before_provisioning`` hookimpl on mngr
 core, so this plugin doesn't depend on any Claude-specific hookspec. All file
