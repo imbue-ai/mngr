@@ -6,6 +6,7 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import click
 from loguru import logger
@@ -26,6 +27,8 @@ from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import classify_waiting_reason
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -39,6 +42,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_pi_coding import resources as _pi_resources
@@ -97,6 +101,10 @@ _READY_TIMEOUT_SECONDS: float = 30.0
 # into the live session via pi.sendUserMessage (no tmux keystrokes, TUI stays
 # viewable). Kept in sync with INBOX_NAME in mngr_pi_lifecycle.ts.
 _INBOX_FILE_NAME: str = "pi_inbox"
+
+# The lifecycle marker the pi extension maintains while a turn is in flight
+# (RUNNING vs WAITING). Kept in sync with ACTIVE_MARKER_NAME in mngr_pi_lifecycle.ts.
+_ACTIVE_MARKER_NAME: str = "active"
 
 # After inboxing a message, wait up to this long for the turn to start (the
 # ``active`` marker to appear) as delivery confirmation. Covers the extension's
@@ -380,7 +388,7 @@ class PiCodingAgent(
 
     def _confirm_turn_started(self, timeout: float = _TURN_CONFIRM_TIMEOUT_SECONDS) -> None:
         """Wait for the injected message to start a turn (the ``active`` marker appearing)."""
-        marker_path = self._get_agent_dir() / "active"
+        marker_path = self._get_agent_dir() / _ACTIVE_MARKER_NAME
         if self._check_file_exists(marker_path):
             # Already running: the followUp message is queued; no marker-based confirmation.
             return
@@ -819,6 +827,26 @@ def _pi_coding_preserved_items() -> list[PreservedItem]:
 def _pi_coding_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
     """Return the items to preserve for a discovered (offline) pi-coding agent, or None to skip it."""
     return flag_gated_items(ref, "preserve_on_destroy", _pi_coding_preserved_items())
+
+
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting, or None while it is active.
+
+    pi has no tool-approval gate, so it can never be blocked on a permission
+    prompt: ``is_blocked_on_permission`` is always False and the only possible
+    reason is ``END_OF_TURN`` (the agent is idle). Wired through the same shared
+    ``classify_waiting_reason`` the other plugins use, so the single-value result
+    is a real extension point if pi ever gains an approval gate.
+    """
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    is_active = host.path_exists(agent_dir / _ACTIVE_MARKER_NAME)
+    return classify_waiting_reason(is_active, is_blocked_on_permission=False)
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose pi-coding-specific agent fields for listing."""
+    return (_PI_AGENT_TYPE, {"waiting_reason": _waiting_reason})
 
 
 @hookimpl

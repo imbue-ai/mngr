@@ -13,7 +13,7 @@ absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 | common_transcript | Y | Y | Y | Y | - | Y | Y | - | Y | Y | Y |
 | headless_output | - | - | - | - | - | - | Y | Y | - | - | - |
 | streaming_headless_output | - | - | - | - | - | - | Y | Y | - | - | - |
-| waiting_reason_field | - | Y | - | Y | - | - | - | - | - | Y | - |
+| waiting_reason_field | - | Y | - | Y | - | - | - | - | - | Y | Y |
 | streaming_snapshot | - | Y | Y | - | - | Y | Y | - | Y | - | - |
 | session_preservation | Y | Y | Y | Y | - | Y | Y | - | Y | Y | Y |
 | unattended_operation | Y | Y | Y | Y | - | Y | Y | - | Y | Y | Y |

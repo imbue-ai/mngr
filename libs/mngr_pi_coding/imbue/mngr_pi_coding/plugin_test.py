@@ -30,6 +30,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -44,6 +45,8 @@ from imbue.mngr_pi_coding.plugin import _inbox_append_command
 from imbue.mngr_pi_coding.plugin import _load_resource
 from imbue.mngr_pi_coding.plugin import _read_pi_trust
 from imbue.mngr_pi_coding.plugin import _serialize_pi_trust
+from imbue.mngr_pi_coding.plugin import _waiting_reason
+from imbue.mngr_pi_coding.plugin import agent_field_generators
 from imbue.mngr_pi_coding.plugin import register_agent_aliases
 from imbue.mngr_pi_coding.plugin import register_agent_type
 
@@ -879,3 +882,28 @@ def test_pi_config_rejects_disabling_auto_allow() -> None:
     # (pydantic wraps the PiAutoAllowRequiredError raised by the field validator).
     with pytest.raises(ValidationError, match="cannot honor"):
         PiCodingAgentConfig(auto_allow_permissions=False)
+
+
+def test_agent_field_generators_exposes_pi_waiting_reason() -> None:
+    result = agent_field_generators()
+    assert result is not None
+    plugin_name, generators = result
+    assert plugin_name == "pi-coding"
+    assert "waiting_reason" in generators
+    assert callable(generators["waiting_reason"])
+
+
+def test_pi_waiting_reason_is_end_of_turn_when_idle(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    # No active marker -> the agent is idle, so the (single-value) reason is END_OF_TURN.
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+    assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
+
+
+def test_pi_waiting_reason_is_none_when_active(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    # Active marker present -> the agent is running, so there is no waiting reason.
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    marker = agent._get_agent_dir() / "active"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
+    assert _waiting_reason(agent, agent.host) is None

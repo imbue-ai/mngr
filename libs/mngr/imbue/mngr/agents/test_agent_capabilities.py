@@ -44,11 +44,12 @@ def test_builder_detects_known_capabilities(plugin_manager: pluggy.PluginManager
         assert "raw_transcript" in keys
     assert "common_transcript" not in _present_keys(infos, "command")
 
-    # waiting_reason field generator: claude/codex/opencode yes; pi/antigravity no.
+    # waiting_reason field generator: claude/codex/opencode/pi yes (pi degenerately,
+    # a single-value END_OF_TURN); antigravity no (blocked on an upstream signal).
     assert "waiting_reason_field" in _present_keys(infos, "claude")
     assert "waiting_reason_field" in _present_keys(infos, "codex")
     assert "waiting_reason_field" in _present_keys(infos, "opencode")
-    assert "waiting_reason_field" not in _present_keys(infos, "pi-coding")
+    assert "waiting_reason_field" in _present_keys(infos, "pi-coding")
     assert "waiting_reason_field" not in _present_keys(infos, "antigravity")
 
     # Class-mixin capabilities wired in phase 3.
