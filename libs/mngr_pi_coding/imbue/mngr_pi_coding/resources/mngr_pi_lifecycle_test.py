@@ -55,9 +55,19 @@ def _node_supports_typescript(node: str, work_dir: Path) -> bool:
 
 
 def _run_extension(
-    tmp_path: Path, events: list[dict[str, Any]], *, emit_common: bool = True, emit_usage: bool = False
+    tmp_path: Path,
+    events: list[dict[str, Any]],
+    *,
+    emit_common: bool = True,
+    emit_usage: bool = False,
+    pi_auth: dict[str, Any] | None = None,
 ) -> Path:
-    """Run the extension over ``events`` under a fresh state dir; return the state dir."""
+    """Run the extension over ``events`` under a fresh state dir; return the state dir.
+
+    When ``pi_auth`` is given, write it as the per-agent ``auth.json`` and point
+    ``PI_CODING_AGENT_DIR`` at it, mirroring how mngr syncs pi's auth.json; this is
+    what the usage writer reads to derive ``cost_mode``.
+    """
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not available")
@@ -77,16 +87,22 @@ def _run_extension(
     if emit_usage:
         # The usage writer is gated on this marker (provisioned by mngr_pi_coding_usage).
         (state_dir / "pi_emit_usage").write_text("1")
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "MNGR_PI_EMIT_COMMON_TRANSCRIPT": "1" if emit_common else "0",
+    }
+    if pi_auth is not None:
+        agent_dir = state_dir / "plugin" / "pi_coding"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        (agent_dir / "auth.json").write_text(json.dumps(pi_auth))
+        env["PI_CODING_AGENT_DIR"] = str(agent_dir)
     result = subprocess.run(
         [node, str(driver_path), str(events_path)],
         capture_output=True,
         text=True,
         timeout=60,
-        env={
-            "PATH": os.environ.get("PATH", ""),
-            "MNGR_AGENT_STATE_DIR": str(state_dir),
-            "MNGR_PI_EMIT_COMMON_TRANSCRIPT": "1" if emit_common else "0",
-        },
+        env=env,
     )
     assert result.returncode == 0, f"extension driver failed:\n{result.stdout}\n{result.stderr}"
     return state_dir
@@ -539,6 +555,7 @@ def test_usage_writer_emits_cost_snapshot_when_gated(tmp_path: Path) -> None:
     assert record["cost"] == {"total_cost_usd": 0.00488275}
     assert record["tokens"] == {"input": 2, "output": 7, "cache_read": 9133, "cache_creation": 21}
     assert record["model"] == "anthropic/claude-opus-4-8"
+    # No auth.json provisioned here -> cost_mode falls back to API_KEY.
     assert record["cost_mode"] == "API_KEY"
 
 
@@ -553,3 +570,35 @@ def test_usage_writer_is_inert_without_the_gate_marker(tmp_path: Path) -> None:
         emit_usage=False,
     )
     assert not (state / _USAGE_EVENTS).exists()
+
+
+def _usage_cost_mode(tmp_path: Path, pi_auth: dict[str, Any] | None) -> str:
+    """Emit one pi usage record (provider 'anthropic') under ``pi_auth`` and return its cost_mode."""
+    session_file = "/sessions/2056-01-01T00-00-00Z_abc-uuid.jsonl"
+    state = _run_extension(
+        tmp_path,
+        [
+            {"event": "session_start", "sessionId": "s1", "sessionFile": session_file},
+            _assistant_message_end(session_file, {"input": 2, "output": 7, "cost": {"total": 0.1}}),
+        ],
+        emit_usage=True,
+        pi_auth=pi_auth,
+    )
+    records = _read_jsonl(state / _USAGE_EVENTS)
+    assert len(records) == 1
+    return records[0]["cost_mode"]
+
+
+def test_usage_writer_derives_subscription_cost_mode_from_oauth_login(tmp_path: Path) -> None:
+    """An oauth (plan/subscription) login for the message's provider -> SUBSCRIPTION."""
+    assert _usage_cost_mode(tmp_path, {"anthropic": {"type": "oauth"}}) == "SUBSCRIPTION"
+
+
+def test_usage_writer_keeps_api_key_cost_mode_for_api_key_login(tmp_path: Path) -> None:
+    """An api_key login for the message's provider -> API_KEY."""
+    assert _usage_cost_mode(tmp_path, {"anthropic": {"type": "api_key"}}) == "API_KEY"
+
+
+def test_usage_writer_defaults_cost_mode_when_provider_absent_from_auth(tmp_path: Path) -> None:
+    """auth.json present but missing the message's provider -> default API_KEY."""
+    assert _usage_cost_mode(tmp_path, {"openai": {"type": "oauth"}}) == "API_KEY"

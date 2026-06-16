@@ -358,10 +358,11 @@ is what usage data the tool exposes.
   so `input` is already cache-exclusive — no subtraction needed (unlike Codex).
   Map `cacheRead → cache_read`, `cacheWrite → cache_creation`; emit `tokens` for
   auditability. The model is a **bare name** (`claude-opus-4-8`) with `provider`
-  a **separate** field (`anthropic`). As shipped, the writer emits `cost_mode =
-  API_KEY` unconditionally (pi runs against a real provider key); deriving the
-  mode from `auth.json[provider].type` (`"api_key"` → `API_KEY`; oauth-style →
-  `SUBSCRIPTION`) is a deferred refinement for oauth/subscription providers.
+  a **separate** field (`anthropic`). The writer derives `cost_mode` from the
+  message provider's `auth.json[provider].type` (synced into
+  `PI_CODING_AGENT_DIR`, fallback `~/.pi/agent`): `"oauth"` → `SUBSCRIPTION`;
+  `"api_key"`, plus anything missing or unrecognized → `API_KEY` (the safe
+  default for a real provider key).
 - **Fallback logic:** for a provider/model where pi does *not* compute a cost
   (`usage.cost` absent — possible for some of openai/gemini/groq/openrouter), the
   writer omits `cost` and the reader estimates from `tokens` + `provider/model`.
@@ -492,8 +493,8 @@ their real on-disk data / shipped schemas (OpenCode 1.16.2, Codex 0.138.0, pi
    Anthropic per-token prices exactly (e.g. `9133 × 5e-7 = 0.0045665` cache-read),
    a second-source validation of the pricing table. Model is a bare name with a
    separate `provider` field (key `provider/model`); `auth.json[provider].type`
-   gives the mode (`"api_key"` → `API_KEY`). `lifecycle.ts` must surface
-   `usage.cost.total` and `provider` (it currently drops both).
+   gives the mode (`"oauth"` → `SUBSCRIPTION`; `"api_key"`/missing → `API_KEY`).
+   `lifecycle.ts` surfaces `usage.cost.total`, `provider`, and the derived mode.
 
 ## Out of scope and deferred work
 

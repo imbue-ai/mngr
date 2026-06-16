@@ -395,6 +395,54 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   });
 }
 
+// pi records each provider's auth kind in auth.json ({"<provider>": {"type": "api_key" | "oauth" | ...}}),
+// synced into PI_CODING_AGENT_DIR (fallback ~/.pi/agent). Read once and cached: auth.json is stable for the
+// life of a session. Anything unexpected (no dir, missing/unparseable file) leaves it null and callers fall
+// back to API_KEY.
+let _piAuthByProvider: Record<string, unknown> | null | undefined;
+
+function readPiAuth(): Record<string, unknown> | null {
+  if (_piAuthByProvider !== undefined) {
+    return _piAuthByProvider;
+  }
+  _piAuthByProvider = null;
+  const candidates: string[] = [];
+  if (process.env.PI_CODING_AGENT_DIR) {
+    candidates.push(join(process.env.PI_CODING_AGENT_DIR, "auth.json"));
+  }
+  if (process.env.HOME) {
+    candidates.push(join(process.env.HOME, ".pi", "agent", "auth.json"));
+  }
+  for (const path of candidates) {
+    try {
+      if (!existsSync(path)) {
+        continue;
+      }
+      const parsed = JSON.parse(readFileSync(path, "utf-8"));
+      if (parsed && typeof parsed === "object") {
+        _piAuthByProvider = parsed as Record<string, unknown>;
+        break;
+      }
+    } catch {
+      // best-effort: ignore and try the next candidate, falling back to API_KEY
+    }
+  }
+  return _piAuthByProvider;
+}
+
+// CostMode for a provider, from its auth.json type: an oauth (plan/subscription) login is SUBSCRIPTION;
+// an "api_key" login -- and anything missing or unrecognized -- is API_KEY, the safe default for a real
+// provider key.
+function resolveCostMode(provider: string | null): string {
+  if (!provider) {
+    return "API_KEY";
+  }
+  const auth = readPiAuth();
+  const entry = auth ? auth[provider] : undefined;
+  const type = entry && typeof entry === "object" ? (entry as Record<string, unknown>).type : undefined;
+  return type === "oauth" ? "SUBSCRIPTION" : "API_KEY";
+}
+
 // Convert a pi AgentMessage into an mngr usage cost_snapshot record, or null when
 // there is nothing to report (non-assistant message, no usage, or no session id).
 // pi reports per-message cost (`usage.cost.total`), so this is REPORTED cost; the
@@ -442,7 +490,7 @@ export function toUsageRecord(
         }
       : null,
     model,
-    cost_mode: "API_KEY",
+    cost_mode: resolveCostMode(assistant.provider ?? null),
   };
 }
 
