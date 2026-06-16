@@ -192,9 +192,7 @@ alive="$(mngr list --include 'labels.queue == "live" && state == "RUNNING"' --id
 # Only launch if there's spare capacity going unused.
 "$(dirname "$0")/spare-capacity.sh" || exit 0
 
-# Grab the oldest queued task, if any. (For no particular order, swap `sort` for
-# `sort -R` to shuffle and claim a random task instead -- portable across macOS
-# and Linux.)
+# Grab the oldest queued task, if any. (For a random order, use `sort -R`.)
 task_file="$(find "$TODO_DIR" -maxdepth 1 -name '*.md' -type f | sort | head -n1)"
 [[ -n "$task_file" ]] || exit 0
 
