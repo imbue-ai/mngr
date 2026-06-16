@@ -70,7 +70,6 @@ from __future__ import annotations
 
 import importlib.resources
 import json
-import os
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -113,6 +112,7 @@ from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
@@ -179,17 +179,6 @@ _APPROVAL_POLICY_NEVER: Final[str] = "never"
 # (``codex --version`` output, then codex's version.json). Chosen to never collide
 # with a version string or JSON content.
 _VERSION_SPLIT_SENTINEL: Final[str] = "__MNGR_CODEX_VERSION_SPLIT__"
-
-# Interim trigger seam for session adoption, ahead of the central ``--adopt-session``
-# mixin/flag. When set on a ``mngr create``, ``on_after_provisioning`` resolves this
-# value (a codex session id or an absolute rollout ``.jsonl`` path) against the
-# preserved, live-mngr-agent, and user-native session stores, copies the resolved
-# rollout store into the new agent's ``CODEX_HOME/sessions``, rebinds the recorded cwd
-# to the new work dir, and writes the adopted session id as the resume pointer. The
-# string is hardcoded (not imported from the test harness, which pulls in pytest); once
-# the flag lands, ``plugin_data["adopt_session"]`` takes precedence and this is the
-# fallback. Keep in sync with ``ADOPT_SESSION_ENV_VAR`` in the release harness.
-_ADOPT_SESSION_ENV_VAR: Final[str] = "MNGR_ADOPT_SESSION"
 
 
 class CodexUpdatePolicy(UpperCaseStrEnum):
@@ -318,6 +307,7 @@ class CodexAgent(
     CliBackedAgentMixin,
     HasCommonTranscriptMixin,
     HasSessionPreservationMixin,
+    HasSessionAdoptionMixin,
     HasUnattendedModeMixin,
     HasPermissionPolicyMixin,
     HasVersionManagementMixin,
@@ -900,41 +890,35 @@ class CodexAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt an existing codex session so the new agent resumes its conversation.
+        """Adopt an existing codex session so the new agent resumes its conversation."""
+        self.adopt_session(host, options, mngr_ctx)
 
-        Triggered by the interim ``MNGR_ADOPT_SESSION`` env-var seam (falling back from
-        the future ``plugin_data["adopt_session"]`` flag -- read first so swapping in the
-        flag is a one-line change). When an adopt argument is present, resolve it to a
-        ``(session_id, source_sessions_dir)`` (see ``_resolve_adopt_session``), copy the
-        source ``sessions/`` tree into this agent's ``CODEX_HOME/sessions``, rebind the
-        adopted rollout's recorded cwd to this agent's work dir (so ``codex resume`` does
-        not pop the working-directory modal), and write the session id as the resume
-        pointer (``codex_root_session``) that ``assemble_command``'s prelude reads.
+    def adopt_session(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Adopt the session named by ``--adopt-session`` into this newly provisioned agent.
+
+        ``plugin_data["adopt_session"]`` is the tuple of values passed to the
+        (command-global, ``multiple=True``) ``--adopt-session`` flag; empty when the flag
+        was not given. When present, adopt the last entry (a codex session id or an
+        absolute rollout ``.jsonl`` path): resolve it to a ``(session_id,
+        source_sessions_dir)`` (see ``_resolve_adopt_session``), copy the source
+        ``sessions/`` tree into this agent's ``CODEX_HOME/sessions``, rebind the adopted
+        rollout's recorded cwd to this agent's work dir (so ``codex resume`` does not pop
+        the working-directory modal), and write the session id as the resume pointer
+        (``codex_root_session``) that ``assemble_command``'s prelude reads.
         """
-        adopt_arg = self._resolve_adopt_argument(options)
-        if adopt_arg is None:
+        adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        if not adopt_args:
             return
         user_codex_home = self._resolve_user_codex_home(host)
-        session_id, source_sessions_dir = _resolve_adopt_session(adopt_arg, mngr_ctx, user_codex_home)
+        session_id, source_sessions_dir = _resolve_adopt_session(adopt_args[-1], mngr_ctx, user_codex_home)
         with log_span("Adopting codex session {}", session_id):
             self._adopt_codex_session(host, session_id, source_sessions_dir)
         logger.info("Adopted codex session {} into agent {}", session_id, self.id)
-
-    def _resolve_adopt_argument(self, options: CreateAgentOptions) -> str | None:
-        """Return the adopt-session argument, or None when adoption was not requested.
-
-        Prefers the (future) public flag ``plugin_data["adopt_session"]`` and falls back
-        to the interim ``MNGR_ADOPT_SESSION`` env var, so wiring the flag through is a
-        one-line precedence swap. An empty/whitespace value is treated as absent.
-        """
-        flag_value = options.plugin_data.get("adopt_session")
-        candidate = (
-            flag_value if isinstance(flag_value, str) and flag_value else os.environ.get(_ADOPT_SESSION_ENV_VAR)
-        )
-        if candidate is None:
-            return None
-        stripped = candidate.strip()
-        return stripped or None
 
     def _adopt_codex_session(self, host: OnlineHostInterface, session_id: str, source_sessions_dir: Path) -> None:
         """Copy the resolved session store in, rebind its cwd, and write the resume pointer.
