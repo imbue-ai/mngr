@@ -18,6 +18,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
@@ -107,6 +108,13 @@ class AwsVpsClient(VpsClientInterface):
     root_volume_size_gb: int = Field(default=30, description="Root EBS volume size in GB")
     root_volume_type: str = Field(default="gp3", description="Root EBS volume type")
     iam_instance_profile: str | None = Field(default=None, description="IAM instance profile name to attach")
+    terminate_on_shutdown: bool = Field(
+        default=False,
+        description=(
+            "Sets EC2 InstanceInitiatedShutdownBehavior: False -> 'stop' (resumable idle-pause), "
+            "True -> 'terminate' (ephemeral / self-cleaning). See AwsProviderConfig for details."
+        ),
+    )
     container_ssh_port: int = Field(
         default=2222, description="Port the container's sshd is exposed on (added to the SG)"
     )
@@ -488,7 +496,10 @@ class AwsVpsClient(VpsClientInterface):
             "UserData": user_data,
             "BlockDeviceMappings": block_device_mappings,
             "NetworkInterfaces": network_interfaces,
-            "InstanceInitiatedShutdownBehavior": "terminate",
+            # stop (resumable idle-pause) vs terminate (ephemeral / self-cleaning);
+            # see AwsProviderConfig.terminate_on_shutdown. Governs BOTH the idle
+            # watcher's poweroff and the auto_shutdown_seconds time-cap poweroff.
+            "InstanceInitiatedShutdownBehavior": "terminate" if self.terminate_on_shutdown else "stop",
             # IMDSv2 required: refuse IMDSv1 (unauthenticated GET) entirely
             # and cap the response-hop limit at 1 so the metadata service
             # cannot be reached from a hostile container running on the
@@ -506,17 +517,15 @@ class AwsVpsClient(VpsClientInterface):
         }
         if ssh_key_ids:
             run_kwargs["KeyName"] = ssh_key_ids[0]
+        # Attach an explicit operator-supplied IAM instance profile if configured.
+        # mngr's idle self-stop no longer needs one: the watcher powers the host
+        # off and InstanceInitiatedShutdownBehavior decides stop-vs-terminate, so
+        # there is no default profile to attach (and no iam:PassRole requirement).
         if self.iam_instance_profile is not None:
             run_kwargs["IamInstanceProfile"] = {"Name": self.iam_instance_profile}
         if spot:
             # Default spot config: AWS sets max price to the on-demand price
-            # automatically; no need to specify SpotInstanceType or
-            # MaxPrice for the dev-host use case (any non-zero capacity is
-            # acceptable, and a higher max price just lengthens uptime when
-            # spot prices spike). InstanceInitiatedShutdownBehavior=terminate
-            # (always set above) interacts cleanly with spot's
-            # interruption-by-terminate semantics: the cloud-init auto-shutdown
-            # safety net still fires the same way.
+            # automatically; the dev-host use case accepts any non-zero capacity.
             run_kwargs["InstanceMarketOptions"] = {"MarketType": "spot"}
 
         with self._translate_aws_errors():
@@ -539,6 +548,125 @@ class AwsVpsClient(VpsClientInterface):
         with self._translate_aws_errors():
             self._ec2().terminate_instances(InstanceIds=[str(instance_id)])
         logger.info("Terminated EC2 instance {}", instance_id)
+
+    def stop_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> None:
+        """Stop (not terminate) an EC2 instance, preserving its EBS volumes.
+
+        Unlike ``destroy_instance`` (terminate), a stop keeps the root EBS
+        volume and all on-disk state intact so the instance can later be
+        resumed via ``start_instance``. Compute billing ends while stopped;
+        EBS storage continues to bill. Blocks until the instance reaches the
+        terminal ``stopped`` state so callers can rely on the volume being
+        quiesced before, e.g., snapshotting or reading metadata. Idempotent:
+        stopping an already-stopped instance still waits for ``stopped``.
+
+        This method widens ``AwsVpsClient`` beyond the shared
+        ``VpsClientInterface`` (which has no stop/start, since most VPS
+        providers in this repo only support create/destroy); ``AwsProvider``
+        reaches it through ``self.aws_client`` rather than the abstract
+        interface.
+        """
+        with self._translate_aws_errors():
+            self._ec2().stop_instances(InstanceIds=[str(instance_id)])
+        logger.info("Stopping EC2 instance {}", instance_id)
+        self._wait_for_instance_state(instance_id, "stopped", timeout_seconds)
+        logger.info("EC2 instance {} stopped", instance_id)
+
+    def start_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
+        """Start a previously-stopped EC2 instance and return its public IP.
+
+        A stopped instance loses its public IPv4 address; AWS assigns a fresh
+        one on start (unless an Elastic IP is associated), so the returned IP
+        may differ from the pre-stop address -- callers must refresh any cached
+        address / known_hosts entries. Reuses ``wait_for_instance_active`` to
+        block until the instance is ``running`` and has a public IP. Idempotent:
+        starting an already-running instance returns its current IP.
+
+        AWS-only, like ``stop_instance`` -- reached via ``self.aws_client``.
+        """
+        # AWS rejects ``start-instances`` on an instance that is still ``stopping``
+        # (``IncorrectInstanceState``). When resuming a host caught mid-stop -- e.g.
+        # one the idle watcher just powered off, resolved during its stop transition
+        # -- wait for the terminal ``stopped`` state before starting it.
+        if self._instance_state_name(instance_id) == "stopping":
+            self._wait_for_instance_state(instance_id, "stopped", timeout_seconds)
+        with self._translate_aws_errors():
+            self._ec2().start_instances(InstanceIds=[str(instance_id)])
+        logger.info("Starting EC2 instance {}", instance_id)
+        return self.wait_for_instance_active(instance_id, timeout_seconds=timeout_seconds)
+
+    def _instance_state_name(self, instance_id: VpsInstanceId) -> str:
+        """Return the raw EC2 state name (e.g. ``running`` / ``stopped``), or ``''`` if absent.
+
+        ``''`` is returned only when the describe response contains no instance
+        record; a truly-nonexistent instance id instead makes ``_describe_instance``
+        raise ``VpsApiError`` (``InvalidInstanceID.NotFound``).
+
+        Unlike ``get_instance_status``, this preserves the raw EC2 state name
+        rather than collapsing ``stopping`` / ``stopped`` into a single
+        ``HALTED`` status, so callers can distinguish "still stopping" from
+        "fully stopped".
+        """
+        instance = self._describe_instance(instance_id)
+        return instance.get("State", {}).get("Name", "") if instance is not None else ""
+
+    def _wait_for_instance_state(
+        self,
+        instance_id: VpsInstanceId,
+        target_state: str,
+        timeout_seconds: float,
+    ) -> None:
+        """Poll ``describe_instances`` every 5s until the instance reaches ``target_state``.
+
+        Used by ``stop_instance`` to wait for the terminal ``stopped`` state.
+        Polls via the shared ``wait_for`` helper (not a raw ``time.sleep`` loop)
+        and re-raises its ``TimeoutError`` as ``VpsProvisioningError`` to match
+        the rest of this client's error contract.
+        """
+        try:
+            wait_for(
+                lambda: self._instance_state_name(instance_id) == target_state,
+                timeout=timeout_seconds,
+                poll_interval=5.0,
+                error_message=(
+                    f"EC2 instance {instance_id} did not reach state {target_state!r} within {timeout_seconds}s"
+                ),
+            )
+        except TimeoutError as e:
+            raise VpsProvisioningError(str(e)) from e
+
+    def add_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
+        """Add or overwrite tags on an instance via ``CreateTags`` (idempotent upsert).
+
+        Used to persist offline-discoverable metadata (per-agent records) onto the
+        EC2 instance, so a stopped instance -- which has no public IP and is
+        unreachable over SSH -- still surfaces in ``mngr list`` and can be resumed
+        by name. AWS limits: 50 tags per resource, key <=128 chars, value <=256
+        chars. No-op when ``tags`` is empty. AWS-only (reached via
+        ``self.aws_client``), like ``stop_instance``/``start_instance``.
+        """
+        if not tags:
+            return
+        with self._translate_aws_errors():
+            self._ec2().create_tags(
+                Resources=[str(instance_id)],
+                Tags=[{"Key": k, "Value": v} for k, v in tags.items()],
+            )
+
+    def remove_tags(self, instance_id: VpsInstanceId, keys: Sequence[str]) -> None:
+        """Remove tags (by key) from an instance via ``DeleteTags``. No-op when ``keys`` is empty.
+
+        ``DeleteTags`` with only a ``Key`` (no ``Value``) deletes the tag
+        regardless of its current value -- what we want for removing a
+        persisted-agent tag when its agent is destroyed.
+        """
+        if not keys:
+            return
+        with self._translate_aws_errors():
+            self._ec2().delete_tags(
+                Resources=[str(instance_id)],
+                Tags=[{"Key": k} for k in keys],
+            )
 
     def _describe_instance(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
         with self._translate_aws_errors():
