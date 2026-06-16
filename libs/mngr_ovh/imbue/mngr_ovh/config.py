@@ -7,7 +7,7 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 
 _DEFAULT_ENDPOINT: Final[str] = "ovh-us"
 _DEFAULT_PLAN: Final[str] = "vps-2025-model1"
@@ -31,7 +31,7 @@ class OvhPricingMode(UpperCaseStrEnum):
         return self.value.lower()
 
 
-class OvhProviderConfig(VpsDockerProviderConfig):
+class OvhProviderConfig(VpsProviderConfig):
     """Configuration for the OVH classic-VPS Docker provider."""
 
     backend: ProviderBackendName = Field(

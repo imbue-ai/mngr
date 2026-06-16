@@ -2,7 +2,7 @@
 
 Vultr provider backend plugin for mngr. Runs agents in Docker containers on Vultr VPS instances.
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -28,7 +28,7 @@ mngr destroy my-agent
 
 ## Vultr-specific configuration
 
-These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
+These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 
 | Field | Default | Description |
 |-------|---------|-------------|

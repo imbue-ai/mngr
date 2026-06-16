@@ -47,11 +47,11 @@ from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_SKU
 from imbue.mngr_azure.config import DEFAULT_IMAGE_VERSION
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Tag key/value that ``create_instance`` adds to every VM launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses this

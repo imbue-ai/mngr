@@ -47,19 +47,19 @@ from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
-from imbue.mngr_vps_docker.container_setup import host_volume_name_for
-from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import open_host_store
-from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
-from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import extract_presence_flag
-from imbue.mngr_vps_docker.instance import extract_single_value_arg
-from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.container_setup import host_volume_name_for
+from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.host_store import open_host_store
+from imbue.mngr_vps.instance import IDLE_SENTINEL_FILENAME
+from imbue.mngr_vps.instance import OfflineCapableVpsProvider
+from imbue.mngr_vps.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps.instance import extract_git_depth
+from imbue.mngr_vps.instance import extract_presence_flag
+from imbue.mngr_vps.instance import extract_single_value_arg
+from imbue.mngr_vps.instance import raise_if_unknown_provider_arg
+from imbue.mngr_vps.instance import raise_if_vps_migration_arg
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
@@ -94,7 +94,7 @@ IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-gcp-idle-watcher"
 def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
     """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
 
-    Unlike the base ``VpsDockerProvider`` shutdown script (``kill -TERM 1``, which
+    Unlike the base ``VpsProvider`` shutdown script (``kill -TERM 1``, which
     stops only the container), the GCP variant signals idle by touching a sentinel
     file on the shared volume. A host-side systemd path unit observes it and powers
     the whole GCE instance off (a container cannot power off its host).
@@ -191,7 +191,7 @@ class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class GcpProvider(OfflineCapableVpsDockerProvider):
+class GcpProvider(OfflineCapableVpsProvider):
     """GCP-specific provider that discovers hosts via the GCE instances.list API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -392,7 +392,7 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
     ) -> None:
         """Stop the agent container *and* the GCE instance, preserving the boot disk.
 
-        The base ``VpsDockerProvider.stop_host`` only stops the inner Docker
+        The base ``VpsProvider.stop_host`` only stops the inner Docker
         container, leaving the GCE instance running and billing. This override
         additionally calls ``instances.stop`` so a paused GCP agent costs only disk
         storage; the boot disk (and all on-disk state) survives, so ``start_host``
@@ -475,7 +475,7 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
         wanted = f"mngr-host-id={to_gce_label_value(str(host_id))}"
         return [instance for instance in self._list_instances_cached() if wanted in instance.get("tags", ())]
 
-    def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
+    def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
         """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
 
         GCE stop/start keeps the instance's SSH host keys (on the boot disk), so only
@@ -755,7 +755,7 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
             updated_at=now,
             stop_reason=HostState.STOPPED.value,
         )
-        return self._create_offline_host(VpsDockerHostRecord(certified_host_data=certified))
+        return self._create_offline_host(VpsHostRecord(certified_host_data=certified))
 
     def _created_at_from_labels(self, labels: Mapping[str, str], host_id: HostId) -> datetime | None:
         """Parse the ``mngr-created-at`` label (``%Y-%m-%dt%H-%M-%S``, UTC), or None on failure.

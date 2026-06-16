@@ -33,10 +33,10 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.host_store import VpsHostConfig
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -327,7 +327,7 @@ def _reachable_provider_with_record(temp_mngr_ctx: MngrContext, host_id: HostId)
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+    provider._host_record_cache[host_id] = VpsHostRecord(
         certified_host_data=certified,
         vps_ip="1.2.3.4",
         config=VpsHostConfig(

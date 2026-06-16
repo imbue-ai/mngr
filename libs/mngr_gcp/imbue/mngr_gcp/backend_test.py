@@ -32,7 +32,7 @@ from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
 class _StubAdcConfig(GcpProviderConfig):

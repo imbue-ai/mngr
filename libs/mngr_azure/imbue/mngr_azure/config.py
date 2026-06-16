@@ -14,7 +14,7 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 
 # Storage-account names are globally unique, 3-24 chars, lowercase alphanumeric
 # only (no hyphens). The derived name is ``mngrst<hash>`` where ``<hash>`` is a
@@ -32,7 +32,7 @@ AZURE_MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
 
 # Default marketplace image: Debian 12 (gen2), matching the Debian-12 default of
 # the other mngr providers (aws / gcp / ovh / vultr). Debian's Azure image runs
-# cloud-init with the Azure datasource, so the shared ``mngr_vps_docker``
+# cloud-init with the Azure datasource, so the shared ``mngr_vps``
 # cloud-init flow (Docker install, SSH host-key injection, mngr bootstrap) works
 # unchanged. The four-part publisher/offer/sku/version URN is configurable for
 # users who want a different distro or a custom image; ``test_release_azure``
@@ -117,7 +117,7 @@ def read_az_cli_default_subscription() -> str | None:
     return None
 
 
-class AzureProviderConfig(VpsDockerProviderConfig):
+class AzureProviderConfig(VpsProviderConfig):
     """Configuration for the Azure Virtual Machines VPS Docker provider.
 
     Credentials are deliberately not stored in this config. Azure's

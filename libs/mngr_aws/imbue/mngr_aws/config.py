@@ -16,7 +16,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 
 
 class AwsConfigError(MngrError, ValueError):
@@ -79,7 +79,7 @@ DEFAULT_AMI_BY_REGION: Final[dict[str, str]] = {
 }
 
 
-class AwsProviderConfig(VpsDockerProviderConfig):
+class AwsProviderConfig(VpsProviderConfig):
     """Configuration for the AWS EC2 VPS Docker provider.
 
     Credentials are deliberately not stored in this config. boto3's default

@@ -14,9 +14,9 @@ from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import parse_vps_build_args
+from imbue.mngr_vps.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.instance import parse_vps_build_args
 from imbue.mngr_vultr import hookimpl
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.config import VultrProviderConfig
@@ -24,11 +24,11 @@ from imbue.mngr_vultr.config import VultrProviderConfig
 VULTR_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("vultr")
 
 
-class VultrProvider(VpsDockerProvider):
+class VultrProvider(VpsProvider):
     """Vultr-specific provider that implements VPS listing via the Vultr API.
 
     All cross-VPS discovery machinery (parallel SSH reads, caching,
-    per-name lookups) is inherited from ``VpsDockerProvider``; this
+    per-name lookups) is inherited from ``VpsProvider``; this
     subclass only contributes the provider-specific tag-based listing.
     """
 

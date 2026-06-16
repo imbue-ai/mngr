@@ -20,7 +20,7 @@ from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr_vps_docker import state_keys
+from imbue.mngr_vps import state_keys
 
 # Trust policy + inline policy name for the per-bucket host identity (Decision 3).
 # The trust policy lets EC2 assume the role; the inline policy grants ONLY the

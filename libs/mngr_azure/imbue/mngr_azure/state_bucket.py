@@ -32,7 +32,7 @@ from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr_vps_docker import state_keys
+from imbue.mngr_vps import state_keys
 
 # The Azure analog of an S3 bucket is a Blob *container* inside a *storage
 # account*. The container name is fixed (container names allow hyphens, 3-63

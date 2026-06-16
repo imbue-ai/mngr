@@ -22,8 +22,8 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 _BUCKET_NAME = "mngr-state-test-bucket"
 
@@ -116,7 +116,7 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(
         updated_at=datetime.now(timezone.utc),
         stop_reason=HostState.STOPPED.value,
     )
-    record = VpsDockerHostRecord(certified_host_data=certified)
+    record = VpsHostRecord(certified_host_data=certified)
 
     provider._persist_host_record_externally(record)
 

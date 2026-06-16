@@ -31,7 +31,7 @@ from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
 class _SubnetStubClient(AzureVpsClient):

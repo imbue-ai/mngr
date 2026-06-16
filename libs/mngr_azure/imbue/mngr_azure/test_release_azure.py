@@ -331,7 +331,7 @@ def test_provider_create_builds_dockerfile_on_vm(
 
     The other lifecycle tests create from the default base image; this one exercises
     the remote-build path the ``-t azure`` template relies on (the same shared
-    ``mngr_vps_docker`` flow ``gcp`` uses): ``mngr create`` uploads the build context,
+    ``mngr_vps`` flow ``gcp`` uses): ``mngr create`` uploads the build context,
     runs ``docker build`` on the VM, and starts the agent container FROM the built
     image. We confirm that by baking a marker into the image with a ``RUN`` and reading
     it back via ``exec`` -- if create silently fell back to the base image, the marker

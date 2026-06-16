@@ -5,7 +5,7 @@ from typing import Final
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 
 # Inside the slice VM, the vps_docker bake publishes the agent container's sshd on
-# this guest port (matches VpsDockerProviderConfig.container_ssh_port). Each is
+# this guest port (matches VpsProviderConfig.container_ssh_port). Each is
 # forwarded to a distinct host port on the bare-metal box so the slice looks like
 # a VPS (box-IP + two ports).
 _CONTAINER_SSH_GUEST_PORT: Final[int] = 2222
@@ -46,7 +46,7 @@ systemctl enable --now docker 2>/dev/null || true
 
 
 # Installs inotify-tools on the VM so the vps_docker snapshot helper (the
-# outer_trigger btrfs helper provisioned by mngr_vps_docker) can run: its
+# outer_trigger btrfs helper provisioned by mngr_vps) can run: its
 # systemd unit execs `inotifywait` to watch for snapshot requests, and without
 # it the unit crash-loops (exit 127) -- servicing requests only by accident of
 # its restart cadence and emitting spurious "already exists" failures. The OVH

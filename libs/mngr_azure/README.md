@@ -2,9 +2,9 @@
 
 Azure provider backend plugin for mngr. Runs agents in Docker containers on Azure Virtual Machines.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -251,7 +251,7 @@ size has no capacity in the region right now; pick another size with
   Azure has no per-key resource. Cloud-init also forwards the key into root's
   `authorized_keys`, so mngr's root SSH works.
 - **Image:** Debian 12 by default (matching the other mngr providers; runs
-  cloud-init with the Azure datasource, so the shared `mngr_vps_docker` bootstrap
+  cloud-init with the Azure datasource, so the shared `mngr_vps` bootstrap
   works unchanged). Configurable via `image_publisher` / `image_offer` /
   `image_sku` / `image_version`.
 - **No snapshot workflow:** the Azure client exposes no managed-disk-snapshot surface (the speculative `create_snapshot` / `list_snapshots` / `delete_snapshot` client methods are not part of `VpsClientInterface`). Restore from a fresh `mngr create` instead.
@@ -272,7 +272,7 @@ size has no capacity in the region right now; pick another size with
   (`virtual_machines.begin_deallocate`) to halt compute billing; `mngr start`
   re-allocates it (`begin_start`). The static public IP and on-disk SSH host keys
   persist, so resume needs no IP/known_hosts fixup. Mirrors `mngr_aws`/`mngr_gcp`;
-  the shared `mngr_vps_docker` base is untouched.
+  the shared `mngr_vps` base is untouched.
 - **Idle self-deallocate (managed identity):** each VM is created with a
   system-assigned managed identity. The in-container idle watcher touches a
   sentinel; a host-side systemd path unit runs a script that uses the VM's IMDS

@@ -47,25 +47,25 @@ from imbue.mngr_aws.state_bucket import S3StateBucketError
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
 from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
-from imbue.mngr_vps_docker.container_setup import host_volume_name_for
-from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
-from imbue.mngr_vps_docker.host_state_store import HostStateStore
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import open_host_store
-from imbue.mngr_vps_docker.instance import AGENT_TAG_FIELDS
-from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
-from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import extract_presence_flag
-from imbue.mngr_vps_docker.instance import extract_single_value_arg
-from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.container_setup import host_volume_name_for
+from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
+from imbue.mngr_vps.host_state_store import HostStateStore
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.host_store import open_host_store
+from imbue.mngr_vps.instance import AGENT_TAG_FIELDS
+from imbue.mngr_vps.instance import AGENT_TAG_PREFIX
+from imbue.mngr_vps.instance import IDLE_SENTINEL_FILENAME
+from imbue.mngr_vps.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps.instance import TagMirrorVpsProvider
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.instance import extract_git_depth
+from imbue.mngr_vps.instance import extract_presence_flag
+from imbue.mngr_vps.instance import extract_single_value_arg
+from imbue.mngr_vps.instance import raise_if_unknown_provider_arg
+from imbue.mngr_vps.instance import raise_if_vps_migration_arg
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
@@ -114,7 +114,7 @@ _HOST_DIR_SYNC_EXCLUDES: Final[tuple[str, ...]] = ("*.tmp", "*/__pycache__/*", "
 def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
     """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
 
-    Unlike the base ``VpsDockerProvider`` shutdown script (which runs
+    Unlike the base ``VpsProvider`` shutdown script (which runs
     ``kill -TERM 1`` to stop the container), the AWS variant only *signals*
     that the host is idle: it touches a sentinel file on the shared volume.
     The host-side systemd path unit observes that file and powers the whole
@@ -254,7 +254,7 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AwsProvider(TagMirrorVpsDockerProvider):
+class AwsProvider(TagMirrorVpsProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -518,7 +518,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
     ) -> None:
         """Stop the agent container *and* the EC2 instance, preserving the EBS volume.
 
-        The base ``VpsDockerProvider.stop_host`` only stops the inner Docker
+        The base ``VpsProvider.stop_host`` only stops the inner Docker
         container, leaving the EC2 instance running and billing. This override
         additionally calls ``ec2 stop-instances`` so a paused AWS agent costs
         only EBS storage; the root volume (and all on-disk state) survives, so
@@ -612,7 +612,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         # idle keeps working across resumes without an AWS-specific step here.
         return started
 
-    def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
+    def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
         """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
 
         EC2 stop/start keeps the instance's SSH host keys, so only the IP
@@ -670,7 +670,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
     def _create_shutdown_script(self, host: Host) -> None:
         """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
 
-        The base ``VpsDockerProvider._create_shutdown_script`` writes a script
+        The base ``VpsProvider._create_shutdown_script`` writes a script
         that runs ``kill -TERM 1`` to stop the container on idle. For AWS, an
         idle container should stop the whole *instance* (so a paused agent costs
         only EBS), but a container cannot power off its host. Instead, the
@@ -817,7 +817,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
     # Offline metadata via EC2 tags (so STOPPED hosts list + resolve by name)
     # =========================================================================
 
-    def _persist_host_record_externally(self, record: VpsDockerHostRecord) -> None:
+    def _persist_host_record_externally(self, record: VpsHostRecord) -> None:
         """Mirror the full host record into the external store (best-effort).
 
         Delegates to the selected store: the S3 bucket writes the full record; the
@@ -836,7 +836,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         """Persist an agent's record on the host volume *and* in the external store.
 
-        The base ``VpsDockerProvider`` writes the agent record to the on-volume
+        The base ``VpsProvider`` writes the agent record to the on-volume
         host store (``agents/<id>.json``), the authoritative source the SSH-based
         discovery reads for *running* hosts -- so this override must keep doing
         that (via ``super()``) so running hosts list their agents. The on-volume
@@ -921,11 +921,11 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         ``HostNotFoundError`` (the volume is unreadable), so we fall back to the
         external store: the S3 bucket when configured (full records), else the
         compact records mirrored into EC2 tags. Bypasses the
-        ``OfflineCapableVpsDockerProvider`` tag fallback (which would ignore the
-        bucket) by going straight to the SSH-only ``VpsDockerProvider`` path.
+        ``OfflineCapableVpsProvider`` tag fallback (which would ignore the
+        bucket) by going straight to the SSH-only ``VpsProvider`` path.
         """
         try:
-            return VpsDockerProvider.list_persisted_agent_data_for_host(self, host_id)
+            return VpsProvider.list_persisted_agent_data_for_host(self, host_id)
         except HostNotFoundError:
             return self._state_store.list_agent_records(host_id)
 
@@ -942,10 +942,10 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         ``mngr list`` and resolve for ``mngr start`` -- from the S3 state bucket
         when configured (full records), else from EC2 tags. Drives the offline
         loop off ``self._state_store`` rather than the
-        ``OfflineCapableVpsDockerProvider`` tag-only loop, so the SSH-only base
+        ``OfflineCapableVpsProvider`` tag-only loop, so the SSH-only base
         sweep is invoked directly.
         """
-        result = VpsDockerProvider.discover_hosts_and_agents(self, cg, include_destroyed=include_destroyed)
+        result = VpsProvider.discover_hosts_and_agents(self, cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
         for instance in self._list_instances_cached():
             try:
@@ -988,16 +988,16 @@ class AwsProvider(TagMirrorVpsDockerProvider):
 
         Falls back to the base (SSH/volume-backed) path first; if that can't find
         the host (because it is stopped and unreachable), reconstruct it from the
-        external store: the *full* ``VpsDockerHostRecord`` when the store has it
+        external store: the *full* ``VpsHostRecord`` when the store has it
         (S3 ``host_state.json``), otherwise a minimal record rebuilt from the
         instance's own EC2 tags -- which also covers a bucket-mode host created
         before the bucket existed (so its ``host_state.json`` is absent). Calls
-        the SSH-only ``VpsDockerProvider`` path directly so the
-        ``OfflineCapableVpsDockerProvider`` tag fallback does not pre-empt the
+        the SSH-only ``VpsProvider`` path directly so the
+        ``OfflineCapableVpsProvider`` tag fallback does not pre-empt the
         bucket-aware reconstruction below.
         """
         try:
-            return VpsDockerProvider.to_offline_host(self, host_id)
+            return VpsProvider.to_offline_host(self, host_id)
         except HostNotFoundError:
             record = self._state_store.read_host_record(host_id)
             # In bucket mode, fall back to the instance's own tags for a host whose
@@ -1097,7 +1097,7 @@ class _Ec2TagHostStateStore(HostStateStore):
 
     provider: AwsProvider
 
-    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+    def persist_host_record(self, record: VpsHostRecord) -> None:
         # The instance's own create/stop tags carry the host record; nothing extra to write.
         pass
 
@@ -1121,7 +1121,7 @@ class _Ec2TagHostStateStore(HostStateStore):
             return []
         return self.provider._persisted_agent_dicts_from_instance(instance)
 
-    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+    def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
         return self.provider._host_record_from_instance_tags(host_id)
 
 

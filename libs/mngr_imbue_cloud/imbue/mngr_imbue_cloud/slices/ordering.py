@@ -25,7 +25,7 @@ from imbue.mngr_imbue_cloud.slices.pricing import compute_storage_usable_gb
 from imbue.mngr_imbue_cloud.slices.pricing import describe_storage_raid_level
 from imbue.mngr_imbue_cloud.slices.pricing import parse_memory_gb
 from imbue.mngr_ovh.client import OvhVpsClient
-from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsApiError
 
 # Month-to-month eco order: no commitment, monthly renewal, one server.
 ECO_PRICING_MODE: Final[str] = "default"

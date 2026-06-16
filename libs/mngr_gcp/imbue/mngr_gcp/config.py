@@ -12,7 +12,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
 from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 
 # OAuth scope granting full access to all Google Cloud Platform APIs. Only
 # applied when ``service_account_email`` is set (attaching a service account to
@@ -75,7 +75,7 @@ def get_gcloud_compute_zone(concurrency_group: ConcurrencyGroup) -> str | None:
     return zone or None
 
 
-class GcpProviderConfig(VpsDockerProviderConfig):
+class GcpProviderConfig(VpsProviderConfig):
     """Configuration for the GCP Compute Engine VPS Docker provider.
 
     Credentials are deliberately not stored in this config. Google
