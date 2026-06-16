@@ -191,8 +191,22 @@ def _dismiss_screensaver() -> None:
     subprocess.run(["killall", "ScreenSaverEngine"], check=False, capture_output=True, timeout=3)
 
 
+def _safe_snap_name(name: str) -> str:
+    """Slugify a snapshot name so it is always a valid file / artifact path.
+
+    Names sometimes embed a page URL (e.g. a ``/recovery?return_to=...`` URL on
+    a failed redirect). Characters like ``?``, ``:``, ``%``, ``/`` produce a
+    filename ``actions/upload-artifact`` rejects, which drops ALL of the run's
+    diagnostics -- exactly when a failure makes them most valuable. Replace
+    anything outside ``[A-Za-z0-9._-]`` with ``-`` and cap the length.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
+    return slug[:120] or "snap"
+
+
 def snap(name: str) -> None:
-    """Whole-desktop screencapture. Silently no-ops when no Aqua session."""
+    """Whole-desktop screencapture. No-ops cleanly when there's no Aqua session."""
+    name = _safe_snap_name(name)
     _dismiss_screensaver()
     _activate_minds()
     out = SCREENSHOT_DIR / f"{name}.png"
@@ -206,7 +220,14 @@ def snap(name: str) -> None:
         logger.info("  snap[{}] -> {} bytes", name, out.stat().st_size)
     else:
         msg = err.read_text(errors="ignore").strip() if err.exists() else "?"
-        logger.warning("  snap[{}] FAILED: {}", name, msg)
+        # The headless CI runner has no Aqua display session, so screencapture
+        # fails with "could not create image from display" at every milestone --
+        # expected there, not worth a per-snapshot warning. The Playwright page
+        # screenshots in snap_page() are the real diagnostics on that runner.
+        if "could not create image" in msg.lower():
+            logger.debug("  snap[{}] skipped (no display session)", name)
+        else:
+            logger.warning("  snap[{}] FAILED: {}", name, msg)
         if out.exists():
             out.unlink()
     if err.exists():
@@ -232,7 +253,7 @@ async def snap_page(page: Page, name: str) -> None:
     except Exception as e:
         logger.warning("  bring_to_front[{}] failed: {}", name, e)
     try:
-        await page.screenshot(path=str(SCREENSHOT_DIR / f"{name}.win.png"), full_page=True)
+        await page.screenshot(path=str(SCREENSHOT_DIR / f"{_safe_snap_name(name)}.win.png"), full_page=True)
     except Exception as e:
         logger.warning("  page-shot[{}] failed: {}", name, e)
     snap(name)

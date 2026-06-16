@@ -1,0 +1,1 @@
+Added a `--window` (`-w`) option to `mngr capture` for capturing a non-primary tmux window in the agent's session, by index (e.g. `--window 1`) or name. Without it, capture still reads the agent's primary window as before.
