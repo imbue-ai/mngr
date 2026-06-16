@@ -34,6 +34,7 @@ from imbue.mngr.api.gc import gc
 from imbue.mngr.api.gc import gc_build_cache
 from imbue.mngr.api.gc import gc_logs
 from imbue.mngr.api.gc import gc_machines
+from imbue.mngr.api.gc import gc_provider_resources
 from imbue.mngr.api.gc import gc_snapshots
 from imbue.mngr.api.gc import gc_volumes
 from imbue.mngr.api.gc import gc_work_dirs
@@ -52,6 +53,7 @@ from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
@@ -1940,6 +1942,91 @@ def test_gc_volumes_handles_list_volumes_mngr_error_with_abort(
             error_behavior=ErrorBehavior.ABORT,
             result=result,
         )
+
+
+# =========================================================================
+# gc_provider_resources tests
+# =========================================================================
+
+
+def _provider_resource(name: str, kind: str = "network_interface") -> ProviderResourceInfo:
+    return ProviderResourceInfo(provider_name=ProviderInstanceName("mock"), kind=kind, name=name)
+
+
+def test_gc_provider_resources_default_no_op(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A provider that does not override the hook reclaims nothing."""
+    provider = MockProviderInstance(name=ProviderInstanceName("mock"), host_dir=temp_host_dir, mngr_ctx=temp_mngr_ctx)
+    result = GcResult()
+    gc_provider_resources(providers=[provider], dry_run=False, error_behavior=ErrorBehavior.ABORT, result=result)
+    assert result.provider_resources_destroyed == []
+    # The hook was still invoked once with the dry_run flag threaded through.
+    assert provider.gc_provider_resources_dry_runs == [False]
+
+
+def test_gc_provider_resources_collects_reclaimed(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """Resources returned by the hook are aggregated into the result."""
+    reclaimed = [_provider_resource("old-nic"), _provider_resource("old-ip", kind="public_ip")]
+    provider = MockProviderInstance(
+        name=ProviderInstanceName("mock"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_provider_resources=reclaimed,
+    )
+    result = GcResult()
+    gc_provider_resources(providers=[provider], dry_run=True, error_behavior=ErrorBehavior.ABORT, result=result)
+    assert result.provider_resources_destroyed == reclaimed
+    assert provider.gc_provider_resources_dry_runs == [True]
+
+
+class _ProviderResourcesUnavailableProvider(MockProviderInstance):
+    """Provider whose gc_provider_resources raises ProviderUnavailableError."""
+
+    def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
+        raise ProviderUnavailableError(self.name, "backend offline")
+
+
+class _ProviderResourcesMngrErrorProvider(MockProviderInstance):
+    """Provider whose gc_provider_resources raises a generic MngrError."""
+
+    def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
+        raise MngrError("simulated provider-resource reclaim failure")
+
+
+def test_gc_provider_resources_skips_provider_when_unavailable(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """An unavailable provider is skipped silently (no error recorded)."""
+    provider = _ProviderResourcesUnavailableProvider(
+        name=ProviderInstanceName("unavailable"), host_dir=temp_host_dir, mngr_ctx=temp_mngr_ctx
+    )
+    result = GcResult()
+    gc_provider_resources(providers=[provider], dry_run=False, error_behavior=ErrorBehavior.ABORT, result=result)
+    assert result.provider_resources_destroyed == []
+    assert result.errors == []
+
+
+@pytest.mark.allow_warnings(
+    match=r"Failed to reclaim provider resources for .*: simulated provider-resource reclaim failure"
+)
+def test_gc_provider_resources_records_error_with_continue(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A generic MngrError is recorded and GC continues."""
+    provider = _ProviderResourcesMngrErrorProvider(
+        name=ProviderInstanceName("err"), host_dir=temp_host_dir, mngr_ctx=temp_mngr_ctx
+    )
+    result = GcResult()
+    gc_provider_resources(providers=[provider], dry_run=False, error_behavior=ErrorBehavior.CONTINUE, result=result)
+    assert len(result.errors) == 1
+    assert "simulated provider-resource reclaim failure" in result.errors[0]
+
+
+def test_gc_provider_resources_reraises_with_abort(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A generic MngrError aborts GC when ABORT behavior is set."""
+    provider = _ProviderResourcesMngrErrorProvider(
+        name=ProviderInstanceName("err-abort"), host_dir=temp_host_dir, mngr_ctx=temp_mngr_ctx
+    )
+    result = GcResult()
+    with pytest.raises(MngrError, match="simulated provider-resource reclaim failure"):
+        gc_provider_resources(providers=[provider], dry_run=False, error_behavior=ErrorBehavior.ABORT, result=result)
 
 
 # =========================================================================

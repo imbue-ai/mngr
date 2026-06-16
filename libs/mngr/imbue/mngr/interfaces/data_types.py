@@ -523,6 +523,20 @@ class BuildCacheInfo(FrozenModel):
     created_at: datetime = Field(description="When the cache entry was created")
 
 
+class ProviderResourceInfo(FrozenModel):
+    """An orphaned provider-level cloud resource reclaimed (or reclaimable) during GC.
+
+    Generic across providers: a provider-managed resource not attached to any live
+    host that is safe to reclaim -- e.g. an Azure NIC or public IP left behind by a
+    VM create that failed after the NIC/IP were provisioned. ``kind`` is a
+    provider-defined, display-only label (e.g. ``"network_interface"``).
+    """
+
+    provider_name: ProviderInstanceName = Field(description="Provider that owns the resource")
+    kind: str = Field(description="Provider-defined resource kind, e.g. 'network_interface' or 'public_ip'")
+    name: str = Field(description="Provider resource name or id")
+
+
 class HostDetails(FrozenModel):
     """Full host information collected by connecting to the host.
 
