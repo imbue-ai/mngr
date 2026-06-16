@@ -1,0 +1,1 @@
+Updated `LimaSliceVpsClient` to match the slimmed-down `VpsClientInterface`: it no longer overrides the removed `create_snapshot`, `delete_snapshot`, `list_snapshots`, or `list_ssh_keys` methods, and no longer imports the deleted `VpsSnapshotId` / `VpsSnapshotInfo` / `VpsSshKeyInfo` names. This fixes an `ImportError` that broke `mngr imbue_cloud` CLI startup.

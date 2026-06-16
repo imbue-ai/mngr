@@ -20,13 +20,9 @@ def test_cloud_only_operations_raise_not_implemented() -> None:
     with pytest.raises(NotImplementedError):
         client.create_instance("label", "region", "plan", "", (), {})
     with pytest.raises(NotImplementedError):
-        client.create_snapshot(VpsInstanceId("mngr-slice-x"), "desc")
-    with pytest.raises(NotImplementedError):
-        client.list_snapshots()
-    with pytest.raises(NotImplementedError):
         client.upload_ssh_key("name", "ssh-ed25519 AAAA")
     with pytest.raises(NotImplementedError):
-        client.list_ssh_keys()
+        client.delete_ssh_key("key-id")
 
 
 def test_get_instance_ip_is_the_box_address() -> None:
