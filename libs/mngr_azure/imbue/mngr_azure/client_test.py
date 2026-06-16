@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AzureVmName
 from imbue.mngr_azure.client import LinuxHostname
 from imbue.mngr_azure.client import SELF_DEALLOCATE_ROLE_ID
@@ -277,6 +278,11 @@ def test_create_instance_cleans_up_nic_and_ip_when_vm_create_fails() -> None:
     assert network.public_ip_addresses.deleted[0].endswith("-ip")
 
 
+# =========================================================================
+# reclaim_orphaned_network_resources (GC-time NIC/IP reclaim)
+# =========================================================================
+
+
 def _orphan_resource(name: str, *, age_seconds: float, attached: bool, attach_attr: str, tagged: bool = True) -> Any:
     created_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
     tags = (
@@ -287,9 +293,9 @@ def _orphan_resource(name: str, *, age_seconds: float, attached: bool, attach_at
     )
 
 
-def test_create_instance_reclaims_aged_orphan_nic_and_ip() -> None:
+def test_reclaim_deletes_aged_orphan_nic_and_ip() -> None:
     # A NIC + public IP left unattached by an earlier failed create, now older
-    # than the reservation window, are reclaimed at the start of the next create.
+    # than the reservation window, are reclaimed at GC time and reported back.
     network = FakeNetworkClient()
     network.network_interfaces.list_result = [
         _orphan_resource("old-nic", age_seconds=600, attached=False, attach_attr="virtual_machine")
@@ -298,17 +304,11 @@ def test_create_instance_reclaims_aged_orphan_nic_and_ip() -> None:
         _orphan_resource("old-ip", age_seconds=600, attached=False, attach_attr="ip_configuration")
     ]
     client = _make_client(network=network)
-    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
-    client.create_instance(
-        label="agent",
-        region=_REGION,
-        plan="Standard_B2s",
-        user_data="#cloud-config\n",
-        ssh_key_ids=["k1"],
-        tags={"mngr-host-id": "host-abc"},
-    )
+    reclaimed = client.reclaim_orphaned_network_resources(provider_name=ProviderInstanceName("azure"))
     assert "old-nic" in network.network_interfaces.deleted
     assert "old-ip" in network.public_ip_addresses.deleted
+    assert {(r.kind, r.name) for r in reclaimed} == {("network_interface", "old-nic"), ("public_ip", "old-ip")}
+    assert all(r.provider_name == "azure" for r in reclaimed)
 
 
 def test_reclaim_skips_recent_attached_and_untagged() -> None:
@@ -322,16 +322,24 @@ def test_reclaim_skips_recent_attached_and_untagged() -> None:
         _orphan_resource("foreign-nic", age_seconds=600, attached=False, attach_attr="virtual_machine", tagged=False),
     ]
     client = _make_client(network=network)
-    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
-    client.create_instance(
-        label="agent",
-        region=_REGION,
-        plan="Standard_B2s",
-        user_data="#cloud-config\n",
-        ssh_key_ids=["k1"],
-        tags={"mngr-host-id": "host-abc"},
-    )
+    reclaimed = client.reclaim_orphaned_network_resources(provider_name=ProviderInstanceName("azure"))
     assert network.network_interfaces.deleted == []
+    assert reclaimed == []
+
+
+def test_reclaim_dry_run_reports_without_deleting() -> None:
+    network = FakeNetworkClient()
+    network.network_interfaces.list_result = [
+        _orphan_resource("old-nic", age_seconds=600, attached=False, attach_attr="virtual_machine")
+    ]
+    network.public_ip_addresses.list_result = [
+        _orphan_resource("old-ip", age_seconds=600, attached=False, attach_attr="ip_configuration")
+    ]
+    client = _make_client(network=network)
+    reclaimed = client.reclaim_orphaned_network_resources(provider_name=ProviderInstanceName("azure"), dry_run=True)
+    assert network.network_interfaces.deleted == []
+    assert network.public_ip_addresses.deleted == []
+    assert {(r.kind, r.name) for r in reclaimed} == {("network_interface", "old-nic"), ("public_ip", "old-ip")}
 
 
 def test_create_instance_requires_uploaded_ssh_key() -> None:
@@ -568,6 +576,24 @@ def test_start_instance_returns_preserved_public_ip_and_records_start() -> None:
     client = _make_client(compute=compute, network=network)
     assert client.start_instance(VpsInstanceId("vm1")) == "203.0.113.7"
     assert compute.virtual_machines.started == ["vm1"]
+
+
+def test_deallocate_instance_raises_when_the_operation_outlasts_the_timeout() -> None:
+    """A deallocate LRO still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.deallocate_completes = False
+    client = _make_client(compute=compute)
+    with pytest.raises(VpsProvisioningError, match="did not finish within"):
+        client.deallocate_instance(VpsInstanceId("vm1"), timeout_seconds=0.01)
+
+
+def test_start_instance_raises_when_the_operation_outlasts_the_timeout() -> None:
+    """A start LRO still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.start_completes = False
+    client = _make_client(compute=compute)
+    with pytest.raises(VpsProvisioningError, match="did not finish within"):
+        client.start_instance(VpsInstanceId("vm1"), timeout_seconds=0.01)
 
 
 # =========================================================================

@@ -27,7 +27,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -56,6 +56,7 @@ from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
@@ -326,7 +327,7 @@ class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AzureProvider(VpsDockerProvider):
+class AzureProvider(OfflineCapableVpsDockerProvider):
     """Azure-specific provider that discovers hosts via the VM list in the resource group."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -401,6 +402,17 @@ class AzureProvider(VpsDockerProvider):
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List Azure VMs tagged with this provider's name."""
         return self.azure_client.list_instances(provider_tag=str(self.name))
+
+    def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
+        """Reclaim NIC/public-IP orphans left by failed VM creates (Azure-specific).
+
+        Azure provisions a per-VM public IP + NIC before the VM and reserves them
+        for 180s after a capacity-failed create, so they cannot be cleaned up
+        synchronously on the failure path. They are reaped here at GC time instead
+        of on the next create. Age-gated and best-effort -- see
+        ``AzureVpsClient.reclaim_orphaned_network_resources``.
+        """
+        return self.azure_client.reclaim_orphaned_network_resources(provider_name=self.name, dry_run=dry_run)
 
     def _validate_provider_args_for_create(self) -> None:
         """Pre-create hook: enforce the pytest safety net, then require the prepared subnet.
@@ -938,10 +950,29 @@ class AzureProvider(VpsDockerProvider):
             logger.debug("Host {} unreachable; removing agent data from the external store only", host_id)
         self._state_store.remove_agent_record(host_id, str(agent_id))
 
+    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
+        """Whether the VM is halted (stopped/deallocated, and their in-flight transitions).
+
+        Azure's VM list cannot carry power state (``expand=instanceView`` is
+        rejected on a resource-group list), so -- unlike AWS/GCP, which get state
+        for free in the listing -- this confirms the halt with a per-VM
+        ``get_instance_status`` call. The base discovery loop calls this only for
+        mngr VMs the SSH sweep did NOT surface (and after the dedup filter), so a
+        healthy ``mngr list`` makes zero extra calls, and a not-online VM that is
+        still ``running`` (transient SSH failure, mid-boot, firewall) is not
+        misreported as STOPPED.
+        """
+        return self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) == VpsInstanceStatus.HALTED
+
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the host's persisted agent records, on-volume when reachable else from the external store."""
+        """Return the host's persisted agent records, on-volume when reachable else from the external store.
+
+        Bypasses the ``OfflineCapableVpsDockerProvider`` tag fallback (which would
+        ignore the bucket) by going straight to the SSH-only ``VpsDockerProvider``
+        path, then falling back to ``_state_store`` (Blob bucket or VM tags).
+        """
         try:
-            return super().list_persisted_agent_data_for_host(host_id)
+            return VpsDockerProvider.list_persisted_agent_data_for_host(self, host_id)
         except HostNotFoundError:
             return self._state_store.list_agent_records(host_id)
 
@@ -954,24 +985,19 @@ class AzureProvider(VpsDockerProvider):
 
         A deallocated VM keeps its static public IP but its OS is down, so the base
         SSH sweep can't reach it; here we reconstruct those hosts and their agents
-        from VM tags. Mirrors ``AwsProvider.discover_hosts_and_agents``.
-
-        Azure's VM list cannot carry power state (``expand=instanceView`` is
-        rejected on a resource-group list), so -- unlike AWS, which gets EC2 state
-        for free in the list -- we confirm a candidate is actually halted with a
-        per-VM ``get_instance_status`` call. That call is made only for mngr VMs the
-        SSH sweep did NOT surface (i.e. unreachable ones), so a healthy ``mngr
-        list`` makes zero extra calls, and a running-but-transiently-unreachable VM
-        is not misreported as STOPPED.
+        from the external store (Blob bucket when configured, else VM tags). Mirrors
+        ``AwsProvider.discover_hosts_and_agents``. Drives the offline loop off
+        ``self._state_store`` rather than the ``OfflineCapableVpsDockerProvider``
+        tag-only loop, so the SSH-only base sweep is invoked directly.
         """
-        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
+        result = VpsDockerProvider.discover_hosts_and_agents(self, cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
         for instance in self._list_instances_cached():
             try:
-                host_ref = self._discovered_host_from_tags(instance)
+                host_ref = self._offline_discovered_host_from_instance(instance)
             except ValueError as e:
                 logger.opt(exception=e).warning(
-                    "Skipping VM {} in offline discovery: malformed mngr host tag(s)",
+                    "Skipping VM {} in offline discovery: malformed mngr host identity",
                     instance.get("id"),
                 )
                 continue
@@ -979,9 +1005,9 @@ class AzureProvider(VpsDockerProvider):
                 continue
             # Only reconstruct genuinely-down VMs: a not-online mngr VM that is
             # still ``running`` (e.g. SSH transiently failed, mid-boot, firewall)
-            # must not be surfaced as STOPPED. HALTED covers stopped/deallocated
-            # and their in-flight transitions.
-            if self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) != VpsInstanceStatus.HALTED:
+            # must not be surfaced as STOPPED. The per-VM HALTED check covers
+            # stopped/deallocated and their in-flight transitions.
+            if not self._is_instance_offline(instance):
                 continue
             # An operational store/lookup failure (transient Blob error, or duplicate
             # mngr-host-id tags) propagates: the api/list discovery wrapper attributes
@@ -997,28 +1023,6 @@ class AzureProvider(VpsDockerProvider):
             result[host_ref] = agent_refs
         return result
 
-    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
-        """Return [] for a deallocated host instead of raising (no Azure snapshot lifecycle)."""
-        try:
-            return super().list_snapshots(host)
-        except HostNotFoundError:
-            return []
-
-    def get_host(self, host: HostId | HostName) -> HostInterface:
-        """Resolve a host, falling back to a tag-based offline host when deallocated.
-
-        ``mngr start`` calls ``get_host`` directly; the base reads the record over
-        SSH, so a deallocated VM raises ``HostNotFoundError``. Recover by
-        reconstructing the offline host from tags (HostId form only). Mirrors
-        ``AwsProvider.get_host``.
-        """
-        try:
-            return super().get_host(host)
-        except HostNotFoundError:
-            if isinstance(host, HostId):
-                return self.to_offline_host(host)
-            raise
-
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Return an offline host, reconstructing a deallocated VM's record offline.
 
@@ -1028,10 +1032,12 @@ class AzureProvider(VpsDockerProvider):
         ``host_state.json``), otherwise a minimal record rebuilt from the VM's own
         tags -- which also covers a bucket-mode host created before the bucket
         existed (so its ``host_state.json`` is absent). Mirrors
-        ``AwsProvider.to_offline_host``.
+        ``AwsProvider.to_offline_host``. Calls the SSH-only ``VpsDockerProvider``
+        path directly so the ``OfflineCapableVpsDockerProvider`` tag fallback does
+        not pre-empt the bucket-aware reconstruction below.
         """
         try:
-            return super().to_offline_host(host_id)
+            return VpsDockerProvider.to_offline_host(self, host_id)
         except HostNotFoundError:
             record = self._state_store.read_host_record(host_id)
             # In bucket mode, fall back to the VM's own tags for a host whose
@@ -1217,7 +1223,7 @@ class AzureProvider(VpsDockerProvider):
             return HostName(name_tag)
         return HostName(tags.get("mngr-host-id", "unknown"))
 
-    def _discovered_host_from_tags(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED-state DiscoveredHost from a VM's tags, or None if not a mngr host."""
         tags = self._tag_dict_from_normalized(instance)
         host_id_str = tags.get("mngr-host-id")
@@ -1230,19 +1236,15 @@ class AzureProvider(VpsDockerProvider):
             host_state=HostState.STOPPED,
         )
 
-    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Rebuild a minimal STOPPED host record from the VM's own ``mngr-*`` tags, or None.
+    def _host_record_from_instance(self, instance: Mapping[str, Any]) -> VpsDockerHostRecord:
+        """Build a minimal STOPPED host record from a deallocated VM's own ``mngr-*`` tags.
 
         Uses only the base tags mngr writes at launch (host-id, Name, created-at),
         so it works regardless of the external-store mode -- including a bucket-mode
         host created before the bucket existed (whose ``host_state.json`` is absent).
-        Returns None when no VM carries the host's tag. Backs the tag store's
-        ``read_host_record`` and the universal fallback in ``to_offline_host``.
         """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return None
         tags = self._tag_dict_from_normalized(instance)
+        host_id = HostId(tags.get("mngr-host-id", ""))
         now = datetime.now(timezone.utc)
         created_at = now
         created_at_raw = tags.get("mngr-created-at")
@@ -1263,6 +1265,22 @@ class AzureProvider(VpsDockerProvider):
             stop_reason=HostState.STOPPED.value,
         )
         return VpsDockerHostRecord(certified_host_data=certified)
+
+    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+        """Reconstruct a minimal offline host (STOPPED) for a deallocated VM from its tags."""
+        del host_id
+        return self._create_offline_host(self._host_record_from_instance(instance))
+
+    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        """Rebuild a minimal STOPPED host record from the VM's own ``mngr-*`` tags, or None.
+
+        Returns None when no VM carries the host's tag. Backs the tag store's
+        ``read_host_record`` and the universal fallback in ``to_offline_host``.
+        """
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return None
+        return self._host_record_from_instance(instance)
 
 
 class _BlobBucketHostStateStore(HostStateStore):

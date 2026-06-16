@@ -16,6 +16,7 @@ from uuid import uuid4
 from uuid import uuid5
 
 from azure.core.exceptions import HttpResponseError
+from azure.core.polling import LROPoller
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.authorization.v2022_04_01.models import Permission
 from azure.mgmt.authorization.v2022_04_01.models import RoleAssignmentCreateParameters
@@ -36,6 +37,8 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
@@ -153,13 +156,12 @@ class LinuxHostname(NonEmptyStr):
 _PROVIDER_REGISTRATION_TIMEOUT_SECONDS: Final[float] = 180.0
 _PROVIDER_REGISTRATION_POLL_SECONDS: Final[float] = 3.0
 
-# Minimum age before an unattached NIC / public IP is eligible for reclaim by the
-# next create. Every healthy create leaves its NIC briefly unattached (between
-# creating it and the VM associating it), so the age gate is what keeps the sweep
-# from racing an in-flight create -- whether that create is in this process, on
-# this machine, or on another machine sharing the resource group. The window sits
-# above Azure's 180s post-failure NIC reservation, so a younger orphan's delete
-# would fail anyway.
+# Minimum age before an unattached NIC / public IP is eligible for reclaim by GC.
+# Every healthy create leaves its NIC briefly unattached (between creating it and
+# the VM associating it), so the age gate is what keeps the sweep from racing an
+# in-flight create -- whether that create is in this process, on this machine, or
+# on another machine sharing the resource group. The window sits above Azure's
+# 180s post-failure NIC reservation, so a younger orphan's delete would fail anyway.
 _ORPHAN_RECLAIM_MIN_AGE_SECONDS: Final[float] = 240.0
 
 
@@ -544,10 +546,6 @@ class AzureVpsClient(VpsClientInterface):
             )
 
         subnet_id = self.resolve_subnet_id()
-        # Self-heal: reclaim NIC/public-IP orphans left by an earlier failed
-        # create whose 180s NIC reservation has since expired. Done here (on the
-        # next create) rather than by blocking the failed create for ~3 minutes.
-        self._reclaim_orphaned_network_resources()
         vm_name = _make_vm_name(label, tags)
         public_key = self._resolve_ssh_public_key(ssh_key_ids)
 
@@ -754,9 +752,9 @@ class AzureVpsClient(VpsClientInterface):
 
         When VM creation failed for *capacity* reasons (``SkuNotAvailable``),
         Azure reserves the NIC for the would-be VM for 180s, so the delete here
-        raises ``NicReservedForAnotherVm``. That is expected, not an error: the
-        next ``create_instance`` reclaims it via ``_reclaim_orphaned_network_resources``
-        once the reservation expires, so it is logged at info, not warning.
+        raises ``NicReservedForAnotherVm``. That is expected, not an error:
+        ``reclaim_orphaned_network_resources`` reaps it at GC time once the
+        reservation expires, so it is logged at info, not warning.
         """
         try:
             with self._translate_azure_errors():
@@ -774,7 +772,7 @@ class AzureVpsClient(VpsClientInterface):
     def _log_orphan_cleanup_failure(self, kind: str, vm_name: str, error: VpsApiError) -> None:
         if "NicReservedForAnotherVm" in str(error) or "PublicIPAddressCannotBeDeleted" in str(error):
             logger.info(
-                "Orphaned {} for {} is still reserved by the failed VM; it will be reclaimed on the next create.",
+                "Orphaned {} for {} is still reserved by the failed VM; it will be reclaimed by the next gc.",
                 kind,
                 vm_name,
             )
@@ -800,20 +798,25 @@ class AzureVpsClient(VpsClientInterface):
             return False
         return created_at < cutoff
 
-    def _reclaim_orphaned_network_resources(self) -> None:
+    def reclaim_orphaned_network_resources(
+        self, provider_name: ProviderInstanceName, dry_run: bool = False
+    ) -> list[ProviderResourceInfo]:
         """Best-effort delete unattached, aged mngr NICs / public IPs from failed creates.
 
         ``create_instance`` provisions a public IP + NIC before the VM; a VM
         create that fails (capacity / quota) leaves them orphaned, and Azure
         reserves the NIC for the would-be VM for 180s so immediate cleanup is
-        blocked. Rather than block a failed create for ~3 minutes, the next create
-        reclaims them here -- self-healing on the next operation, the same pattern
-        discovery / GC use. Only resources older than the reservation window
+        blocked. Rather than block a failed create for ~3 minutes, these are
+        reclaimed here at GC time (``mngr gc``, which also runs after every
+        ``mngr destroy``). Only resources older than the reservation window
         (``_ORPHAN_RECLAIM_MIN_AGE_SECONDS``) are touched, so an in-flight
         concurrent create is never disturbed. The whole sweep is best-effort: a
-        list / delete failure is logged and never blocks the create that follows.
+        list / delete failure is logged and never aborts the surrounding GC.
+
+        Returns the resources reclaimed (or, when ``dry_run``, that would be).
         """
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=_ORPHAN_RECLAIM_MIN_AGE_SECONDS)
+        reclaimed: list[ProviderResourceInfo] = []
         # NICs first -- a public IP attached to a NIC cannot be deleted.
         try:
             with self._translate_azure_errors():
@@ -824,10 +827,15 @@ class AzureVpsClient(VpsClientInterface):
         for nic in nics:
             if nic.virtual_machine is not None or not self._is_reclaimable_orphan(nic, cutoff):
                 continue
+            info = ProviderResourceInfo(provider_name=provider_name, kind="network_interface", name=nic.name)
+            if dry_run:
+                reclaimed.append(info)
+                continue
             try:
                 with self._translate_azure_errors():
                     self._network().network_interfaces.begin_delete(self.resource_group, nic.name).result()
                 logger.info("Reclaimed orphaned NIC {}", nic.name)
+                reclaimed.append(info)
             except VpsApiError as e:
                 logger.warning("Failed to reclaim orphaned NIC {}: {}", nic.name, e)
         # Then unattached public IPs (their NIC is gone, or never had one).
@@ -840,12 +848,18 @@ class AzureVpsClient(VpsClientInterface):
         for public_ip in public_ips:
             if public_ip.ip_configuration is not None or not self._is_reclaimable_orphan(public_ip, cutoff):
                 continue
+            info = ProviderResourceInfo(provider_name=provider_name, kind="public_ip", name=public_ip.name)
+            if dry_run:
+                reclaimed.append(info)
+                continue
             try:
                 with self._translate_azure_errors():
                     self._network().public_ip_addresses.begin_delete(self.resource_group, public_ip.name).result()
                 logger.info("Reclaimed orphaned public IP {}", public_ip.name)
+                reclaimed.append(info)
             except VpsApiError as e:
                 logger.warning("Failed to reclaim orphaned public IP {}: {}", public_ip.name, e)
+        return reclaimed
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
         try:
@@ -859,23 +873,36 @@ class AzureVpsClient(VpsClientInterface):
             return
         logger.info("Deleted Azure VM {} (NIC, public IP and OS disk cascade via delete_option)", instance_id)
 
+    def _await_lro(self, poller: LROPoller[None], timeout_seconds: float, description: str) -> None:
+        """Block on an Azure long-running operation up to ``timeout_seconds``.
+
+        ``LROPoller.wait(timeout)`` re-raises the operation's own error (translated
+        to ``VpsApiError`` by the surrounding ``_translate_azure_errors``) but does
+        NOT raise when the timeout merely elapses -- it returns with the poll still
+        in flight. So we check ``done()`` afterward and surface a clear
+        ``VpsProvisioningError``, matching the AWS/GCP clients' wait contract (the
+        operation itself keeps running server-side).
+        """
+        poller.wait(timeout_seconds)
+        if not poller.done():
+            raise VpsProvisioningError(f"Azure operation did not finish within {timeout_seconds}s: {description}")
+
     def deallocate_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> None:
         """Deallocate (not delete) an Azure VM, halting compute billing; the OS disk persists.
 
         Critically distinct from an OS-level shutdown, which only powers the VM
         off ("Stopped (not deallocated)") and STILL bills compute -- only a
         ``deallocate`` halts compute billing. The OS disk (and all on-disk state)
-        survives, so ``start_instance`` resumes it. The ``begin_deallocate`` LRO's
-        ``.result()`` blocks until the VM is fully deallocated, so no separate poll
-        is needed (``timeout_seconds`` is accepted for signature parity with the
-        AWS/GCP clients but the SDK manages its own polling). Idempotent.
+        survives, so ``start_instance`` resumes it. The ``begin_deallocate`` LRO is
+        bounded by ``timeout_seconds`` (re-raised as ``VpsProvisioningError`` on
+        exceedance, matching the AWS/GCP clients' wait contract). Idempotent.
 
         Widens ``AzureVpsClient`` beyond the shared ``VpsClientInterface`` (which
         has no stop/start); ``AzureProvider`` reaches it via ``self.azure_client``.
         """
-        del timeout_seconds
         with self._translate_azure_errors():
-            self._compute().virtual_machines.begin_deallocate(self.resource_group, str(instance_id)).result()
+            poller = self._compute().virtual_machines.begin_deallocate(self.resource_group, str(instance_id))
+            self._await_lro(poller, timeout_seconds, f"deallocate VM {instance_id}")
         logger.info("Deallocated Azure VM {} (compute billing halted; OS disk preserved)", instance_id)
 
     def start_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
@@ -885,13 +912,14 @@ class AzureVpsClient(VpsClientInterface):
         so it is PRESERVED across deallocate/start -- the returned IP equals the
         pre-stop address. (This is why ``AzureProvider.start_host`` needs no
         known_hosts rebind, unlike AWS/GCP whose ephemeral IPs change.) The
-        ``begin_start`` LRO blocks until the VM is running. Idempotent.
+        ``begin_start`` LRO is bounded by ``timeout_seconds`` (re-raised as
+        ``VpsProvisioningError`` on exceedance). Idempotent.
 
         Azure-only, like ``deallocate_instance`` -- reached via ``self.azure_client``.
         """
-        del timeout_seconds
         with self._translate_azure_errors():
-            self._compute().virtual_machines.begin_start(self.resource_group, str(instance_id)).result()
+            poller = self._compute().virtual_machines.begin_start(self.resource_group, str(instance_id))
+            self._await_lro(poller, timeout_seconds, f"start VM {instance_id}")
         logger.info("Started Azure VM {}", instance_id)
         return self.get_instance_ip(instance_id)
 
