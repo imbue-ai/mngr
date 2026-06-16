@@ -15,7 +15,6 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.cli.output_helpers import output_rsync_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -128,7 +127,7 @@ def _resolve_endpoint(
 @add_common_options
 @click.pass_context
 def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
-    mngr_ctx, output_opts, opts = setup_command_context(
+    mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="rsync",
         command_class=RsyncCliOptions,
@@ -158,7 +157,7 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
 
     uncommitted_changes_mode = UncommittedChangesMode(opts.uncommitted_changes.upper())
 
-    result = rsync(
+    rsync(
         source_host=source_host,
         source_path=source_path_str,
         destination_host=destination_host,
@@ -166,9 +165,8 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
         extra_args=opts.rsync_args,
         uncommitted_changes=uncommitted_changes_mode,
         cg=mngr_ctx.concurrency_group,
+        run_in_terminal=True,
     )
-
-    output_rsync_result(result, output_opts.output_format)
 
 
 # Register as ``mngr rsync`` (click's default name is the function name)
