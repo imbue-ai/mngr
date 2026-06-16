@@ -50,13 +50,13 @@ from imbue.mngr_aws.state_bucket import S3StateBucketError
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
 from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
-from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
@@ -103,7 +103,6 @@ _HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
 # default) or ``terminate`` -- so no IAM role or awscli is needed on the box.
 # See the README "Implementation details".
 IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-aws-idle-watcher"
-IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 
 # Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
 # When ``is_host_dir_synced_to_bucket`` is on and a state bucket is present, the
@@ -764,15 +763,6 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
                 outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
         logger.info("AWS host_dir sync daemon installed for host {} (target {})", host_id, sync_target_uri)
 
-    def _host_dir_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of this host's host_dir (the btrfs subvolume's host_dir tree).
-
-        The per-host host_dir lives at
-        ``<btrfs_mount_path>/<host_id_hex>/host_dir`` on the outer (the same
-        subvolume layout the idle sentinel path uses).
-        """
-        return self.config.btrfs_mount_path / host_id.get_uuid().hex / HOST_DIR_SUBPATH
-
     def _trigger_final_host_dir_sync(self, host_id: HostId, vps_ip: str) -> None:
         """Run the host_dir sync once (best-effort) so the offline copy is current before stop.
 
@@ -828,21 +818,6 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
                 outer.execute_idempotent_command("systemctl daemon-reload")
                 outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
         logger.info("AWS idle self-stop watcher installed for host {}", host_id)
-
-    def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of the in-container idle sentinel for this host.
-
-        The container writes the sentinel at ``<host_dir>/commands/<file>`` on the
-        shared volume; on the outer host that maps to
-        ``<btrfs_mount_path>/<host_id_hex>/host_dir/commands/<file>``.
-        """
-        return (
-            self.config.btrfs_mount_path
-            / host_id.get_uuid().hex
-            / HOST_DIR_SUBPATH
-            / "commands"
-            / IDLE_SENTINEL_FILENAME
-        )
 
     # =========================================================================
     # Offline metadata via EC2 tags (so STOPPED hosts list + resolve by name)

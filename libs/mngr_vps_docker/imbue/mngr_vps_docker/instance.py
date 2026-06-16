@@ -2375,6 +2375,14 @@ class VpsDockerProvider(BaseProviderInstance):
             host_store.remove_persisted_agent_data(agent_id)
 
 
+# The in-container activity watcher writes this sentinel into the host_dir's
+# ``commands`` directory on the shared volume when the host goes idle; a
+# host-side systemd ``.path`` unit watches the outer-filesystem location and
+# fires the provider's stop/deallocate ``.service``. Shared verbatim by every
+# offline-capable provider.
+IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
+
+
 class OfflineCapableVpsDockerProvider(VpsDockerProvider):
     """``VpsDockerProvider`` for cloud providers whose hosts can be stopped while
     their disk persists, with host/agent identity mirrored into instance
@@ -2431,6 +2439,23 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         """
         wanted_tag = f"mngr-host-id={host_id}"
         return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
+
+    def _host_dir_path_on_outer(self, host_id: HostId) -> Path:
+        """Outer-filesystem path of this host's host_dir (the btrfs subvolume's host_dir tree).
+
+        The per-host host_dir lives at ``<btrfs_mount_path>/<host_id_hex>/host_dir``
+        on the outer (the same subvolume layout the idle sentinel path uses).
+        """
+        return self.config.btrfs_mount_path / host_id.get_uuid().hex / HOST_DIR_SUBPATH
+
+    def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
+        """Outer-filesystem path of the in-container idle sentinel for this host.
+
+        The container writes the sentinel at ``<host_dir>/commands/<file>`` on the
+        shared volume; on the outer host that maps to
+        ``<btrfs_mount_path>/<host_id_hex>/host_dir/commands/<file>``.
+        """
+        return self._host_dir_path_on_outer(host_id) / "commands" / IDLE_SENTINEL_FILENAME
 
     @abstractmethod
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:

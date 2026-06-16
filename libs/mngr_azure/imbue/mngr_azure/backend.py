@@ -51,11 +51,11 @@ from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
-from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
@@ -94,7 +94,6 @@ _HOST_NAME_PREFIX: Final[str] = "mngr-"
 # billing on Azure, so falling back to ``shutdown`` would only strand the VM
 # unreachable while it keeps billing.
 IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-azure-idle-watcher"
-IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 # Where the host-side deallocate script is installed on the outer VM.
 _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
 
@@ -779,14 +778,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
                 outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
         logger.info("Azure host_dir sync daemon installed for host {} (target {})", host_id, blob_prefix_url)
 
-    def _host_dir_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of this host's host_dir (the btrfs subvolume's host_dir tree).
-
-        The per-host host_dir lives at ``<btrfs_mount_path>/<host_id_hex>/host_dir``
-        on the outer (the same subvolume layout the idle sentinel path uses).
-        """
-        return self.config.btrfs_mount_path / host_id.get_uuid().hex / HOST_DIR_SUBPATH
-
     def _trigger_final_host_dir_sync(self, host_id: HostId, vps_ip: str) -> None:
         """Run the host_dir sync once (best-effort) so the offline copy is current before deallocate.
 
@@ -845,16 +836,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
                 outer.execute_idempotent_command("systemctl daemon-reload")
                 outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
         logger.info("Azure idle self-deallocate watcher installed for host {}", host_id)
-
-    def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of the in-container idle sentinel for this host."""
-        return (
-            self.config.btrfs_mount_path
-            / host_id.get_uuid().hex
-            / HOST_DIR_SUBPATH
-            / "commands"
-            / IDLE_SENTINEL_FILENAME
-        )
 
     # =========================================================================
     # Offline metadata (so DEALLOCATED hosts list + resolve by name): the Blob
