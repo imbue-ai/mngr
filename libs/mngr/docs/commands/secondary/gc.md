@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr gc [OPTIONS]
+mngr gc [--all-providers] [--provider <PROVIDER>] [--dry-run] [--on-error <MODE>]
 ```
 
 Garbage collect unused resources.

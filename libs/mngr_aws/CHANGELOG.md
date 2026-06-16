@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-15
+
+### Changed
+
+- Changed: `mngr aws prepare` is now read-only-first: when the `mngr-aws` security group already exists with the required SSH ingress, it returns without any write API call. A re-run on an already-prepared region therefore succeeds with a key that only has `ec2:DescribeSecurityGroups`; `ec2:CreateSecurityGroup` / `ec2:AuthorizeSecurityGroupIngress` are only needed when the group or a rule is actually missing. Lets callers safely run `prepare` before every create regardless of the key's privileges.
+
 ## [v0.1.0] - 2026-06-13
 
 ### Added

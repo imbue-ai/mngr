@@ -755,7 +755,7 @@ add_pager_help_option(snapshot)
 CommandHelpMetadata(
     key="snapshot.create",
     one_line_description="Create a snapshot of agent host(s)",
-    synopsis="mngr snapshot create [IDENTIFIERS...|-] [OPTIONS]",
+    synopsis="mngr snapshot create [IDENTIFIERS...|-] [--name <NAME>] [--on-error <MODE>]",
     description="""Positional arguments can be agent names/IDs or host names/IDs. Each
 identifier is automatically resolved: if it matches a known agent, that
 agent's host is snapshotted; otherwise it is treated as a host identifier.
@@ -782,7 +782,7 @@ add_pager_help_option(snapshot_create)
 CommandHelpMetadata(
     key="snapshot.list",
     one_line_description="List snapshots for agent host(s)",
-    synopsis="mngr snapshot list [IDENTIFIERS...|-] [OPTIONS]",
+    synopsis="mngr snapshot list [IDENTIFIERS...|-] [--limit <N>]",
     description="""Shows snapshot ID, name, creation time, size, and host for each snapshot.
 
 Positional arguments can be agent names/IDs or host names/IDs. Each
@@ -810,7 +810,7 @@ add_pager_help_option(snapshot_list)
 CommandHelpMetadata(
     key="snapshot.destroy",
     one_line_description="Destroy snapshots for agent host(s)",
-    synopsis="mngr snapshot destroy [IDENTIFIERS...|-] [OPTIONS]",
+    synopsis="mngr snapshot destroy [IDENTIFIERS...|-] [--snapshot <ID>] [--all-snapshots] [-f|--force] [--dry-run]",
     description="""Requires either --snapshot (to delete specific snapshots) or --all-snapshots
 (to delete all snapshots for the resolved hosts). A confirmation prompt is
 shown unless --force is specified. Pass --dry-run to preview what would be
