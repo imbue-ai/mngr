@@ -344,11 +344,9 @@ def test_handles_malformed_json(tmp_path: Path, stub_mngr_log_sh: str) -> None:
 
 
 def test_missing_output_file_emits_nothing_to_pane(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    """Regression: on the first pass the output file does not exist yet, and the
-    watcher must stay completely silent on stdout/stderr. A bare
-    `wc -l < "$OUTPUT_FILE"` leaked a "No such file or directory" redirection
-    error to stderr (the watcher shell's own, so the command's 2>/dev/null did not
-    catch it), which surfaced in the agent's tmux pane on every poll.
+    """On the first pass the output file does not exist yet; the watcher must
+    stay completely silent on stdout/stderr while still converting the event.
+    The converter's count is captured by the shell, never echoed to the pane.
     """
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     runner.write_input([_make_user_event(uuid4().hex, "2026-01-01T00:00:00Z", text="Hello")])
@@ -363,9 +361,8 @@ def test_missing_output_file_emits_nothing_to_pane(tmp_path: Path, stub_mngr_log
 
 
 def test_dropped_lines_emit_nothing_to_pane(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    """Regression: malformed and null-message lines are dropped silently. The
-    converter used to log per-line skip warnings to stdout, which the shell did not
-    capture, so they leaked into the agent's tmux pane.
+    """Malformed and null-message lines are dropped silently and must produce no
+    output on the watcher's stdout/stderr; the valid line still converts.
     """
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     null_message = json.dumps(

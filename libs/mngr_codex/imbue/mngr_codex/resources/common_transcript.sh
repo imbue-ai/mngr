@@ -56,37 +56,20 @@ _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/common_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
-# Count lines in the output file, or 0 if it doesn't exist yet. A bare
-# `wc -l < "$OUTPUT_FILE"` leaks a "No such file or directory" redirection
-# error to this watcher's stderr (the failing `<` is the shell's own, so the
-# command's `2>/dev/null` does not catch it), which would surface in the
-# agent's pane on every poll until the first event is converted.
-_count_output_lines() {
-    if [ -f "$OUTPUT_FILE" ]; then
-        wc -l < "$OUTPUT_FILE"
-    else
-        echo 0
-    fi
-}
-
 convert_new_events() {
     if [ ! -f "$INPUT_FILE" ]; then
         log_debug "Input file not found: $INPUT_FILE"
         return
     fi
 
-    # Count output lines before/after so we can report how many events the
-    # converter appended without it having to write anything to stdout.
-    local before_count
-    before_count=$(_count_output_lines)
-
-    # The converter writes new events straight to the output file; its stdout
-    # carries nothing of interest, so drop it -- letting it reach this watcher's
-    # stdout would surface in the agent's pane. Genuine errors go to stderr.
     local convert_stderr
     convert_stderr=$(mktemp)
-    _INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" \
-        python3 "$SCRIPT_DIR/common_transcript_convert.py" 1>/dev/null 2>"$convert_stderr" || true
+    # The converter prints the count of appended events to stdout; capture it
+    # here so it never reaches this watcher's stdout (which would surface in the
+    # agent's pane). Genuine errors go to stderr.
+    local result
+    result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" \
+        python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
     if [ -s "$convert_stderr" ]; then
         # Forward the converter's stderr to both the structured log (via
@@ -97,9 +80,7 @@ convert_new_events() {
     fi
     rm -f "$convert_stderr"
 
-    local after_count
-    after_count=$(_count_output_lines)
-    local converted=$((after_count - before_count))
+    local converted="${result:-0}"
     if [ "$converted" -gt 0 ] 2>/dev/null; then
         log_info "Converted $converted new event(s) -> events/codex/common_transcript/events.jsonl"
     fi

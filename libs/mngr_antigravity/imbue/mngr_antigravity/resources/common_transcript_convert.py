@@ -22,7 +22,8 @@ Invoked as ``python3 common_transcript_convert.py`` with the input/output paths
 passed via the ``_INPUT_FILE`` / ``_OUTPUT_FILE`` environment variables that
 common_transcript.sh sets. Malformed or null lines are dropped silently; only an
 uncaught exception writes to stderr, which the shell reports as a convert error
-(the appended count comes from diffing the output file's line count). Split out of
+(the count of appended events is printed to stdout for common_transcript.sh to
+capture). Split out of
 the shell script (it used to be an inline ``python3`` heredoc) so the logic is
 lintable, type-checked, and unit-testable directly rather than only through a
 subprocess.
@@ -242,4 +243,4 @@ def convert(input_file: str, output_file: str) -> int:
 
 
 if __name__ == "__main__":
-    convert(os.environ["_INPUT_FILE"], os.environ["_OUTPUT_FILE"])
+    print(convert(os.environ["_INPUT_FILE"], os.environ["_OUTPUT_FILE"]))

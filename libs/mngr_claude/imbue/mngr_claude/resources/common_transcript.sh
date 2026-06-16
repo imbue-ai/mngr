@@ -48,19 +48,6 @@ source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 # shellcheck source=mngr_common_transcript_lib.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
 
-# Count lines in the output file, or 0 if it doesn't exist yet. A bare
-# `wc -l < "$OUTPUT_FILE"` leaks a "No such file or directory" redirection
-# error to this watcher's stderr (the failing `<` is the shell's own, so the
-# command's `2>/dev/null` does not catch it), which would surface in the
-# agent's pane on every poll until the first event is converted.
-_count_output_lines() {
-    if [ -f "$OUTPUT_FILE" ]; then
-        wc -l < "$OUTPUT_FILE"
-    else
-        echo 0
-    fi
-}
-
 # Convert new Claude transcript events to the common format.
 #
 # Reads the full input file and the set of event_ids already in the output
@@ -77,19 +64,15 @@ convert_new_events() {
         return
     fi
 
-    # Count output lines before/after so we can report how many events the
-    # converter appended without it having to write anything to stdout.
-    local before_count
-    before_count=$(_count_output_lines)
-
-    # The converter writes new events straight to the output file; its stdout
-    # carries nothing of interest, so drop it -- letting it reach this watcher's
-    # stdout would surface in the agent's pane. Genuine errors go to stderr.
     local convert_stderr
     convert_stderr=$(mktemp)
-    _INPUT_FILE="$INPUT_FILE" \
+    # The converter prints the count of appended events to stdout; capture it
+    # here so it never reaches this watcher's stdout (which would surface in the
+    # agent's pane). Genuine errors go to stderr.
+    local result
+    result=$(_INPUT_FILE="$INPUT_FILE" \
         _OUTPUT_FILE="$OUTPUT_FILE" \
-        python3 "$SCRIPT_DIR/common_transcript_convert.py" 1>/dev/null 2>"$convert_stderr" || true
+        python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
     # The read-modify-write is done; drop the lock before the (lock-free)
     # logging below so a concurrent pass can proceed immediately.
@@ -100,9 +83,7 @@ convert_new_events() {
     fi
     rm -f "$convert_stderr"
 
-    local after_count
-    after_count=$(_count_output_lines)
-    local converted=$((after_count - before_count))
+    local converted="${result:-0}"
     if [ "$converted" -gt 0 ] 2>/dev/null; then
         log_info "Converted $converted new event(s) -> events/claude/common_transcript/events.jsonl"
     fi
