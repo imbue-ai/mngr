@@ -53,6 +53,7 @@ from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -322,7 +323,9 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
         """
         bucket = self._state_bucket
         if bucket is not None:
-            return _S3BucketHostStateStore(bucket=bucket)
+            return BucketHostStateStore(
+                bucket=bucket, bucket_error_type=S3StateBucketError, bucket_label="S3 state bucket"
+            )
         return _Ec2TagHostStateStore(provider=self)
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
@@ -1254,54 +1257,6 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
         if instance is None:
             return None
         return self._host_record_from_instance(instance)
-
-
-class _S3BucketHostStateStore(HostStateStore):
-    """Bucket-backed host-state mirror: full host + agent records in S3 (no size limit)."""
-
-    bucket: S3StateBucket
-
-    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
-        host_id = HostId(record.certified_host_data.host_id)
-        try:
-            self.bucket.write_host_record(host_id, record.model_dump_json(indent=2))
-        except S3StateBucketError as e:
-            logger.warning("Failed to mirror host record for {} to S3 state bucket: {}", host_id, e)
-
-    def delete_host_state(self, host_id: HostId) -> None:
-        try:
-            self.bucket.delete_host_state(host_id)
-        except S3StateBucketError as e:
-            logger.warning("Failed to delete host state for {} from S3 state bucket: {}", host_id, e)
-
-    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        try:
-            self.bucket.write_agent_record(host_id, agent_id, agent_data)
-        except S3StateBucketError as e:
-            logger.warning("Failed to mirror agent {} for host {} to S3 state bucket: {}", agent_id, host_id, e)
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        try:
-            self.bucket.remove_agent_record(host_id, agent_id)
-        except S3StateBucketError as e:
-            logger.warning("Failed to remove agent {} for host {} from S3 state bucket: {}", agent_id, host_id, e)
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        return self.bucket.list_agent_records(host_id)
-
-    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        try:
-            record_json = self.bucket.read_host_record(host_id)
-        except S3StateBucketError as e:
-            logger.warning("Failed to read host record for {} from S3 state bucket: {}", host_id, e)
-            return None
-        if record_json is None:
-            return None
-        try:
-            return VpsDockerHostRecord.model_validate_json(record_json)
-        except ValueError as e:
-            logger.warning("Malformed host record for {} in S3 state bucket: {}", host_id, e)
-            return None
 
 
 class _Ec2TagHostStateStore(HostStateStore):

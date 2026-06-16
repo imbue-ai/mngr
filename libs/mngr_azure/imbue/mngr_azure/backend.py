@@ -52,6 +52,7 @@ from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
+from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -382,7 +383,9 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         """
         bucket = self._state_bucket
         if bucket is not None:
-            return _BlobBucketHostStateStore(bucket=bucket)
+            return BucketHostStateStore(
+                bucket=bucket, bucket_error_type=BlobStateBucketError, bucket_label="Azure state bucket"
+            )
         return _VmTagHostStateStore(provider=self)
 
     def _host_identity(self) -> BlobStateHostIdentity | None:
@@ -1237,54 +1240,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         if instance is None:
             return None
         return self._host_record_from_instance(instance)
-
-
-class _BlobBucketHostStateStore(HostStateStore):
-    """Bucket-backed host-state mirror: full host + agent records in Azure Blob (no size limit)."""
-
-    bucket: BlobStateBucket
-
-    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
-        host_id = HostId(record.certified_host_data.host_id)
-        try:
-            self.bucket.write_host_record(host_id, record.model_dump_json(indent=2))
-        except BlobStateBucketError as e:
-            logger.warning("Failed to mirror host record for {} to Azure state bucket: {}", host_id, e)
-
-    def delete_host_state(self, host_id: HostId) -> None:
-        try:
-            self.bucket.delete_host_state(host_id)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to delete host state for {} from Azure state bucket: {}", host_id, e)
-
-    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        try:
-            self.bucket.write_agent_record(host_id, agent_id, agent_data)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to mirror agent {} for host {} to Azure state bucket: {}", agent_id, host_id, e)
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        try:
-            self.bucket.remove_agent_record(host_id, agent_id)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to remove agent {} for host {} from Azure state bucket: {}", agent_id, host_id, e)
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        return self.bucket.list_agent_records(host_id)
-
-    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        try:
-            record_json = self.bucket.read_host_record(host_id)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to read host record for {} from Azure state bucket: {}", host_id, e)
-            return None
-        if record_json is None:
-            return None
-        try:
-            return VpsDockerHostRecord.model_validate_json(record_json)
-        except ValueError as e:
-            logger.warning("Malformed host record for {} in Azure state bucket: {}", host_id, e)
-            return None
 
 
 class _VmTagHostStateStore(HostStateStore):
