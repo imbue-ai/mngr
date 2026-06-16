@@ -179,7 +179,7 @@ def _format_cost_line(
     Caller contract: only invoke when there's at least one session of
     this mode (``session_count >= 1``), so ``latest_event_at`` is always
     a real timestamp -- the freshest session's last event for this mode.
-    ``UsageSnapshot`` enforces this pairing by construction (the
+    ``_UsageRenderModel`` enforces this pairing by construction (its
     per-mode ``latest_*_event_at`` property is ``int | None`` and is
     ``None`` iff the mode has zero sessions); callers in
     ``_write_source_section`` gate on the timestamp being present.

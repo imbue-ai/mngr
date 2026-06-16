@@ -56,6 +56,25 @@ def test_tokens_none_for_non_dict() -> None:
     assert codex_usage_emit._tokens_from_total_usage(None) is None
 
 
+def test_tokens_none_when_all_buckets_absent() -> None:
+    # An empty (or unrecognized-key) usage dict has no usable buckets, so it maps
+    # to None -- the emit guard then drops the content-free token block rather than
+    # writing an all-None snapshot the reader would price as a spurious $0.00 session.
+    assert codex_usage_emit._tokens_from_total_usage({}) is None
+
+
+def test_emit_skips_token_count_with_empty_usage_and_no_rate_limits(tmp_path: Path) -> None:
+    output_file, _ = _run(
+        tmp_path,
+        [
+            _session_meta("sess-1"),
+            _turn_context("gpt-5-codex"),
+            _token_count({}),
+        ],
+    )
+    assert _events(output_file) == []
+
+
 def test_rate_limits_map_primary_and_secondary_to_windows() -> None:
     windows = codex_usage_emit._rate_limits(
         {
