@@ -19,6 +19,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -359,6 +362,41 @@ def test_destroy_new_host_on_create_failure_destroys_failed_new_host(
         with destroy_new_host_on_create_failure(local_host, provider):
             raise ValueError("provisioning blew up")
     assert provider.destroyed_host_ids == [local_host.id]
+
+
+@pytest.mark.allow_warnings(match=r"^Failed to destroy host .* after a failed create")
+def test_destroy_new_host_on_create_failure_leaked_resource_does_not_mask_create_error(
+    local_provider: LocalProviderInstance,
+    local_host: Host,
+) -> None:
+    """A leaked-resource failure during rollback must not mask the original create error.
+
+    The teardown runs in a finally; destroy_host now raises a CleanupFailedGroup when it
+    leaves a resource behind. That group must be swallowed (logged) so the ValueError that
+    actually caused the create to fail is what propagates -- otherwise the user sees a
+    confusing cleanup error instead of the real cause.
+    """
+
+    class _LeakyDestroyProvider(LocalProviderInstance):
+        def destroy_host(self, host: HostInterface | HostId) -> None:
+            raise CleanupFailedGroup.from_failures(
+                [
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message="container could not be removed",
+                        host_id=local_host.id,
+                    )
+                ]
+            )
+
+    provider = _LeakyDestroyProvider(
+        name=local_provider.name,
+        host_dir=local_provider.host_dir,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    with pytest.raises(ValueError, match="provisioning blew up"):
+        with destroy_new_host_on_create_failure(local_host, provider):
+            raise ValueError("provisioning blew up")
 
 
 def test_destroy_new_host_on_create_failure_is_noop_on_success(

@@ -13,6 +13,7 @@ from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.exit_codes import exit_code_for_failures
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -26,6 +27,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -78,22 +81,22 @@ class GcCliOptions(CommonCliOptions):
 @click.pass_context
 def gc(ctx: click.Context, **kwargs) -> None:
     try:
-        any_provider_skipped = _gc_impl(ctx, **kwargs)
+        result = _gc_impl(ctx, **kwargs)
     except AbortError as e:
         # AbortError means we should exit immediately with an error
         logger.error("Aborted: {}", e.message)
         ctx.exit(1)
         return
-    if any_provider_skipped:
-        ctx.exit(1)
+    # Exit with a cause-specific code derived from the structured failures (0 when none),
+    # mirroring `mngr cleanup`/`destroy`/`stop`.
+    ctx.exit(exit_code_for_failures(result.failures))
 
 
-def _gc_impl(ctx: click.Context, **kwargs) -> bool:
+def _gc_impl(ctx: click.Context, **kwargs) -> GcResult:
     """Implementation of gc command (extracted for exception handling).
 
-    Returns True if any explicitly-requested provider was skipped because it
-    was empty or unavailable, signalling that the CLI should exit non-zero
-    after the rest of the work has run.
+    Returns the aggregated GcResult so the caller can derive a cause-specific
+    exit code from its structured failures.
     """
     # Setup command context (config, logging, output options)
     # This loads the config, applies defaults, and creates the final options
@@ -106,12 +109,13 @@ def _gc_impl(ctx: click.Context, **kwargs) -> bool:
     return _run_gc_iteration(mngr_ctx=mngr_ctx, opts=opts, output_opts=output_opts)
 
 
-def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: OutputOptions) -> bool:
+def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: OutputOptions) -> GcResult:
     """Run a single gc iteration.
 
-    Returns True if any explicitly-requested provider was skipped (empty or
-    unavailable). Other per-resource errors are reported in the summary but
-    do not change the CLI exit code.
+    Returns the aggregated GcResult. Skipped explicitly-requested providers are
+    recorded as PROVIDER_INACCESSIBLE failures, and per-resource cleanup
+    failures are recorded with their cause-specific categories; the caller
+    derives the process exit code from the full set of failures.
     """
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
@@ -138,8 +142,12 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
     )
 
     # Surface explicitly-requested providers that were skipped (empty/unavailable)
-    # as errors so the user sees them in the summary and the CLI exits non-zero.
-    result.errors.extend(skipped_provider_errors)
+    # as structured failures so the user sees them in the summary and the CLI exits
+    # non-zero (PROVIDER_INACCESSIBLE, exit code 6).
+    result.failures.extend(
+        CleanupFailure(category=CleanupFailureCategory.PROVIDER_INACCESSIBLE, message=message)
+        for message in skipped_provider_errors
+    )
 
     # Emit destroyed events for CLI output
     for work_dir in result.work_dirs_destroyed:
@@ -160,7 +168,7 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
     # Emit final summary
     _emit_final_summary(result=result, output_format=output_opts.output_format, dry_run=opts.dry_run)
 
-    return bool(skipped_provider_errors)
+    return result
 
 
 _RESOURCE_TYPE_MESSAGES: dict[str, str] = {
@@ -241,6 +249,7 @@ def _emit_json_summary(result: GcResult, dry_run: bool) -> None:
         "logs_destroyed": [log.model_dump(mode="json") for log in result.logs_destroyed],
         "build_cache_destroyed": [cache.model_dump(mode="json") for cache in result.build_cache_destroyed],
         "errors": result.errors,
+        "failures": [failure.model_dump(mode="json") for failure in result.failures],
         "dry_run": dry_run,
     }
     write_json_line(output_data)
@@ -340,6 +349,7 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
         "build_cache_count": len(result.build_cache_destroyed),
         "errors_count": len(result.errors),
         "errors": result.errors,
+        "failures": [failure.model_dump(mode="json") for failure in result.failures],
         "dry_run": dry_run,
     }
     emit_event("summary", event, OutputFormat.JSONL)

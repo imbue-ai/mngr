@@ -1,0 +1,1 @@
+Cron recipes: the "dispatch tasks from a queue directory" recipe now creates each agent on its own fresh branch off `main` (`mngr create --from ":$PROJECT_DIR" --branch main:`), so concurrent tasks never share a working branch. Also documented the random-selection variant (swap `sort` for `sort -R`).
