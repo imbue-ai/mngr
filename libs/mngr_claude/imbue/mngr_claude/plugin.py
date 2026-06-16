@@ -57,8 +57,10 @@ from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
@@ -1389,9 +1391,11 @@ class CostThresholdDialogIndicator(DialogIndicator):
 
 class ClaudeAgent(
     InteractiveTuiAgent[ClaudeAgentConfig],
+    CliBackedAgentMixin,
     HasCommonTranscriptMixin,
     HasStreamingSnapshotMixin,
     HasSessionPreservationMixin,
+    HasSessionAdoptionMixin,
     HasUnattendedModeMixin,
     HasVersionManagementMixin,
     HasAutoInstallMixin,
@@ -2198,6 +2202,15 @@ class ClaudeAgent(
             provision_backgroun_script_thread.join(60.0)
 
     def on_after_provisioning(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Adopt a session after provisioning so the agent's claude resumes existing context."""
+        self.adopt_session(host, options, mngr_ctx)
+
+    def adopt_session(
         self,
         host: OnlineHostInterface,
         options: CreateAgentOptions,

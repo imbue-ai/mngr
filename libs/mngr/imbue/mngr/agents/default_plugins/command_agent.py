@@ -4,16 +4,19 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.agent import GenericCommandAgentMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 
 
-class CommandAgent(BaseAgent[AgentTypeConfig], GenericCommandAgentMixin):
+class CommandAgent(BaseAgent[AgentTypeConfig], HasUnattendedModeMixin):
     """Agent type that runs an arbitrary shell command (see ``register_agent_type``).
 
-    Adds nothing to ``BaseAgent`` beyond the ``GenericCommandAgentMixin`` marker, which
-    records that this is a bare command runner (not a CLI-backed agent) and that it runs
-    unattended by nature.
+    A bare command runner: it does not inherit ``CliBackedAgentMixin``, so the CLI-oriented
+    capabilities render ``n/a`` for it. It runs unattended by construction -- a plain command
+    has no in-run tool prompt to approve -- so ``is_unattended_enabled`` is always True.
     """
+
+    def is_unattended_enabled(self) -> bool:
+        return True
 
 
 @hookimpl

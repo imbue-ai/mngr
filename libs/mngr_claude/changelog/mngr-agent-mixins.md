@@ -5,3 +5,5 @@
 `ClaudeAgent` also declares `HasVersionManagementMixin` (version pin, else auto-update).
 
 The auto-allow permission apply-path now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
+
+`ClaudeAgent` now declares `CliBackedAgentMixin` (marking it as wrapping a specific external CLI, which scopes the CLI-only capability-matrix rows) and `HasSessionAdoptionMixin`. Its session-adoption logic moved from `on_after_provisioning` into an `adopt_session` method (called by `on_after_provisioning`), so `--adopt-session` / `--from` session resumption is now a code-detectable `session_resume` capability. Behavior is unchanged.

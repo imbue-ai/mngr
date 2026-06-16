@@ -133,14 +133,22 @@ hand-maintained per agent):
 | Scope | Applies to | Example capabilities |
 |---|---|---|
 | `ALL` | every agent | `unattended_operation`, `deploy_contributions`, `live_output` |
-| `CLI_BACKED_ONLY` | not the bare command runners | transcripts, `auto_install`, `permission_policy`, `version_management`, `usage_tracking` |
-| `INTERACTIVE_ONLY` | not headless, not a bare command runner | `waiting_reason_field` |
+| `CLI_BACKED_ONLY` | agents that wrap a specific CLI | transcripts, `auto_install`, `permission_policy`, `version_management`, `usage_tracking`, `session_resume` |
+| `INTERACTIVE_ONLY` | CLI-backed and not headless | `waiting_reason_field` |
 | `HEADLESS_ONLY` | headless agents | `headless_output` |
 
-The kind traits come from marker mixins: `HeadlessAgentMixin` (headless) and
-`GenericCommandAgentMixin` (a bare `command` / `headless_command` runner, not CLI-backed and
-inherently unattended). `headless_output` is scoped `HEADLESS_ONLY` because exposing `output()`
-non-interactively is meaningless for an interactive agent.
+The kind traits come from two positive marker mixins: `HeadlessAgentMixin` (headless) and
+`CliBackedAgentMixin` (wraps a specific external coding-model CLI, vs. a bare `command` /
+`headless_command` runner). `CLI_BACKED_ONLY` is derived positively (`is_cli_backed`), so a bare
+command runner is simply *the agent without that marker* -- it needs no command-specific class of
+its own. `headless_output` is scoped `HEADLESS_ONLY` because exposing `output()` non-interactively
+is meaningless for an interactive agent.
+
+`unattended_operation` stays `ALL`-scope but reads two ways: an interactive coding agent earns it
+by auto-allowing in-run tool prompts (`HasUnattendedModeMixin` declared on the agent), while
+headless and bare-command agents have it *by construction* -- they have no prompt to gate on, so
+they declare the mixin trivially (`BaseHeadlessAgent`, and `CommandAgent` directly). A future
+coding agent that did not auto-allow would correctly show `-`.
 
 A cell renders `n/a` when the capability is out of scope for the agent's kind. One subtlety:
 a class mixin can be *inherited* by a kind that the scope excludes (a CLI-only transcript mixin
@@ -191,27 +199,33 @@ is prose in its `description`, not a boolean the code branches on.
 
 `AGENT_CAPABILITIES` is the ordered list. `AgentClassInfo` bundles what detection and scope
 need: the agent class, the agent-type/owner facts for the module-level kinds, and the kind
-traits (`is_headless`, `is_generic_command`) read from marker mixins.
+traits (`is_headless`, `is_cli_backed`) read from marker mixins.
 
 ### Class-level mixins to introduce
 
 `HasStreamingSnapshotMixin`, `HasUnattendedModeMixin`, `HasPermissionPolicyMixin`,
-`HasVersionManagementMixin`, `HasSessionPreservationMixin` -- each a small ABC carrying the
-abstract method(s) that capability already implies (e.g. `HasUnattendedModeMixin` declares the
-auto-allow application step that claude/agy/opencode/codex each implement differently, and that
-pi implements degenerately; `HasSessionPreservationMixin` declares the preserve step that all
-five `on_destroy` overrides already call). Unattended and policy are deliberately *two* mixins,
-not one, so claude and pi can claim the first without the second. The `Has…Mixin` shape matches
-the existing capability mixins (`HasTranscriptMixin`, `HasCommonTranscriptMixin`).
-Contract-bearing, not bare markers: you cannot inherit one without implementing its method, and
-the existing behavior is routed through it, so membership and implementation are the same fact.
-The four existing transcript/headless mixins are folded into the registry as-is. (Names are
-bikeable -- `HasUnattendedModeMixin` could be `SupportsUnattendedRunMixin`; the suffix is fixed.)
+`HasVersionManagementMixin`, `HasSessionPreservationMixin`, `HasSessionAdoptionMixin` -- each a
+small ABC carrying the abstract method(s) that capability already implies (e.g.
+`HasUnattendedModeMixin` declares the auto-allow application step that claude/agy/opencode/codex
+each implement differently, and that pi implements degenerately; `HasSessionPreservationMixin`
+declares the preserve step that all five `on_destroy` overrides already call; its read-side
+counterpart `HasSessionAdoptionMixin` declares the `adopt_session` step that claude's
+`on_after_provisioning` calls to resume `--adopt-session` / `--from` context). Unattended and
+policy are deliberately *two* mixins, not one, so claude and pi can claim the first without the
+second. The `Has…Mixin` shape matches the existing capability mixins (`HasTranscriptMixin`,
+`HasCommonTranscriptMixin`). Contract-bearing, not bare markers: you cannot inherit one without
+implementing its method, and the existing behavior is routed through it, so membership and
+implementation are the same fact. The four existing transcript/headless mixins are folded into
+the registry as-is. (Names are bikeable -- `HasUnattendedModeMixin` could be
+`SupportsUnattendedRunMixin`; the suffix is fixed.)
 
-`GenericCommandAgentMixin` is a **kind marker**, not a capability -- it classifies the agent so
-scope can be derived (see [Capability scope](#capability-scope-the-na-state)) and carries no
-matrix row of its own. It marks the bare `command` / `headless_command` runners (not CLI-backed;
-also inherently unattended, so it supplies `is_unattended_enabled`).
+`CliBackedAgentMixin` is a **kind marker**, not a capability -- it classifies the agent so scope
+can be derived (see [Capability scope](#capability-scope-the-na-state)) and carries no matrix row
+of its own. Every agent that wraps a specific external CLI (claude, codex, antigravity, opencode,
+pi, and headless variants) inherits it; the bare `command` / `headless_command` runners do not, so
+`is_cli_backed` is the positive trait that scopes the CLI-only rows. This is why `command` needs
+no special class for *scoping* -- a minimal `CommandAgent` survives only to declare
+`HasUnattendedModeMixin` (unattended by construction).
 
 Live output unifies what used to be two rows. A TUI agent surfaces it as a streaming-snapshot
 file (`HasStreamingSnapshotMixin`) and a headless agent as incremental stdout chunks
@@ -319,12 +333,15 @@ in the parity spec, because their content is how-not-whether.
 4. **(done)** Matrix presentation and the `n/a` state: a fixed column order with the bare
    command runners last (and a guard that raises if a registered agent type is neither ordered
    nor explicitly excluded, so none is silently dropped); the `headless_output` row pinned last;
-   and the code-derived `scope` model with its `CapabilityScope` enum and the
-   `GenericCommandAgentMixin` kind marker, so `raw`/`common` transcript, install, version, usage,
-   and permission are `n/a` for the bare command runners, `waiting_reason` is `n/a` for
-   headless/command, and `headless_output` is `n/a` off the headless agents. The TUI streaming
-   snapshot and headless incremental output were unified into one `live_output` row via a shared
-   `SupportsLiveOutputMixin` marker. Also wired `is_unattended_enabled()` through each agent's
+   and the code-derived `scope` model with its `CapabilityScope` enum and the positive
+   `CliBackedAgentMixin` kind marker, so `raw`/`common` transcript, install, version, usage,
+   permission, and `session_resume` are `n/a` for the bare command runners, `waiting_reason` is
+   `n/a` for headless/command, and `headless_output` is `n/a` off the headless agents. The TUI
+   streaming snapshot and headless incremental output were unified into one `live_output` row via
+   a shared `SupportsLiveOutputMixin` marker. `session_resume` (claude's `--adopt-session` /
+   `--from` carry-forward) was added via `HasSessionAdoptionMixin`. `GenericCommandAgentMixin` was
+   removed in favour of the positive marker; a minimal `CommandAgent` survives only to declare
+   unattended-by-construction. Also wired `is_unattended_enabled()` through each agent's
    auto-allow apply-site so the contract method is the single source of truth (behavior-preserving).
 5. **(follow-up PR)** The registry-driven **release** harness: walk each agent's declared
    capabilities and run a real `exercise_fn` per capability against a live agent (the

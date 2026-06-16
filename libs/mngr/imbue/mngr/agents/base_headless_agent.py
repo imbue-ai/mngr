@@ -12,6 +12,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
@@ -98,12 +99,16 @@ def render_file_diagnostic(
     return f"{prefix}{char_count} chars, tail:\n{tail}".rstrip()
 
 
-class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
+class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin, HasUnattendedModeMixin):
     """Base class for headless agents that capture output to files.
 
     Provides shared infrastructure for agents that redirect stdout/stderr
     to files and expose output programmatically. Subclasses must implement
     _get_stdout_path, _get_stderr_path, and stream_output.
+
+    Headless agents run unattended by construction -- they produce output
+    non-interactively, with no in-run tool prompt to approve -- so
+    ``is_unattended_enabled`` is always True.
 
     Subclasses can customize behavior by overriding:
     - _no_output_error_subject: the subject for "X exited without producing output" messages
@@ -113,6 +118,10 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
 
     _no_output_error_subject: str = "Command"
     _startup_grace_seconds: float = STARTUP_GRACE_SECONDS
+
+    def is_unattended_enabled(self) -> bool:
+        """Headless agents always run unattended -- there is no interactive prompt to gate on."""
+        return True
 
     @abstractmethod
     def _get_stdout_path(self) -> Path:
