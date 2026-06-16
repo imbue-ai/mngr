@@ -2350,6 +2350,151 @@ class VpsDockerProvider(BaseProviderInstance):
             host_store.remove_persisted_agent_data(agent_id)
 
 
+class OfflineCapableVpsDockerProvider(VpsDockerProvider):
+    """``VpsDockerProvider`` for cloud providers whose hosts can be stopped while
+    their disk persists, with host/agent identity mirrored into instance
+    tags/metadata.
+
+    A stopped (deallocated / powered-off) instance keeps its disk but is
+    SSH-unreachable, so the volume-backed base discovery and host resolution
+    cannot see it. This class adds the shared "offline" recovery: it reconstructs
+    such hosts (and their agents) from the provider's instance listing, and falls
+    back to that listing whenever the on-volume path raises ``HostNotFoundError``.
+
+    Subclasses (AWS/GCP/Azure) supply the per-provider instance-data hooks below.
+    The agent-record *write* side (``persist_agent_data`` /
+    ``remove_persisted_agent_data``) stays provider-specific because the tag vs
+    metadata write APIs differ too much to share.
+    """
+
+    @abstractmethod
+    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
+        """Locate this host's instance by its mngr-host-id tag/label (works while stopped), or None."""
+        ...
+
+    @abstractmethod
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        """Build a STOPPED ``DiscoveredHost`` from an instance's tags/metadata.
+
+        Returns ``None`` when the instance is not a mngr host. Raises ``ValueError``
+        when the instance carries a mngr host identity that is malformed (a
+        corrupt/externally-edited host-id or name).
+        """
+        ...
+
+    @abstractmethod
+    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
+        """Whether this instance's OS is down (stopped/deallocated, and their in-flight transitions).
+
+        Called only for mngr instances the live SSH sweep did NOT surface, so a
+        provider that must spend a per-instance API call to read power state pays
+        for it only on the unreachable ones.
+        """
+        ...
+
+    @abstractmethod
+    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
+        """Reassemble the host's agent records mirrored into this instance's tags/metadata."""
+        ...
+
+    @abstractmethod
+    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+        """Reconstruct a minimal STOPPED offline host from a stopped instance's tags/metadata."""
+        ...
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        """Augment the SSH-based base discovery with STOPPED instances it cannot reach.
+
+        The base sweep reaches hosts over SSH, so a stopped instance (OS down) is
+        invisible. Here we reconstruct those hosts and their agents from the
+        instance listing so they still appear in ``mngr list`` and resolve for
+        ``mngr start``.
+
+        One bad instance never aborts the sweep: a malformed mngr host identity is
+        logged and skipped. The offline check runs only for instances the live
+        sweep did not already surface (and after the cheap not-a-mngr-host / dedup
+        filters), so a healthy ``mngr list`` does no extra per-instance work and a
+        running-but-transiently-unreachable instance is not misreported as STOPPED.
+        """
+        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
+        online_host_ids = {ref.host_id for ref in result}
+        for instance in self._list_instances_cached():
+            try:
+                host_ref = self._offline_discovered_host_from_instance(instance)
+            except ValueError as e:
+                logger.opt(exception=e).warning(
+                    "Skipping instance {} in offline discovery: malformed mngr host identity",
+                    instance.get("id"),
+                )
+                continue
+            # Drop non-mngr instances and ones already surfaced live BEFORE the
+            # offline check, since that check may cost a per-instance API call.
+            if host_ref is None or host_ref.host_id in online_host_ids:
+                continue
+            if not self._is_instance_offline(instance):
+                continue
+            agent_refs: list[DiscoveredAgent] = []
+            for agent_data in self._persisted_agent_dicts_from_instance(instance):
+                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
+                if ref is not None:
+                    agent_refs.append(ref)
+            result[host_ref] = agent_refs
+        return result
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        """Resolve a host, falling back to the instance-data offline host when stopped.
+
+        The base reads the record over SSH, so a stopped instance raises
+        ``HostNotFoundError``; ``mngr start`` calls this directly, so without the
+        fallback a paused host could not be resumed by name. Only the ``HostId``
+        form is recovered (the resume path passes a ``HostId``); a bare
+        ``HostName`` for a stopped host still surfaces via discovery.
+        """
+        try:
+            return super().get_host(host)
+        except HostNotFoundError:
+            if isinstance(host, HostId):
+                return self.to_offline_host(host)
+            raise
+
+    def to_offline_host(self, host_id: HostId) -> OfflineHost:
+        """Return an offline host, reconstructing a stopped instance's record from instance data."""
+        try:
+            return super().to_offline_host(host_id)
+        except HostNotFoundError:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                raise
+            return self._offline_host_from_instance(host_id, instance)
+
+    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
+        """Return ``[]`` for a stopped host instead of raising.
+
+        ``OfflineHost.get_state`` derives state via ``list_snapshots``; the base
+        reads the list from the on-volume record, which is unreadable while
+        stopped. These providers have no host-snapshot lifecycle, so a stopped
+        host simply has none.
+        """
+        try:
+            return super().list_snapshots(host)
+        except HostNotFoundError:
+            return []
+
+    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
+        """Return the host's persisted agent records, on-volume when reachable else from instance data."""
+        try:
+            return super().list_persisted_agent_data_for_host(host_id)
+        except HostNotFoundError:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                return []
+            return self._persisted_agent_dicts_from_instance(instance)
+
+
 class MinimalVpsDockerProvider(VpsDockerProvider):
     """``VpsDockerProvider`` for use cases where VPS provisioning is externally managed.
 

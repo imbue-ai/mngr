@@ -25,14 +25,11 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -55,8 +52,8 @@ from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -195,7 +192,7 @@ class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class GcpProvider(VpsDockerProvider):
+class GcpProvider(OfflineCapableVpsDockerProvider):
     """GCP-specific provider that discovers hosts via the GCE instances.list API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -674,88 +671,14 @@ class GcpProvider(VpsDockerProvider):
         keys = [f"{AGENT_METADATA_PREFIX}{agent_id}-{field}" for field in _AGENT_METADATA_FIELDS]
         self.gcp_client.set_instance_metadata(VpsInstanceId(instance["id"]), {}, keys)
 
-    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the host's persisted agent records, on-volume when reachable else from metadata."""
-        try:
-            return super().list_persisted_agent_data_for_host(host_id)
-        except HostNotFoundError:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return []
-            return self._persisted_agent_dicts_from_instance(instance)
+    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
+        """Whether the GCE instance's OS is down (STOPPING or TERMINATED).
 
-    def discover_hosts_and_agents(
-        self,
-        cg: ConcurrencyGroup,
-        include_destroyed: bool = False,
-    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Add STOPPED instances (which the SSH-based base discovery misses) from metadata.
-
-        A stopped instance has no external IP and is SSH-unreachable, so the base
-        sweep can't see it; here we reconstruct those hosts and their agents from
-        instance labels + metadata. Mirrors ``AwsProvider.discover_hosts_and_agents``.
+        GCE power state rides along for free in the instance listing, so this
+        needs no extra call. A stopped GCE instance has no external IP and is
+        SSH-unreachable.
         """
-        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
-        online_host_ids = {ref.host_id for ref in result}
-        for instance in self._list_instances_cached():
-            if instance.get("state") not in _HOST_DOWN_STATES:
-                continue
-            try:
-                host_ref = self._discovered_host_from_instance(instance)
-            except ValueError as e:
-                logger.opt(exception=e).warning(
-                    "Skipping instance {} in offline discovery: malformed mngr host label(s)",
-                    instance.get("id"),
-                )
-                continue
-            if host_ref is None or host_ref.host_id in online_host_ids:
-                continue
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_data in self._persisted_agent_dicts_from_instance(instance):
-                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
-                if ref is not None:
-                    agent_refs.append(ref)
-            result[host_ref] = agent_refs
-        return result
-
-    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
-        """Return [] for a stopped host instead of raising.
-
-        ``OfflineHost.get_state`` derives state via ``list_snapshots``; the base
-        reads the snapshot list from the on-volume record, unreadable while stopped.
-        GCP has no host-snapshot lifecycle, so a stopped host simply has none.
-        Mirrors ``AwsProvider.list_snapshots``.
-        """
-        try:
-            return super().list_snapshots(host)
-        except HostNotFoundError:
-            return []
-
-    def get_host(self, host: HostId | HostName) -> HostInterface:
-        """Resolve a host, falling back to a metadata-based offline host when stopped.
-
-        ``mngr start`` calls ``get_host`` directly; the base reads the record over
-        SSH, so a stopped instance raises ``HostNotFoundError``. Recover by
-        reconstructing the offline host from labels + metadata (HostId form only;
-        a bare HostName for a stopped host still surfaces via discovery). Mirrors
-        ``AwsProvider.get_host``.
-        """
-        try:
-            return super().get_host(host)
-        except HostNotFoundError:
-            if isinstance(host, HostId):
-                return self.to_offline_host(host)
-            raise
-
-    def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a STOPPED instance's record from metadata."""
-        try:
-            return super().to_offline_host(host_id)
-        except HostNotFoundError:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                raise
-            return self._offline_host_from_instance(host_id, instance)
+        return instance.get("state") in _HOST_DOWN_STATES
 
     def _agent_metadata_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
         """Render one agent field as a metadata-value string, or ``None`` if absent/empty.
@@ -845,7 +768,7 @@ class GcpProvider(VpsDockerProvider):
             return HostName(name)
         return HostName(self._label_dict_from_normalized(instance).get("mngr-host-id", "unknown"))
 
-    def _discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED-state DiscoveredHost from an instance's labels + metadata, or None."""
         host_id_str = self._label_dict_from_normalized(instance).get("mngr-host-id")
         if host_id_str is None:

@@ -16,6 +16,7 @@ from uuid import uuid4
 from uuid import uuid5
 
 from azure.core.exceptions import HttpResponseError
+from azure.core.polling import LROPoller
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.authorization.v2022_04_01.models import Permission
 from azure.mgmt.authorization.v2022_04_01.models import RoleAssignmentCreateParameters
@@ -838,23 +839,36 @@ class AzureVpsClient(VpsClientInterface):
             return
         logger.info("Deleted Azure VM {} (NIC, public IP and OS disk cascade via delete_option)", instance_id)
 
+    def _await_lro(self, poller: LROPoller[None], timeout_seconds: float, description: str) -> None:
+        """Block on an Azure long-running operation up to ``timeout_seconds``.
+
+        ``LROPoller.wait(timeout)`` re-raises the operation's own error (translated
+        to ``VpsApiError`` by the surrounding ``_translate_azure_errors``) but does
+        NOT raise when the timeout merely elapses -- it returns with the poll still
+        in flight. So we check ``done()`` afterward and surface a clear
+        ``VpsProvisioningError``, matching the AWS/GCP clients' wait contract (the
+        operation itself keeps running server-side).
+        """
+        poller.wait(timeout_seconds)
+        if not poller.done():
+            raise VpsProvisioningError(f"Azure operation did not finish within {timeout_seconds}s: {description}")
+
     def deallocate_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> None:
         """Deallocate (not delete) an Azure VM, halting compute billing; the OS disk persists.
 
         Critically distinct from an OS-level shutdown, which only powers the VM
         off ("Stopped (not deallocated)") and STILL bills compute -- only a
         ``deallocate`` halts compute billing. The OS disk (and all on-disk state)
-        survives, so ``start_instance`` resumes it. The ``begin_deallocate`` LRO's
-        ``.result()`` blocks until the VM is fully deallocated, so no separate poll
-        is needed (``timeout_seconds`` is accepted for signature parity with the
-        AWS/GCP clients but the SDK manages its own polling). Idempotent.
+        survives, so ``start_instance`` resumes it. The ``begin_deallocate`` LRO is
+        bounded by ``timeout_seconds`` (re-raised as ``VpsProvisioningError`` on
+        exceedance, matching the AWS/GCP clients' wait contract). Idempotent.
 
         Widens ``AzureVpsClient`` beyond the shared ``VpsClientInterface`` (which
         has no stop/start); ``AzureProvider`` reaches it via ``self.azure_client``.
         """
-        del timeout_seconds
         with self._translate_azure_errors():
-            self._compute().virtual_machines.begin_deallocate(self.resource_group, str(instance_id)).result()
+            poller = self._compute().virtual_machines.begin_deallocate(self.resource_group, str(instance_id))
+            self._await_lro(poller, timeout_seconds, f"deallocate VM {instance_id}")
         logger.info("Deallocated Azure VM {} (compute billing halted; OS disk preserved)", instance_id)
 
     def start_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
@@ -864,13 +878,14 @@ class AzureVpsClient(VpsClientInterface):
         so it is PRESERVED across deallocate/start -- the returned IP equals the
         pre-stop address. (This is why ``AzureProvider.start_host`` needs no
         known_hosts rebind, unlike AWS/GCP whose ephemeral IPs change.) The
-        ``begin_start`` LRO blocks until the VM is running. Idempotent.
+        ``begin_start`` LRO is bounded by ``timeout_seconds`` (re-raised as
+        ``VpsProvisioningError`` on exceedance). Idempotent.
 
         Azure-only, like ``deallocate_instance`` -- reached via ``self.azure_client``.
         """
-        del timeout_seconds
         with self._translate_azure_errors():
-            self._compute().virtual_machines.begin_start(self.resource_group, str(instance_id)).result()
+            poller = self._compute().virtual_machines.begin_start(self.resource_group, str(instance_id))
+            self._await_lro(poller, timeout_seconds, f"start VM {instance_id}")
         logger.info("Started Azure VM {}", instance_id)
         return self.get_instance_ip(instance_id)
 

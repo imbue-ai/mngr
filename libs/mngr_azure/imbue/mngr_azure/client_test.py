@@ -570,6 +570,24 @@ def test_start_instance_returns_preserved_public_ip_and_records_start() -> None:
     assert compute.virtual_machines.started == ["vm1"]
 
 
+def test_deallocate_instance_raises_when_the_operation_outlasts_the_timeout() -> None:
+    """A deallocate LRO still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.deallocate_completes = False
+    client = _make_client(compute=compute)
+    with pytest.raises(VpsProvisioningError, match="did not finish within"):
+        client.deallocate_instance(VpsInstanceId("vm1"), timeout_seconds=0.01)
+
+
+def test_start_instance_raises_when_the_operation_outlasts_the_timeout() -> None:
+    """A start LRO still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.start_completes = False
+    client = _make_client(compute=compute)
+    with pytest.raises(VpsProvisioningError, match="did not finish within"):
+        client.start_instance(VpsInstanceId("vm1"), timeout_seconds=0.01)
+
+
 # =========================================================================
 # add_tags / remove_tags (server-side tag Merge/Delete, offline-discovery mirror)
 # =========================================================================

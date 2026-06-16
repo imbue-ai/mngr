@@ -109,13 +109,29 @@ def make_azure_http_error(status_code: int, message: str) -> HttpResponseError:
 
 
 class FakePoller:
-    """Stand-in for an azure LROPoller: ``result()`` returns a preset value or raises."""
+    """Stand-in for an azure LROPoller: ``result()``/``wait()`` return a preset value or raise.
 
-    def __init__(self, result_value: Any = None, error: Exception | None = None) -> None:
+    ``wait()`` re-raises the preset error (like the real poller surfacing the
+    operation's failure) but, like the real one, does NOT raise merely because a
+    timeout elapsed. Set ``completes=False`` to model an operation still in flight
+    after ``wait(timeout)`` so ``done()`` reports ``False`` (the timeout path).
+    """
+
+    def __init__(self, result_value: Any = None, error: Exception | None = None, completes: bool = True) -> None:
         self._result_value = result_value
         self._error = error
+        self._completes = completes
 
-    def result(self) -> Any:
+    def wait(self, timeout: float | None = None) -> None:
+        del timeout
+        if self._error is not None:
+            raise self._error
+
+    def done(self) -> bool:
+        return self._completes
+
+    def result(self, timeout: float | None = None) -> Any:
+        del timeout
         if self._error is not None:
             raise self._error
         return self._result_value
@@ -133,6 +149,10 @@ class FakeVirtualMachinesOperations:
         self.delete_error: Exception | None = None
         self.deallocate_error: Exception | None = None
         self.start_error: Exception | None = None
+        # When False, the corresponding LRO poller reports ``done()`` as False after
+        # ``wait(timeout)`` -- models an operation still in flight at the deadline.
+        self.deallocate_completes: bool = True
+        self.start_completes: bool = True
         self.instance_view_result: Any = None
         self.instance_view_error: Exception | None = None
         self.get_result: Any = None
@@ -158,13 +178,13 @@ class FakeVirtualMachinesOperations:
         if self.deallocate_error is not None:
             return FakePoller(error=self.deallocate_error)
         self.deallocated.append(vm_name)
-        return FakePoller()
+        return FakePoller(completes=self.deallocate_completes)
 
     def begin_start(self, resource_group: str, vm_name: str) -> FakePoller:
         if self.start_error is not None:
             return FakePoller(error=self.start_error)
         self.started.append(vm_name)
-        return FakePoller()
+        return FakePoller(completes=self.start_completes)
 
     def instance_view(self, resource_group: str, vm_name: str) -> Any:
         if self.instance_view_error is not None:

@@ -14,7 +14,6 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
@@ -24,14 +23,11 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -50,8 +46,8 @@ from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -185,7 +181,7 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AwsProvider(VpsDockerProvider):
+class AwsProvider(OfflineCapableVpsDockerProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -706,116 +702,16 @@ class AwsProvider(VpsDockerProvider):
         keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
         self.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
-    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the host's persisted agent records, on-volume when reachable else from tags.
+    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
+        """Whether the EC2 instance's OS is down (stopping or stopped).
 
-        For a *running* host the base reads the authoritative on-volume records
-        (full agent data); for a *stopped* host the base raises
-        ``HostNotFoundError`` (the volume is unreadable), so we fall back to the
-        compact records mirrored into EC2 tags (returned by ``DescribeInstances``
-        regardless of instance state).
+        EC2 power state rides along for free in the ``DescribeInstances`` listing,
+        so this needs no extra call. Gate on state, not ``main_ip`` -- a
+        ``stopping`` instance can still report a public IP while its OS is already
+        off, and gating on the IP would make the host vanish for the (seconds-long)
+        stop transition.
         """
-        try:
-            return super().list_persisted_agent_data_for_host(host_id)
-        except HostNotFoundError:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return []
-            return self._persisted_agent_dicts_from_instance(instance)
-
-    def discover_hosts_and_agents(
-        self,
-        cg: ConcurrencyGroup,
-        include_destroyed: bool = False,
-    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Add STOPPED instances (which the SSH-based base discovery misses) from tags.
-
-        The base discovery reaches hosts over SSH via their public IP, so a
-        stopped instance (no IP) is invisible. Here we reconstruct those hosts
-        and their agents from EC2 tags so they still appear in ``mngr list`` and
-        resolve for ``mngr start``.
-        """
-        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
-        online_host_ids = {ref.host_id for ref in result}
-        for instance in self._list_instances_cached():
-            # Reconstruct hosts whose instance is stopping or fully stopped: the OS
-            # is down, so the SSH-based sweep above can't reach them. Gate on state,
-            # not main_ip -- a `stopping` instance can still report a public IP while
-            # its OS is already off, and gating on main_ip would make the host vanish
-            # for the (seconds-long) stop transition. A genuinely-reachable host
-            # lands in online_host_ids and is deduped just below, so a running host
-            # is never double-listed here.
-            if instance.get("state") not in _HOST_DOWN_STATES:
-                continue
-            try:
-                host_ref = self._discovered_host_from_tags(instance)
-            except ValueError as e:
-                # A corrupted / externally-edited mngr-host-id or Name tag yields an
-                # invalid HostId/HostName (both ValueError subclasses). Skip just
-                # this instance rather than letting one bad tag abort offline
-                # discovery for every other stopped host in the account.
-                logger.opt(exception=e).warning(
-                    "Skipping instance {} in offline discovery: malformed mngr host tag(s)",
-                    instance.get("id"),
-                )
-                continue
-            if host_ref is None or host_ref.host_id in online_host_ids:
-                continue
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_data in self._persisted_agent_dicts_from_instance(instance):
-                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
-                if ref is not None:
-                    agent_refs.append(ref)
-            result[host_ref] = agent_refs
-        return result
-
-    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
-        """Return [] for a stopped host instead of raising.
-
-        ``OfflineHost.get_state`` calls ``get_snapshots`` (-> ``list_snapshots``)
-        while deriving state. The base reads the snapshot list from the on-volume
-        host record, which is unreadable while the instance is stopped, so it
-        raises ``HostNotFoundError``. AWS has no EBS-snapshot lifecycle and a
-        stopped host's docker-commit snapshots (if any) live on that unreadable
-        volume, so a stopped host simply has no visible snapshots.
-        """
-        try:
-            return super().list_snapshots(host)
-        except HostNotFoundError:
-            return []
-
-    def get_host(self, host: HostId | HostName) -> HostInterface:
-        """Resolve a host, falling back to the tag-based offline host when stopped.
-
-        The base ``get_host`` reads the host record over SSH, so a stopped
-        instance (no public IP, unreachable) raises ``HostNotFoundError``.
-        ``mngr start`` calls ``get_host`` directly, so without this a paused host
-        could not be resumed by name. Recover by reconstructing the offline host
-        from EC2 tags. Only the ``HostId`` form is recovered (the resume path
-        passes a HostId); a bare ``HostName`` for a stopped host still surfaces
-        via discovery, so name resolution does not depend on this.
-        """
-        try:
-            return super().get_host(host)
-        except HostNotFoundError:
-            if isinstance(host, HostId):
-                return self.to_offline_host(host)
-            raise
-
-    def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a STOPPED instance's record from tags.
-
-        Falls back to the base (SSH/volume-backed) path first; if that can't find
-        the host (because it is stopped and unreachable), rebuild a minimal
-        ``CertifiedHostData`` from EC2 tags so the offline host is still usable.
-        """
-        try:
-            return super().to_offline_host(host_id)
-        except HostNotFoundError:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                raise
-            return self._offline_host_from_tags(host_id, instance)
+        return instance.get("state") in _HOST_DOWN_STATES
 
     def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
         """Render one agent field as a tag-value string, or ``None`` if absent/empty.
@@ -919,7 +815,7 @@ class AwsProvider(VpsDockerProvider):
             return HostName(name_tag)
         return HostName(tags.get("mngr-host-id", "unknown"))
 
-    def _discovered_host_from_tags(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED-state DiscoveredHost from an instance's tags, or None if not a mngr host."""
         tags = self._tag_dict_from_normalized(instance)
         host_id_str = tags.get("mngr-host-id")
@@ -932,7 +828,7 @@ class AwsProvider(VpsDockerProvider):
             host_state=HostState.STOPPED,
         )
 
-    def _offline_host_from_tags(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
         """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
         tags = self._tag_dict_from_normalized(instance)
         created_at_raw = tags.get("mngr-created-at")
