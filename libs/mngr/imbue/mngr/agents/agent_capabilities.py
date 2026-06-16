@@ -212,8 +212,8 @@ def render_capability_matrix(
     infos: Sequence[AgentClassInfo],
 ) -> str:
     """Render a markdown matrix of capability (rows) x agent type (columns), with Y/- cells."""
-    agent_type_names = [info.agent_type_name for info in sorted(infos, key=lambda i: i.agent_type_name)]
     sorted_infos = sorted(infos, key=lambda i: i.agent_type_name)
+    agent_type_names = [info.agent_type_name for info in sorted_infos]
 
     header_row = "| Capability | " + " | ".join(agent_type_names) + " |"
     separator_row = "|" + "---|" * (len(agent_type_names) + 1)
