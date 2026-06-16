@@ -63,6 +63,14 @@ PLUGIN_FILENAME: str = "mngr_opencode_plugin.ts"
 # plugin touches/removes it. Kept in sync with the literal ``"active"`` core checks.
 ACTIVE_MARKER_FILENAME: str = "active"
 
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while opencode is blocked on a
+# tool-approval prompt (its ``ask`` permission policy). The lifecycle plugin touches
+# it while one or more permissions are pending and removes it once they are all
+# answered; ``OpenCodeAgent.get_lifecycle_state`` promotes RUNNING -> WAITING while
+# it is present, and ``_waiting_reason`` reports ``PERMISSIONS``. The plugin
+# hardcodes this same literal; keep the two in sync.
+PERMISSIONS_WAITING_FILENAME: str = "permissions_waiting"
+
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the *root* OpenCode
 # session id. ``opencode_launch.sh`` creates the session (via the server API)
 # and writes its id here on first launch, then reuses it on every restart so the
