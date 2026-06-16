@@ -34,10 +34,21 @@ named ones above stay independent. Folding in the refinements from design review
 - "Extra agent subtypes" is a registry fact (how many types a plugin registers), not a
   property of any agent class.
 
-The matrix has no `n/a` cells. Every cell is `Y` or `-` (present/absent) -- exactly what a
-detector computes -- because the would-be-n/a cases are handled honestly instead: folded into
-a universal requirement, or **implemented in their degenerate form** so presence is real. pi
-is the worked example (it has no tool-approval gate): rather than marking permissions "n/a",
+The matrix has three cell states: `Y` (present), `-` (applicable but absent), and `n/a`
+(the capability does not apply to that *kind* of agent). `n/a` is **derived from the code**,
+never hand-declared: each capability carries a `scope`, each agent's kind is read from marker
+mixins, and a cell is `n/a` exactly when the scope excludes the kind -- so `n/a` keeps the same
+"zero hand-maintained data" property as `Y`/`-` (see [Capability scope](#capability-scope-the-na-state)).
+
+This reverses the original binary design, and the reversal is deliberate. Once the matrix grew
+to cover non-standard kinds -- the headless variants and the bare `command` / `headless_command`
+runners -- some capabilities became genuinely inapplicable to a *whole kind*: a pane-scraping
+streaming snapshot on a headless agent, or a CLI install / version / usage concern on a bare
+shell command. Marking those `n/a` is more honest than `-` (which would imply "could have it,
+just doesn't"), and because the kind is itself a code-detectable fact, it stays fully derived.
+
+`n/a` is for *kind*-level inapplicability only. An *instance*-level gap is still handled
+honestly without it: pi has no tool-approval gate, but rather than marking permissions `n/a`,
 pi *implements* Unattended operation degenerately (auto-allow is always on; explicitly setting
 it off is a hard error, since pi cannot honor a gate) and *implements* the `waiting_reason`
 field with a single-value enum (a real extension point for if pi ever gains an approval gate).
@@ -61,7 +72,7 @@ What pi genuinely lacks -- a per-resource allow/deny/ask policy -- is an honest 
 | Field generators (`waiting_reason`) | claude, codex, opencode | **pluggy hookimpl on the plugin module** |
 | Usage tracking (token/cost emission) | claude, opencode, pi, codex | **sibling `mngr_<harness>_usage` plugin (hookimpls)** |
 
-The "Has it today" column was **corrected against the code on the synthetic base** (this is
+The "Has it today" column was **corrected against the code** (this is
 exactly the drift the matrix is meant to kill): the earlier draft wrongly listed claude under
 per-resource policy (it is blanket-hooks only), opencode under install management (it has
 none), and pi under `waiting_reason` (it has none yet -- pi's degenerate single-value generator
@@ -82,7 +93,7 @@ operation without a policy, which is exactly why these must be *separately* dete
 cannot share one mixin (an agent inheriting a combined mixin would falsely claim the policy).
 Two small mixins is the price of honest per-aspect detection.
 
-Where each agent's policy lives (verified against the code on the synthetic base): antigravity
+Where each agent's policy lives (verified against the code): antigravity
 a `permissions` block in `settings_overrides`; opencode a `permission` block via
 `config_overrides`; codex `sandbox_mode` / `approval_policy` / `config_overrides`. claude
 routes permissions through blanket `"*"` hooks with no structured per-tool surface, so it is an
@@ -110,25 +121,62 @@ registered plugins. antigravity is the lone `-` (deferred).
 All shapes are detected by a single capability registry, so the matrix has one generator
 regardless of which a capability uses.
 
+## Capability scope (the `n/a` state)
+
+Detection answers *does this agent have the capability?* Scope answers a prior question:
+*does the capability even apply to this kind of agent?* They are orthogonal -- a capability
+can be out of scope (`n/a`) regardless of whether the class happens to inherit its mixin.
+
+Each capability declares a `scope`, derived from code-detectable agent-kind traits (never
+hand-maintained per agent):
+
+| Scope | Applies to | Example capabilities |
+|---|---|---|
+| `ALL` | every agent | raw/common transcript-independent rows like `unattended_operation`, `deploy_contributions`, headless output |
+| `CLI_BACKED_ONLY` | not the bare command runners | transcripts, `auto_install`, `permission_policy`, `version_management`, `usage_tracking` |
+| `INTERACTIVE_ONLY` | not headless, not a bare command runner | `waiting_reason_field` |
+| `TUI_DRIVEN_ONLY` | keystroke-driven TUI agents that aren't headless | `streaming_snapshot` |
+
+The kind traits come from marker mixins: `HeadlessAgentMixin` (headless), `GenericCommandAgentMixin`
+(a bare `command` / `headless_command` runner, not CLI-backed and inherently unattended), and
+`InteractiveTuiMixin` (mngr drives it by sending keystrokes into the rendered pane, vs. a
+server/extension API). `streaming_snapshot` is scoped to TUI-driven because it works by scraping
+the rendered pane: server/extension-driven agents (opencode, pi) read the same information from
+their API, and headless agents have no pane. To make this structural, `HasStreamingSnapshotMixin`
+subclasses `InteractiveTuiMixin` -- the capability is, by construction, undeclarable on a
+non-TUI-driven agent.
+
+A cell renders `n/a` when the capability is out of scope for the agent's kind. One subtlety:
+a class mixin can be *inherited* by a kind that the scope excludes (e.g. `headless_claude`
+inherits the snapshot mixin from `ClaudeAgent` but has no pane), so an out-of-scope class-mixin
+hit renders `n/a` rather than erroring. The deliberately-registered kinds (a field generator
+keyed by agent type, a usage source, a deploy hookimpl) cannot be inherited by accident, so an
+out-of-scope hit *there* means the scope is wrong and rendering raises -- a drift guard.
+
 ## The capability registry
 
 One module (`libs/mngr/imbue/mngr/interfaces/agent_capabilities.py`) declares the
 capabilities and how to detect each. Sketch:
 
 ```python
-@dataclass(frozen=True)
-class AgentCapability:
+class AgentCapability(FrozenModel):
     key: str                       # matrix row name, stable
     description: str               # one line: what it does, and whether a
                                    # new port normally wants it
-    detect: Callable[[AgentClassInfo], bool]
+    detection_kind: CapabilityDetectionKind   # CLASS_MIXIN | FIELD_GENERATOR |
+                                              # PLUGIN_HOOKIMPL | USAGE_SOURCE
+    scope: CapabilityScope = CapabilityScope.ALL   # which agent kinds it applies to
+    mixin: type | None = None      # for CLASS_MIXIN detection
+    hook_name: str | None = None   # for PLUGIN_HOOKIMPL detection
 
-# class-level capability: detected by inheritance
+# class-level capability, scoped to TUI-driven agents
 STREAMING_SNAPSHOT = AgentCapability(
     key="streaming_snapshot",
     description="Live in-progress view of the agent's assistant text. "
     "Lowest-priority; only needed if a consuming UI wants live streaming.",
-    detect=lambda info: issubclass(info.agent_class, HasStreamingSnapshotMixin),
+    detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+    scope=CapabilityScope.TUI_DRIVEN_ONLY,
+    mixin=HasStreamingSnapshotMixin,
 )
 
 # module-level capability: detected by hookimpl presence
@@ -136,16 +184,19 @@ DEPLOY_CONTRIBUTIONS = AgentCapability(
     key="deploy_contributions",
     description="Bakes config/cred files + env vars into a `mngr schedule` "
     "image. Only needed if the agent runs under `mngr schedule`.",
-    detect=lambda info: info.plugin_implements("get_files_for_deploy"),
+    detection_kind=CapabilityDetectionKind.PLUGIN_HOOKIMPL,
+    hook_name="get_files_for_deploy",
 )
 ```
 
-There is no `is_recommended` flag: whether a new port normally wants a capability is
-prose in its `description`, not a boolean the code branches on.
+Detection is a `CapabilityDetectionKind` enum dispatched in one `is_capability_present`
+function (rather than a per-capability `detect` callable), so the four detection shapes live
+in one place. There is no `is_recommended` flag: whether a new port normally wants a capability
+is prose in its `description`, not a boolean the code branches on.
 
-`AGENT_CAPABILITIES` is the ordered list. `AgentClassInfo` bundles what a detector needs:
-the agent class (from `list_registered_agent_class_types` / `get_agent_class`) and a
-`plugin_implements(hook_name)` closure over the plugin manager's hookimpls.
+`AGENT_CAPABILITIES` is the ordered list. `AgentClassInfo` bundles what detection and scope
+need: the agent class, the agent-type/owner facts for the module-level kinds, and the kind
+traits (`is_headless`, `is_generic_command`, `is_tui_driven`) read from marker mixins.
 
 ### Class-level mixins to introduce
 
@@ -161,6 +212,14 @@ Contract-bearing, not bare markers: you cannot inherit one without implementing 
 the existing behavior is routed through it, so membership and implementation are the same fact.
 The four existing transcript/headless mixins are folded into the registry as-is. (Names are
 bikeable -- `HasUnattendedModeMixin` could be `SupportsUnattendedRunMixin`; the suffix is fixed.)
+
+Two further mixins are **kind markers**, not capabilities -- they classify the agent so scope
+can be derived (see [Capability scope](#capability-scope-the-na-state)), and carry no matrix
+row of their own. `GenericCommandAgentMixin` marks the bare `command` / `headless_command`
+runners (not CLI-backed; also inherently unattended, so it supplies `is_unattended_enabled`).
+`InteractiveTuiMixin` is a bare marker for keystroke-driven TUI agents; `InteractiveTuiAgent`
+inherits it (no behavior moved), and `HasStreamingSnapshotMixin` subclasses it so the snapshot
+capability is undeclarable off a TUI-driven agent.
 
 **Auto-install is a *base* capability, not one of the optional mixins above.** Checking the
 binary is present and installing it if missing is cheap and every agent should have it, so it
@@ -185,9 +244,10 @@ discoverability comes from two things, no extra machinery:
   should fill this" or "fine to skip" without a separate flag.
 
 The capability list is cross-linked from the parity spec's New-CLI investigation checklist,
-so the doc points at the code, not a copy. Because there are no `n/a` cells, every gap reads
-unambiguously as "absent" -- and whether to fill it is answered by the capability's
-`description`.
+so the doc points at the code, not a copy. A `-` gap reads unambiguously as "absent, and
+applicable" -- whether to fill it is answered by the capability's `description` -- while an
+`n/a` cell signals the capability does not apply to that kind of agent, so it is not a gap at
+all.
 
 ## The generated matrix and drift guard
 
@@ -241,7 +301,7 @@ mngr-owned start dialogs (interactive: pulled into mngr prompts; unattended: def
 transcript *mechanism*, process name, workspace path quirks. These remain dimension sections
 in the parity spec, because their content is how-not-whether.
 
-## Implementation plan -- all phases done
+## Implementation plan -- core phases done
 
 1. **(done)** `agents/agent_capabilities.py`: `AgentCapability`, `AgentClassInfo`, the
    registry, and the matrix renderer, with class-mixin / field-generator / plugin-hookimpl /
@@ -257,7 +317,16 @@ in the parity spec, because their content is how-not-whether.
    (detected by owning-plugin entry-point name); and **auto-install** as a base capability (`HasAutoInstallMixin`
    + shared `ensure_cli_installed`) added to agy/opencode/codex, pi routed through the helper,
    claude keeping its version-aware flow. One changelog entry per touched project.
-4. **(follow-up PR)** The registry-driven **release** harness: walk each agent's declared
+4. **(done)** Matrix presentation and the `n/a` state: a fixed column order with the bare
+   command runners last (and a guard that raises if a registered agent type is neither ordered
+   nor explicitly excluded, so none is silently dropped); the headless-output rows pinned last;
+   and the code-derived `scope` model with its `CapabilityScope` enum and the `GenericCommandAgentMixin`
+   / `InteractiveTuiMixin` kind markers, so `raw`/`common` transcript, install, version, usage,
+   and permission are `n/a` for the bare command runners, `waiting_reason` is `n/a` for
+   headless/command, and `streaming_snapshot` is `n/a` off the TUI-driven agents. Also wired
+   `is_unattended_enabled()` through each agent's auto-allow apply-site so the contract method is
+   the single source of truth (behavior-preserving).
+5. **(follow-up PR)** The registry-driven **release** harness: walk each agent's declared
    capabilities and run a real `exercise_fn` per capability against a live agent (the
    behavioral check detection cannot give). Detection itself is already covered in CI by the
    drift guard + the builder integration test, so a CI-cheap "coverage forcing" test over prose
@@ -281,11 +350,13 @@ matrix column.
   decreases," which doesn't match an equality check, so a plain test is the likely fit.
 - `offline_agent_field_generators` is unused by every plugin today; included as a detectable
   capability only if/when one implements it.
-- **No n/a, by construction.** Resolved in review: rather than a hand-declared n/a overlay,
-  would-be-n/a cells are handled honestly (folded into a universal requirement, or
-  implemented degenerately so presence is real -- see pi above). The generated grid is purely
-  binary (`Y`/`-`), with zero hand-kept data. This is the design's load-bearing simplifier;
-  if a future capability genuinely resists both treatments, revisit rather than reintroducing
-  n/a casually.
-- The opencode/codex permission-row contradiction (spec says `Y`, code-mapping said absent)
-  is unresolved; pin it down per-agent when writing the detectors.
+- **`n/a` is code-derived, never hand-declared.** The original design forbade `n/a` entirely;
+  it was reintroduced only once the matrix covered kinds for which some capabilities are
+  genuinely inapplicable (headless / bare-command), and only as a `scope` derived from
+  code-detectable kind traits (see [Capability scope](#capability-scope-the-na-state)). The
+  invariant that still holds: zero hand-kept per-cell data. *Instance*-level would-be-n/a
+  (pi's missing approval gate) is still handled honestly via degenerate implementation, not a
+  cell state.
+- The opencode/codex permission-row question is resolved: both carry `HasPermissionPolicyMixin`
+  (opencode a `permission` block via `config_overrides`; codex `sandbox_mode` / `approval_policy`),
+  so both are an honest `Y`.
