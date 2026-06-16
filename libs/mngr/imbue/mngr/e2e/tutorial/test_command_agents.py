@@ -8,7 +8,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # `mngr exec` runs the agent's command and waits for the agent's activity
@@ -79,8 +78,11 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
     # Verify the pipeline command and the idle configuration were actually
     # applied to the created agent (not silently dropped). The idle settings are
     # the distinctive feature of this tutorial line, so assert they round-trip.
+    # Scope the listing to the modal provider where this agent runs, so it stays
+    # fast and does not reach out to other providers (e.g. AWS) that may have no
+    # credentials configured in the test environment.
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider modal --format json",
         comment="verify the etl-job agent's command and idle configuration",
         timeout=120.0,
     )
@@ -90,14 +92,22 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
     assert len(matching) == 1, f"expected exactly one etl-job agent, got {matching}"
     etl_job = matching[0]
     assert etl_job["command"] == "sleep 100991", etl_job
+    assert etl_job["host"]["provider_name"] == "modal", etl_job
     # IdleMode serializes as an upper-case enum value (see primitives.IdleMode).
     assert etl_job["idle_mode"] == "RUN", etl_job
     assert etl_job["idle_timeout_seconds"] == 60, etl_job
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: this agent runs purely locally (it lives in a git
+# worktree of the current repo, populated via `git worktree add` rather than
+# rsync), so it never invokes the rsync binary and the resource guard would flag
+# the mark as never invoked.
 @pytest.mark.release
 @pytest.mark.tmux
+# `mngr create` for a command agent runs the agent's command and waits for the
+# agent's activity tracker, which pushes the test past the default 10s per-test
+# timeout (mirrors test_command_agent_python_http above).
+@pytest.mark.timeout(60)
 def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # run a dev server with extra tmux windows for logs
@@ -142,6 +152,18 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     expect(windows_result).to_succeed()
     window_names = windows_result.stdout.strip().split("\n")
     assert "logs" in window_names, f"Expected 'logs' window, got: {window_names}"
+
+    # A window merely named "logs" is not enough: the point of -w is to *run*
+    # the supplied command in that window. Verify both the main command (sleep)
+    # and the extra window's command (tail) are actually running inside the
+    # agent, so an empty window named "logs" would not pass.
+    ps_result = e2e.run(
+        "mngr exec dev-env 'ps aux'",
+        comment="Verify the main command and the extra window's command are running",
+    )
+    expect(ps_result).to_succeed()
+    expect(ps_result.stdout).to_contain("sleep 100992")
+    expect(ps_result.stdout).to_contain("tail -f /tmp/mngr-app.log")
 
 
 @pytest.mark.release

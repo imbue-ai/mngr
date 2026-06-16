@@ -58,7 +58,11 @@ def test_connect_by_name(e2e: E2eSession) -> None:
 
 
 # No @pytest.mark.modal: see test_connect_by_name (local-only resolution).
-@pytest.mark.rsync
+# No @pytest.mark.rsync: creating a local command agent in a git repo uses the
+# git-worktree transfer (no rsync, since the working tree has no extra
+# untracked/modified files to copy), and connecting to a local agent just execs
+# `tmux attach` -- neither path invokes rsync, so the resource guard would fail a
+# spurious rsync mark with "marked rsync but never invoked rsync".
 @pytest.mark.release
 @pytest.mark.tmux
 # See test_connect_by_name: the interactive attach/detach flow exceeds the

@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` from the `test_advanced_fan_out_create` e2e tutorial test. The fan-out create flow builds local git agents via the default git-worktree transfer, which never invokes rsync, so the resource guard failed the test for carrying a mark it never exercised.

@@ -1,0 +1,1 @@
+Strengthened the `mngr config set --scope` e2e tutorial test (`test_config_set_scope`): it now asserts the full "Set <key> = <value> in <scope>" confirmation line instead of just the scope word, checks the "Key not found" message on the project-scope read-back, and additionally verifies the user-scope write does not leak into the local scope.

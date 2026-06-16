@@ -1,0 +1,1 @@
+Fixed the `test_config_unset` e2e tutorial test, which failed because the project-scope `settings.toml` it created via `mngr config set` did not opt into pytest, so the follow-up `mngr config unset` (which reloads the merged config) was rejected. The test now seeds the project `settings.toml` with `is_allowed_in_pytest = true` up front, mirroring `test_config_unset_missing_key`.

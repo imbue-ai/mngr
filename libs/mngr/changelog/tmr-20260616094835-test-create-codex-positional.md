@@ -1,0 +1,3 @@
+Fixed the `test_create_codex_positional` e2e tutorial test, which failed the resource guard with "marked with @pytest.mark.rsync but never invoked rsync". Because the test creates the codex agent with `--no-auto-start --no-connect`, the agent process is never launched and file sync (rsync) is never exercised, so the `@pytest.mark.rsync` mark was removed (mirroring the earlier removal of `@pytest.mark.modal` for the same reason).
+
+Added an unhappy-path test (`test_create_unknown_positional_type_fails`) covering the same tutorial block: passing an unknown agent type as the second positional argument to `mngr create` now is verified to fail with an "Unknown agent type" error and to leave no agent behind.

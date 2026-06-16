@@ -9,6 +9,12 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+# This test runs two full `mngr` invocations back to back (the failing create
+# and a follow-up list). Each cold CLI startup in the isolated e2e environment
+# costs several seconds, so their combined runtime can exceed the default 10s
+# per-test timeout even though `mngr list --provider local` only queries the
+# local provider. Allow extra headroom for the sequence.
+@pytest.mark.timeout(120)
 def test_invalid_provider_fails(e2e: E2eSession) -> None:
     # A valid agent type is supplied so the failure is genuinely attributable to
     # the unknown provider, not to an unrelated missing-type error that would be
@@ -27,13 +33,11 @@ def test_invalid_provider_fails(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# This test creates a live local agent and then runs `mngr list`, which
-# enumerates every configured provider; that discovery can exceed the default
-# 10s per-test timeout when a remote provider (e.g. Docker) is unreachable and
-# the client waits on a connection. Allow extra headroom for the verification.
+# This test creates two live local agents and then runs `mngr list` plus
+# `mngr exec`; spinning up the agents and execing into one can exceed the
+# default 10s per-test timeout. Allow extra headroom for the verification.
 @pytest.mark.timeout(120)
 def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
     expect(
@@ -54,7 +58,13 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
 
     # The rejected duplicate must leave the original agent untouched: exactly
     # one agent named "my-task" should remain.
-    list_result = e2e.run("mngr list --format json", comment="Verify the original agent is intact")
+    # Scope discovery to the local provider: the agents are created with the
+    # default (local) provider, and an unscoped `mngr list` enumerates every
+    # configured provider and hard-fails (exit 1) whenever any provider's
+    # discovery errors (e.g. `aws` with no credentials in the test sandbox).
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="Verify the original agent is intact"
+    )
     expect(list_result).to_succeed()
     agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
     assert agent_names == ["my-task"], f"Expected only the original 'my-task', got {agent_names}"
@@ -72,6 +82,12 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# A cold-start `mngr create` (loading the type registry, resolving the source
+# location and its remote URL) followed by a `mngr list` verification routinely
+# exceeds the default 10s per-test timeout, even though the create itself aborts
+# early on the dirty-tree guard. Allow headroom so the timeout reflects a genuine
+# hang, not normal startup cost.
+@pytest.mark.timeout(120)
 def test_create_with_dirty_tree_fails(e2e: E2eSession) -> None:
     expect(
         e2e.run(

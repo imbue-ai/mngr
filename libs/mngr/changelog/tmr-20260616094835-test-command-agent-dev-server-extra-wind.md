@@ -1,0 +1,3 @@
+Fixed the `test_command_agent_dev_server_extra_windows` e2e release test, which was failing for two reasons: it lacked a `@pytest.mark.timeout` override (the command-agent create waits for the activity tracker and exceeded the default 10s timeout), and it carried a spurious `@pytest.mark.rsync` mark even though a local command agent runs in a git worktree and never invokes rsync.
+
+Also strengthened the test to verify that the extra `-w logs=...` tmux window actually runs its command: it now checks (via `mngr exec ... ps aux`) that both the main `sleep` command and the window's `tail -f` command are running inside the agent, rather than only asserting that a window named `logs` exists.

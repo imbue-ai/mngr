@@ -1,0 +1,1 @@
+Strengthened the `mngr config edit` editor-failure release test: it now drives the command with a fake editor that exits with a distinctive code (42) instead of `/bin/false`, proving that `config edit` propagates the editor's exact exit code rather than collapsing every editor failure to a generic 1.

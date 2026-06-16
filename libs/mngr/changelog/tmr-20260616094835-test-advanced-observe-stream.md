@@ -1,0 +1,1 @@
+Strengthened the `mngr observe --discovery-only` release test (`test_advanced_observe_stream`): it now asserts that every event line in the JSONL stream carries the common envelope fields (`source`, `type`, `event_id`, `timestamp`) that programmatic consumers rely on, and that the local provider entry reports `backend == "local"` in its config.

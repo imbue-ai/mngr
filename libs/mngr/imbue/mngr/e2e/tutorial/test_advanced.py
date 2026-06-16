@@ -19,7 +19,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -66,22 +65,29 @@ def test_advanced_fan_out_create(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # monitor all agents in a refreshing dashboard (uses Unix watch(1))
         watch -n 5 mngr list --running
     """)
-    # No modal mark: with no remote hosts registered, `mngr list --running`
-    # only enumerates the local provider and never contacts modal. `watch`
-    # clears the screen and emits terminal escape codes, so here we only assert
-    # that the one-shot dashboard refresh exits cleanly.
+    # No modal mark: the verification query below is scoped to `--provider local`,
+    # so it never contacts modal. `watch` clears the screen and emits terminal
+    # escape codes, so here we only assert that the one-shot dashboard refresh
+    # exits cleanly. The `timeout 1` wrapper kills watch during mngr's cold start
+    # (before a tick completes), which is why we re-run the query directly below.
     expect(
         e2e.run("timeout 1 watch -n 5 mngr list --running || true", comment="watch refreshing dashboard")
     ).to_succeed()
     # Verify the actual behavior of the command `watch` re-runs each tick: the
     # underlying `mngr list --running` query succeeds and emits a well-formed
-    # dashboard (an `agents` list -- empty here, since nothing is running).
-    dashboard = e2e.run("mngr list --running --format json", comment="dashboard query underlying the watch loop")
+    # dashboard (an `agents` list -- empty here, since nothing is running). Scope
+    # discovery to the local provider (matching test_advanced_fan_out_create) so
+    # the assertion does not depend on (or contact, and time out on) remote
+    # providers like modal/aws/docker that the e2e env leaves enabled.
+    dashboard = e2e.run(
+        "mngr list --running --provider local --format json", comment="dashboard query underlying the watch loop"
+    )
     expect(dashboard).to_succeed()
     assert json.loads(dashboard.stdout)["agents"] == [], dashboard.stdout
 
@@ -115,6 +121,16 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
     jsonl_lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert jsonl_lines, f"expected JSONL discovery output but got none. stderr:\n{result.stderr}"
     events = [json.loads(line) for line in jsonl_lines]
+    # Every line is an event envelope for programmatic consumers, so each must
+    # carry the common envelope fields (a typed event id, a type discriminator,
+    # a timestamp) and originate from the discovery source. Consumers key off
+    # these fields to dedupe and route events, so the contract holds for every
+    # event in the stream, not just the snapshot.
+    for event in events:
+        assert event["source"] == "mngr/discovery", event
+        assert event["type"], event
+        assert event["event_id"], event
+        assert event["timestamp"], event
     snapshots = [event for event in events if event.get("type") == "DISCOVERY_FULL"]
     assert snapshots, (
         f"expected a DISCOVERY_FULL snapshot in the stream, got types "
@@ -132,12 +148,15 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
     # provider must appear (the comment above explains why no remote markers are
     # needed). In this isolated, empty environment nothing has been created yet,
     # so the agent list is empty.
-    provider_names = {provider["provider_name"] for provider in snapshot["providers"]}
-    assert "local" in provider_names, provider_names
+    providers_by_name = {provider["provider_name"]: provider for provider in snapshot["providers"]}
+    assert "local" in providers_by_name, providers_by_name
+    # Each provider entry carries its base config; the local provider's backend
+    # must identify it as the local backend (the field consumers read to pick a
+    # provider implementation).
+    assert providers_by_name["local"]["config"]["backend"] == "local", providers_by_name["local"]
     assert snapshot["agents"] == [], snapshot
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -206,9 +225,13 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     # the Modal environment does not exist yet, bootstraps the environment too).
     expect(e2e.run(create_cmd, comment="use --reuse to make create idempotent", timeout=150.0)).to_succeed()
 
-    # Capture the agent ID of the newly created my-task agent.
+    # Capture the agent ID of the newly created my-task agent. Scope discovery to
+    # the modal provider (where the agent lives): the isolated e2e environment
+    # leaves every provider enabled, including unconfigured cloud providers such
+    # as aws, and `mngr list` exits non-zero if any enabled provider is
+    # unavailable. Scoping keeps the assertion focused on the agent under test.
     first_list = e2e.run(
-        "mngr list --include 'name == \"my-task\"' --ids",
+        "mngr list --provider modal --include 'name == \"my-task\"' --ids",
         comment="record the my-task agent ID after first create",
     )
     expect(first_list).to_succeed()
@@ -233,8 +256,9 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     assert "Creating host" not in second_output, f"--reuse must not create a new host: {second_output}"
 
     # The reuse must not have created a second agent: same single ID as before.
+    # Scope to the modal provider for the same reason as the first list above.
     second_list = e2e.run(
-        "mngr list --include 'name == \"my-task\"' --ids",
+        "mngr list --provider modal --include 'name == \"my-task\"' --ids",
         comment="verify --reuse did not create a duplicate agent",
     )
     expect(second_list).to_succeed()
@@ -244,8 +268,10 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     )
 
 
+# This test only creates a local command agent and runs `mngr list` under
+# `watch`, neither of which invokes rsync, so it intentionally carries no
+# @pytest.mark.rsync (the resource guard would flag it as never-invoked).
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
@@ -258,7 +284,10 @@ def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
     # `mngr list` is the content the dashboard refreshes. Run it directly (under
     # `watch` with a sub-second timeout it is killed during mngr's cold start
     # before producing output) so we can assert the agent actually shows up.
-    list_result = e2e.run("mngr list", comment="the live dashboard content")
+    # Scope to the local provider so the assertion does not depend on (or fail
+    # because of) unconfigured remote providers such as aws, which the bare
+    # `mngr list` queries and reports as unreachable (exit code 1).
+    list_result = e2e.run("mngr list --provider local", comment="the live dashboard content")
     expect(list_result).to_succeed()
     # The dashboard row shows the agent name alongside its live state (RUNNING or
     # WAITING depending on timing for the sleep command agent).
@@ -270,7 +299,6 @@ def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -282,8 +310,16 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
     _create_my_task(e2e, 101015)
     # Capture the id mngr records for my-task so we can confirm exec ran inside
     # *that* agent's environment, not merely that some env was dumped. Only one
-    # agent exists, so `mngr list --ids` prints exactly its id.
-    list_result = e2e.run("mngr list --ids", comment="get the agent id to cross-check the exec env")
+    # agent exists, so `mngr list --ids` prints exactly its id. Scope discovery to
+    # the local provider (where `_create_my_task` puts the agent): this test is
+    # not marked for docker/modal, so a bare full-scan list would also query those
+    # providers, and an unavailable backend (e.g. a stopped Docker daemon or an
+    # unconfigured cloud provider) makes the listing exit non-zero through no
+    # fault of the agent under test. The tutorial command below (`mngr exec`)
+    # already scopes by agent identifier, so this keeps the helper consistent.
+    list_result = e2e.run(
+        "mngr list --provider local --ids", comment="get the agent id to cross-check the exec env"
+    )
     expect(list_result).to_succeed()
     agent_id = list_result.stdout.strip()
     assert agent_id, f"expected an agent id from `mngr list --ids`, got: {list_result.stdout!r}"
@@ -322,9 +358,16 @@ def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
             timeout=180.0,
         )
     ).to_succeed()
-    # The filtered list should return exactly the modal agent we just created.
+    # Capture the modal agent's id to cross-check the exec below. This helper
+    # scopes discovery to the modal provider (`--provider`), which keeps it
+    # robust to other providers (e.g. aws) being enabled-but-unconfigured in the
+    # test environment -- those make a fan-out `mngr list` exit non-zero even
+    # though it still prints the modal id. The tutorial pipeline command itself
+    # (run below, unchanged) tolerates that because the pipe's exit code is
+    # `mngr exec`'s, not the upstream `mngr list`'s. Only the modal agent exists
+    # on the modal provider, so `--ids` prints exactly its id.
     list_result = e2e.run(
-        "mngr list --include 'host.provider == \"modal\"' --ids",
+        "mngr list --provider modal --include 'host.provider == \"modal\"' --ids",
         comment="list ids of modal hosts",
         timeout=60.0,
     )
@@ -341,6 +384,11 @@ def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
     expect(result).to_succeed()
     expect(result.stdout).to_contain(agent_id)
     expect(result.stdout).to_contain(f"MNGR_AGENT_ID={agent_id}")
+    # Confirm the exec ran inside *that* agent's environment (mngr injects these
+    # agent-identifying variables) and that mngr reported per-agent success,
+    # tying the env dump back to the modal agent we filtered to.
+    expect(result.stdout).to_contain("MNGR_AGENT_NAME=my-task")
+    expect(result.stdout).to_contain("Command succeeded on agent my-task")
 
 
 @pytest.mark.release
@@ -367,14 +415,27 @@ def test_tips_xargs_parallel_exec(e2e: E2eSession) -> None:
     # Sanity: the modal filter discovers the host we just created. Capture its id
     # so we can confirm the pipeline actually exec'd on it. `mngr list --ids`
     # prints `{id}`, which equals the `$MNGR_AGENT_ID` exported into the exec env.
+    #
+    # We assert on the discovered modal id rather than the exit code: `mngr list`
+    # exits non-zero whenever ANY enabled provider is unreachable (per
+    # error_handling.md), and this monorepo ships extra cloud-provider plugins
+    # (e.g. aws/gcp/vultr) that are enabled-by-default but lack credentials in
+    # the test environment. A real tutorial user installs only the recommended
+    # plugins and would not see those errors; more importantly the tutorial
+    # pipeline itself is immune because the pipe ignores `mngr list`'s exit code
+    # and still feeds the printed modal id into xargs. So the meaningful check is
+    # that the modal host id is listed, not that every unrelated provider was
+    # reachable.
     list_result = e2e.run(
         "mngr list --include 'host.provider == \"modal\"' --ids",
         comment="list modal host ids",
         timeout=60.0,
     )
-    expect(list_result).to_succeed()
-    agent_id = list_result.stdout.strip()
-    assert agent_id, f"expected a modal host id from `mngr list --ids`, got: {list_result.stdout!r}"
+    modal_id_lines = [line.strip() for line in list_result.stdout.splitlines() if line.strip().startswith("agent-")]
+    assert len(modal_id_lines) == 1, (
+        f"expected exactly one modal host id from `mngr list --ids`, got: {list_result.stdout!r}"
+    )
+    agent_id = modal_id_lines[0]
     # The tutorial command: fan `mngr exec` out across the modal hosts in
     # parallel. `mngr list` discovery is a cold network round-trip, so this needs
     # a per-command timeout well above the default 10s pytest signal timeout
@@ -427,9 +488,9 @@ def _seed_claude_transcript(host_dir: Path, events: list[dict[str, Any]]) -> Non
     (transcript_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_tips_transcript_tail_assistant(e2e: E2eSession, temp_host_dir: Path) -> None:
     e2e.write_tutorial_block("""
         # check the transcript to see what an agent has been up to

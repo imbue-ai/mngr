@@ -1,0 +1,1 @@
+Added a `test_config_path_json` release test covering the machine-readable (`--format json`) output of `mngr config path`, complementing the existing human-output test by verifying that the `paths` array reports all three scopes with `exists` booleans that match on-disk reality.

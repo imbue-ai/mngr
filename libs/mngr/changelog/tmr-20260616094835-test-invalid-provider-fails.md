@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `test_invalid_provider_fails` e2e test to 120s. The test runs two cold `mngr` invocations back to back, whose combined runtime exceeded the default 10s timeout and caused spurious failures.

@@ -1,0 +1,1 @@
+Fixed the `test_command_agent_data_pipeline` e2e release test so its verification step scopes `mngr list` to the `modal` provider (where the agent runs) instead of querying all providers. The unscoped listing failed in environments without AWS credentials because provider discovery for `aws` errored out. The test now also asserts the agent's host provider is `modal`.

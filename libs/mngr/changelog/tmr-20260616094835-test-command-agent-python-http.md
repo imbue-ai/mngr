@@ -1,0 +1,1 @@
+Removed the incorrect `@pytest.mark.rsync` mark from the `test_command_agent_python_http` e2e tutorial test. The test creates a purely local command agent that never invokes rsync, so the resource guard failed the test during teardown.

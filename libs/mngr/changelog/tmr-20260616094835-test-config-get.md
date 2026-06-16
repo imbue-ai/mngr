@@ -1,0 +1,1 @@
+Added a `test_config_get_json` e2e release test covering the machine-readable (`--format json`) output branch of `mngr config get`, mirroring the existing `test_config_list` / `test_config_list_json` pairing.

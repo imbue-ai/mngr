@@ -1,0 +1,1 @@
+- Changed: Added a `@pytest.mark.timeout(60)` override to the `test_help_succeeds` e2e release test. `mngr --help` loads every command module (and their pydantic models / the modal synchronizer) before rendering help, which takes ~8s and intermittently exceeded the global 10s pytest-timeout under load, causing spurious timeouts. Test-only change; no behavior change.

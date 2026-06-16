@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_advanced_collect_results_loop` e2e tutorial test. Local command agents in a git repo use a git worktree (not rsync) for their work directory, so the resource guard correctly flagged the mark as never invoking rsync.

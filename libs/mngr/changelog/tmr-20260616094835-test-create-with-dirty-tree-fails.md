@@ -1,0 +1,1 @@
+Raised the per-test timeout for the `test_create_with_dirty_tree_fails` e2e release test so a cold-start `mngr create` plus its `mngr list` verification no longer trips the default 10s timeout. The test exercises the dirty-working-tree guard and the underlying behavior was already correct.

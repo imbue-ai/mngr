@@ -14,6 +14,11 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+# `mngr --help` loads every command module (and their pydantic models / the modal
+# synchronizer) before rendering help, which routinely takes ~8s and intermittently
+# spikes past the global 10s pytest timeout under load. Raise it, mirroring the
+# other slow mngr invocations below (e.g. test_create_with_label).
+@pytest.mark.timeout(60)
 def test_help_succeeds(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or see the other commands--list, destroy, message, connect, push, pull, clone, and more!  These other commands are covered in their own sections below.
@@ -33,6 +38,12 @@ def test_help_succeeds(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# No host work happens (the unknown command is rejected at argument parsing, before
+# any agent/host setup), so no tmux/rsync markers. But the single `mngr` subprocess
+# still has to cold-start the full CLI (plugin/provider registration), which on its
+# own routinely approaches/exceeds the global 10s pytest timeout in the e2e
+# environment, so raise it like the create tests below.
+@pytest.mark.timeout(120)
 def test_unknown_command_fails(e2e: E2eSession) -> None:
     # Shares the tutorial block with test_help_succeeds: that block teaches users
     # to discover commands via `mngr --help`. This is the unhappy path -- invoking
@@ -57,6 +68,12 @@ def test_unknown_command_fails(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# No host/agent work happens (this only renders help text), but a single `mngr`
+# invocation still pays the full CLI startup cost: every plugin's CLI is imported
+# eagerly at launch, pulling in heavy SDKs (google-cloud, anthropic, docker), so
+# even `mngr create --help` routinely exceeds the global 10s pytest timeout. Raise
+# it past the e2e.run() default (30s) like the other create tests in this file.
+@pytest.mark.timeout(60)
 def test_create_help_succeeds(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # tons more arguments for anything you could want! As always, you can learn more via --help
@@ -103,7 +120,9 @@ def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("Usage: mngr create")
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: the working directory is a git repo, so create uses the
+# git-worktree transfer mode (rsync is only used for non-git projects or an
+# explicit --transfer=rsync). The agent's command runs in tmux, hence @tmux.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -124,7 +143,15 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     assert created["agent_id"].startswith("agent-")
     assert created["host_id"].startswith("host-")
 
-    list_result = e2e.run("mngr list --format json", comment="Verify agent appears in JSON list")
+    # Scope the listing to the local provider (where this agent lives). An
+    # enumerate-all `mngr list` intentionally fails loudly when any registered
+    # backend is unavailable (e.g. the AWS plugin is installed but has no
+    # credentials in this environment), per the documented design that a down
+    # provider could be hiding a target -- see
+    # test_discover_hosts_and_agents_propagates_unavailable_provider. Scoping to
+    # the relevant provider is the sanctioned way to avoid that, matching how the
+    # other e2e tests (test_config.py, test_errors.py) verify local agents.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify agent appears in JSON list")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert parsed["errors"] == []
@@ -139,7 +166,6 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     assert agent["command"] == "sleep 100064"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -169,7 +195,13 @@ def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
 
     # Suppressing output must not suppress the work: the agent must still exist.
     # `mngr list` output is unaffected by the create command's --quiet flag.
-    list_result = e2e.run("mngr list --format json", comment="Verify the quiet-created agent still exists")
+    # Scope discovery to the local provider (where this `--type command` agent
+    # was created): the default `--on-error abort` would otherwise fail the
+    # whole listing if any unrelated remote provider plugin (e.g. AWS) is
+    # installed in the environment but lacks credentials.
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="Verify the quiet-created agent still exists"
+    )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert parsed["errors"] == []
@@ -180,7 +212,6 @@ def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
     assert agent["command"] == "sleep 100066"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -197,7 +228,14 @@ def test_create_headless(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    list_result = e2e.run("mngr list", comment="Verify headless agent appears in list")
+    # The headless agent runs on the local provider, so scope the listing to
+    # that provider. This keeps the verification precise (it asserts on the
+    # provider the agent actually lives on) and decoupled from the reachability
+    # of unrelated remote providers -- a `mngr list` that fans out to every
+    # enabled backend would exit non-zero if, say, the Docker daemon is down or
+    # a cloud provider is uncredentialed, neither of which has any bearing on
+    # whether this local agent was created.
+    list_result = e2e.run("mngr list --provider local", comment="Verify headless agent appears in list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("my-task")
 
@@ -268,8 +306,41 @@ def test_create_rejects_malformed_label(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("KEY=VALUE")
 
     # The malformed input must be rejected before any agent is created -- nothing
-    # should be left behind in the listing.
-    list_result = e2e.run("mngr list --format json", comment="Verify no agent was created")
+    # should be left behind in the listing. Scope to the local provider: the create
+    # omits --provider, so it would have landed on the local host, and scoping keeps
+    # the listing from reaching out to (and failing on) optional cloud-provider
+    # plugins that happen to be installed but unconfigured in the test environment.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify no agent was created")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    assert [a for a in parsed["agents"] if a["name"] == "my-task"] == []
+
+
+@pytest.mark.release
+# Same rationale as test_create_rejects_malformed_label: create fails at label
+# parsing, but `mngr list`'s remote discovery still routinely exceeds the global
+# 10s pytest timeout, so raise it like the other create tests above.
+@pytest.mark.timeout(120)
+def test_create_rejects_malformed_host_label(e2e: E2eSession) -> None:
+    """Unhappy path for the `--host-label` half of the same `mngr create` block: a
+    host label missing the `=` separator is not in KEY=VALUE format, so create must
+    fail with a clear error before any agent is created. This is the host-metadata
+    counterpart to test_create_rejects_malformed_label (which exercises `--label`).
+    """
+    e2e.write_tutorial_block("""
+    # you can add labels to organize your agents and tags for host metadata:
+    mngr create my-task --label team=backend --host-label env=staging
+    """)
+    result = e2e.run(
+        "mngr create my-task --type command --no-ensure-clean --host-label env -- sleep 100070",
+        comment="a host label that is not in KEY=VALUE format is rejected",
+    )
+    expect(result).to_fail()
+    expect(result.stderr).to_contain("KEY=VALUE")
+
+    # The malformed input must be rejected before any agent is created. Scope to the
+    # local provider for the same reason as test_create_rejects_malformed_label.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify no agent was created")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert [a for a in parsed["agents"] if a["name"] == "my-task"] == []

@@ -1,0 +1,1 @@
+Removed the stale `@pytest.mark.rsync` mark from the `test_create_codex_explicit_type` tutorial e2e test. The test creates a local, same-host codex agent in a git repo, so the transfer mode is git-worktree (rsync is in fact rejected for git repos), and the resource guard correctly failed the test for declaring a resource it never invoked.

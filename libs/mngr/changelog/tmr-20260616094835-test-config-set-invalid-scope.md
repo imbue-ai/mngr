@@ -1,0 +1,1 @@
+Strengthened the `test_config_set_invalid_scope` e2e test to assert the exact Click usage-error exit code (2) for an invalid `--scope` value, confirming the rejection happens at argument-parse time before any write logic runs.

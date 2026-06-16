@@ -1,0 +1,1 @@
+Fixed the `test_config_edit_scope` e2e release test, which intermittently timed out. It runs three `mngr` subprocesses (config path, config edit, cat) whose cumulative cold-start time exceeds the default 10s per-test timeout; it now carries the same `@pytest.mark.timeout(60)` override used by the other multi-command config tests.

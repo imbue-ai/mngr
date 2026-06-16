@@ -1,0 +1,1 @@
+Fixed a flaky-on-slow-host failure in the `test_plugin_list_active_to_see_types` e2e tutorial test: the test runs two back-to-back `mngr plugin list` invocations (human + JSON), and their combined startup plus plugin-discovery cost could exceed the default 10s per-test timeout. Added `@pytest.mark.timeout(120)`, matching the other tests in the same file.

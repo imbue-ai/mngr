@@ -1,0 +1,1 @@
+Fixed the `test_create_with_template` and `test_create_with_nonexistent_template` e2e release tests, which were failing because they relied on the global 10-second pytest timeout. Creating a real agent takes longer than that, so the tests now use `@pytest.mark.timeout(300)`, matching the other e2e release tests.

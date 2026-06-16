@@ -8,7 +8,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -56,7 +55,6 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
     assert len(set(work_dirs.values())) == 3, f"agents must occupy distinct working directories: {work_dirs}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -97,6 +95,18 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     expect(cel_result).to_succeed()
     cel_names = {a["name"] for a in json.loads(cel_result.stdout)["agents"]}
     assert cel_names == set(stopped_names), (cel_names, stopped_names)
+
+    # The complementary --running filter must never surface the agent we
+    # explicitly stopped. We assert only on the stopped agent's absence (which
+    # is deterministic); whether the untouched agent reports RUNNING vs WAITING
+    # is timing-dependent, so we do not assert its presence here.
+    running_result = e2e.run(
+        "mngr list --running --format json",
+        comment="List only running agents",
+    )
+    expect(running_result).to_succeed()
+    running_names = {a["name"] for a in json.loads(running_result.stdout)["agents"]}
+    assert "stopped-agent" not in running_names, running_names
 
     # Without --stopped, both agents should appear (the non-stopped one may
     # be RUNNING or WAITING depending on timing)

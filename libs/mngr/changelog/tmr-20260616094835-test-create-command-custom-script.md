@@ -1,0 +1,1 @@
+Fixed the `test_create_command_custom_script` e2e tutorial test so its `mngr list` verification scopes to `--provider local`, matching the other agent-type tests. This keeps the listing from querying unreachable remote providers (e.g. AWS without credentials), which previously made the test fail with a non-zero exit from `mngr list`.

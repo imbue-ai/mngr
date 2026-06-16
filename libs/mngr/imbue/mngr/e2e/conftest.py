@@ -505,7 +505,32 @@ def _setup_test_profile(host_dir: Path) -> str:
     # PYTEST_CURRENT_TEST and loads this profile's settings.toml, so without
     # is_allowed_in_pytest = true (it defaults to False) the config loader would
     # refuse to run.
-    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
+    #
+    # Restrict the enabled backends to the ones the e2e suite actually
+    # exercises. The test repo is built with `uv sync --all-packages`, so every
+    # optional provider plugin (imbue-mngr-aws, -gcp, -ovh, -vultr, ...) is
+    # importable and registers a default backend instance -- something a real
+    # `pip install mngr` user would NOT have unless they opted into that plugin.
+    # Several of those credential-backed backends (notably AWS) deliberately
+    # raise ProviderUnavailableError when no credentials are resolvable, which
+    # makes any multi-provider read command (`mngr list`, `mngr gc`, ...) exit
+    # non-zero. Pinning enabled_backends mirrors a realistic install and keeps
+    # the e2e environment from depending on cloud credentials it does not have.
+    #
+    # ``docker`` is a core backend (always registered), but a default docker
+    # instance whose daemon is unreachable likewise raises
+    # ProviderUnavailableError and fails multi-provider reads. Release tests run
+    # in the Dockerfile.release sandbox where dockerd is up (socket at
+    # /var/run/docker.sock); only enable docker when it is actually reachable so
+    # that local/modal-only tests still pass in environments without docker.
+    # Add a backend here when the e2e suite starts exercising it.
+    enabled_backends = ["local", "modal"]
+    if os.environ.get("DOCKER_HOST") or Path("/var/run/docker.sock").exists():
+        enabled_backends.append("docker")
+    backends_toml = ", ".join(f'"{backend}"' for backend in enabled_backends)
+    (profile_dir / "settings.toml").write_text(
+        f"is_allowed_in_pytest = true\nenabled_backends = [{backends_toml}]\n"
+    )
 
     # Build a user_id that produces a Modal environment name matching the
     # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by
@@ -686,9 +711,41 @@ def e2e(
     # the installer; the e2e fixture mirrors that here so tutorial commands that
     # omit --type (e.g. `mngr create my-task --provider modal`) run as written.
     # "claude" matches the historical source default these tests relied on.
+    # Restrict discovery to the backends that are actually reachable in this
+    # environment. The monorepo installs *every* provider plugin, so without a
+    # pin the default `mngr list` constructs a default instance for each
+    # registered backend. The credential-requiring cloud backends (aws, gcp)
+    # deliberately raise ProviderUnavailableError when their credentials are
+    # missing (a configured provider whose state is unknown should surface
+    # rather than silently vanish) -- but in the test environment they are not
+    # configured at all, and that error aborts `mngr list` under its default
+    # --on-error abort. The docker backend likewise raises
+    # ProviderUnavailableError when no daemon is reachable. Real users only
+    # install/configure the backends they actually use; enabling exactly the
+    # reachable ones mirrors that and keeps discovery deterministic regardless
+    # of which optional plugins happen to be importable.
+    #
+    # local + ssh have no external dependency and are always safe. docker is
+    # enabled only when a daemon socket is present (release sandboxes start
+    # dockerd; see _ensure_dockerd_for_release). modal self-disables cleanly
+    # via ProviderEmptyError, but is only enabled when its credentials are
+    # loaded so it is never constructed without a way to reach its API.
+    enabled_backend_names = ["local", "ssh"]
+    if Path("/var/run/docker.sock").exists() or "DOCKER_HOST" in env:
+        enabled_backend_names.append("docker")
+    if "MODAL_TOKEN_ID" in env:
+        enabled_backend_names.append("modal")
+    enabled_backends_toml = ", ".join(f'"{name}"' for name in enabled_backend_names)
     settings_path.write_text(
         "is_allowed_in_pytest = true\n"
         "allow_settings_key_assignment_narrowing = true\n"
+        f"enabled_backends = [{enabled_backends_toml}]\n"
+        "\n"
+        "[providers.aws]\n"
+        "is_enabled = false\n"
+        "\n"
+        "[providers.gcp]\n"
+        "is_enabled = false\n"
         "\n"
         "[commands.create]\n"
         'type = "claude"\n'

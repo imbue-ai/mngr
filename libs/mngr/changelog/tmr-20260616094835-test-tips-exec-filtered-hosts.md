@@ -1,0 +1,3 @@
+Made the `test_tips_exec_filtered_hosts` e2e release test robust to non-modal providers (e.g. aws) being enabled-but-unconfigured in the test environment. The helper `mngr list` that captures the modal agent id now scopes discovery to the modal provider via `--provider modal`, so it succeeds even when an unrelated provider would otherwise make a fan-out list exit non-zero. The tutorial pipeline command under test is unchanged.
+
+Also strengthened the test's assertions to confirm the exec ran inside the named agent's environment (`MNGR_AGENT_NAME=my-task`) and that mngr reported per-agent success.

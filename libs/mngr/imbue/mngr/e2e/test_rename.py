@@ -12,7 +12,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -32,7 +31,7 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(rename_result.stdout).to_contain("my-task -> renamed-task")
 
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider local --format json",
         comment="Verify only the new name appears and agent is still alive",
     )
     expect(list_result).to_succeed()
@@ -54,7 +53,6 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(exec_result.stdout).to_contain("sleep 100104")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -74,8 +72,13 @@ def test_rename_dry_run_does_not_rename(e2e: E2eSession) -> None:
     expect(dry_run_result).to_succeed()
     expect(dry_run_result.stdout).to_contain("Would rename agent: my-task -> renamed-task")
 
+    # Scope discovery to the local provider: the agent was created in-place
+    # locally, so there is nothing to learn from remote providers, and fanning
+    # out to them would make the assertion fragile to whichever provider plugins
+    # happen to be installed/unconfigured in the runner (e.g. an AWS plugin with
+    # no credentials aborts the default `--on-error abort` listing).
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider local --format json",
         comment="Verify the agent still has its original name (dry-run did not mutate)",
     )
     expect(list_result).to_succeed()

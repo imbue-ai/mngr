@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` mark from the `test_connect_short_form` e2e release test. Connecting to a local agent (created via the git-worktree transfer, then attached with `tmux attach`) never invokes rsync, so the resource guard was failing the test with "marked rsync but never invoked rsync".

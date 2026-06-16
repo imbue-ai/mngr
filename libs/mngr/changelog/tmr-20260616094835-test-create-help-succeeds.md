@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `test_create_help_succeeds` e2e tutorial test. A single `mngr` invocation pays the full CLI startup cost (every plugin's CLI is imported eagerly, pulling in heavy SDKs), so even `mngr create --help` can exceed the global 10s pytest timeout. The test now allows 60s, matching the pattern used by the other `mngr create` tests in the same file.

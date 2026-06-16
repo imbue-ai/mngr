@@ -1,0 +1,1 @@
+Fixed the `test_config_edit` release test, which incorrectly assumed the e2e fixture pre-seeds the project-scope `settings.toml`. The fixture deliberately leaves that file unseeded so the test exercises genuine first-use behavior, where `mngr config edit` creates the file from a template before opening it in the editor. The test now tolerates the file not existing yet.
