@@ -158,6 +158,7 @@ from imbue.minds.primitives import ServiceName
 from imbue.minds.primitives import UserDataPreference
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -4333,7 +4334,10 @@ def create_desktop_client(
         onboarding_applier = OnboardingApplier(
             agent_creator=agent_creator,
             paths=agent_creator.paths,
-            message_sender=MngrMessageSender(mngr_binary=mngr_binary),
+            message_sender=MngrMessageSender(
+                mngr_caller=get_default_mngr_caller(),
+                concurrency_group=agent_creator.root_concurrency_group,
+            ),
             root_concurrency_group=agent_creator.root_concurrency_group,
             mngr_binary=mngr_binary,
         )
