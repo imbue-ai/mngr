@@ -1022,16 +1022,12 @@ class AwsProvider(VpsDockerProvider):
                 continue
             if host_ref is None or host_ref.host_id in online_host_ids:
                 continue
-            try:
-                agent_dicts = self._state_store.list_agent_records(host_ref.host_id)
-            except MngrError as e:
-                # e.g. duplicate mngr-host-id tags: skip this host's agents rather
-                # than aborting the whole offline sweep (matches the per-instance
-                # skip above for malformed tags).
-                logger.opt(exception=e).warning(
-                    "Skipping agents for host {} in offline discovery: {}", host_ref.host_id, e
-                )
-                continue
+            # An operational store/lookup failure (transient S3 error, or duplicate
+            # mngr-host-id tags) propagates: the api/list discovery wrapper attributes
+            # it to this provider and honors the caller's --on-error (ABORT/CONTINUE)
+            # plus the AgentObserver UNKNOWN convention. Only the malformed-tag data
+            # error above is skipped per-host (it is unrecoverable for that instance).
+            agent_dicts = self._state_store.list_agent_records(host_ref.host_id)
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in agent_dicts:
                 ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
