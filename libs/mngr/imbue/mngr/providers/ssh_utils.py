@@ -14,6 +14,7 @@ from pyinfra.api.inventory import Inventory
 from pyinfra.connectors.sshuserclient.client import get_host_keys
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.polling import poll_until
 
 
@@ -42,6 +43,12 @@ def generate_ssh_keypair() -> tuple[str, str]:
 def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Path]:
     """Generate and save an SSH keypair to the specified directory.
 
+    Both files are written atomically (temp file + ``os.replace``) so a
+    concurrent reader never observes a truncated key or public-key file. This
+    matters because the public-key file is probed by pyinfra/paramiko on every
+    SSH connection (as a possible certificate), and a half-written ``.pub``
+    raises ``ValueError: Not enough fields for public blob``.
+
     Returns a tuple of (private_key_path, public_key_path).
     """
     key_dir.mkdir(parents=True, exist_ok=True)
@@ -51,10 +58,9 @@ def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Pa
 
     private_key_pem, public_key_openssh = generate_ssh_keypair()
 
-    private_key_path.write_text(private_key_pem)
+    atomic_write(private_key_path, private_key_pem)
     private_key_path.chmod(0o600)
-
-    public_key_path.write_text(public_key_openssh)
+    atomic_write(public_key_path, public_key_openssh)
     public_key_path.chmod(0o644)
 
     return private_key_path, public_key_path
@@ -62,6 +68,14 @@ def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Pa
 
 def load_or_create_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, str]:
     """Load an existing SSH keypair or create a new one if it doesn't exist.
+
+    Creation is serialized with an exclusive file lock so that concurrent
+    callers (e.g. the parallel host-discovery fan-out, which opens one SSH
+    connection per VPS and lazily creates this keypair on first use) do not
+    each generate and write a different keypair over the top of one another --
+    which previously produced a transient zero-byte / mismatched ``.pub`` and a
+    ``ValueError`` deep in paramiko's certificate probe. Exactly one caller
+    creates the pair; the rest wait, then read the completed files.
 
     Returns a tuple of (private_key_path, public_key_content).
     """
@@ -71,7 +85,14 @@ def load_or_create_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tupl
     if private_key_path.exists() and public_key_path.exists():
         return private_key_path, public_key_path.read_text().strip()
 
-    save_ssh_keypair(key_dir, key_name)
+    key_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = key_dir / f".{key_name}.lock"
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        # Re-check under the lock: another caller may have created the pair
+        # while we waited to acquire it.
+        if not (private_key_path.exists() and public_key_path.exists()):
+            save_ssh_keypair(key_dir, key_name)
     return private_key_path, public_key_path.read_text().strip()
 
 
