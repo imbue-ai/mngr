@@ -241,23 +241,33 @@ mngr-owned start dialogs (interactive: pulled into mngr prompts; unattended: def
 transcript *mechanism*, process name, workspace path quirks. These remain dimension sections
 in the parity spec, because their content is how-not-whether.
 
-## Implementation plan
+## Implementation plan -- all phases done
 
 1. **(done)** `agents/agent_capabilities.py`: `AgentCapability`, `AgentClassInfo`, the
    registry, and the matrix renderer, with class-mixin / field-generator / plugin-hookimpl /
-   usage-source detection. Unit-tested; no plugin changes.
-2. The live `build_agent_class_infos(plugin_manager)` builder (introspects registered agent
-   classes, the `waiting_reason`-keyed field generators, per-agent plugin hookimpls, and usage
-   claims), the generated matrix doc, and the drift-guard test.
-3. Introduce the five new class-level mixins and wire them in, routing existing behavior
-   through the mixin method: snapshot -> claude; unattended -> all five (pi degenerately,
-   erroring on explicit-off); per-resource policy -> agy/opencode/codex; version management ->
-   claude/codex; session preservation -> all five. Add pi's single-value `waiting_reason` field
-   generator. Make **auto-install** a base capability and add it to the agents missing it
-   (agy/opencode/codex), per-CLI install command. One changelog entry per touched project.
-4. Wire the registry into the e2e/release harness: the `{capability_key: exercise_fn}` map,
-   the per-agent walk over declared capabilities, and the coverage test that forces every
-   capability to have an exercise.
+   usage-source detection. Unit-tested.
+2. **(done)** The live `build_agent_class_infos(plugin_manager)` builder, the generated matrix
+   doc (`libs/mngr/docs/concepts/agent_capabilities.md`), and the drift-guard test
+   (`just regenerate-agent-capabilities-doc`).
+3. **(done)** The capability mixins, wired across the plugins, routing existing behavior
+   through each contract method: streaming snapshot -> claude(+subtypes); session preservation
+   -> all five; unattended operation -> all five (pi degenerate, rejects explicit-off);
+   per-resource policy -> agy/opencode/codex; version management -> claude/codex; pi's
+   single-value `waiting_reason`; module-level `deploy_contributions` + `usage_tracking`
+   (package-level detection); and **auto-install** as a base capability (`HasAutoInstallMixin`
+   + shared `ensure_cli_installed`) added to agy/opencode/codex, pi routed through the helper,
+   claude keeping its version-aware flow. One changelog entry per touched project.
+4. **(done)** `agents/test_capability_coverage.py`: the coverage forcing test (every capability
+   must point at the test(s) exercising it) + a per-agent "declares >=1 capability" check.
+
+Verified opencode and agy auto-install end-to-end on real Modal hosts (which ship without the
+CLIs): both printed "<cli> installed successfully" during provision.
+
+The matrix was **corrected against the code** throughout (the drift this system kills): per-
+resource policy is agy/opencode/codex (not claude -- blanket hooks only); field generators are
+claude/codex/opencode (+ pi's degenerate one); install split into auto-install (all real
+agents) and version management (claude/codex); `mngr_kanpan` is not an agent type so it is no
+matrix column.
 
 ## Non-goals / open questions
 
