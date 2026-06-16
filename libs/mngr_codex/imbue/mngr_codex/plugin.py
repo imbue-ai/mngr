@@ -105,8 +105,10 @@ from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -294,6 +296,8 @@ class CodexAgent(
     HasCommonTranscriptMixin,
     HasSessionPreservationMixin,
     HasUnattendedModeMixin,
+    HasPermissionPolicyMixin,
+    HasVersionManagementMixin,
 ):
     """Agent implementation for the OpenAI Codex CLI (``codex``)."""
 
@@ -379,6 +383,17 @@ class CodexAgent(
 
     def is_unattended_enabled(self) -> bool:
         return self.agent_config.auto_allow_permissions
+
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        # codex's per-resource policy is its sandbox mode plus any approval_policy override.
+        policy: dict[str, Any] = {"sandbox_mode": self.agent_config.sandbox_mode}
+        if "approval_policy" in self.agent_config.config_overrides:
+            policy["approval_policy"] = self.agent_config.config_overrides["approval_policy"]
+        return policy
+
+    def get_version_policy(self) -> str:
+        # codex follows an update policy (ask / auto / never) rather than pinning a version.
+        return str(self.agent_config.update_policy)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""

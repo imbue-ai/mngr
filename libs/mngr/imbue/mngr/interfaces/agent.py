@@ -625,3 +625,35 @@ class HasUnattendedModeMixin(ABC):
     def is_unattended_enabled(self) -> bool:
         """Whether this agent instance is configured to run unattended (auto-allow tool prompts)."""
         ...
+
+
+class HasPermissionPolicyMixin(ABC):
+    """Mixin for agent types that support a per-resource allow/deny/ask permission policy.
+
+    A refinement on top of plain unattended auto-allow: the CLI can express a
+    per-tool / per-resource policy (e.g. allow ``git *`` but deny ``rm -rf *``).
+    Each CLI stores this differently (a settings block, a config-overrides key, a
+    sandbox mode); this contract returns the instance's configured policy in a
+    normalized form, empty when none is set.
+    """
+
+    @abstractmethod
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        """Return this agent instance's configured per-resource permission policy (empty if none)."""
+        ...
+
+
+class HasVersionManagementMixin(ABC):
+    """Mixin for agent types that control which version of their binary runs.
+
+    Either by pinning a specific version or by following an update policy (the
+    two faces of version control -- not pinning is itself a choice to track
+    upstream). CLIs that simply assume whatever binary is on PATH do not have
+    this capability. This contract returns a short label of the instance's
+    version-management intent.
+    """
+
+    @abstractmethod
+    def get_version_policy(self) -> str:
+        """Return a short label of how this agent instance manages its binary version."""
+        ...

@@ -78,6 +78,7 @@ from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileType
@@ -223,7 +224,11 @@ class OpenCodeAgentConfig(AgentTypeConfig):
 
 
 class OpenCodeAgent(
-    BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin, HasUnattendedModeMixin
+    BaseAgent[OpenCodeAgentConfig],
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
+    HasPermissionPolicyMixin,
 ):
     """Agent implementation for OpenCode (driven via its server, not TUI keystrokes)."""
 
@@ -536,6 +541,11 @@ class OpenCodeAgent(
 
     def is_unattended_enabled(self) -> bool:
         return self.agent_config.auto_allow_permissions
+
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        # opencode's per-resource policy lives in the `permission` config-overrides key.
+        policy = self.agent_config.config_overrides.get("permission", {})
+        return policy if isinstance(policy, Mapping) else {}
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""

@@ -12,10 +12,12 @@ from pydantic import Field
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 
@@ -149,6 +151,18 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         description="Can complete a run with no human by auto-allowing in-run tool prompts. The load-bearing capability for remote / scheduled / headless agents.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasUnattendedModeMixin,
+    ),
+    AgentCapability(
+        key="permission_policy",
+        description="Supports a per-resource allow/deny/ask permission policy (a refinement on plain auto-allow). Only some CLIs expose per-tool config.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=HasPermissionPolicyMixin,
+    ),
+    AgentCapability(
+        key="version_management",
+        description="Controls which version of its binary runs, by pinning a version or following an update policy. Absent for CLIs that just use whatever is on PATH.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=HasVersionManagementMixin,
     ),
 )
 
