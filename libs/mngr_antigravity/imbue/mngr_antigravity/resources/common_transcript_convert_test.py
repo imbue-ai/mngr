@@ -8,8 +8,11 @@ streams on disk, without the surrounding shell script. The shell integration
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr_antigravity.resources import common_transcript_convert
@@ -116,9 +119,12 @@ def test_code_action_error_status_sets_is_error(tmp_path: Path) -> None:
     assert result["is_error"] is True
 
 
-def test_code_action_with_non_string_content_yields_empty_output(tmp_path: Path) -> None:
-    # A CODE_ACTION whose content is JSON null (key present, value null) must not
-    # crash _truncate; it pairs with its tool call and emits an empty output.
+def test_code_action_with_non_string_content_is_dropped_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A CODE_ACTION whose content is JSON null (key present, value null) carries no
+    # usable output and would crash _truncate; it is dropped with a warning rather
+    # than emitted as an empty tool_result.
     in_f, out_f = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     _write(
         in_f,
@@ -141,10 +147,10 @@ def test_code_action_with_non_string_content_yields_empty_output(tmp_path: Path)
             },
         ],
     )
-    common_transcript_convert.convert(str(in_f), str(out_f))
-    result = [e for e in _events(out_f) if e["type"] == "tool_result"][0]
-    assert result["output"] == ""
-    assert validate_common_transcript_record(result) is None
+    with caplog.at_level(logging.WARNING):
+        common_transcript_convert.convert(str(in_f), str(out_f))
+    assert [e for e in _events(out_f) if e["type"] == "tool_result"] == []
+    assert "non-string content" in caplog.text
 
 
 def test_code_action_without_preceding_tool_call_is_dropped(tmp_path: Path) -> None:

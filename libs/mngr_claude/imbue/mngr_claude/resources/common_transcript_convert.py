@@ -147,7 +147,12 @@ def convert(input_file: str, output_file: str) -> int:
                     continue
 
                 raw_message = raw.get("message")
-                message = raw_message if isinstance(raw_message, dict) else {}
+                if not isinstance(raw_message, dict):
+                    # A null/missing message carries no usable content -- warn and
+                    # drop the line rather than emit an empty event or crash.
+                    logging.warning("dropping %s event with non-dict message (uuid=%s)", event_type, uuid)
+                    continue
+                message = raw_message
                 content_blocks = message.get("content", [])
                 model = message.get("model", "unknown")
                 stop_reason = message.get("stop_reason")
@@ -216,7 +221,12 @@ def convert(input_file: str, output_file: str) -> int:
             # -- user messages (may contain text, tool results, or both) --
             elif event_type == "user":
                 raw_message = raw.get("message")
-                message = raw_message if isinstance(raw_message, dict) else {}
+                if not isinstance(raw_message, dict):
+                    # A null/missing message carries no usable content -- warn and
+                    # drop the line rather than emit an empty event or crash.
+                    logging.warning("dropping %s event with non-dict message (uuid=%s)", event_type, uuid)
+                    continue
+                message = raw_message
                 content = message.get("content")
 
                 # Emit user text message if there is actual user text

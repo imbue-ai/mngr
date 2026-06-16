@@ -204,11 +204,16 @@ def convert(input_file: str, output_file: str) -> int:
                 event_id = f"{conv_id}-{step_index}-tool_result"
                 if event_id in existing_ids:
                     continue
-                # Coerce a non-string content (e.g. JSON null, or a list/dict) to ""
-                # before truncation, matching how USER_INPUT / PLANNER_RESPONSE guard
-                # their content -- _truncate calls len()/slices and assumes a str.
-                content = raw.get("content", "")
-                output = _truncate(content if isinstance(content, str) else "", _MAX_OUTPUT_LENGTH)
+                # A non-string content (JSON null, or a list/dict) carries no usable
+                # output and would crash _truncate (it calls len()/slices, assuming a
+                # str), so warn and drop rather than emit an empty tool_result.
+                content = raw.get("content")
+                if not isinstance(content, str):
+                    logging.warning(
+                        "dropping CODE_ACTION with non-string content for conv=%s step=%s", conv_id, step_index
+                    )
+                    continue
+                output = _truncate(content, _MAX_OUTPUT_LENGTH)
                 new_events.append(
                     (
                         timestamp,

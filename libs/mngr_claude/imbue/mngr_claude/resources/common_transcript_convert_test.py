@@ -8,8 +8,11 @@ streams on disk, without the surrounding shell script. The shell integration
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr_claude.resources import common_transcript_convert
@@ -146,11 +149,11 @@ def test_corrupt_existing_output_line_is_skipped(tmp_path: Path) -> None:
     assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
 
 
-def test_null_message_line_does_not_abort_run(tmp_path: Path) -> None:
+def test_null_message_line_is_dropped_with_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
-    # A null (rather than dict) message must degrade gracefully (treated as an
-    # empty message) instead of raising AttributeError and aborting the whole
-    # run -- a following valid line must still convert.
+    # A null (rather than dict) message carries no usable content, so the line is
+    # dropped with a warning -- not raised on (AttributeError aborting the run) and
+    # not emitted as an empty event. A following valid line must still convert.
     _write(
         input_file,
         [
@@ -159,9 +162,12 @@ def test_null_message_line_does_not_abort_run(tmp_path: Path) -> None:
             _user_text("u3", "real message"),
         ],
     )
-    common_transcript_convert.convert(str(input_file), str(output_file))
-    contents = [e.get("content") for e in _events(output_file)]
-    assert "real message" in contents
+    with caplog.at_level(logging.WARNING):
+        common_transcript_convert.convert(str(input_file), str(output_file))
+    # Only the valid line is emitted; the two null-message lines produce nothing.
+    assert [e.get("content") for e in _events(output_file)] == ["real message"]
+    # Both drops are surfaced rather than silent.
+    assert caplog.text.count("non-dict message") == 2
 
 
 def test_events_without_uuid_or_timestamp_are_skipped(tmp_path: Path) -> None:
