@@ -189,20 +189,17 @@ class MngrCaller(MutableModel):
             self._ensure_forkserver_running,
             name="mngr-caller-prewarm",
             is_checked=False,
-            on_failure=lambda exc: logger.warning("mngr forkserver pre-warm thread failed: {}", exc),
+            # Best-effort warmup: if the OS refuses the warmup fork, the first
+            # real call will simply start the forkserver itself (cold).
+            on_failure=lambda exc: logger.exception("mngr forkserver pre-warm thread failed: {}", exc),
         )
 
     def _ensure_forkserver_running(self) -> None:
         """Force the forkserver to start (and run its preload imports)."""
-        try:
-            context = self._get_context()
-            warmup_process = context.Process(target=_noop_child, name="mngr-caller-warmup")
-            warmup_process.start()
-            warmup_process.join()
-        except OSError as exc:
-            # Best-effort warmup: if the OS refuses the warmup fork, the first
-            # real call will simply start the forkserver itself (cold).
-            logger.warning("mngr forkserver pre-warm failed: {}", exc)
+        context = self._get_context()
+        warmup_process = context.Process(target=_noop_child, name="mngr-caller-warmup")
+        warmup_process.start()
+        warmup_process.join()
 
     def call(
         self,

@@ -83,17 +83,12 @@ class MngrMessageSender(MutableModel):
         The send runs on a thread tracked by :attr:`concurrency_group` and never raises -- failures are logged.
         """
         self.concurrency_group.start_new_thread(
-            self._send_and_log,
-            args=(agent_id, text),
+            self.try_send,
+            args=(str(agent_id), text),
             name="mngr-message-send",
             is_checked=False,
-            on_failure=lambda exc: logger.warning("mngr message send to agent {} failed: {}", agent_id, exc),
+            on_failure=lambda exc: logger.exception("mngr message send to agent {} failed: {}", agent_id, exc),
         )
-
-    def _send_and_log(self, agent_id: AgentId, text: str) -> None:
-        """Deliver the message and log a warning if it did not land."""
-        if not self.try_send(str(agent_id), text):
-            logger.warning("mngr message to agent {} was not delivered", agent_id)
 
     def try_send(self, target: str, text: str) -> bool:
         """Send a message to ``target`` (an agent id or name); return whether it succeeded.
@@ -110,7 +105,7 @@ class MngrMessageSender(MutableModel):
         # actual message content would be read from stdin (silently empty here).
         result = self.mngr_caller.call(["message", "-m", text, "--", target], timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
         if result.returncode != 0:
-            logger.warning(
+            logger.error(
                 "mngr message to target {} exited {}: {}",
                 target,
                 result.returncode,
