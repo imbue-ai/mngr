@@ -73,6 +73,7 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
+from imbue.mngr_claude.plugin import _build_claude_install_command
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
@@ -3461,6 +3462,43 @@ def test_install_claude_verifies_binary_exists() -> None:
     # executable; anchor to the imported constant rather than a hand-typed literal.
     tokens = _install_clause_tokens(executed_commands[0], "test -x")
     assert tokens == ["test", "-x", f"{CLAUDE_INSTALL_PATH}/claude"]
+
+
+# =============================================================================
+# Capability-mixin contract methods (install / unattended / version)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_claude() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_install_binary_name() == "claude"
+
+
+def test_get_install_command_installs_claude() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_install_command() == _build_claude_install_command(None)
+
+
+def test_get_install_command_pins_configured_version() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    assert agent.get_install_command() == _build_claude_install_command("2.1.50")
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(auto_allow_permissions=True))
+    attended = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def test_get_version_policy_auto_updates_when_unpinned() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_version_policy() == "auto-update"
+
+
+def test_get_version_policy_returns_pinned_version() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    assert agent.get_version_policy() == "2.1.50"
 
 
 # =============================================================================
