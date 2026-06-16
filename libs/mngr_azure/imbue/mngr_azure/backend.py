@@ -1038,7 +1038,10 @@ class AzureProvider(VpsDockerProvider):
             return super().to_offline_host(host_id)
         except HostNotFoundError:
             record = self._state_store.read_host_record(host_id)
-            if record is None:
+            # In bucket mode, fall back to the VM's own tags for a host whose
+            # host_state.json is absent (created before the bucket existed). The tag
+            # store already reconstructs from tags, so this fallback is bucket-only.
+            if record is None and self._state_bucket is not None:
                 record = self._host_record_from_instance_tags(host_id)
             if record is None:
                 raise
