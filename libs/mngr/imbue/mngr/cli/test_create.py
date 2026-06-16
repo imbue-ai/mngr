@@ -102,6 +102,10 @@ def test_cli_create_via_subprocess(
         )
 
 
+# Shells out to `uv run mngr create`, whose subprocess startup (uv resolve + plugin
+# load) is slow and variable under CI load and intermittently exceeds the default
+# 10s pytest-timeout. Bump it to match the sibling subprocess-create test above.
+@pytest.mark.timeout(30)
 def test_cli_create_rejects_dirty_tree_by_default(
     temp_git_repo: Path,
     temp_host_dir: Path,
