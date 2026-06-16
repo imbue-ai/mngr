@@ -255,16 +255,28 @@ minds-tailwind:
   bash apps/minds/scripts/fetch_tailwind.sh
 
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
-# in FCT. Default FCT path is $HOME/project/forever-claude-template; override
-# by passing a positional arg. Run from this repo on the branch you want to
-# vendor (typically main); the recipe archives HEAD, replaces vendor/mngr/
-# contents with that snapshot, and commits in FCT. Does not push. Aborts if
-# FCT has any uncommitted changes -- resolve them first. The full release
-# flow (release branches, push, merge to main) is the release-minds skill.
-sync-vendor-mngr fct="$HOME/project/forever-claude-template":
+# in FCT. The FCT checkout path comes from the positional arg, else FCT_DIR read
+# from a gitignored apps/minds/.env (minds-scoped per-user config -- see
+# apps/minds/.env.example), else $FCT_DIR in your shell. No personal path is
+# baked in, and nothing outside this recipe loads that .env. Position the mngr
+# checkout at the exact commit you want to vendor first -- your release PR branch
+# HEAD / the verified release SHA, NOT blindly `main`, which can drift past it
+# between verification and merge. The recipe archives HEAD, replaces vendor/mngr/
+# with that snapshot, and commits in FCT. Does not push. Aborts if FCT is dirty.
+# Full release flow: apps/minds/docs/release.md.
+sync-vendor-mngr fct="":
     #!/bin/bash
     set -ueo pipefail
     fct="{{fct}}"
+    # Fall back to FCT_DIR -- from a gitignored apps/minds/.env (minds-scoped), or your shell.
+    if [ -z "$fct" ] && [ -f apps/minds/.env ]; then set -a; . ./apps/minds/.env; set +a; fi
+    if [ -z "$fct" ]; then fct="${FCT_DIR:-}"; fi
+    if [ -z "$fct" ]; then
+        echo "error: no forever-claude-template path. Set FCT_DIR in apps/minds/.env, or pass it:" >&2
+        echo "  echo 'FCT_DIR=/path/to/forever-claude-template' >> apps/minds/.env   # gitignored" >&2
+        echo "  just sync-vendor-mngr /path/to/forever-claude-template" >&2
+        exit 2
+    fi
     if [ ! -d "$fct/vendor/mngr" ]; then
         echo "Error: $fct/vendor/mngr not found"
         exit 1

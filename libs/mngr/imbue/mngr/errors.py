@@ -233,13 +233,21 @@ class ProviderUnavailableError(ProviderError):
     not block the entire operation.
     """
 
-    def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
+    def __init__(
+        self,
+        provider_name: ProviderInstanceName,
+        reason: str,
+        user_help_text: str | None = None,
+    ) -> None:
         super().__init__(
             provider_name,
             f"Provider '{provider_name}' is not available: {reason}. "
             f"Any agents managed by this provider could not be reached.",
         )
-        self.user_help_text = (
+        # Providers whose "unavailable" cause is not a local daemon (e.g. a cloud
+        # provider failing on credentials/subscription) pass curated guidance so
+        # the user is not told to "start Docker" for an auth problem.
+        self.user_help_text = user_help_text or (
             f"Ensure the provider backend is running (e.g. start Docker), or disable the provider:\n"
             f"  mngr config set --scope user providers.{provider_name}.is_enabled false"
         )
