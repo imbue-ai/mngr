@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.15] - 2026-06-16
+
+### Added
+
+- Added: `mngr create --format json` (and `jsonl`) now also reports the created host's name, its agent SSH connection (`ssh_user` / `ssh_host` / `ssh_port` / `ssh_key_path`), and an `outer_ssh_port` when the provider exposes a separate outer/management sshd (e.g. an OVH-slice's box-forwarded VM-root port). Backed by a new default-`None` `HostInterface.get_outer_ssh_port` hook.
+- Added: `mngr capture --window` (`-w`) option for capturing a non-primary tmux window in the agent's session, by index (`--window 1`) or name.
+- Added: Shared `mngr_common_transcript_lib.sh` library, provisioned to every agent's `commands/` dir alongside `mngr_log.sh` and `mngr_transcript_lib.sh`. Centralizes the convert-lock mutex (serializes the converter's read-modify-write across the 5s daemon and on-demand `--single-pass` flushes) and the turn-end synchronous flush previously duplicated per agent plugin.
+- Added: `VpsDockerProvider.record_outer_host_key` pins an outer (VPS-root) sshd host key in the provider's known_hosts, so a provider operating on a VPS it did not order itself (e.g. the imbue_cloud rebuild on a leased host) passes strict host-key checking.
+
+### Changed
+
+- Changed: Centralized the Claude Code CLI presence check — `mngr extras` status and the `is_claude_installed` test helper now both defer to `CLAUDE.is_available()` instead of re-implementing `shutil.which("claude")` inline. `extras.py` now imports the shared `SUBPROCESS_ERRORS` from `imbue.mngr.utils.deps` rather than defining its own copy.
+- Changed: Regenerated the bundled CLI reference docs to include the new `mngr imbue_cloud admin server` command group (including `admin server pricing`).
+
 ## [v0.2.14] - 2026-06-15
 
 ### Changed
