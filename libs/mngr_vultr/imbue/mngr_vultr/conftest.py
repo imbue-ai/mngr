@@ -6,13 +6,26 @@ that crashed between create and their ``try``/``finally`` destroy, or
 whose destroy itself failed silently.
 
 The mechanism is tag-based:
-  1. ``pytest_configure`` injects ``mngr-vultr-test-session=<uuid>`` into
-     ``MNGR_VPS_EXTRA_TAGS`` via ``pytest.MonkeyPatch`` so the value is
-     restored at session end (no process-wide leakage). ``build_vps_tags``
-     in mngr_vps_docker reads this env var and attaches every entry to
-     each VPS at create time, so every test-created VPS carries the
-     session tag. The mngr CLI runs as a subprocess and inherits the
-     env, so this works transparently across ``_run_mngr`` calls.
+  1. ``pytest_configure`` injects two tags into ``MNGR_VPS_EXTRA_TAGS``
+     via ``pytest.MonkeyPatch`` so the value is restored at session end
+     (no process-wide leakage): ``mngr-vultr-test-session=<uuid>`` (the
+     per-session marker used by the in-process leak check below) and
+     ``mngr-vultr-test-created=<YYYY-MM-DD-HH-MM-SS>`` (a UTC session-start
+     timestamp). ``build_vps_tags`` in mngr_vps_docker reads this env var
+     and attaches every entry to each VPS at create time, so every
+     test-created VPS carries both tags. The mngr CLI runs as a
+     subprocess and inherits the env, so this works transparently across
+     ``_run_mngr`` calls.
+
+     The timestamp tag exists for an *out-of-band, age-based* reaper
+     (analogous to Modal's ``cleanup_old_modal_test_environments.py``):
+     the in-process check in ``pytest_sessionfinish`` only reaps leaks
+     from sessions that survive to run it, so a session/runner killed
+     mid-run leaves orphans that no future session -- each with a fresh
+     uuid -- can match. The timestamp lets a scheduled reaper find and
+     destroy those by age, independent of the random session uuid. The
+     format mirrors Modal's ``TEST_ENV_PATTERN`` so such a reaper can
+     reuse the same parsing.
   2. ``pytest_sessionfinish`` lists Vultr instances, filters to those
      bearing the session tag, destroys any survivors, and fails the
      session on any real leak. A real leak is any survivor that was
@@ -28,6 +41,8 @@ no Vultr API calls). Modeled on the leak detector in
 
 import os
 import uuid
+from datetime import datetime
+from datetime import timezone
 from enum import auto
 from typing import Any
 from typing import Final
@@ -44,6 +59,15 @@ from imbue.mngr_vultr.client import VultrVpsClient
 
 _SESSION_TAG_KEY: Final[str] = "mngr-vultr-test-session"
 _SESSION_TAG: Final[str] = f"{_SESSION_TAG_KEY}={uuid.uuid4().hex}"
+
+# Out-of-band age-based reaping (for sessions killed before
+# ``pytest_sessionfinish`` runs). Format mirrors Modal's
+# ``TEST_ENV_PATTERN`` (``%Y-%m-%d-%H-%M-%S``, no colons -> safe as a Vultr
+# tag) so a future scheduled reaper can reuse the same parsing. Computed at
+# import (session start), which is within seconds of the first VPS create.
+_CREATED_TAG_KEY: Final[str] = "mngr-vultr-test-created"
+_CREATED_TAG_TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d-%H-%M-%S"
+_CREATED_TAG: Final[str] = f"{_CREATED_TAG_KEY}={datetime.now(timezone.utc).strftime(_CREATED_TAG_TIMESTAMP_FORMAT)}"
 
 
 class _LeakDestroyOutcome(UpperCaseStrEnum):
@@ -72,17 +96,20 @@ _monkeypatch: Final[pytest.MonkeyPatch] = pytest.MonkeyPatch()
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Inject the session tag into ``MNGR_VPS_EXTRA_TAGS``.
+    """Inject the session and timestamp tags into ``MNGR_VPS_EXTRA_TAGS``.
 
     Any VPS subsequently created via the mngr CLI (which runs as a
-    subprocess and inherits this env) will carry the tag, making the
-    leak detection in ``pytest_sessionfinish`` precise. Uses
+    subprocess and inherits this env) will carry both tags: the session
+    tag makes the leak detection in ``pytest_sessionfinish`` precise, and
+    the timestamp tag lets an out-of-band reaper destroy orphans by age
+    when a session dies before ``pytest_sessionfinish`` can run. Uses
     ``pytest.MonkeyPatch.setenv`` so the original value is restored
     when ``_monkeypatch.undo()`` is called from ``pytest_sessionfinish``.
     """
     del config
     existing = os.environ.get("MNGR_VPS_EXTRA_TAGS", "").strip()
-    new_value = f"{existing},{_SESSION_TAG}" if existing else _SESSION_TAG
+    session_tags = f"{_SESSION_TAG},{_CREATED_TAG}"
+    new_value = f"{existing},{session_tags}" if existing else session_tags
     _monkeypatch.setenv("MNGR_VPS_EXTRA_TAGS", new_value)
 
 
