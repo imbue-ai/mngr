@@ -63,10 +63,17 @@ Because config loading is a prerequisite for `mngr create`, `mngr forward`, `mng
 
 It was written by minds' own desktop code — **not** by the connector and **not** by the imbue_cloud plugin.
 
-- The only writer of `aws-<region>` provider blocks in the codebase is `_write_aws_provider_blocks` in `apps/minds/imbue/minds/bootstrap.py:174`, called from `_ensure_mngr_settings` during minds startup.
+- The only writer of `aws-<region>` provider blocks in the codebase is `_write_aws_provider_blocks` in `apps/minds/imbue/minds/bootstrap.py:174`, called from `_ensure_mngr_settings` during minds startup/registration.
 - It writes one block per region in `CONFIGURED_AWS_REGIONS = ("us-east-1", "us-east-2", "us-west-1", "us-west-2")` (`apps/minds/imbue/minds/primitives.py:24`), each named `aws-` + region. `aws-us-east-1` is the first of the four.
-- Each block sets exactly `backend = "aws"`, `default_region`, `default_instance_type`, `install_gvisor_runtime`, `docker_runtime` — a precise fingerprint of the block that trips the parser.
-- It is gated by `_aws_credentials_plausibly_configured()` (`bootstrap.py:145`): true when `AWS_ACCESS_KEY_ID`/`AWS_PROFILE` is set or `~/.aws/credentials`/`~/.aws/config` exists. bowei, as an imbue developer, has AWS credentials on his laptop, so the gate fired and the blocks were written.
+- Each block sets `backend = "aws"`, `default_region`, `default_instance_type`, `install_gvisor_runtime`, `docker_runtime`. (The log only shows the name `aws-us-east-1` and backend `aws`; the rest of the field set is what this function writes, not something the log prints.)
+- It is gated by `_aws_credentials_plausibly_configured()` (`bootstrap.py:145`): true when `AWS_ACCESS_KEY_ID`/`AWS_PROFILE` is set or `~/.aws/credentials`/`~/.aws/config` exists. bowei, as an imbue developer, has AWS credentials on his laptop, so the gate fired.
+
+**The corruption happened live, mid-session — which is how we know his running bundle contained the writer.** The log brackets the write between two config loads:
+
+- At log lines ~107-111, the first `mngr create … imbue_cloud` ("assistant") loads config **successfully** — it reaches "FAST PATH: leasing exact-attribute pool host" and fails only on `FastPathUnavailableError` (no pool host). An enabled unknown-backend block would have aborted the parse *before* any lease logic, so at this point `settings.toml` was clean.
+- At log line 477, the next create ("mtg-edh-corec") aborts **immediately** with `Provider 'aws-us-east-1' references unknown backend 'aws'`, before any lease attempt.
+
+Config went from parseable to unparseable within the one session, so the poison block was written **during the session, by his running minds code**. That settles the version question (see §5): his bundle contained the writer. What the log does **not** pin down is the precise in-session trigger of the write (settings rewrites are not all individually logged) — it occurred somewhere between lines ~111 and ~477, plausibly a re-register / the second create's setup / the providers-panel load calling `_ensure_mngr_settings` with the `~/.aws`-gate satisfied.
 
 Ruled out:
 - **The connector.** `mngr_imbue_cloud` and the production connector (`rsc-production-api`) never write `[providers.*]` blocks into settings.toml — minds owns that file. The imbue_cloud plugin only leases hosts; it does not persist provider config locally.
@@ -74,14 +81,21 @@ Ruled out:
 
 ---
 
-## 5. Root cause: a writer/reader packaging split-brain
+## 5. Root cause: an in-bundle manifest split (writer package shipped, plugin package omitted)
 
-The minds desktop process (the **writer**) and the bundled mngr toolchain (the **reader**) are two separate Python environments that were shipped out of sync.
+This is **not** a case of two independently-versioned environments drifting, and **not** a network self-update pulling in newer code. The writer (`imbue-minds`) and the readers (`imbue-mngr*`, including the would-be `imbue-mngr-aws`) are installed into the **same** per-user venv, `~/.minds/.venv`, assembled from **one** bundled manifest. The defect is that the manifest included the writer package but omitted the aws-plugin package.
 
-- The **writer** ran from the app bundle (`/Applications/Minds.app/Contents/Resources/pyproject/imbue/minds/…`). Its minds code includes `_write_aws_provider_blocks`, added 2026-06-14 in commit `9c9515d98` ("minds: add AWS compute provider; rename CLOUD launch mode to VULTR").
-- The **reader** ran from the per-user workspace venv (`/Users/bowei/.minds/.venv/lib/python3.12/site-packages/imbue/…`, visible in the shutdown traceback at log lines 805-828). That venv's mngr had **no `aws` backend plugin**.
+### How the venv is provisioned (no self-update)
 
-The defect is that commit `9c9515d98` added the block-writer but **did not** add the `imbue-mngr-aws` plugin to the bundled mngr toolchain. Verified directly: `9c9515d98` touched only `apps/minds/imbue/minds/bootstrap.py` and `apps/minds/imbue/minds/primitives.py`. It did not touch any of the four bundled-workspace-package lists (`scripts/build.js`, `electron/env-setup.js`, `scripts/build_test.py`, `electron/pyproject/pyproject.toml`) that determine which mngr plugins are installed into the toolchain that reads the settings file.
+On every launch, the Electron shell runs `uv sync` against the **bundled** pyproject + bundled wheels (`apps/minds/electron/env-setup.js`). It is not a frozen copy run in-place from the .app, and it does not resolve newer versions from PyPI at runtime — it tracks whatever the currently-installed .app bundle ships. One wrinkle matters here: the workspace wheels reuse the same PEP 440 version string across releases, so `uv sync` would otherwise treat them as already-installed and skip updating them ("the user keeps running the OLD code in `~/.minds/.venv` even after the signed .app bundle has been replaced" — env-setup.js:33-44). To defeat that, the build force-reinstalls every package in `WORKSPACE_PACKAGES` on each launch. `minds` (the writer) is on that list; `imbue-mngr-aws` was **not** in bowei's window. So the writer is re-extracted from the current bundle every launch, while the aws plugin simply isn't part of the venv at all.
+
+So both halves come from the same bundle:
+- **Writer:** `imbue-minds`, containing `_write_aws_provider_blocks` (added 2026-06-14 in commit `9c9515d98`, "minds: add AWS compute provider; rename CLOUD launch mode to VULTR"). Demonstrably present in bowei's running bundle — it wrote the block mid-session (see §4).
+- **Reader:** the `mngr` toolchain in `~/.minds/.venv` (visible in the shutdown traceback at log lines 805-828), which had **no `aws` backend plugin** registered.
+
+### The omission
+
+Commit `9c9515d98` added the block-writer but did **not** add the `imbue-mngr-aws` plugin to the bundled mngr toolchain. Verified directly: `9c9515d98` touched only `apps/minds/imbue/minds/bootstrap.py` and `apps/minds/imbue/minds/primitives.py`. It did not touch any of the four bundled-workspace-package lists (`scripts/build.js`, `electron/env-setup.js`, `scripts/build_test.py`, `electron/pyproject/pyproject.toml`) that govern which mngr plugins land in `~/.minds/.venv`. The writer's dependency manifest (`apps/minds/pyproject.toml`) and the bundled-toolchain manifests are separate, and only the former was updated — so a single coherent .app could ship `imbue-minds`-with-the-writer alongside a venv that never gets the `aws` plugin.
 
 This is corroborated by the post-mortem in `apps/minds/changelog/wz-fix-macos-launch-welcome-selectors.md`:
 
@@ -89,12 +103,14 @@ This is corroborated by the post-mortem in `apps/minds/changelog/wz-fix-macos-la
 
 ### On "the app predates the aws work"
 
-The intuition is half-right and the discrepancy *is* the bug:
+The intuition is half-right, and the half that's wrong is the crux:
 
-- The **bundled mngr toolchain** does predate the `aws` plugin — that's why it can't parse the block.
-- The **minds desktop layer** does **not** predate the aws work — it must contain the 2026-06-14 `_write_aws_provider_blocks`, because that is the only thing that could have written `aws-us-east-1` into his profile.
+- The **bundled mngr toolchain** behaves as if it predates the `aws` plugin — the plugin was never in its manifest, so the backend isn't registered and the block can't be parsed.
+- The **minds writer layer** does **not** predate the aws work. The log proves this directly: a previously-parseable config (line ~107) became unparseable (line 477) within the single session, so his running code wrote the block. A genuinely pre-aws bundle has no writer and could not have produced the block.
 
-So bowei's app is from the AWS-transition window with the two halves bundled inconsistently (or a newer-desktop build wrote the block into his persistent `~/.minds` profile, after which an older-toolchain run could no longer parse it — `~/.minds` persists across app versions). Either way, the failure is the writer/reader version skew, not a pure pre-aws build.
+So bowei's app is from the AWS-transition window: one bundle that shipped the writer but omitted the aws plugin from the venv. This is the manifest split the §7 fix repairs — not a version skew between two separately-updated environments, and not a self-update.
+
+> **To confirm on the affected machine** (open items — being collected): the installed .app version (About box / `Info.plist`); the `~/.minds/.venv` package set (`imbue-minds` present with `_write_aws_provider_blocks`? `imbue-mngr-aws` absent?); and the literal `[providers.aws-us-east-1]` block in `~/.minds/mngr/profiles/*/settings.toml` plus that file's mtime (which should date the write to the session).
 
 ---
 
