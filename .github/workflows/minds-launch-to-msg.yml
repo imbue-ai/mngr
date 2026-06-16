@@ -630,7 +630,7 @@ jobs:
           # Resolve FCT_REF to its commit. Peel annotated tags (`^{}`) to the
           # commit they point at (not the tag object); else take the ref
           # directly (branch / lightweight tag), or the literal 40-char SHA.
-          if [[ "$FCT_REF" =~ ^[a-f0-9]{40}$ ]]; then
+          if [[ "$FCT_REF" =~ ^[0-9a-f]{40}$ ]]; then
             FCT_SHA="$FCT_REF"
           else
             FCT_SHA=$(git ls-remote "$FCT_REPO_URL" "refs/tags/$FCT_REF^{}" 2>/dev/null | awk '{print $1; exit}')

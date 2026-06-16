@@ -26,8 +26,8 @@ Both repos release from **`main`** via **two PRs that both target `main`** (one 
 **Reviewing the FCT PR.** Two kinds of change land on the same branch: the mechanical `vendor/mngr` snapshot (hundreds of files) and reviewable code (e.g. a `system_interface` fix). CI needs the *full* branch — the binary clones the ref and imports the committed `vendor/mngr` — but reviewers should read only the code. Keep them separable:
 
 1. **Isolate the vendor refresh in its own commit** (`vendor/mngr: refresh from mngr <sha>`), distinct from the reviewable commits, so review can be done per-commit.
-2. **`vendor/mngr/**` is `linguist-generated` in `.gitattributes`**, so GitHub collapses it in the PR "Files changed" view by default — reviewers see only the real changes.
-3. **The snapshot is verified by reproduction, not review**: `git archive <sha> | diff -r vendor/mngr` (the vendor-match check) proves it equals the tagged mngr SHA. A clean diff *is* the review.
+2. **`vendor/mngr/**` is `linguist-generated` in FCT's `.gitattributes`**, so GitHub collapses it in the PR "Files changed" view by default — reviewers see only the real changes.
+3. **The snapshot is verified by reproduction, not review**: the step-6 vendor-match check (`git archive <sha> | tar -x -C tmp && diff -r tmp vendor/mngr`) proves it equals the tagged mngr SHA. A clean diff *is* the review.
 
 ## File reference
 
@@ -35,16 +35,20 @@ Both repos release from **`main`** via **two PRs that both target `main`** (one 
 |---|---|
 | Version string | `apps/minds/package.json` `version` |
 | Baked FCT tag | `apps/minds/imbue/minds/desktop_client/templates.py` `FALLBACK_BRANCH` |
-| `forever-claude-template` checkout | set `FCT_DIR` in a gitignored `apps/minds/.env` (per-user, never committed; read by `just sync-vendor-mngr`, step 3 — see `apps/minds/.env.example`) |
-| `mngr` monorepo checkout | wherever you cloned it — you run `just` / `git archive` from here |
+| `forever-claude-template` checkout | `$FCT` — your local clone; `just sync-vendor-mngr` (step 3) reads its path from a gitignored `apps/minds/.env`. See Session setup. |
+| `mngr` monorepo checkout | `$MNGR` — wherever you cloned it; you run `just` / `git` from here. See Session setup. |
 | Build / e2e CI | `.github/workflows/minds-launch-to-msg.yml` (`workflow_dispatch`) |
 | Traditional CI | `.github/workflows/ci.yml` (auto on push) |
 
-Two bits of config, set up front (later steps assume both):
+## Session setup
+
+Set these once for the whole session — later steps assume them:
+
 - **`GH_TOKEN`** (derived, per session) — `export GH_TOKEN=$(gh auth token --user weishi-imbue)`. Pre-flight any push with `gh api user --jq .login` → must print `weishi-imbue` (the keychain "active" account drifts between parallel agents).
-- **`FCT_DIR`** (static, set once) — your `forever-claude-template` checkout path, read by `just sync-vendor-mngr` (step 3). Because it's a static per-user path, put it in a gitignored `apps/minds/.env`; the recipe reads it (minds-scoped — only that recipe loads it), so no shell-rc edit, and it reaches non-interactive agent shells. See `apps/minds/.env.example`:
+- **`MNGR`** and **`FCT`** — absolute paths to your `mngr` and `forever-claude-template` clones, used by the shell commands in steps 4/6/7: `export MNGR=/your/mngr FCT=/your/forever-claude-template`.
+- **`FCT_DIR`** — the *same* `forever-claude-template` path, but consumed by `just sync-vendor-mngr` (step 3), which reads it from a gitignored `apps/minds/.env` (minds-scoped, never committed — only that recipe loads it, so no shell-rc edit and it reaches non-interactive agent shells; see `apps/minds/.env.example`):
   ```bash
-  echo 'FCT_DIR=/abs/path/to/forever-claude-template' >> apps/minds/.env
+  echo "FCT_DIR=$FCT" >> apps/minds/.env
   ```
   An agent: if `apps/minds/.env` doesn't already define `FCT_DIR`, ask the user for their checkout path — don't guess.
 
@@ -67,7 +71,8 @@ On the FCT PR branch (cut from `origin/main`, clean tree), with the **mngr check
 ```bash
 just sync-vendor-mngr                       # reads FCT_DIR from .env
 # (or pass the path explicitly: just sync-vendor-mngr /abs/path/to/forever-claude-template)
-# then run the `cd <fct> && git push origin <branch>` line the recipe printed
+# then copy the `To publish: (cd <fct> && git push origin <branch>)` line the recipe
+# printed (it already has the resolved absolute path) and run it verbatim
 ```
 
 If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`), fix that consumer in this same PR.
@@ -77,6 +82,7 @@ If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`)
 The tag doesn't exist yet, so pass the FCT PR branch as `template_ref`. `commit_sha` and that branch's `vendor/mngr` must be the same mngr SHA.
 
 ```bash
+GREEN_MNGR_SHA=<the green mngr SHA from step 2>   # carried through to steps 6-8
 cd "$MNGR"
 gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
   -r <mngr-pr-branch> -f commit_sha="$GREEN_MNGR_SHA" -f template_ref=<fct-pr-branch>
@@ -92,12 +98,15 @@ Still branch refs; nothing tagged yet.
 
 **Merge the mngr PR with a merge commit, not a squash.** `main` can advance past the SHA you built and verified in step 4 (`$GREEN_MNGR_SHA`) while you were verifying; a merge commit keeps that exact SHA reachable on `main` as a parent (a squash replaces it with a new commit whose tree also contains the drift — and the binary you verified was built from neither).
 
-The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and FCT's `vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the vendor still matches *that* SHA:
+The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and FCT's `vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the *commit you'll actually tag* (FCT `origin/main` post-merge, not your local working copy) still matches that SHA:
 
 ```bash
 GREEN_MNGR_SHA=<the SHA from step 4>
-TMP=$(mktemp -d); (cd "$MNGR" && git archive "$GREEN_MNGR_SHA") | tar -x -C "$TMP"
-diff -r "$TMP" /Users/weishi/Developer/imbue/forever-claude-template/vendor/mngr && echo OK || echo "MISMATCH — FCT vendor was not archived from $GREEN_MNGR_SHA (re-run step 3)"
+git -C "$FCT" fetch origin --quiet
+A=$(mktemp -d); B=$(mktemp -d)
+(cd "$MNGR" && git archive "$GREEN_MNGR_SHA") | tar -x -C "$A"    # the mngr SHA you'll tag
+git -C "$FCT" archive origin/main:vendor/mngr | tar -x -C "$B"    # the FCT commit you'll tag
+diff -r "$A" "$B" && echo OK || echo "MISMATCH — FCT origin/main vendor != archive $GREEN_MNGR_SHA (re-run step 3 / re-merge FCT)"
 ```
 
 `git archive main` (HEAD) failing to match while `git archive $GREEN_MNGR_SHA` matches is **expected drift** (unrelated PRs landed on `main`), not an error — tag `$GREEN_MNGR_SHA`, not HEAD.
@@ -107,11 +116,10 @@ diff -r "$TMP" /Users/weishi/Developer/imbue/forever-claude-template/vendor/mngr
 Tag mngr at **`$GREEN_MNGR_SHA`** (the built+verified SHA; reachable on `main` as the merge parent) and FCT at the commit whose `vendor/mngr` is that SHA's archive (the FCT PR's merge into `main`):
 
 ```bash
-export GH_TOKEN=$(gh auth token --user weishi-imbue)
-export MNGR=/Users/weishi/Developer/imbue/mngr FCT=/Users/weishi/Developer/imbue/forever-claude-template
+# $GH_TOKEN, $MNGR, $FCT from Session setup
 VERSION=minds-v0.3.1
 GREEN_MNGR_SHA=<the SHA from step 4>
-git -C "$FCT" fetch origin --quiet; FCT_SHA=$(git -C "$FCT" rev-parse origin/main)   # its vendor/mngr == archive $GREEN_MNGR_SHA
+git -C "$FCT" fetch origin --quiet; FCT_SHA=$(git -C "$FCT" rev-parse origin/main)   # vendor/mngr == archive $GREEN_MNGR_SHA (verified in step 6)
 
 git -C "$MNGR" tag -a "$VERSION" "$GREEN_MNGR_SHA" -m "minds $VERSION: mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) / FCT $(git -C "$FCT" rev-parse --short $FCT_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
 git -C "$MNGR" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/mngr.git refs/tags/"$VERSION"
