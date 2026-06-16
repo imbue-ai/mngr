@@ -65,6 +65,8 @@ jobs:
       pair_key:   ${{ steps.compute.outputs.pair_key }}
       mngr_sha:   ${{ steps.compute.outputs.mngr_sha }}
       fct_sha:    ${{ steps.compute.outputs.fct_sha }}
+      mngr_ref:   ${{ steps.compute.outputs.mngr_ref }}
+      fct_ref:    ${{ steps.compute.outputs.fct_ref }}
     steps:
       - name: compute (mngr, FCT) pair key
         id: compute
@@ -81,8 +83,12 @@ jobs:
           # resolve it against the mngr repo so the pair key fingerprint
           # is stable across reruns at the same HEAD.
           if [[ ! "$MNGR_REF" =~ ^[0-9a-f]{40}$ ]]; then
-            MNGR_SHA=$(git ls-remote 'https://github.com/${{ github.repository }}.git' \
-              "refs/heads/$MNGR_REF" "refs/tags/$MNGR_REF" | head -1 | awk '{print $1}')
+            MNGR_URL='https://github.com/${{ github.repository }}.git'
+            # Peel annotated tags (`^{}`) to the commit they point at, not
+            # the tag object -- else the Slack/summary show a SHA nobody can
+            # `git checkout`. Fall back to the ref directly (branch / tag).
+            MNGR_SHA=$(git ls-remote "$MNGR_URL" "refs/tags/$MNGR_REF^{}" | awk '{print $1; exit}')
+            [[ -z "$MNGR_SHA" ]] && MNGR_SHA=$(git ls-remote "$MNGR_URL" "refs/heads/$MNGR_REF" "refs/tags/$MNGR_REF" | awk '{print $1; exit}')
           else
             MNGR_SHA="$MNGR_REF"
           fi
@@ -97,8 +103,8 @@ jobs:
             FCT_REPO_URL='https://github.com/imbue-ai/forever-claude-template'
           fi
           if [[ ! "$FCT_REF" =~ ^[0-9a-f]{40}$ ]]; then
-            FCT_SHA=$(git ls-remote "$FCT_REPO_URL" \
-              "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" | head -1 | awk '{print $1}')
+            FCT_SHA=$(git ls-remote "$FCT_REPO_URL" "refs/tags/$FCT_REF^{}" | awk '{print $1; exit}')
+            [[ -z "$FCT_SHA" ]] && FCT_SHA=$(git ls-remote "$FCT_REPO_URL" "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" | awk '{print $1; exit}')
           else
             FCT_SHA="$FCT_REF"
           fi
@@ -110,6 +116,8 @@ jobs:
           {
             echo "mngr_sha=$MNGR_SHA"
             echo "fct_sha=$FCT_SHA"
+            echo "mngr_ref=$MNGR_REF"
+            echo "fct_ref=$FCT_REF"
             echo "pair_key=$PAIR_KEY"
           } >> "$GITHUB_OUTPUT"
       - name: look up marker cache
@@ -129,8 +137,8 @@ jobs:
           set -euo pipefail
           {
             echo "## Pair-key fingerprint"
-            echo "- mngr: \`${{ steps.compute.outputs.mngr_sha }}\`"
-            echo "- FCT:  \`${{ steps.compute.outputs.fct_sha }}\`"
+            echo "- mngr: \`${{ steps.compute.outputs.mngr_ref }}\` (\`${{ steps.compute.outputs.mngr_sha }}\`)"
+            echo "- FCT:  \`${{ steps.compute.outputs.fct_ref }}\` (\`${{ steps.compute.outputs.fct_sha }}\`)"
             echo "- cache key: \`launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-fct-${{ steps.compute.outputs.fct_sha }}\`"
             echo "- marker cache-hit: \`${{ steps.marker.outputs.cache-hit }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1062,6 +1070,8 @@ jobs:
           SHOULD_RUN: ${{ needs.check_should_run.outputs.should_run }}
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
           FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
+          MNGR_REF: ${{ needs.check_should_run.outputs.mngr_ref }}
+          FCT_REF:  ${{ needs.check_should_run.outputs.fct_ref }}
           BUILD_RESULT:         ${{ needs.build.result }}
           LAUNCH_TO_MSG_RESULT: ${{ needs.launch_to_msg.result }}
           MACOS_LAUNCH_RESULT:  ${{ needs.macos_launch.result }}
@@ -1183,7 +1193,13 @@ jobs:
           # `binary` falls out when build didn't produce one.
           line1=$(printf '%s *launch-to-msg* — %s in %s%s, _trigger=_ `%s`' \
             "$emoji" "$verdict_word" "$duration" "$detail" "$TRIGGER")
-          line2="[_mngr_ \`${MNGR_SHORT}\` | _FCT_ \`${FCT_SHORT}\`]"
+          # Show "<ref> (<commit>)" when the ref is a name (tag / branch);
+          # just the commit when the input was already a raw 40-char SHA.
+          mngr_label="\`${MNGR_SHORT}\`"
+          [[ -n "$MNGR_REF" && ! "$MNGR_REF" =~ ^[0-9a-f]{40}$ ]] && mngr_label="\`${MNGR_REF}\` (\`${MNGR_SHORT}\`)"
+          fct_label="\`${FCT_SHORT}\`"
+          [[ -n "$FCT_REF" && ! "$FCT_REF" =~ ^[0-9a-f]{40}$ ]] && fct_label="\`${FCT_REF}\` (\`${FCT_SHORT}\`)"
+          line2="[_mngr_ ${mngr_label} | _FCT_ ${fct_label}]"
           if [[ -n "$metrics_line" ]]; then
             text=$(printf '%s\n%s\n%s\n%s' "$line1" "$line2" "$metrics_line" "$links_line")
           else
