@@ -60,7 +60,11 @@ from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
-_POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 7200
+# Hard cap on the admin pool-create subprocess. Generous (12h) so a large bulk bake
+# (e.g. `--count 20` in waves of `--max-concurrency`, slow on a loaded box) is never
+# killed mid-run. If it ever does fire, the slice backend reaps its orphans on
+# SIGTERM, but the point of 12h is to not hit it in normal operation.
+_POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 43200
 
 # Flags whose values are secrets and must be masked when the admin command is
 # rendered into the "Running: ..." log line. ``--database-url`` carries the
