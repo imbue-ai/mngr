@@ -13,6 +13,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import list_registered_agent_class_types
 from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
+from imbue.mngr.interfaces.agent import GenericCommandAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
@@ -73,6 +74,26 @@ class CapabilityDetectionKind(UpperCaseStrEnum):
     USAGE_SOURCE = auto()
 
 
+class CapabilityScope(UpperCaseStrEnum):
+    """Which agent types a capability is even *applicable* to.
+
+    Scope is orthogonal to presence: a capability outside an agent's scope renders as
+    `n/a` (not applicable) rather than `-` (applicable but absent). Derived from the
+    agent's kind, not hand-maintained per agent.
+    """
+
+    # Applies to every agent type.
+    ALL = auto()
+    # Applies only to agents that interactively prompt for tool approval -- i.e. a
+    # CLI-backed agent that is not headless. Headless and bare-command agents never prompt,
+    # so e.g. a waiting-reason field is meaningless for them.
+    INTERACTIVE_ONLY = auto()
+    # Applies only to agents that wrap a specific external CLI -- i.e. not the bare
+    # command runners. CLI-specific concerns (install, version, usage, per-tool policy,
+    # an agent-native transcript) do not apply to a generic shell command.
+    CLI_BACKED_ONLY = auto()
+
+
 class AgentCapability(FrozenModel):
     """A discrete unit of agent functionality whose presence the matrix tracks."""
 
@@ -83,6 +104,9 @@ class AgentCapability(FrozenModel):
         description="One line: what the capability does, and whether a new port normally wants it"
     )
     detection_kind: CapabilityDetectionKind = Field(description="How presence is determined from the code")
+    scope: CapabilityScope = Field(
+        default=CapabilityScope.ALL, description="Which agent kinds this capability applies to"
+    )
     # Required when detection_kind is CLASS_MIXIN; the mixin an agent class inherits to have this capability.
     mixin: type | None = Field(default=None, description="The capability mixin for CLASS_MIXIN detection")
     # Required when detection_kind is PLUGIN_HOOKIMPL; the hook the agent's plugin must implement.
@@ -113,6 +137,25 @@ class AgentClassInfo(FrozenModel):
     plugin_hook_names: frozenset[str] = Field(description="Hook names implemented by this agent's owning plugin")
     # Whether a sibling usage plugin claims this agent's usage source.
     is_usage_source_claimed: bool = Field(description="Whether a mngr_<harness>_usage plugin covers this agent")
+    # Whether this agent runs headlessly (HeadlessAgentMixin) and so never prompts.
+    is_headless: bool = Field(description="Whether the agent runs headlessly (no interactive prompts)")
+    # Whether this is a bare command runner (GenericCommandAgentMixin) rather than a
+    # CLI-backed agent. Drives CLI_BACKED_ONLY applicability.
+    is_generic_command: bool = Field(description="Whether the agent is a bare command runner, not CLI-backed")
+
+
+def is_capability_applicable(capability: AgentCapability, info: AgentClassInfo) -> bool:
+    """Whether the capability is even applicable to this agent kind (vs. `n/a`)."""
+    match capability.scope:
+        case CapabilityScope.ALL:
+            return True
+        case CapabilityScope.INTERACTIVE_ONLY:
+            # Interactive prompting = a CLI-backed agent that is not headless.
+            return not info.is_generic_command and not info.is_headless
+        case CapabilityScope.CLI_BACKED_ONLY:
+            return not info.is_generic_command
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def is_capability_present(capability: AgentCapability, info: AgentClassInfo) -> bool:
@@ -155,12 +198,14 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         key="common_transcript",
         description="Emits the agent-agnostic common transcript that `mngr transcript` renders. Baseline; every port wants it.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
         mixin=HasCommonTranscriptMixin,
     ),
     AgentCapability(
         key="waiting_reason_field",
         description="Surfaces why a WAITING agent is blocked (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.",
         detection_kind=CapabilityDetectionKind.FIELD_GENERATOR,
+        scope=CapabilityScope.INTERACTIVE_ONLY,
     ),
     AgentCapability(
         key="streaming_snapshot",
@@ -178,6 +223,7 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         key="auto_install",
         description="Installs its CLI binary at provision time if missing (gated by consent locally, a config flag remotely). Baseline; every real agent wants it.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
         mixin=HasAutoInstallMixin,
     ),
     AgentCapability(
@@ -190,12 +236,14 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         key="permission_policy",
         description="Supports a per-resource allow/deny/ask permission policy (a refinement on plain auto-allow). Only some CLIs expose per-tool config.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
         mixin=HasPermissionPolicyMixin,
     ),
     AgentCapability(
         key="version_management",
         description="Controls which version of its binary runs, by pinning a version or following an update policy. Absent for CLIs that just use whatever is on PATH.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
         mixin=HasVersionManagementMixin,
     ),
     AgentCapability(
@@ -208,6 +256,7 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         key="usage_tracking",
         description="Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.",
         detection_kind=CapabilityDetectionKind.USAGE_SOURCE,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
     ),
     # Headless-output rows are kept last: they apply only to headless agent variants.
     AgentCapability(
@@ -244,10 +293,24 @@ def render_capability_matrix(
 
     body_rows: list[str] = []
     for capability in capabilities:
-        cells = ["Y" if is_capability_present(capability, info) else "-" for info in sorted_infos]
+        cells = [_render_cell(capability, info) for info in sorted_infos]
         body_rows.append(f"| {capability.key} | " + " | ".join(cells) + " |")
 
     return "\n".join([header_row, separator_row, *body_rows])
+
+
+def _render_cell(capability: AgentCapability, info: AgentClassInfo) -> str:
+    """Render one matrix cell: `Y` (present), `-` (applicable but absent), or `n/a`."""
+    if not is_capability_applicable(capability, info):
+        # A capability outside an agent's scope must not also be detected as present;
+        # if it is, the scope and the detection disagree and the matrix would be a lie.
+        if is_capability_present(capability, info):
+            raise AgentCapabilityError(
+                f"Capability '{capability.key}' is n/a for '{info.agent_type_name}' (scope "
+                f"{capability.scope}) yet is detected as present; the scope and detection disagree."
+            )
+        return "n/a"
+    return "Y" if is_capability_present(capability, info) else "-"
 
 
 def _hook_implementer_plugin_names(pm: pluggy.PluginManager, hook_name: str) -> frozenset[str]:
@@ -298,13 +361,16 @@ def build_agent_class_infos(
         plugin_hook_names = frozenset(
             hook_name for hook_name in hook_names if owner in plugin_names_by_hook[hook_name]
         )
+        agent_class = get_agent_class(agent_type_name)
         infos.append(
             AgentClassInfo(
                 agent_type_name=agent_type_name,
-                agent_class=get_agent_class(agent_type_name),
+                agent_class=agent_class,
                 field_generator_agent_type_names=field_generator_agent_type_names,
                 plugin_hook_names=plugin_hook_names,
                 is_usage_source_claimed=(owner + _USAGE_PLUGIN_SUFFIX) in usage_plugin_names,
+                is_headless=issubclass(agent_class, HeadlessAgentMixin),
+                is_generic_command=issubclass(agent_class, GenericCommandAgentMixin),
             )
         )
     return tuple(infos)
@@ -316,8 +382,10 @@ _GENERATED_DOC_HEADER: Final[str] = """# Agent capabilities
      Regenerate with `just regenerate-agent-capabilities-doc` (see `mngr.agents.agent_capabilities`). -->
 
 Which agent types implement which capabilities, **derived from the code** (the agent classes
-and their plugins), not maintained by hand. A `Y` means the capability is present; `-` means
-absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
+and their plugins), not maintained by hand. `Y` means present; `-` means applicable but
+absent; `n/a` means the capability does not apply to that agent kind (an interactive-only
+capability on a headless agent, or a CLI-specific capability on a bare command runner). See
+`specs/agent-plugin-parity/capability-mixins.md` for the design.
 """
 
 

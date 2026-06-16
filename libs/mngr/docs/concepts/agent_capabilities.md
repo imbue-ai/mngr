@@ -4,22 +4,24 @@
      Regenerate with `just regenerate-agent-capabilities-doc` (see `mngr.agents.agent_capabilities`). -->
 
 Which agent types implement which capabilities, **derived from the code** (the agent classes
-and their plugins), not maintained by hand. A `Y` means the capability is present; `-` means
-absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
+and their plugins), not maintained by hand. `Y` means present; `-` means applicable but
+absent; `n/a` means the capability does not apply to that agent kind (an interactive-only
+capability on a headless agent, or a CLI-specific capability on a bare command runner). See
+`specs/agent-plugin-parity/capability-mixins.md` for the design.
 
 | Capability | claude | headless_claude | antigravity | codex | opencode | pi-coding | command | headless_command |
 |---|---|---|---|---|---|---|---|---|
 | raw_transcript | Y | Y | Y | Y | Y | Y | - | - |
-| common_transcript | Y | Y | Y | Y | Y | Y | - | - |
-| waiting_reason_field | Y | - | - | Y | Y | Y | - | - |
+| common_transcript | Y | Y | Y | Y | Y | Y | n/a | n/a |
+| waiting_reason_field | Y | n/a | - | Y | Y | Y | n/a | n/a |
 | streaming_snapshot | Y | Y | - | - | - | - | - | - |
 | session_preservation | Y | Y | Y | Y | Y | Y | - | - |
-| auto_install | Y | Y | Y | Y | Y | Y | - | - |
-| unattended_operation | Y | Y | Y | Y | Y | Y | - | - |
-| permission_policy | - | - | Y | Y | Y | - | - | - |
-| version_management | Y | Y | - | Y | - | - | - | - |
+| auto_install | Y | Y | Y | Y | Y | Y | n/a | n/a |
+| unattended_operation | Y | Y | Y | Y | Y | Y | Y | Y |
+| permission_policy | - | - | Y | Y | Y | - | n/a | n/a |
+| version_management | Y | Y | - | Y | - | - | n/a | n/a |
 | deploy_contributions | Y | - | - | - | - | - | - | - |
-| usage_tracking | Y | - | - | Y | Y | Y | - | - |
+| usage_tracking | Y | - | - | Y | Y | Y | n/a | n/a |
 | headless_output | - | Y | - | - | - | - | - | Y |
 | streaming_headless_output | - | Y | - | - | - | - | - | Y |
 

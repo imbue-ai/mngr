@@ -681,3 +681,17 @@ class HasAutoInstallMixin(ABC):
     def get_install_command(self) -> str:
         """Return the shell command that installs this agent's CLI binary."""
         ...
+
+
+class GenericCommandAgentMixin(HasUnattendedModeMixin):
+    """Marker for the bare command-running agent types (``command``, ``headless_command``).
+
+    These run an arbitrary shell command rather than wrapping a specific external CLI, so
+    the CLI-oriented capabilities (common transcript, auto-install, permission policy,
+    version management, usage tracking) do not apply to them. They also run with no human
+    by nature -- a plain command has no in-run tool prompts to approve -- so they are
+    always unattended.
+    """
+
+    def is_unattended_enabled(self) -> bool:
+        return True
