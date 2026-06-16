@@ -175,7 +175,7 @@ def test_prevent_short_uuid_ids() -> None:
 
 
 def test_prevent_model_copy() -> None:
-    rc.check_model_copy(_DIR, snapshot(8))
+    rc.check_model_copy(_DIR, snapshot(0))
 
 
 # --- Logging ---

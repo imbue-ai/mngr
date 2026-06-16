@@ -15,6 +15,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pyinfra.api import Host as PyinfraHost
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -105,14 +106,14 @@ def test_vps_docker_host_record_serialization_roundtrip() -> None:
     assert restored.container_id == "deadbeef1234"
 
 
-def test_vps_docker_host_record_model_copy() -> None:
+def test_vps_host_record_model_copy_update() -> None:
     certified_data = _make_certified_data()
     record = VpsHostRecord(
         certified_host_data=certified_data,
         vps_ip="10.0.0.1",
     )
     new_data = _make_certified_data(host_name="updated-host")
-    updated = record.model_copy(update={"certified_host_data": new_data})
+    updated = record.model_copy_update(to_update(record.field_ref().certified_host_data, new_data))
     assert updated.certified_host_data.host_name == "updated-host"
     assert updated.vps_ip == "10.0.0.1"
     # Original unchanged.

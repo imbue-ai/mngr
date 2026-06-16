@@ -79,3 +79,7 @@ Bugfix (found by the new bare release tests): on resume, the aws/gcp/azure
 `start_host` read the host record through the Docker volume (`docker volume
 inspect`), which does not exist for a bare host, so `mngr start` failed. It now
 resolves the store through the realizer (the fixed root-disk path for bare).
+
+The VPS provider's host-record updates use the type-safe `model_copy_update` /
+`to_update` idiom instead of `model_copy(update={...})`, so field names are
+checked by the type system.
