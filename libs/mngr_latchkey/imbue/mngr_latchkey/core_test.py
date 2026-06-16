@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import psutil
 import pytest
+from loguru import logger
 from pydantic import PrivateAttr
 from watchdog.events import FileModifiedEvent
 from watchdog.observers import Observer
@@ -28,6 +29,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
+from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
@@ -40,6 +42,28 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import FakeLatchkey
 
 _POLL_INTERVAL_SECONDS = 0.05
+
+
+def test_gateway_output_is_routed_through_loguru() -> None:
+    """Gateway output lines are emitted as structured loguru events (not a raw file).
+
+    This is what folds the gateway's otherwise-unstructured output into the
+    supervisor's standard rotating, timestamped JSONL log.
+    """
+    captured: list[tuple[str, str]] = []
+
+    def _sink(message: object) -> None:
+        record = message.record  # ty: ignore[unresolved-attribute]
+        captured.append((record["level"].name, record["message"]))
+
+    handler_id = logger.add(_sink, level="DEBUG", format="{message}")
+    try:
+        _log_gateway_output_line("hello from the gateway\n", is_stdout=True)
+    finally:
+        logger.remove(handler_id)
+
+    assert ("DEBUG", "[latchkey gateway] hello from the gateway") in captured
+
 
 # The previous on-disk gateway-record tests went away when the record
 # itself did -- gateway lifetime is now scoped to a single ``mngr
@@ -1158,9 +1182,9 @@ def test_remote_state_watch_handler_routes_credential_and_permission_changes(
         event_handler.dispatch(FileModifiedEvent(str(permissions_path)))
         assert handler._synced == [(host_id_str, True, False)]
 
-        # An unrelated path (e.g. the gateway log) is ignored.
+        # An unrelated path (e.g. the forward supervisor record) is ignored.
         handler._synced.clear()
-        event_handler.dispatch(FileModifiedEvent(str(tmp_path / "mngr_latchkey" / "latchkey_gateway.log")))
+        event_handler.dispatch(FileModifiedEvent(str(tmp_path / "mngr_latchkey" / "latchkey_forward.json")))
         assert handler._synced == []
 
         # A permissions file for an unknown host is ignored.

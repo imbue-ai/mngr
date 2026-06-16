@@ -17,6 +17,7 @@ command that produces a Debian + Docker + deps-baked AMI to skip the
 """
 
 from typing import Any
+from typing import assert_never
 
 import click
 from botocore.exceptions import BotoCoreError
@@ -24,11 +25,15 @@ from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 
@@ -155,6 +160,63 @@ def _perform_cleanup(client: AwsVpsClient) -> str | None:
     return client.delete_security_group()
 
 
+def _output_prepare_result(
+    result: SecurityGroupPrepareResult,
+    region: str,
+    output_format: OutputFormat,
+) -> None:
+    """Emit the result of ``mngr aws prepare`` in the requested format.
+
+    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
+    ``prepared`` event. The structured forms carry ``created`` so a caller can
+    tell a first-run create from an idempotent no-op.
+    """
+    data = {
+        "security_group_id": result.security_group_id,
+        "region": region,
+        "created": result.was_created,
+    }
+    match output_format:
+        case OutputFormat.JSON:
+            write_json_line(data)
+        case OutputFormat.JSONL:
+            emit_event("prepared", data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            write_human_line("Prepared AWS security group {} in region {}", result.security_group_id, region)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _output_cleanup_result(
+    deleted_sg_id: str | None,
+    region: str,
+    output_format: OutputFormat,
+) -> None:
+    """Emit the result of ``mngr aws cleanup`` in the requested format.
+
+    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
+    ``cleaned_up`` event. ``deleted`` is False when the security group was
+    already absent (idempotent no-op).
+    """
+    data = {
+        "security_group_id": deleted_sg_id,
+        "region": region,
+        "deleted": deleted_sg_id is not None,
+    }
+    match output_format:
+        case OutputFormat.JSON:
+            write_json_line(data)
+        case OutputFormat.JSONL:
+            emit_event("cleaned_up", data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            if deleted_sg_id is None:
+                write_human_line("Nothing to clean up: no mngr-managed security group in region {}.", region)
+            else:
+                write_human_line("Cleaned up AWS security group {} in region {}", deleted_sg_id, region)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 @click.group(name="aws")
 def aws_cli_group() -> None:
     """AWS-provider operator commands (one-time setup, future AMI tooling)."""
@@ -211,7 +273,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     --provider aws` only needs RunInstances + DescribeSecurityGroups +
     DescribeInstances + ImportKeyPair etc. (no SG-management permissions).
     """
-    mngr_ctx, _output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="aws prepare",
         command_class=_AwsPrepareCliOptions,
@@ -230,9 +292,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # bad ``AWS_PROFILE``). Mirrors the pair caught by
         # ``AwsProviderBackend.build_provider_instance``.
         raise click.ClickException(str(e)) from e
-    sg_id = client.ensure_security_group()
-    logger.info("Prepared AWS security group {} in region {}", sg_id, client.region)
-    write_human_line(sg_id)
+    result = client.ensure_security_group()
+    _output_prepare_result(result, client.region, output_opts.output_format)
 
 
 @aws_cli_group.command(name="cleanup")
@@ -286,7 +347,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     created and deleted by the create/destroy lifecycle, not by `prepare`
     or `cleanup`.
     """
-    mngr_ctx, _output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="aws cleanup",
         command_class=_AwsOperatorCliOptions,
@@ -299,11 +360,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         raise click.ClickException(str(e)) from e
 
     deleted_sg_id = _perform_cleanup(client)
-    if deleted_sg_id is None:
-        write_human_line(f"Nothing to clean up: no mngr-managed security group in region {client.region}.")
-    else:
-        logger.info("Cleaned up AWS security group {} in region {}", deleted_sg_id, client.region)
-        write_human_line(deleted_sg_id)
+    _output_cleanup_result(deleted_sg_id, client.region, output_opts.output_format)
 
 
 @aws_cli_group.command(name="ami")
