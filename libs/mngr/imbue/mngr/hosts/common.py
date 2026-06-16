@@ -18,6 +18,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import WaitingReason
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
 
@@ -407,3 +408,29 @@ def determine_lifecycle_state(
         return AgentLifecycleState.DONE
 
     return replaced_state
+
+
+@pure
+def classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> WaitingReason | None:
+    """Classify why an agent is waiting from two marker signals, or None if running.
+
+    Shared by agent plugins so that a lifecycle reader (the RUNNING -> WAITING
+    promotion in ``get_lifecycle_state``) and a ``waiting_reason`` field generator
+    make the *same* decision from the same inputs and cannot drift. Callers differ
+    only in how they derive ``is_active`` -- e.g. from the live process plus an
+    ``active`` marker, or from a single cheap ``active`` marker read.
+
+    - not active -> END_OF_TURN (idle, turn complete)
+    - active and blocked on a permission dialog -> PERMISSIONS
+    - active and not blocked -> None (actively running)
+
+    PERMISSIONS is gated on ``is_active``: a permission dialog is only meaningful
+    during a live turn, so a *stranded* permission marker (one that outlived its
+    turn) reports END_OF_TURN rather than PERMISSIONS. Correctness therefore does
+    not depend on a cleanup hook having removed the marker.
+    """
+    if not is_active:
+        return WaitingReason.END_OF_TURN
+    if is_blocked_on_permission:
+        return WaitingReason.PERMISSIONS
+    return None
