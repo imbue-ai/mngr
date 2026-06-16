@@ -19,7 +19,7 @@ from imbue.mngr.errors import MngrError
 # ConcurrencyExceptionGroup before re-raising. So the subprocess-runner
 # helpers below must catch the group in addition to the bare ProcessError --
 # either can surface depending on where the failure happens.
-_SUBPROCESS_ERRORS: tuple[type[Exception], ...] = (OSError, ProcessError, ConcurrencyExceptionGroup)
+SUBPROCESS_ERRORS: tuple[type[Exception], ...] = (OSError, ProcessError, ConcurrencyExceptionGroup)
 
 
 class OsName(UpperCaseStrEnum):
@@ -168,7 +168,7 @@ def check_bash_version(minimum: int = 4) -> bool:
             result = cg.run_process_to_completion(["bash", "-c", "echo ${BASH_VERSINFO[0]}"])
         version = int(result.stdout.strip())
         return version >= minimum
-    except (*_SUBPROCESS_ERRORS, ValueError):
+    except (*SUBPROCESS_ERRORS, ValueError):
         return False
 
 
@@ -273,7 +273,7 @@ def _install_via_brew(packages: list[str]) -> bool:
         with ConcurrencyGroup(name="brew-install") as cg:
             cg.run_process_to_completion(["brew", "install", *packages])
         return True
-    except _SUBPROCESS_ERRORS:
+    except SUBPROCESS_ERRORS:
         return False
 
 
@@ -286,7 +286,7 @@ def _install_via_apt(packages: list[str]) -> bool:
             cg.run_process_to_completion(["sudo", "apt-get", "update", "-qq"])
             cg.run_process_to_completion(["sudo", "apt-get", "install", "-y", "-qq", *packages])
         return True
-    except _SUBPROCESS_ERRORS:
+    except SUBPROCESS_ERRORS:
         return False
 
 

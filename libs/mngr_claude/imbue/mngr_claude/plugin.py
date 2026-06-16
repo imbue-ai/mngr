@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
-from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -27,7 +26,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
@@ -41,9 +39,9 @@ from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
-from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import get_preserved_agents_root_dir
-from imbue.mngr.api.preservation import preserve_agent_data
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -52,6 +50,7 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
@@ -63,16 +62,17 @@ from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.plugins.hookspecs import OptionStackItem
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
@@ -315,12 +315,8 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     preserve_sessions_on_destroy: bool = Field(
         default=True,
-        description="Preserve Claude session files locally before the agent's state directory is deleted on destroy. "
-        "When enabled, session JSONL files, transcripts (raw and common), and the session ID history "
-        "are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the agent's "
-        "state-directory layout. For remote agents, files are pulled to the local machine so they "
-        "survive host destruction. "
-        "Set to False to discard session data on destroy.",
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
     use_env_config_dir: bool = Field(
         default=False,
@@ -1521,12 +1517,19 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         The PermissionRequest hook creates a 'permissions_waiting' file when Claude
         is blocked on a permission dialog. When present, this overrides RUNNING to
         WAITING since the agent cannot make progress without user intervention.
+
+        Delegates the gating decision to the shared classify_waiting_reason so this
+        promotion and the waiting_reason field generator cannot drift: a RUNNING
+        base state means the 'active' marker is present and the process is alive, so
+        the classifier's is_active gate is satisfied and a PERMISSIONS verdict is
+        what promotes RUNNING to WAITING.
         """
         state = super().get_lifecycle_state()
-        if state == AgentLifecycleState.RUNNING:
-            if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
-                return AgentLifecycleState.WAITING
-        return state
+        if state != AgentLifecycleState.RUNNING:
+            return state
+        is_blocked = self._check_file_exists(self._get_agent_dir() / "permissions_waiting")
+        reason = classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked)
+        return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else state
 
     def get_expected_process_name(self) -> str:
         """Return 'claude' as the expected process name.
@@ -2402,13 +2405,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """
         # Preserve session files before the state dir is deleted
         if self.agent_config.preserve_sessions_on_destroy:
-            preserve_agent_data(
-                _claude_preserved_items(self.agent_config.use_env_config_dir),
-                host,
-                self._get_agent_dir(),
-                get_local_preserved_agent_dir(self.mngr_ctx, self.name, self.id),
-                self.mngr_ctx,
-            )
+            preserve_agent_state(_claude_preserved_items(self.agent_config.use_env_config_dir), self, host)
 
         if self.agent_config.use_env_config_dir:
             # Shared-config mode: mngr never wrote per-agent keychain entries or
@@ -2473,6 +2470,14 @@ def _should_preserve_sessions(ref: DiscoveredAgent) -> bool:
     return bool(agent_config.get("preserve_sessions_on_destroy"))
 
 
+def _claude_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) Claude agent, or None to skip it."""
+    if not _should_preserve_sessions(ref):
+        return None
+    is_shared_config = bool(ref.certified_data.get("agent_config", {}).get("use_env_config_dir"))
+    return _claude_preserved_items(is_shared_config)
+
+
 def _generate_claude_home_settings() -> dict[str, Any]:
     """default contents for ~/.claude/settings.json"""
     return {"skipDangerousModePermissionPrompt": True}
@@ -2520,38 +2525,20 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentT
     return ("claude", ClaudeAgent, ClaudeAgentConfig)
 
 
-class WaitingReason(UpperCaseStrEnum):
-    """Why a Claude agent is in the WAITING lifecycle state."""
-
-    PERMISSIONS = auto()
-    END_OF_TURN = auto()
-
-
-def _host_file_exists(host: OnlineHostInterface, path: Path) -> bool:
-    """Check if a file exists on the host without SSH overhead."""
-    try:
-        host.read_text_file(path)
-        return True
-    except FileNotFoundError:
-        return False
-
-
 def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
     """Return why the agent is waiting based on marker files, or None.
 
     Checks the agent state directory for marker files rather than calling
-    get_lifecycle_state() (which involves tmux/ps SSH commands).
-
-    - permissions_waiting exists -> PERMISSIONS (blocked on permission dialog)
-    - active file absent -> END_OF_TURN (idle, turn complete)
-    - otherwise -> None (agent is actively running)
+    get_lifecycle_state() (which involves tmux/ps SSH commands), then delegates the
+    decision to the shared ``classify_waiting_reason`` so this and the lifecycle
+    promotion stay in lockstep. ``permissions_waiting`` is only read when ``active``
+    is present, both to short-circuit the idle case and because the classifier
+    ignores the permission signal when the agent is not in a turn.
     """
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    if _host_file_exists(host, agent_dir / "permissions_waiting"):
-        return WaitingReason.PERMISSIONS
-    if not _host_file_exists(host, agent_dir / "active"):
-        return WaitingReason.END_OF_TURN
-    return None
+    is_active = host.path_exists(agent_dir / "active")
+    is_blocked_on_permission = is_active and host.path_exists(agent_dir / "permissions_waiting")
+    return classify_waiting_reason(is_active, is_blocked_on_permission)
 
 
 @hookimpl
@@ -2565,28 +2552,13 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     """Preserve Claude session files from the host's volume before it is destroyed.
 
     When a host goes offline and is destroyed without calling agent.on_destroy(),
-    session data still lives on the host's persisted volume. If the provider
-    surfaces that volume, ``to_offline_host`` returns an ``OfflineHostWithVolume``
-    (a :class:`HostFileReadInterface`), so the same :func:`preserve_agent_data`
-    used on the online path reads the files straight off the volume. If the host
-    is not readable (no volume), there is nothing we can preserve.
+    session data still lives on the host's persisted volume. The shared
+    :func:`preserve_host_agents_on_destroy` reads the declared files straight off
+    that volume (when the host surfaces one) for each Claude agent that opted in.
     """
-    if not isinstance(host, HostFileReadInterface):
-        logger.debug("Host {} is not readable (no volume); skipping session preservation", host.id)
-        return
-
-    for ref in host.discover_agents():
-        if not _should_preserve_sessions(ref):
-            continue
-        agent_config = ref.certified_data.get("agent_config", {})
-        is_shared_config = bool(agent_config.get("use_env_config_dir"))
-        preserve_agent_data(
-            _claude_preserved_items(is_shared_config),
-            host,
-            get_agent_state_dir_path(host.host_dir, ref.agent_id),
-            get_local_preserved_agent_dir(mngr_ctx, ref.agent_name, ref.agent_id),
-            mngr_ctx,
-        )
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName("claude"), _claude_items_to_preserve_for_discovered_agent
+    )
 
 
 @hookimpl

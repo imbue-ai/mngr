@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-16
+
+### Changed
+
+- Changed: `statusline.sh` now flushes the transcript pipeline (synchronous `--single-pass` of the raw streamer and common-transcript converter) on the busy->idle edge before clearing the `active` marker, so consumers reading the common transcript on a WAITING transition cannot outrun the converter. The flush and the convert lock come from the shared `mngr_common_transcript_lib.sh` rather than being duplicated per agent.
+
+## [v0.1.5] - 2026-06-15
+
+### Changed
+
+- Changed: Ported the antigravity transcript streamer to agy's new SQLite conversation store (agy 1.0.4+ stopped writing the per-conversation JSONL transcript the old streamer tailed). A new self-contained `decode_agy_transcript.py` reads steps from each `.db` and emits the same record shape, so the common-transcript converter is unchanged; assistant tool calls (name + args) are now decoded too.
+
+### Fixed
+
+- Fixed: On macOS, antigravity (`agy`) agents no longer hang on a modal "A keychain cannot be found to store Antigravity Safe Storage" dialog. Provisioning now symlinks each per-agent home's `Library/Keychains` to the user's real one; Linux is unaffected (Chromium falls back to its file-based store).
+
 ## [v0.1.4] - 2026-06-13
 
 ### Added

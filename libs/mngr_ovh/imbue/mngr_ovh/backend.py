@@ -340,6 +340,7 @@ class OvhProvider(VpsDockerProvider):
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
+        vps_public_key: str,
     ) -> tuple[VpsInstanceId, str]:
         """Drive the OVH classic-VPS provisioning flow.
 
@@ -357,6 +358,9 @@ class OvhProvider(VpsDockerProvider):
         unused: OVH provides no mechanism to inject host keys at install
         time. The locally-generated host key files are left on disk; they
         do no harm and keep the base ``create_host`` flow uniform.
+        ``vps_public_key`` is likewise unused here: OVH installs the SSH
+        public key via the rebuild API (``get_cached_public_key`` below),
+        not via the base cloud-init path that consumes it.
 
         The OS image is taken from ``OvhProviderConfig.default_image_name``;
         per-host image overrides are not supported via build args, matching
@@ -367,7 +371,7 @@ class OvhProvider(VpsDockerProvider):
         SSH-reachable hostname -- OVH's serviceName is itself a DNS name
         like ``vps-eec8860b.vps.ovh.us`` that resolves to the VPS's IP.
         """
-        del vps_host_key_path, vps_host_public_key
+        del vps_host_key_path, vps_host_public_key, vps_public_key
         region = parsed.region
         plan = parsed.plan
         image_name = self.ovh_config.default_image_name

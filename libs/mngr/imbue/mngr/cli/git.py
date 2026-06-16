@@ -15,8 +15,6 @@ from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_info
-from imbue.mngr.cli.output_helpers import output_git_pull_success
-from imbue.mngr.cli.output_helpers import output_git_push_success
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -123,9 +121,8 @@ def git_push_command(ctx: click.Context, **kwargs: Any) -> None:
         remote_path=location.path,
         extra_args=opts.git_args,
         cg=mngr_ctx.concurrency_group,
+        run_in_terminal=True,
     )
-
-    output_git_push_success(output_opts.output_format)
 
 
 @git_command.command(
@@ -160,9 +157,8 @@ def git_pull_command(ctx: click.Context, **kwargs: Any) -> None:
         remote_path=location.path,
         extra_args=opts.git_args,
         cg=mngr_ctx.concurrency_group,
+        run_in_terminal=True,
     )
-
-    output_git_pull_success(output_opts.output_format)
 
 
 CommandHelpMetadata(

@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+## wait_for_usage: own daemon poll loop instead of injected sleep
+
+- `wait_for_usage` no longer takes injected `monotonic_fn` / `sleep_fn` callables (which had aliased `time.sleep` to dodge the `time_sleep` ratchet while still sleeping for real). It now owns a real `time.sleep` directly -- the single sanctioned sleep in this package -- because it is a background/daemon wait that deliberately supports `timeout_seconds=None` (run indefinitely until the usage predicate flips). That no-timeout case is why it does not use the shared `poll_until`, which requires an explicit timeout on purpose. `now_fn` (the wall-clock value fed into the CEL context) is unchanged. No behavior change for callers; purely internal.
+
+Rename the `--max-age` flag (and the `max_age_seconds` plugin-config option) to `--stale-after` (`stale_after_seconds`), so the name reflects that it only controls the snapshot stale-warning threshold and is not an event-age filter. No alias is kept for the old name.
+
+README: add a "Filtering by event age" section documenting `--since` as the way to bound the per-session cost aggregation by event age, and clarifying that `--stale-after` is a stale-warning threshold, not a filter.
+
+`mngr usage --help`: move `--since`, `--stale-after`, `--detail`, and `--preserved/--no-preserved` out of "Ungrouped". `--since` and `--preserved/--no-preserved` now render under the existing "Filtering" group (matching `mngr usage wait`, where `--preserved/--no-preserved` already lives); `--stale-after` and `--detail` render under a new "Display" group (matching the convention in `mngr transcript` / `mngr events`).
+
+`mngr usage --help` synopsis: enumerate the options unique to `mngr usage` (`--stale-after`, `--detail`, `--since`, `--no-preserved`) instead of the placeholder `[OPTIONS] [COMMAND]`, matching the style used by `mngr usage wait` and other `mngr` commands (which omit shared filter options like `--include` / `--provider`).
+
 ## 2026-06-12
 
 Internal: import `get_agent_state_dir_path` from its new canonical location `imbue.mngr.hosts.common` (relocated there from `imbue.mngr.hosts.host` to avoid circular-import issues). No behavior change.

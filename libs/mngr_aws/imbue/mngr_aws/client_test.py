@@ -7,6 +7,7 @@ requests and canned responses.
 """
 
 from collections.abc import Iterator
+from typing import Any
 
 import boto3
 import pytest
@@ -19,11 +20,9 @@ from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 
 @pytest.fixture()
@@ -87,6 +86,33 @@ def auto_sg_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
         stubber.deactivate()
 
 
+def _make_stubbed_client(**client_kwargs: Any) -> tuple[AwsVpsClient, Stubber]:
+    """Build a ``_StubbedAwsVpsClient`` + (inactive) ``Stubber``, overriding client kwargs.
+
+    Shared spine for the ``create_instance`` variants that need a non-default
+    client field (``terminate_on_shutdown`` / ``iam_instance_profile``). Unlike
+    the ``stubbed_client`` fixture it does not activate the stubber: the caller
+    queues its ``run_instances`` stub and activates so the per-test
+    ``expected_params`` stay explicit.
+    """
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test12345",
+        security_group=ExistingSecurityGroup(id="sg-test"),
+        stubbed_ec2_client=ec2,
+        **client_kwargs,
+    )
+    return client, stubber
+
+
 # =============================================================================
 # create_instance
 # =============================================================================
@@ -104,11 +130,16 @@ def test_create_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
             "MaxCount": 1,
             "UserData": "test-user-data",
             "BlockDeviceMappings": ANY,
+            # Default terminate_on_shutdown is False, so an OS shutdown STOPS
+            # (resumable idle-pause) rather than terminating the instance.
+            "InstanceInitiatedShutdownBehavior": "stop",
             "NetworkInterfaces": ANY,
-            "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
             "KeyName": "key-1",
+            # No default IAM instance profile: idle self-stop powers the host
+            # off (no EC2 API call), so no profile is attached unless the
+            # operator sets iam_instance_profile explicitly.
         },
     )
     instance_id = client.create_instance(
@@ -137,7 +168,7 @@ def test_create_instance_uses_ami_id_override(stubbed_client: tuple[AwsVpsClient
             "UserData": "test-user-data",
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
-            "InstanceInitiatedShutdownBehavior": "terminate",
+            "InstanceInitiatedShutdownBehavior": "stop",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
         },
@@ -169,7 +200,7 @@ def test_create_instance_uses_default_ami_when_override_none(stubbed_client: tup
             "UserData": "test-user-data",
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
-            "InstanceInitiatedShutdownBehavior": "terminate",
+            "InstanceInitiatedShutdownBehavior": "stop",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
         },
@@ -198,7 +229,7 @@ def test_create_instance_spot_sets_instance_market_options(stubbed_client: tuple
             "UserData": "test-user-data",
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
-            "InstanceInitiatedShutdownBehavior": "terminate",
+            "InstanceInitiatedShutdownBehavior": "stop",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
             "InstanceMarketOptions": {"MarketType": "spot"},
@@ -236,7 +267,7 @@ def test_create_instance_no_spot_omits_instance_market_options(
             "UserData": "test-user-data",
             "BlockDeviceMappings": ANY,
             "NetworkInterfaces": ANY,
-            "InstanceInitiatedShutdownBehavior": "terminate",
+            "InstanceInitiatedShutdownBehavior": "stop",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
         },
@@ -249,6 +280,73 @@ def test_create_instance_no_spot_omits_instance_market_options(
         ssh_key_ids=[],
         tags={},
     ) == VpsInstanceId("i-ondemand")
+
+
+def test_create_instance_terminate_on_shutdown_sets_terminate_behavior() -> None:
+    """terminate_on_shutdown=True flips InstanceInitiatedShutdownBehavior to 'terminate'."""
+    client, stubber = _make_stubbed_client(terminate_on_shutdown=True)
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-ephemeral"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    stubber.activate()
+    try:
+        assert client.create_instance(
+            label="mngr-test-aws-host",
+            region="us-east-1",
+            plan="t3.small",
+            user_data="test-user-data",
+            ssh_key_ids=[],
+            tags={},
+        ) == VpsInstanceId("i-ephemeral")
+    finally:
+        stubber.deactivate()
+
+
+def test_create_instance_attaches_explicit_iam_instance_profile() -> None:
+    """An explicit iam_instance_profile is attached as IamInstanceProfile={"Name": ...}."""
+    client, stubber = _make_stubbed_client(iam_instance_profile="custom-profile")
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-profile"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "stop",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "custom-profile"},
+        },
+    )
+    stubber.activate()
+    try:
+        assert client.create_instance(
+            label="mngr-test-aws-host",
+            region="us-east-1",
+            plan="t3.small",
+            user_data="test-user-data",
+            ssh_key_ids=[],
+            tags={},
+        ) == VpsInstanceId("i-profile")
+    finally:
+        stubber.deactivate()
 
 
 def test_create_instance_no_instances_raises(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
@@ -291,6 +389,179 @@ def test_destroy_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
         expected_params={"InstanceIds": ["i-abc"]},
     )
     client.destroy_instance(VpsInstanceId("i-abc"))
+
+
+def test_stop_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """stop_instance issues StopInstances and waits for the terminal 'stopped' state."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "stop_instances",
+        {"StoppingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopped"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    client.stop_instance(VpsInstanceId("i-abc"))
+
+
+def test_stop_instance_times_out_if_not_stopped(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """A zero timeout means the wait never observes 'stopped' and raises.
+
+    ``wait_for`` makes one final condition check after the (already-expired)
+    timeout, so a single ``describe_instances`` (returning the still-stopping
+    state) is consumed before the VpsProvisioningError is raised.
+    """
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "stop_instances",
+        {"StoppingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopping"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    with pytest.raises(VpsProvisioningError, match="did not reach state 'stopped'"):
+        client.stop_instance(VpsInstanceId("i-abc"), timeout_seconds=0.0)
+
+
+def test_start_instance_returns_new_public_ip(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """start_instance issues StartInstances and returns the (fresh) public IP once running."""
+    client, stubber = stubbed_client
+    # start_instance first checks the state (to wait out a `stopping` instance);
+    # here it is already stopped, so it proceeds straight to StartInstances.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopped"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "start_instances",
+        {"StartingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    # wait_for_instance_active polls get_instance_status (running) then get_instance_ip.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "running"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-abc",
+                            "State": {"Name": "running"},
+                            "PublicIpAddress": "5.6.7.8",
+                        }
+                    ]
+                }
+            ]
+        },
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    assert client.start_instance(VpsInstanceId("i-abc")) == "5.6.7.8"
+
+
+def test_start_instance_times_out_if_not_active(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """A zero timeout means the activeness wait never succeeds and raises."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopped"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "start_instances",
+        {"StartingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    with pytest.raises(VpsProvisioningError, match="did not become active"):
+        client.start_instance(VpsInstanceId("i-abc"), timeout_seconds=0.0)
+
+
+def test_start_instance_waits_for_stopped_when_still_stopping(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """A still-``stopping`` instance is waited out to ``stopped`` before StartInstances is issued.
+
+    AWS rejects start-instances on a stopping instance (IncorrectInstanceState), so
+    resuming a host caught mid-stop (e.g. just powered off by the idle watcher) must
+    first wait for the terminal stopped state.
+    """
+    client, stubber = stubbed_client
+    # Initial state check: still stopping.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopping"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    # _wait_for_instance_state polls until stopped.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopped"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "start_instances",
+        {"StartingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    # wait_for_instance_active polls get_instance_status (running) then get_instance_ip.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "running"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {"Instances": [{"InstanceId": "i-abc", "State": {"Name": "running"}, "PublicIpAddress": "5.6.7.8"}]}
+            ]
+        },
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    assert client.start_instance(VpsInstanceId("i-abc")) == "5.6.7.8"
+
+
+def test_add_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """add_tags upserts the given tags onto the instance via CreateTags."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={"Resources": ["i-abc"], "Tags": [{"Key": "mngr-agent-x", "Value": "v"}]},
+    )
+    client.add_tags(VpsInstanceId("i-abc"), {"mngr-agent-x": "v"})
+
+
+def test_add_tags_empty_is_noop(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """No tags means no CreateTags call (an unexpected call would make the Stubber raise)."""
+    client, _stubber = stubbed_client
+    client.add_tags(VpsInstanceId("i-abc"), {})
+
+
+def test_remove_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """remove_tags deletes tags by key via DeleteTags (Value omitted)."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "delete_tags",
+        {},
+        expected_params={"Resources": ["i-abc"], "Tags": [{"Key": "mngr-agent-x"}]},
+    )
+    client.remove_tags(VpsInstanceId("i-abc"), ["mngr-agent-x"])
+
+
+def test_remove_tags_empty_is_noop(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """No keys means no DeleteTags call."""
+    client, _stubber = stubbed_client
+    client.remove_tags(VpsInstanceId("i-abc"), [])
 
 
 def test_get_instance_status_running(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
@@ -476,42 +747,6 @@ def test_delete_ssh_key(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     client.delete_ssh_key("mngr-test-h1")
 
 
-def test_list_ssh_keys(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "describe_key_pairs",
-        {"KeyPairs": [{"KeyName": "k1", "KeyFingerprint": "aa"}, {"KeyName": "k2", "KeyFingerprint": "bb"}]},
-    )
-    keys = client.list_ssh_keys()
-    assert len(keys) == 2
-    assert keys[0].id == "k1"
-    assert keys[0].name == "k1"
-
-
-# =============================================================================
-# Snapshots
-# =============================================================================
-
-
-def test_create_snapshot_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    """EBS snapshot support is intentionally unwired; any caller fails loudly."""
-    client, _ = stubbed_client
-    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
-        client.create_snapshot(VpsInstanceId("i-irrelevant"), "irrelevant")
-
-
-def test_delete_snapshot_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, _ = stubbed_client
-    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
-        client.delete_snapshot(VpsSnapshotId("snap-irrelevant"))
-
-
-def test_list_snapshots_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, _ = stubbed_client
-    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
-        client.list_snapshots()
-
-
 # =============================================================================
 # ensure_security_group
 # =============================================================================
@@ -521,7 +756,10 @@ def test_ensure_security_group_returns_preset_id_when_provided(
     stubbed_client: tuple[AwsVpsClient, Stubber],
 ) -> None:
     client, _stubber = stubbed_client
-    assert client.ensure_security_group() == "sg-test"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-test"
+    # A caller-supplied ExistingSecurityGroup is never created by prepare.
+    assert result.was_created is False
 
 
 def test_ensure_security_group_auto_create_warns_when_no_cidrs(log_warnings: list[str]) -> None:
@@ -558,9 +796,11 @@ def test_ensure_security_group_auto_create_warns_when_no_cidrs(log_warnings: lis
     )
     stubber.activate()
     try:
-        assert client.ensure_security_group() == "sg-empty"
+        result = client.ensure_security_group()
     finally:
         stubber.deactivate()
+    assert result.security_group_id == "sg-empty"
+    assert result.was_created is False
     assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
 
 
@@ -590,9 +830,11 @@ def test_ensure_security_group_auto_create_warns_when_open_to_internet(log_warni
     stubber.add_response("authorize_security_group_ingress", {})
     stubber.activate()
     try:
-        assert client.ensure_security_group() == "sg-open"
+        result = client.ensure_security_group()
     finally:
         stubber.deactivate()
+    assert result.security_group_id == "sg-open"
+    assert result.was_created is False
     assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
 
@@ -616,7 +858,9 @@ def test_ensure_security_group_reuses_existing_sg_when_found(
         {},
         expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
     )
-    assert client.ensure_security_group() == "sg-existing"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-existing"
+    assert result.was_created is False
 
 
 def test_ensure_security_group_skips_authorize_when_ingress_already_present(
@@ -657,7 +901,9 @@ def test_ensure_security_group_skips_authorize_when_ingress_already_present(
         },
         expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
     )
-    assert client.ensure_security_group() == "sg-ready"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-ready"
+    assert result.was_created is False
 
 
 def test_ensure_security_group_authorizes_when_one_port_missing(
@@ -699,7 +945,9 @@ def test_ensure_security_group_authorizes_when_one_port_missing(
         {},
         expected_params={"GroupId": "sg-partial", "IpPermissions": ANY},
     )
-    assert client.ensure_security_group() == "sg-partial"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-partial"
+    assert result.was_created is False
 
 
 def test_ensure_security_group_creates_sg_when_missing(
@@ -727,7 +975,9 @@ def test_ensure_security_group_creates_sg_when_missing(
         {},
         expected_params={"GroupId": "sg-new", "IpPermissions": ANY},
     )
-    assert client.ensure_security_group() == "sg-new"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-new"
+    assert result.was_created is True
 
 
 def test_ensure_security_group_duplicate_on_one_port_does_not_drop_the_other(
@@ -753,7 +1003,9 @@ def test_ensure_security_group_duplicate_on_one_port_does_not_drop_the_other(
         {},
         expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
     )
-    assert client.ensure_security_group() == "sg-existing"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-existing"
+    assert result.was_created is False
 
 
 # =============================================================================

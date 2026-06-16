@@ -45,7 +45,7 @@ class _StoppedWithPaneContent(_AlwaysStopped):
 
     _pane_content: str | None = None
 
-    def capture_pane_content(self, include_scrollback: bool = False) -> str | None:
+    def capture_pane_content(self, include_scrollback: bool = False, window: int | str | None = None) -> str | None:
         return self._pane_content
 
 

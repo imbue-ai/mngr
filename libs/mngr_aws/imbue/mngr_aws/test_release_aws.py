@@ -44,6 +44,9 @@ import boto3
 import pytest
 from botocore.exceptions import ClientError
 
+from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import wait_for
+from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -52,6 +55,8 @@ from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 
 pytestmark = [
     pytest.mark.release,
@@ -63,7 +68,7 @@ pytestmark = [
 ]
 
 
-def _write_release_settings(settings_dir: Path) -> None:
+def _write_release_settings(settings_dir: Path, *, terminate_on_shutdown: bool = True) -> None:
     """Write the release-test ``settings.toml`` into ``settings_dir``.
 
     Shared by the prepare fixture and the per-test settings fixture so both the
@@ -72,6 +77,13 @@ def _write_release_settings(settings_dir: Path) -> None:
     inherit ``PYTEST_CURRENT_TEST`` and mngr refuses to load any config that does
     not opt in -- without it, a developer machine with a real mngr profile would
     fail before any AWS call.
+
+    ``terminate_on_shutdown`` sets EC2's ``InstanceInitiatedShutdownBehavior``.
+    The default (``True``) makes the release-test instances ephemeral /
+    self-cleaning: any OS shutdown (the ``auto_shutdown_seconds`` time cap, or
+    the idle watcher) TERMINATES the instance, so a leaked instance auto-destroys
+    at the cap. The resumable-idle-stop test overrides it to ``False`` so an idle
+    poweroff STOPS (not terminates) the instance and can be resumed.
 
     ``MNGR_PROJECT_CONFIG_DIR`` is the literal directory containing
     ``settings.toml`` (see ``resolve_project_config_dir`` in
@@ -86,16 +98,21 @@ def _write_release_settings(settings_dir: Path) -> None:
         "is_allowed_in_pytest = true\n"
         "\n[providers.aws]\n"
         'backend = "aws"\n'
-        # Auto-terminate via cloud-init if pytest is killed before the
-        # per-test cleanup runs (combined with InstanceInitiatedShutdownBehavior=terminate).
+        # Auto-shutdown via cloud-init if pytest is killed before the per-test
+        # cleanup runs. With terminate_on_shutdown=true the shutdown terminates
+        # the instance (self-cleaning); with false it stops it (resumable), and
+        # the conftest session-end scanner reaps a leak.
         f"auto_shutdown_seconds = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS}\n"
+        f"terminate_on_shutdown = {'true' if terminate_on_shutdown else 'false'}\n"
         # Default is already ("0.0.0.0/0",), but write it explicitly so the
         # test settings file is self-documenting -- the test SSH connection
         # from the developer laptop / CI runner needs ingress from any IP.
         'allowed_ssh_cidrs = ["0.0.0.0/0"]\n'
-        # Disable other remote providers so the create-host preflight
-        # doesn't trip on them looking for credentials.
+        # Disable other remote providers so the create-host preflight (and
+        # ``mngr list``) doesn't trip on them looking for credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
+        "\n[providers.gcp]\nis_enabled = false\n"
         "\n[providers.vultr]\nis_enabled = false\n"
         "\n[providers.ovh]\nis_enabled = false\n"
         "\n[providers.imbue_cloud]\nis_enabled = false\n"
@@ -172,8 +189,27 @@ def aws_test_settings_dir(tmp_path: Path, _aws_release_test_security_group_prepa
     under pytest without it. Using ``MNGR_PROJECT_CONFIG_DIR`` to point
     the subprocess at this settings file keeps the test-only TTL out of
     production code paths.
+
+    Uses the default ``terminate_on_shutdown = true`` (ephemeral / self-cleaning
+    at the time cap). The resumable-idle-stop test needs the opposite flag, so it
+    uses ``aws_resumable_idle_settings_dir`` instead.
     """
     _write_release_settings(tmp_path)
+    yield tmp_path
+
+
+@pytest.fixture()
+def aws_resumable_idle_settings_dir(tmp_path: Path, _aws_release_test_security_group_prepared: None) -> Iterator[Path]:
+    """Like ``aws_test_settings_dir`` but with ``terminate_on_shutdown = false``.
+
+    The idle-watcher resume test must exercise the *resumable* idle-stop path: an
+    idle poweroff STOPS (not terminates) the instance so ``mngr start`` can resume
+    it. That requires ``InstanceInitiatedShutdownBehavior = stop``, i.e. the
+    ``terminate_on_shutdown = false`` flag -- the opposite of the shared settings'
+    default ``true``. ``auto_shutdown_seconds`` is still set (the pytest guard
+    requires it, and the conftest session-end scanner reaps a stopped leak).
+    """
+    _write_release_settings(tmp_path, terminate_on_shutdown=False)
     yield tmp_path
 
 
@@ -283,7 +319,6 @@ def test_provider_lifecycle_create_exec_and_destroy(
         # --force skips the destroy confirmation, so no stdin input needed.
         # Result is intentionally not checked: best-effort cleanup.
         _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
-        time.sleep(20)
 
 
 @pytest.mark.rsync
@@ -328,7 +363,181 @@ def test_provider_lifecycle_create_stop_start_destroy(
         # --force skips the destroy confirmation, so no stdin input needed.
         # Result is intentionally not checked: best-effort cleanup.
         _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
-        time.sleep(20)
+
+
+def _find_test_instance_id(client: AwsVpsClient) -> str | None:
+    """Return the EC2 instance id of the instance the current release test created.
+
+    Test instances are tagged ``mngr-pytest-launched=true`` (``create_instance``
+    adds it when ``PYTEST_CURRENT_TEST`` is set, which the ``_run_mngr``
+    subprocess inherits). Filtering on that tag isolates the test's instance
+    from any real mngr instances in the account, and -- unlike the ``Name`` tag,
+    which is ``mngr-<host-name>`` and so differs from the agent name -- is a
+    reliable handle. ``list_instances`` includes stopped instances, so this
+    resolves the instance even after it has stopped. Returns ``None`` unless
+    exactly one such instance exists (an ambiguous count means leftover state).
+    """
+    matches = [
+        instance
+        for instance in client.list_instances()
+        if f"{AWS_PYTEST_LAUNCHED_TAG}=true" in instance.get("tags", ())
+    ]
+    if len(matches) == 1:
+        return matches[0]["id"]
+    return None
+
+
+def _terminate_instance_best_effort(client: AwsVpsClient, instance_id: VpsInstanceId) -> None:
+    """Directly terminate an instance, swallowing errors.
+
+    A belt-and-suspenders backstop after ``mngr destroy`` in each test's
+    ``finally``: if destroy fails or partially completes, this guarantees the
+    test's EC2 instance is terminated so nothing leaks between iterative local
+    runs (the conftest session-end scanner is the final net, but only fires at
+    session end).
+    """
+    try:
+        client.destroy_instance(instance_id)
+    except MngrError:
+        pass
+
+
+@pytest.mark.rsync
+def test_provider_stop_host_stops_ec2_instance_and_start_resumes(
+    aws_test_settings_dir: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+) -> None:
+    """``mngr stop --stop-host`` stops the EC2 instance itself; ``mngr start`` resumes it.
+
+    This is the native-EC2-stop lifecycle the AWS provider adds on top of the
+    base (which only stops the inner Docker container). It asserts, via the EC2
+    API, that the instance reaches ``stopped`` after ``--stop-host`` (compute
+    billing ends, the EBS volume is preserved) and ``running`` after ``start``,
+    and that a post-resume ``exec`` works -- proving the on-disk state survived
+    the stop and the provider rebound to the instance's fresh public IP.
+    """
+    agent_name = f"{AWS_TEST_NAME_PREFIX}sh-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        aws_test_settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--",
+        "sleep",
+        "99999",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+
+    instance_id: str | None = None
+    try:
+        instance_id = _find_test_instance_id(aws_release_client)
+        assert instance_id is not None, "could not find the created EC2 instance (pytest-launched tag)"
+        vps_instance_id = VpsInstanceId(instance_id)
+
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "stop", agent_name, "--stop-host")
+        assert result.returncode == 0, f"stop --stop-host failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.HALTED, (
+            "EC2 instance should be stopped (HALTED) after `mngr stop --stop-host`"
+        )
+
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
+        assert result.returncode == 0, f"start failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.ACTIVE, (
+            "EC2 instance should be running (ACTIVE) after `mngr start`"
+        )
+
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-host-restart")
+        assert result.returncode == 0, f"post-resume exec failed: {result.stderr}\n{result.stdout}"
+        assert "alive-after-host-restart" in result.stdout
+    finally:
+        # --force skips the destroy confirmation; result unchecked (best-effort).
+        # The direct terminate is a backstop so a failed/partial destroy can't
+        # leak the instance between iterative local runs.
+        _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
+        if instance_id is not None:
+            _terminate_instance_best_effort(aws_release_client, VpsInstanceId(instance_id))
+
+
+@pytest.mark.rsync
+def test_provider_idle_watcher_auto_stops_then_resumes(
+    aws_resumable_idle_settings_dir: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+) -> None:
+    """The on-host idle watcher self-stops the EC2 instance when idle; `mngr start` resumes it.
+
+    Creates an agent with a short ``--idle-timeout`` and no SSH connection, so
+    the in-container activity watcher sees no activity, touches the sentinel, and
+    the host-side systemd path/service powers the host off (``shutdown -P now``).
+    Because this test's settings use ``terminate_on_shutdown = false`` (the
+    per-test override of the shared default ``true``), EC2 applies
+    ``InstanceInitiatedShutdownBehavior = stop``, so the idle poweroff STOPS the
+    instance (resumable) rather than terminating it. We poll EC2 until the
+    instance is ``stopped`` (proving auto-stop end to end), then resume and
+    confirm it stays running with a working post-resume command, which proves the
+    stale-sentinel handling: a resumed instance must not immediately re-stop.
+
+    No IAM is involved: the watcher powers the host off rather than calling the
+    EC2 API, so there is nothing to skip on missing iam:* permissions.
+    """
+    settings_dir = aws_resumable_idle_settings_dir
+    agent_name = f"{AWS_TEST_NAME_PREFIX}idle-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--idle-timeout",
+        "45",
+        "--",
+        "sleep",
+        "99999",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+
+    instance_id: str | None = None
+    try:
+        instance_id = _find_test_instance_id(aws_release_client)
+        assert instance_id is not None, "could not find the created EC2 instance (pytest-launched tag)"
+        vps_instance_id = VpsInstanceId(instance_id)
+
+        # Wait for the idle watcher to self-stop the instance. Budget: 45s idle +
+        # the watcher's 15s poll + systemd path latency + the stop transition.
+        # wait_for polls via the shared helper (no time.sleep in this package).
+        wait_for(
+            lambda: aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.HALTED,
+            timeout=360.0,
+            poll_interval=10.0,
+            error_message=(
+                f"EC2 instance {vps_instance_id} did not auto-stop on idle within 360s "
+                "(the on-host idle watcher should have stopped it)"
+            ),
+        )
+
+        result = _run_mngr(settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
+        assert result.returncode == 0, f"start after auto-stop failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.ACTIVE, (
+            "EC2 instance should be running again after `mngr start`"
+        )
+
+        result = _run_mngr(settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-idle-stop")
+        assert result.returncode == 0, f"post-resume exec failed: {result.stderr}\n{result.stdout}"
+        assert "alive-after-idle-stop" in result.stdout
+    finally:
+        _run_mngr(settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
+        if instance_id is not None:
+            _terminate_instance_best_effort(aws_release_client, VpsInstanceId(instance_id))
 
 
 # =============================================================================
@@ -341,8 +550,8 @@ def aws_release_client() -> AwsVpsClient:
     """Real AWS API client for release-test read-only calls.
 
     Built with placeholder AMI / security-group IDs because the tests below
-    only exercise read-only API operations (list_instances, list_ssh_keys)
-    that ignore those fields.
+    only exercise read-only API operations (list_instances) that ignore
+    those fields.
     """
     session = boto3.Session(region_name=AWS_DEFAULT_REGION)
     return AwsVpsClient(
@@ -356,11 +565,6 @@ def aws_release_client() -> AwsVpsClient:
 def test_api_client_list_instances_does_not_error(aws_release_client: AwsVpsClient) -> None:
     instances = aws_release_client.list_instances()
     assert isinstance(instances, list)
-
-
-def test_api_client_list_ssh_keys_does_not_error(aws_release_client: AwsVpsClient) -> None:
-    keys = aws_release_client.list_ssh_keys()
-    assert isinstance(keys, list)
 
 
 def _latest_debian_12_amd64_ami_id(region: str) -> str | None:

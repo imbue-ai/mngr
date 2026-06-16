@@ -17,7 +17,7 @@ dependencies = [
 # only ever forward -- pushing it back would re-exclude a deliberately-pinned
 # fresh dep and break resolution. This only buys a detection delay;
 # it can't catch a compromise that stays undetected past the window.
-exclude-newer = "2026-05-31T00:00:00Z"
+exclude-newer = "2026-06-02T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
@@ -103,6 +103,8 @@ addopts = [
   "--cov=imbue.mngr_vultr",
   "--cov=imbue.mngr_aws",
   "--cov=imbue.mngr_ovh",
+  "--cov=imbue.mngr_gcp",
+  "--cov=imbue.mngr_azure",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",
@@ -221,6 +223,7 @@ source = [
 root_packages = [
     "imbue.mngr",
     "imbue.minds",
+    "imbue.mngr_imbue_cloud",
 ]
 
 [[tool.importlinter.contracts]]
@@ -254,4 +257,21 @@ layers = [
     "imbue.minds.errors",
     "imbue.minds.utils",
     "imbue.minds.primitives",
+]
+
+[[tool.importlinter.contracts]]
+name = "mngr_imbue_cloud layers contract"
+type = "layers"
+layers = [
+    "imbue.mngr_imbue_cloud.plugin",
+    "imbue.mngr_imbue_cloud.cli",
+    "imbue.mngr_imbue_cloud.bake",
+    "imbue.mngr_imbue_cloud.providers",
+    "imbue.mngr_imbue_cloud.hosts",
+    "imbue.mngr_imbue_cloud.slices",
+    "imbue.mngr_imbue_cloud.connector",
+    "imbue.mngr_imbue_cloud.config",
+    "imbue.mngr_imbue_cloud.data_types",
+    "imbue.mngr_imbue_cloud.errors",
+    "imbue.mngr_imbue_cloud.primitives",
 ]

@@ -13,6 +13,8 @@ Splits the test surface into two layers:
   stub; the no-credentials path; ``prepare --help``).
 """
 
+import json
+
 import boto3
 import click
 import pluggy
@@ -24,13 +26,17 @@ from click.testing import CliRunner
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
+from imbue.mngr_aws.cli import _output_cleanup_result
+from imbue.mngr_aws.cli import _output_prepare_result
 from imbue.mngr_aws.cli import _perform_cleanup
 from imbue.mngr_aws.cli import _resolve_provider_config
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
@@ -42,14 +48,18 @@ def _stubbed_aws_client(
     sg_name: str = "mngr-aws",
     allowed_ssh_cidrs: tuple[str, ...] = ("0.0.0.0/0",),
 ) -> tuple[AwsVpsClient, Stubber]:
-    """Return a ``_StubbedAwsVpsClient`` paired with its botocore Stubber."""
+    """Return a ``_StubbedAwsVpsClient`` paired with its EC2 botocore Stubber.
+
+    ``prepare`` and ``cleanup`` are security-group-only (no IAM), so the helper
+    wires a single Stubber around the EC2 client.
+    """
     session = boto3.Session(
         aws_access_key_id="AKIATEST",
         aws_secret_access_key="secret",
         region_name="us-east-1",
     )
     ec2 = session.client("ec2", region_name="us-east-1")
-    stubber = Stubber(ec2)
+    ec2_stubber = Stubber(ec2)
     client = _StubbedAwsVpsClient(
         session=session,
         region="us-east-1",
@@ -58,52 +68,57 @@ def _stubbed_aws_client(
         allowed_ssh_cidrs=allowed_ssh_cidrs,
         stubbed_ec2_client=ec2,
     )
-    return client, stubber
+    return client, ec2_stubber
 
 
 def test_prepare_logic_creates_sg_when_missing() -> None:
-    """The privileged path calls Describe -> Create -> Authorize x2 and returns the new id."""
-    client, stubber = _stubbed_aws_client(sg_name="mngr-aws")
-    stubber.add_response(
+    """The privileged path creates the SG (Describe -> Create -> Authorize x2)."""
+    client, ec2_stubber = _stubbed_aws_client(sg_name="mngr-aws")
+    ec2_stubber.add_response(
         "describe_security_groups",
         {"SecurityGroups": []},
         expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws"]}]},
     )
-    stubber.add_response(
+    ec2_stubber.add_response(
         "create_security_group",
         {"GroupId": "sg-new123"},
         expected_params={"GroupName": "mngr-aws", "Description": ANY},
     )
-    stubber.add_response("authorize_security_group_ingress", {})
-    stubber.add_response("authorize_security_group_ingress", {})
-    stubber.activate()
+    ec2_stubber.add_response("authorize_security_group_ingress", {})
+    ec2_stubber.add_response("authorize_security_group_ingress", {})
+    ec2_stubber.activate()
     try:
-        assert client.ensure_security_group() == "sg-new123"
+        result = client.ensure_security_group()
+        ec2_stubber.assert_no_pending_responses()
     finally:
-        stubber.deactivate()
+        ec2_stubber.deactivate()
+    assert result.security_group_id == "sg-new123"
+    assert result.was_created is True
 
 
 def test_prepare_logic_reuses_sg_when_present() -> None:
     """When the SG already exists, Describe returns it and Create is skipped."""
-    client, stubber = _stubbed_aws_client(sg_name="my-custom-sg")
-    stubber.add_response(
+    client, ec2_stubber = _stubbed_aws_client(sg_name="my-custom-sg")
+    ec2_stubber.add_response(
         "describe_security_groups",
         {"SecurityGroups": [{"GroupId": "sg-reused", "GroupName": "my-custom-sg"}]},
         expected_params={"Filters": [{"Name": "group-name", "Values": ["my-custom-sg"]}]},
     )
-    stubber.add_response("authorize_security_group_ingress", {})
-    stubber.add_response("authorize_security_group_ingress", {})
-    stubber.activate()
+    ec2_stubber.add_response("authorize_security_group_ingress", {})
+    ec2_stubber.add_response("authorize_security_group_ingress", {})
+    ec2_stubber.activate()
     try:
-        assert client.ensure_security_group() == "sg-reused"
+        result = client.ensure_security_group()
     finally:
-        stubber.deactivate()
+        ec2_stubber.deactivate()
+    assert result.security_group_id == "sg-reused"
+    assert result.was_created is False
 
 
 def test_cleanup_logic_deletes_sg_when_no_instances() -> None:
-    """With no mngr instances, cleanup looks up the SG and deletes it, returning its id."""
-    client, stubber = _stubbed_aws_client(sg_name="mngr-aws")
-    stubber.add_response(
+    """With no mngr instances, cleanup deletes the SG and returns its id."""
+    client, ec2_stubber = _stubbed_aws_client(sg_name="mngr-aws")
+    ec2_stubber.add_response(
         "describe_instances",
         {"Reservations": []},
         expected_params={
@@ -113,23 +128,24 @@ def test_cleanup_logic_deletes_sg_when_no_instances() -> None:
             ]
         },
     )
-    stubber.add_response(
+    ec2_stubber.add_response(
         "describe_security_groups",
         {"SecurityGroups": [{"GroupId": "sg-del123", "GroupName": "mngr-aws"}]},
         expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws"]}]},
     )
-    stubber.add_response("delete_security_group", {}, expected_params={"GroupId": "sg-del123"})
-    stubber.activate()
+    ec2_stubber.add_response("delete_security_group", {}, expected_params={"GroupId": "sg-del123"})
+    ec2_stubber.activate()
     try:
         assert _perform_cleanup(client) == "sg-del123"
+        ec2_stubber.assert_no_pending_responses()
     finally:
-        stubber.deactivate()
+        ec2_stubber.deactivate()
 
 
 def test_cleanup_logic_is_noop_when_sg_missing() -> None:
-    """When the SG is already gone, cleanup deletes nothing and returns None (idempotent)."""
-    client, stubber = _stubbed_aws_client(sg_name="mngr-aws")
-    stubber.add_response(
+    """When the SG is already gone, cleanup deletes nothing and returns None."""
+    client, ec2_stubber = _stubbed_aws_client(sg_name="mngr-aws")
+    ec2_stubber.add_response(
         "describe_instances",
         {"Reservations": []},
         expected_params={
@@ -139,22 +155,23 @@ def test_cleanup_logic_is_noop_when_sg_missing() -> None:
             ]
         },
     )
-    stubber.add_response(
+    ec2_stubber.add_response(
         "describe_security_groups",
         {"SecurityGroups": []},
         expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws"]}]},
     )
-    stubber.activate()
+    ec2_stubber.activate()
     try:
         assert _perform_cleanup(client) is None
+        ec2_stubber.assert_no_pending_responses()
     finally:
-        stubber.deactivate()
+        ec2_stubber.deactivate()
 
 
 def test_cleanup_logic_refuses_when_instances_exist() -> None:
-    """A live mngr instance makes cleanup raise without describing or deleting the SG."""
-    client, stubber = _stubbed_aws_client(sg_name="mngr-aws")
-    stubber.add_response(
+    """A live mngr instance makes cleanup raise without describing/deleting the SG."""
+    client, ec2_stubber = _stubbed_aws_client(sg_name="mngr-aws")
+    ec2_stubber.add_response(
         "describe_instances",
         {
             "Reservations": [
@@ -176,17 +193,62 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
             ]
         },
     )
-    stubber.activate()
+    ec2_stubber.activate()
     try:
         with pytest.raises(click.ClickException) as exc_info:
             _perform_cleanup(client)
         # The refusal must name the blocking instance so the operator knows what to destroy.
         assert "i-abc123" in str(exc_info.value)
         assert "Refusing" in str(exc_info.value)
-        # No SG describe/delete was queued, so the only stubbed call was consumed.
-        stubber.assert_no_pending_responses()
+        # No SG delete was queued, so the only stubbed call was the instance describe.
+        ec2_stubber.assert_no_pending_responses()
     finally:
-        stubber.deactivate()
+        ec2_stubber.deactivate()
+
+
+# =============================================================================
+# format-aware output (prepare / cleanup respect --format)
+# =============================================================================
+
+
+def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode emits one result sentence to stdout (no bare echo line)."""
+    result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
+    _output_prepare_result(result, "us-east-1", OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert captured.out == "Prepared AWS security group sg-new123 in region us-east-1\n"
+
+
+def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON mode emits a structured object including the created signal."""
+    result = SecurityGroupPrepareResult(security_group_id="sg-reused", was_created=False)
+    _output_prepare_result(result, "us-east-1", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {"security_group_id": "sg-reused", "region": "us-east-1", "created": False}
+
+
+def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSONL mode emits a ``prepared`` event with the same fields."""
+    result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
+    _output_prepare_result(result, "us-east-1", OutputFormat.JSONL)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["event"] == "prepared"
+    assert payload["created"] is True
+    assert payload["security_group_id"] == "sg-new123"
+
+
+def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON cleanup output reports deleted=True when an SG was removed."""
+    _output_cleanup_result("sg-gone", "us-east-1", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {"security_group_id": "sg-gone", "region": "us-east-1", "deleted": True}
+
+
+def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON cleanup output reports deleted=False on the idempotent no-op path."""
+    _output_cleanup_result(None, "us-east-1", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {"security_group_id": None, "region": "us-east-1", "deleted": False}
 
 
 def test_cleanup_command_help_is_reachable() -> None:

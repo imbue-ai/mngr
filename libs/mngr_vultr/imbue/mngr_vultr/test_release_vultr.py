@@ -46,6 +46,8 @@ def vultr_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
         # Disable other remote providers so the create-host preflight doesn't
         # trip looking for their credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
+        "\n[providers.gcp]\nis_enabled = false\n"
         "\n[providers.aws]\nis_enabled = false\n"
         "\n[providers.ovh]\nis_enabled = false\n"
         "\n[providers.imbue_cloud]\nis_enabled = false\n"
@@ -222,13 +224,3 @@ class TestVultrApiClient:
         """Verify the API client can list instances without error."""
         instances = vultr_release_client.list_instances()
         assert isinstance(instances, list)
-
-    def test_list_ssh_keys(self, vultr_release_client: VultrVpsClient) -> None:
-        """Verify the API client can list SSH keys."""
-        keys = vultr_release_client.list_ssh_keys()
-        assert isinstance(keys, list)
-
-    def test_list_snapshots(self, vultr_release_client: VultrVpsClient) -> None:
-        """Verify the API client can list snapshots."""
-        snapshots = vultr_release_client.list_snapshots()
-        assert isinstance(snapshots, list)

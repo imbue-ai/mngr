@@ -24,6 +24,7 @@ from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.exit_codes import exit_code_for_failures
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
@@ -42,6 +43,9 @@ from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -253,6 +257,9 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     # Destroy all targets (online agents + offline hosts) in parallel
     destroyed_agents: list[AgentName] = []
     branches_to_remove: list[tuple[str, Path]] = []
+    # Shared accumulator of real cleanup failures (resources left behind). Mutated
+    # under ``results_lock`` exactly like ``destroyed_agents``.
+    failures: list[CleanupFailure] = []
     results_lock = threading.Lock()
 
     with mngr_executor(parent_cg=mngr_ctx.concurrency_group, name="destroy_agents", max_workers=32) as executor:
@@ -269,6 +276,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                     results_lock,
                     destroyed_agents,
                     branches_to_remove,
+                    failures,
                 )
             )
         for offline in targets.offline_hosts:
@@ -280,6 +288,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                     mngr_ctx,
                     results_lock,
                     destroyed_agents,
+                    failures,
                 )
             )
 
@@ -302,6 +311,8 @@ def destroy(ctx: click.Context, **kwargs) -> None:
         online_hosts_with_provider=targets.online_hosts_with_provider,
         mngr_ctx=mngr_ctx,
         output_opts=output_opts,
+        results_lock=results_lock,
+        failures=failures,
     )
 
     # Run garbage collection if enabled.  Worktree cleanup is GC's job:
@@ -321,8 +332,10 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     for created_branch, source_repo_path in branches_to_remove:
         _remove_created_branch(created_branch, source_repo_path, mngr_ctx.concurrency_group, output_opts)
 
-    # Output final result
-    _output_result(destroyed_agents, output_opts)
+    # Output final result, then exit with a cause-specific code if any real
+    # cleanup failures (resources left behind) remain.
+    _output_result(destroyed_agents, failures, output_opts)
+    ctx.exit(exit_code_for_failures(failures))
 
 
 def _find_agents_to_destroy(
@@ -480,6 +493,7 @@ def _destroy_single_online_agent(
     results_lock: threading.Lock,
     destroyed_agents: list[AgentName],
     branches_to_remove: list[tuple[str, Path]],
+    failures: list[CleanupFailure],
 ) -> None:
     """Destroy a single agent on an online host. Thread-safe."""
     agent_display = f"{agent.name}@{host.get_name()}"
@@ -500,10 +514,17 @@ def _destroy_single_online_agent(
                         branches_to_remove.append((created_branch, source_repo_path))
 
         mngr_ctx.pm.hook.on_before_agent_destroy(agent=agent, host=host)
-        host.destroy_agent(agent)
+        # destroy_agent raises a CleanupFailedGroup carrying the real failures (resources
+        # left behind) rather than failing fast; we still acted, so record the agent.
+        agent_failures: tuple[CleanupFailure, ...] = ()
+        try:
+            host.destroy_agent(agent)
+        except CleanupFailedGroup as group:
+            agent_failures = group.failures
         mngr_ctx.pm.hook.on_agent_destroyed(agent=agent, host=host)
         with results_lock:
             destroyed_agents.append(agent.name)
+            failures.extend(agent_failures)
         _output(f"Destroyed agent: {agent_display}", output_opts)
 
         # Emit agent_destroyed event, then re-emit remaining host state
@@ -512,6 +533,15 @@ def _destroy_single_online_agent(
 
     except MngrError as e:
         _output(f"Error destroying agent {agent_display}: {e}", output_opts)
+        with results_lock:
+            failures.append(
+                CleanupFailure(
+                    category=CleanupFailureCategory.OTHER,
+                    message=f"Error destroying agent {agent_display}: {e}",
+                    agent_name=agent.name,
+                    host_id=host.id,
+                )
+            )
 
 
 def _destroy_single_offline_host(
@@ -520,16 +550,24 @@ def _destroy_single_offline_host(
     mngr_ctx: MngrContext,
     results_lock: threading.Lock,
     destroyed_agents: list[AgentName],
+    failures: list[CleanupFailure],
 ) -> None:
     """Destroy a single offline host and all its agents. Thread-safe."""
     host_name = offline.host.get_name()
     try:
         _output(f"Destroying offline host {host_name} with {len(offline.agent_names)} agent(s)...", output_opts)
         mngr_ctx.pm.hook.on_before_host_destroy(host=offline.host, mngr_ctx=mngr_ctx)
-        offline.provider.destroy_host(offline.host)
+        # destroy_host raises a CleanupFailedGroup carrying the real failures (resources
+        # left behind) rather than failing fast; we still acted, so record the agents.
+        host_failures: tuple[CleanupFailure, ...] = ()
+        try:
+            offline.provider.destroy_host(offline.host)
+        except CleanupFailedGroup as group:
+            host_failures = group.failures
         mngr_ctx.pm.hook.on_host_destroyed(host=offline.host, mngr_ctx=mngr_ctx)
         with results_lock:
             destroyed_agents.extend(offline.agent_names)
+            failures.extend(host_failures)
         for name in offline.agent_names:
             _output(f"Destroyed agent: {name}@{host_name} (via host destruction)", output_opts)
 
@@ -537,6 +575,14 @@ def _destroy_single_offline_host(
         emit_host_destroyed(mngr_ctx.config, offline.host.id, offline.agent_ids)
     except MngrError as e:
         _output(f"Error destroying offline host {host_name}: {e}", output_opts)
+        with results_lock:
+            failures.append(
+                CleanupFailure(
+                    category=CleanupFailureCategory.PROVIDER_INACCESSIBLE,
+                    message=f"Error destroying offline host {host_name}: {e}",
+                    host_id=offline.host.id,
+                )
+            )
 
 
 def _check_all_agents_targeted_on_offline_host(
@@ -637,13 +683,23 @@ def _output(message: str, output_opts: OutputOptions) -> None:
         write_human_line(message)
 
 
-def _output_result(destroyed_agents: Sequence[AgentName], output_opts: OutputOptions) -> None:
-    """Output the final result."""
+def _output_result(
+    destroyed_agents: Sequence[AgentName],
+    failures: Sequence[CleanupFailure],
+    output_opts: OutputOptions,
+) -> None:
+    """Output the final result, including any real cleanup failures."""
     if output_opts.format_template is not None:
         items = [{"name": str(n)} for n in destroyed_agents]
         emit_format_template_lines(output_opts.format_template, items)
         return
-    result_data = {"destroyed_agents": [str(n) for n in destroyed_agents], "count": len(destroyed_agents)}
+    result_data = {
+        "destroyed_agents": [str(n) for n in destroyed_agents],
+        "count": len(destroyed_agents),
+        "failures": [failure.model_dump(mode="json") for failure in failures],
+        "failure_count": len(failures),
+        "exit_code": exit_code_for_failures(failures),
+    }
     match output_opts.output_format:
         case OutputFormat.JSON:
             write_json_line(result_data)
@@ -652,6 +708,10 @@ def _output_result(destroyed_agents: Sequence[AgentName], output_opts: OutputOpt
         case OutputFormat.HUMAN:
             if destroyed_agents:
                 write_human_line("\nSuccessfully destroyed {} agent(s)", len(destroyed_agents))
+            if failures:
+                logger.warning("{} cleanup failure(s) -- resources may remain:", len(failures))
+                for failure in failures:
+                    logger.warning("  - [{}] {}", failure.category.value, failure.message)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -679,6 +739,8 @@ def _destroy_emptied_hosts(
     online_hosts_with_provider: Sequence[tuple[OnlineHostInterface, ProviderInstanceInterface]],
     mngr_ctx: MngrContext,
     output_opts: OutputOptions,
+    results_lock: threading.Lock,
+    failures: list[CleanupFailure],
 ) -> None:
     """Destroy each online host whose last live agent was just destroyed.
 
@@ -694,11 +756,16 @@ def _destroy_emptied_hosts(
     ``_resolve_host_for_partition``, so one (host, provider) entry per host
     is guaranteed.
 
-    Failures (connection / auth / provider) are logged and skipped so a
-    single broken host doesn't block destruction of other empty hosts.
-    The post-destroy GC pass that runs immediately after this is the
-    safety net that will eventually pick the host up once the transient
-    failure clears.
+    This is a best-effort convenience pass, not the operation the user asked for
+    (which was to destroy the agents -- already done). A host that *cannot* be
+    destroyed here is therefore not a cleanup failure: the local host is never
+    destroyable (``LocalHostNotDestroyableError``), and a transient connection /
+    auth / provider error is logged and skipped (the post-destroy GC pass that
+    runs immediately after is the safety net that retries once the failure
+    clears). So a *raised* error from this sweep does not contribute to the
+    command's exit code. A host that *was* destroyed but left a real resource
+    behind is surfaced normally -- those failures come back as a
+    ``CleanupFailedGroup`` raised by ``destroy_host``, which we catch and record.
     """
     for host, provider in online_hosts_with_provider:
         host_name = host.get_name()
@@ -720,12 +787,25 @@ def _destroy_emptied_hosts(
             continue
         try:
             mngr_ctx.pm.hook.on_before_host_destroy(host=host, mngr_ctx=mngr_ctx)
-            provider.destroy_host(host)
+            # destroy_host raises a CleanupFailedGroup carrying the real "destroyed but a
+            # resource leaked" failures (not an MngrError), which we surface; an MngrError
+            # means the destroy could not be attempted at all (handled below).
+            host_failures: tuple[CleanupFailure, ...] = ()
+            try:
+                provider.destroy_host(host)
+            except CleanupFailedGroup as group:
+                host_failures = group.failures
             mngr_ctx.pm.hook.on_host_destroyed(host=host, mngr_ctx=mngr_ctx)
             emit_host_destroyed(mngr_ctx.config, host.id, [])
             _output(f"Destroyed empty host: {host_name}", output_opts)
+            with results_lock:
+                failures.extend(host_failures)
         except MngrError as exc:
-            logger.warning("Failed to destroy emptied host {}: {}", host_name, exc)
+            # Best-effort: this implicit host-destroy could not even be attempted (e.g. the
+            # local host is not destroyable, or a transient provider error). The agent
+            # destroy the user asked for succeeded, and GC is the safety net, so this is
+            # logged and skipped rather than recorded as a cleanup failure.
+            logger.warning("Skipping destroy of emptied host {} (GC will retry): {}", host_name, exc)
 
 
 def _run_post_destroy_gc(
@@ -735,8 +815,10 @@ def _run_post_destroy_gc(
 ) -> None:
     """Run garbage collection after destroying agents.
 
-    This cleans up orphaned host-level resources (machines, work dirs, snapshots, volumes).
-    Errors are logged but don't prevent destroy from reporting success.
+    This cleans up orphaned host-level resources (machines, work dirs, snapshots,
+    volumes) and orphaned provider-level resources (e.g. Azure NICs/public IPs left
+    by a failed create). Errors are logged but don't prevent destroy from reporting
+    success.
 
     ``include_work_dirs`` follows the destroy command's --allow-worktree-removal
     flag.  When False, GC skips work-dir cleanup so the user's worktree stays
@@ -754,6 +836,7 @@ def _run_post_destroy_gc(
             is_volumes=True,
             is_logs=False,
             is_build_cache=False,
+            is_provider_resources=True,
         )
 
         result = api_gc(

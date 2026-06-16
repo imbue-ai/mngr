@@ -191,6 +191,24 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         tier=PluginTier.INDEPENDENT,
     ),
     CatalogEntry(
+        entry_point_name="gcp",
+        package_name="imbue-mngr-gcp",
+        description="GCP Compute Engine provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="ovh",
+        package_name="imbue-mngr-ovh",
+        description="OVH Cloud VPS provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="azure",
+        package_name="imbue-mngr-azure",
+        description="Azure Virtual Machines provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
         entry_point_name="tutor",
         package_name="imbue-mngr-tutor",
         description="Interactive tutorial plugin for mngr",

@@ -191,8 +191,22 @@ def _dismiss_screensaver() -> None:
     subprocess.run(["killall", "ScreenSaverEngine"], check=False, capture_output=True, timeout=3)
 
 
+def _safe_snap_name(name: str) -> str:
+    """Slugify a snapshot name so it is always a valid file / artifact path.
+
+    Names sometimes embed a page URL (e.g. a ``/recovery?return_to=...`` URL on
+    a failed redirect). Characters like ``?``, ``:``, ``%``, ``/`` produce a
+    filename ``actions/upload-artifact`` rejects, which drops ALL of the run's
+    diagnostics -- exactly when a failure makes them most valuable. Replace
+    anything outside ``[A-Za-z0-9._-]`` with ``-`` and cap the length.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
+    return slug[:120] or "snap"
+
+
 def snap(name: str) -> None:
-    """Whole-desktop screencapture. Silently no-ops when no Aqua session."""
+    """Whole-desktop screencapture. No-ops cleanly when there's no Aqua session."""
+    name = _safe_snap_name(name)
     _dismiss_screensaver()
     _activate_minds()
     out = SCREENSHOT_DIR / f"{name}.png"
@@ -206,7 +220,14 @@ def snap(name: str) -> None:
         logger.info("  snap[{}] -> {} bytes", name, out.stat().st_size)
     else:
         msg = err.read_text(errors="ignore").strip() if err.exists() else "?"
-        logger.warning("  snap[{}] FAILED: {}", name, msg)
+        # The headless CI runner has no Aqua display session, so screencapture
+        # fails with "could not create image from display" at every milestone --
+        # expected there, not worth a per-snapshot warning. The Playwright page
+        # screenshots in snap_page() are the real diagnostics on that runner.
+        if "could not create image" in msg.lower():
+            logger.debug("  snap[{}] skipped (no display session)", name)
+        else:
+            logger.warning("  snap[{}] FAILED: {}", name, msg)
         if out.exists():
             out.unlink()
     if err.exists():
@@ -232,7 +253,7 @@ async def snap_page(page: Page, name: str) -> None:
     except Exception as e:
         logger.warning("  bring_to_front[{}] failed: {}", name, e)
     try:
-        await page.screenshot(path=str(SCREENSHOT_DIR / f"{name}.win.png"), full_page=True)
+        await page.screenshot(path=str(SCREENSHOT_DIR / f"{_safe_snap_name(name)}.win.png"), full_page=True)
     except Exception as e:
         logger.warning("  page-shot[{}] failed: {}", name, e)
     snap(name)
@@ -1427,11 +1448,22 @@ async def amain() -> int:
             await win.wait_for_url(origin + "/", timeout=30_000)
             await snap_page(win, "18c-w2-destroy-initiated")
 
-            # Poll /api/destroying/<id>/status until the record either
-            # moves past 'running' or returns 404 (cleanup). Lima VM
-            # stop+delete typically takes 30-90s; 4-min budget gives
-            # comfortable headroom.
+            # Poll /api/destroying/<id>/status until the host is actually gone
+            # (status 'done', or 404 once the record is cleaned up). Lima VM
+            # stop+delete typically takes 30-90s; 4-min budget gives comfortable
+            # headroom.
+            #
+            # 'failed' here is NOT terminal: the status is derived fresh per poll
+            # as pid-dead + is_host_still_active (see destroying.read_destroying).
+            # The detached `mngr destroy` subprocess exits before the lima VM
+            # finishes dropping out of discovery, so on a slow runner the status
+            # reads 'failed' transiently (subprocess gone, host not yet) before
+            # flipping to 'done' once the host is actually torn down. Treat it as
+            # "not done yet" and keep polling; a host that never tears down stays
+            # 'failed' until the deadline, which still surfaces a real
+            # silent-orphan teardown as a failure.
             destroy_deadline = time.time() + 240
+            last_body: dict[str, Any] = {}
             while time.time() < destroy_deadline:
                 resp = await win.evaluate(
                     """async (aid) => {
@@ -1443,18 +1475,15 @@ async def amain() -> int:
                 if resp["status"] == 404:
                     logger.info("[w2-destroy] DONE (record cleaned up)")
                     break
-                body = {}
                 with contextlib.suppress(Exception):
-                    body = json.loads(resp["body"])
-                state = body.get("status", "")
-                if state == "failed":
-                    raise E2EFailure(f"[w2-destroy] destroy reported FAILED: {body}")
-                if state and state != "running":
-                    logger.info("[w2-destroy] state={}", state)
+                    last_body = json.loads(resp["body"])
+                state = last_body.get("status", "")
+                if state == "done":
+                    logger.info("[w2-destroy] DONE")
                     break
                 await asyncio.sleep(3)
             else:
-                raise E2EFailure("[w2-destroy] did not complete within 240s")
+                raise E2EFailure(f"[w2-destroy] host still active after 240s (last={last_body})")
             await snap_page(win, "19-w2-destroy-done")
 
             logger.info("=== home page after W2 destroyed ===")
@@ -1509,11 +1538,22 @@ async def amain() -> int:
                 # discovered by providers that DID work, which is what we
                 # actually check. So: parse stdout regardless of exit code;
                 # only fail if the JSON itself is unusable.
+                # Run from $HOME, exactly as minds.app spawns mngr (see
+                # forward_cli.py and laptop_agent_types_seed.py). mngr's project
+                # config is discovered by walking up from cwd to a git worktree
+                # root and reading `<root>/.mngr/settings.toml`. Without this the
+                # subprocess inherits the e2e's cwd -- the mngr monorepo checkout
+                # -- and loads the repo's own `[providers.aws]` image-build block,
+                # which the bundled subset-mngr (no aws plugin) rejects with
+                # "references unknown backend", aborting before any agent lists.
+                # $HOME is not a git worktree, so no project layer leaks in; the
+                # cross-check sees only the minds host profile, like production.
                 cli_result = subprocess.run(
                     [str(bundled_mngr), "list", "--format", "json", "--quiet", "--on-error", "continue"],
                     capture_output=True,
                     text=True,
                     env=mngr_env,
+                    cwd=str(Path.home()),
                     timeout=30,
                 )
                 (SCREENSHOT_DIR / "mngr-list-output.json").write_text(cli_result.stdout or "")
