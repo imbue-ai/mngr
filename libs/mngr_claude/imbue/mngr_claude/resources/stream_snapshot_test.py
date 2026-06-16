@@ -374,10 +374,10 @@ def test_read_last_complete_assistant_id_large_transcript_is_tailed(tmp_path: Pa
     assert stream_snapshot._read_last_complete_assistant_id(transcript) == "a19999"
 
 
-def test_read_last_complete_assistant_id_oversized_final_line_widens(tmp_path: Path) -> None:
-    # The most recent assistant entry is a single line larger than the initial
-    # tail window, so the first read captures only a fragment of it; the window
-    # must widen until the whole record is in view.
+def test_read_last_complete_assistant_id_oversized_final_line_falls_back(tmp_path: Path) -> None:
+    # The most recent assistant entry is a single line larger than the tail
+    # window, so the tail read captures only a fragment of it and finds no
+    # assistant entry; the lookup must fall back to a full-file read to find it.
     transcript = tmp_path / "events.jsonl"
     oversized = "z" * (stream_snapshot._TRANSCRIPT_TAIL_READ_BYTES * 3)
     transcript.write_text(
