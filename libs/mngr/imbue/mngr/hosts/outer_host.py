@@ -52,6 +52,7 @@ from tenacity import stop_after_attempt
 from tenacity import wait_chain
 from tenacity import wait_fixed
 
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
@@ -395,6 +396,14 @@ class OuterHost(OuterHostInterface):
                 raise HostAuthenticationError(f"Authentication failed when connecting to host: {e}") from e
             else:
                 raise HostConnectionError(f"Failed to connect to host: {e}") from e
+        except ValueError as e:
+            # paramiko's per-connection certificate probe raises a bare ``ValueError``
+            # (e.g. "Not enough fields for public blob") when it parses a malformed
+            # ``.pub`` sitting next to the private key. Surface it as a structured
+            # connection error so callers that catch ``MngrError`` (e.g. best-effort
+            # host discovery) treat it as a per-host connection failure rather than
+            # letting it abort the whole operation.
+            raise HostConnectionError(f"Failed to connect to host: {e}") from e
 
     def _close_paramiko_client(self) -> None:
         """Close the paramiko SSH client if one exists.
@@ -527,8 +536,17 @@ class OuterHost(OuterHostInterface):
         _env: dict[str, str] | None,
         _chdir: str | None,
         _shell_executable: str,
+        _raise_on_timeout: bool = False,
     ) -> tuple[bool, CommandOutput]:
-        """Run a shell command on the local machine without going through pyinfra."""
+        """Run a shell command on the local machine without going through pyinfra.
+
+        When ``_raise_on_timeout`` is set, a timeout raises ``ProcessTimeoutError``
+        instead of being reported as an ordinary failed result. This mirrors the
+        remote SSH layer, which always surfaces a timeout as ``socket.timeout``,
+        so opt-in callers can treat a timeout as a hard failure uniformly across
+        backends. Left off by default because most callers want a timeout to look
+        like any other failed command (``success=False``).
+        """
         full_env: dict[str, str] | None = None
         if _env is not None:
             full_env = {**os.environ, **_env}
@@ -540,9 +558,20 @@ class OuterHost(OuterHostInterface):
             cwd=cwd_path,
             env=full_env,
         )
+        if _raise_on_timeout and finished.is_timed_out:
+            # check() inspects is_timed_out before the return code, so this raises
+            # ProcessTimeoutError (not a plain ProcessError) for the timeout case.
+            finished.check()
+        return self._command_output_from_finished(finished, _success_exit_codes)
+
+    @staticmethod
+    def _command_output_from_finished(
+        finished: FinishedProcess,
+        _success_exit_codes: tuple[int, ...] | None,
+    ) -> tuple[bool, CommandOutput]:
+        """Convert a FinishedProcess into the (success, CommandOutput) pair pyinfra callers expect."""
         success_codes: tuple[int, ...] = _success_exit_codes if _success_exit_codes else (0,)
         success = finished.returncode in success_codes
-
         lines: list[OutputLine] = []
         for buffer_name, raw in (("stdout", finished.stdout), ("stderr", finished.stderr)):
             if not raw:

@@ -1,0 +1,1 @@
+Added `specs/cleanup-error-aggregation.md`, a design spec for making `mngr stop`/`destroy`/`cleanup` aggregate and classify failures (benign "already gone" vs. real "resource left behind"), with cause-specific exit codes, across both the stop and destroy paths.

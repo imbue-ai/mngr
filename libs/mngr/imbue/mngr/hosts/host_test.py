@@ -29,6 +29,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import CommandTimeoutError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -47,6 +48,9 @@ from imbue.mngr.hosts.host import _parse_uptime_output
 from imbue.mngr.hosts.tmux import TMUX_ENV_VAR
 from imbue.mngr.hosts.tmux import TMUX_TMPDIR_ENV_VAR
 from imbue.mngr.hosts.tmux import get_mngr_tmux_tmpdir
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -68,7 +72,9 @@ from imbue.mngr.primitives import TmuxWidth
 from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import get_cleanup_failures
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import make_test_agent_details
 
 
 class _TestableAgent(BaseAgent):
@@ -371,17 +377,31 @@ def test_destroy_agent_continues_cleanup_when_on_destroy_raises(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """Test that destroy_agent still cleans up if agent.on_destroy() raises."""
+    """destroy_agent records an on_destroy failure but still completes the teardown.
+
+    A MngrError raised by the on_destroy hook is captured as an OTHER cleanup failure
+    (aggregated into the CleanupFailedGroup, not propagated immediately) so the remaining
+    teardown steps still run.
+    """
     agent, host = _create_testable_agent(local_provider, temp_host_dir, temp_work_dir, on_destroy_should_raise=True)
 
     agent_dir = local_provider.host_dir / "agents" / str(agent.id)
     assert agent_dir.exists()
 
-    # Exception propagates, but cleanup still runs
-    with pytest.raises(AgentError, match="cleanup failed"):
-        host.destroy_agent(agent)
+    # The hook failure is recorded and surfaced via CleanupFailedGroup rather than aborting.
+    failures = get_cleanup_failures(lambda: host.destroy_agent(agent))
 
-    # State directory should still be cleaned up
+    assert agent.on_destroy_called
+    # Exactly one failure: the on_destroy hook error, classified as OTHER and tagged
+    # with the agent. The stop of a freshly-created agent with no live session is benign
+    # and contributes no failures.
+    assert len(failures) == 1
+    on_destroy_failure = failures[0]
+    assert on_destroy_failure.category == CleanupFailureCategory.OTHER
+    assert on_destroy_failure.agent_name == agent.name
+    assert "cleanup failed" in on_destroy_failure.message
+
+    # State directory should still be cleaned up despite the hook failure.
     assert not agent_dir.exists()
 
 
@@ -1156,6 +1176,194 @@ def _create_host_with_fake_connector(
         provider_instance=local_provider,
         mngr_ctx=local_provider.mngr_ctx,
     )
+
+
+def _make_stop_agents_test_host(
+    local_provider: LocalProviderInstance,
+    agent: AgentInterface,
+    command_handler: Callable[[str], CommandResult],
+) -> tuple[Host, list[tuple[str, float | None]]]:
+    """Build a Host whose stop-path shell commands are served by ``command_handler``.
+
+    The returned Host's ``execute_idempotent_command`` records every
+    ``(command, timeout_seconds)`` pair into the returned list (so callers can
+    assert on the bounds passed) and delegates the actual result to
+    ``command_handler``, which is free to return canned output or raise to
+    simulate a wedged command. ``_get_agent_by_id`` is stubbed to return
+    ``agent`` so ``stop_agents`` walks its full collect-then-kill sequence
+    without touching real tmux or processes.
+    """
+    recorded_timeouts: list[tuple[str, float | None]] = []
+
+    class _StopAgentsTestHost(Host):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Any = None,
+            timeout_seconds: float | None = None,
+            raise_on_timeout: bool = False,
+        ) -> CommandResult:
+            recorded_timeouts.append((command, timeout_seconds))
+            return command_handler(command)
+
+        def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
+            return agent
+
+    host = _StopAgentsTestHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, _FakePyinfraHost())),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    return host, recorded_timeouts
+
+
+def test_stop_agents_bounds_every_command_with_a_timeout(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """stop_agents must pass a timeout to every shell command it runs.
+
+    Regression for an offload hang: a wedged ``tmux list-panes`` client (tmux
+    occasionally fails to return under CI load) blocked the unbounded command in
+    the stop path forever, stalling the whole test batch. Every step in the
+    stop/cleanup path must carry a timeout so a wedged command can't hang
+    cleanup. This records the timeout passed to each command and asserts none is
+    unbounded.
+    """
+    agent = make_test_agent_details("cleanup-timeout-agent")
+    fake_pid = "12345"
+
+    def handle(command: str) -> CommandResult:
+        # Canned output (a window index for list-windows and a pane PID for
+        # list-panes) so stop_agents walks its full collect-then-kill sequence.
+        if "list-windows" in command:
+            stdout = "0"
+        elif "list-panes" in command:
+            stdout = fake_pid
+        else:
+            stdout = ""
+        return CommandResult(stdout=stdout, stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    host.stop_agents([agent.id])
+
+    # Sanity: we actually exercised the tmux pid-collection path and the kill step.
+    assert any("list-panes" in command for command, _ in recorded)
+    assert any("kill-session" in command for command, _ in recorded)
+    # The regression guard: no command in the stop path may be unbounded.
+    unbounded = [command for command, timeout in recorded if timeout is None]
+    assert unbounded == [], f"stop_agents ran command(s) without a timeout: {unbounded}"
+
+
+@pytest.mark.allow_warnings(match=r"^Cleanup step timed out on host")
+def test_stop_agents_records_timeout_failure_and_continues(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A timed-out stop-path command is recorded as a TIMEOUT failure and returned,
+    not silently swallowed -- and cleanup continues (aggregate, not fail-fast).
+
+    Simulates execute_idempotent_command raising CommandTimeoutError (which
+    _run_classified_cleanup_command catches and converts to a TIMEOUT failure).
+    The wedged list-panes does not abort: the session teardown is still attempted.
+    """
+    agent = make_test_agent_details("cleanup-timeout-agent")
+
+    def handle(command: str) -> CommandResult:
+        if "list-panes" in command:
+            raise CommandTimeoutError(f"Command timed out after 10.0s: {command}")
+        stdout = "0" if "list-windows" in command else ""
+        return CommandResult(stdout=stdout, stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    failures = get_cleanup_failures(lambda: host.stop_agents([agent.id]))
+
+    assert [f.category for f in failures] == [CleanupFailureCategory.TIMEOUT]
+    commands = [command for command, _ in recorded]
+    assert any("list-panes" in command for command in commands)
+    # Aggregate-and-continue: the timeout does not abort; kill-session is still attempted.
+    assert any("kill-session" in command for command in commands)
+
+
+@pytest.mark.allow_warnings(match=r"^Cleanup step left a resource behind on host")
+def test_stop_agents_classifies_real_vs_benign_stderr(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Stderr signalling 'already gone' (tmux can't-find-session, kill ESRCH) is benign
+    (no failure); any other stderr line is a real failure.
+    """
+    agent = make_test_agent_details("cleanup-classify-agent")
+
+    def handle_benign(command: str) -> CommandResult:
+        # Session already gone (list-windows) and the server going away during teardown
+        # (kill-session racing with the local tmux server exiting) are both benign.
+        if "list-windows" in command:
+            return CommandResult(stdout="", stderr="can't find session: mngr_x", success=False)
+        if "kill-session" in command:
+            return CommandResult(stdout="", stderr="lost server", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    benign_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_benign)
+    assert get_cleanup_failures(lambda: benign_host.stop_agents([agent.id])) == []
+
+    def handle_real(command: str) -> CommandResult:
+        if "list-windows" in command:
+            return CommandResult(stdout="0", stderr="", success=True)
+        if "list-panes" in command:
+            return CommandResult(stdout="999", stderr="", success=True)
+        if "kill -TERM" in command or "kill -KILL" in command:
+            # A process that cannot be killed -> a real PROCESSES_REMAIN failure.
+            return CommandResult(stdout="", stderr="kill: (999): Operation not permitted", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    real_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_real)
+    failures = get_cleanup_failures(lambda: real_host.stop_agents([agent.id]))
+    assert [f.category for f in failures] == [CleanupFailureCategory.PROCESSES_REMAIN]
+
+
+def test_stop_agents_treats_tmux_no_current_target_as_benign(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """tmux 'no current target' on kill-session is benign, not a LOCAL_STATE_REMAINS failure.
+
+    When several agents are destroyed at once, killing the last session makes the tmux server
+    exit; a concurrent kill-session against the already-gone session then reports "no current
+    target". The session is gone either way, so this must not surface as a spurious cleanup
+    failure (it did, flakily, before "no current target" was whitelisted).
+    """
+    agent = make_test_agent_details("cleanup-no-current-target-agent")
+
+    def handle(command: str) -> CommandResult:
+        if "kill-session" in command:
+            return CommandResult(stdout="", stderr="no current target", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+    assert get_cleanup_failures(lambda: host.stop_agents([agent.id])) == []
+
+
+def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeout(
+    local_host: Host,
+) -> None:
+    """raise_on_timeout normalizes a local timeout into a loud CommandTimeoutError.
+
+    Exercises the real local backend: a command that outlives its timeout is
+    killed and, with raise_on_timeout=True, surfaces as CommandTimeoutError
+    (a MngrError) rather than the default failed CommandResult. The default
+    (raise_on_timeout=False) path is asserted too, to confirm existing callers
+    still see success=False on a timeout.
+    """
+    # Default: a local timeout is reported as a failed result, not raised.
+    result = local_host.execute_idempotent_command("sleep 10", timeout_seconds=1)
+    assert result.success is False
+
+    # Opt-in: the same timeout is raised loudly as CommandTimeoutError.
+    with pytest.raises(CommandTimeoutError):
+        local_host.execute_idempotent_command("sleep 10", timeout_seconds=1, raise_on_timeout=True)
 
 
 @pytest.mark.parametrize(

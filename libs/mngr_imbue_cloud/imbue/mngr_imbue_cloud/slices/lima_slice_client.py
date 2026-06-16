@@ -19,10 +19,7 @@ from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 # Lima "Status" strings (from `limactl list --json`) mapped to VPS statuses.
 _LIMA_STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
@@ -324,20 +321,8 @@ class LimaSliceVpsClient(VpsClientInterface):
     ) -> VpsInstanceId:
         raise self._unavailable("create_instance")
 
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        raise self._unavailable("create_snapshot")
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        raise self._unavailable("delete_snapshot")
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        raise self._unavailable("list_snapshots")
-
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         raise self._unavailable("upload_ssh_key")
 
     def delete_ssh_key(self, key_id: str) -> None:
         raise self._unavailable("delete_ssh_key")
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        raise self._unavailable("list_ssh_keys")
