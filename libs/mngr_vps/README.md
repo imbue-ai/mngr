@@ -1,12 +1,21 @@
-# mngr VPS Docker Provider
+# mngr VPS Provider
 
-Base classes and shared infrastructure for running mngr agents in Docker containers on VPS instances.
+Base classes and shared infrastructure for running mngr agents on VPS instances.
 
 This package is a library -- it provides abstract base classes that concrete VPS provider implementations (like `mngr_vultr`) build on. It does not register any provider backends itself.
 
-## Architecture
+## Placement: container vs. bare
 
-Each VPS runs exactly one Docker container (1:1 mapping). Docker is used purely as a consistent provisioning mechanism. The VPS stays running at all times; stop/start operates on the container. Destroying the host destroys both the container and the VPS.
+How an agent sits on the VPS is a selectable axis, chosen by the `isolation` config knob and implemented by a `HostRealizer`:
+
+- **`isolation=CONTAINER`** (default): the agent runs inside a Docker container, reached at `<vps_ip>:2222`. This is the original behavior and the only fully-wired shape today; the architecture below describes it.
+- **`isolation=NONE`** (bare): the agent runs directly on the VPS OS, reached at `<vps_ip>:22`. The `BareRealizer` is implemented but not yet wired end-to-end on the cloud providers (it raises `BareIsolationNotYetSupportedError` for now).
+
+The genuinely Docker-specific code lives in `docker_realizer.py` and `container_setup.py`; the rest of the package (provisioning, instance lifecycle, host record, discovery) is shape-agnostic.
+
+## Architecture (container shape)
+
+In the container shape, each VPS runs exactly one Docker container (1:1 mapping). The VPS stays running at all times; stop/start operates on the container. Destroying the host destroys both the container and the VPS.
 
 ```
 User Machine                              VPS
@@ -127,7 +136,7 @@ To add support for a new VPS provider (e.g., DigitalOcean, Hetzner):
    lives on `VpsProvider` itself; subclasses only need to wire up these two hooks.
 4. Create a `ProviderBackendInterface` implementation and register via pluggy entry points
 
-The btrfs loop-file setup is provided by the base class (`_prepare_btrfs_on_outer`, called at the top of `_setup_container_on_vps`); new providers do not need to install `btrfs-progs` or wire up the loop mount themselves as long as the outer host is a Debian-family Linux with `apt-get` available.
+The btrfs loop-file setup is provided by the container realizer (`DockerRealizer`, in its `realize_placement`); new providers do not need to install `btrfs-progs` or wire up the loop mount themselves as long as the outer host is a Debian-family Linux with `apt-get` available.
 
 ## Compatibility
 
