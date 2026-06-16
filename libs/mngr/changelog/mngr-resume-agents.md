@@ -1,0 +1,3 @@
+Extended the shared agent release-test harness (`imbue.mngr.agents.agent_release_testing`) to optionally exercise session adoption end-to-end: after an agent is destroyed, the arc can create a fresh agent (in a new worktree) that adopts the just-preserved session and assert it recalls the pre-destroy secret -- proving the preserved store actually resumes, not merely that its bytes landed on disk.
+
+An agent's profile opts in by setting `adopts_preserved_session = True` and implementing `adopt_session_arg(preserved_dir)` (the session id or native-store path to adopt). Adoption is triggered through an interim `MNGR_ADOPT_SESSION` env-var seam read by the agent plugin during create, pending the public `--adopt-session` flag for these agents.

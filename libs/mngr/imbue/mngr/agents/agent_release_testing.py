@@ -5,6 +5,7 @@ Every agent-type plugin ships a ``@pytest.mark.release`` test that drives the re
 
     create -> WAITING -> message -> turn runs -> transcript captured
            -> stop -> start -> recall a pre-restart secret -> destroy
+           -> (opt-in) adopt the preserved session into a fresh agent -> recall again
 
 The arc and its assertions are identical across agents; only the *plumbing* differs
 (how the binary is launched and authenticated, how the workspace is seeded, which
@@ -46,6 +47,7 @@ from pydantic import ConfigDict
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import init_git_repo
 
 # Generous defaults: real provisioning + a real model turn. A profile may widen any of
 # these via its own @pytest.mark.timeout; these only bound the individual poll loops.
@@ -54,6 +56,16 @@ _MESSAGE_TIMEOUT_SECONDS = 180.0
 _RESPONSE_TIMEOUT_SECONDS = 300.0
 _RUNNING_TIMEOUT_SECONDS = 90.0
 _LIFECYCLE_TIMEOUT_SECONDS = 150.0
+
+# Interim seam for driving session adoption end-to-end before a public ``--adopt-session``
+# flag exists for these agents. When this env var is set on a ``mngr create``, the agent
+# plugin being created resolves its value (a session/conversation id or a path to the
+# agent's native session store) against its preserved / live-agent / user-native session
+# stores and rebinds it into the new agent so its first launch resumes that session. The
+# adopt-from-preserved arc step below sets it on the adopting create. Once the central
+# adopt-session mixin lands, the plugins read ``plugin_data["adopt_session"]`` from the
+# real flag and this env var becomes a thin fallback (or goes away).
+ADOPT_SESSION_ENV_VAR = "MNGR_ADOPT_SESSION"
 
 
 class AgentReleaseContext(BaseModel):
@@ -105,6 +117,15 @@ class AgentReleaseProfile(abc.ABC):
     # asserts each exists and is non-empty after destroy. Empty when the agent has no
     # native store worth preserving. Only checked when ``preserves_on_destroy`` is set.
     native_session_preserved_relpaths: Sequence[str] = ()
+    # Whether the arc exercises adoption: after destroy, create a *fresh* agent (a new
+    # worktree) that adopts the just-preserved session and assert it recalls the
+    # pre-destroy secret -- proving the preserved store actually resumes, not merely that
+    # its bytes landed on disk. Off by default; an agent flips it on once its plugin
+    # implements adoption of a preserved session (resolve the native store, rebind it to
+    # the new agent's work_dir, write the resume pointer), triggered via the
+    # ``ADOPT_SESSION_ENV_VAR`` seam. Requires ``preserves_on_destroy`` and a non-empty
+    # ``native_session_preserved_relpaths`` (the store the fresh agent adopts).
+    adopts_preserved_session: bool = False
 
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
@@ -138,6 +159,26 @@ class AgentReleaseProfile(abc.ABC):
 
     def recall_prompt(self) -> str:
         return "What was the exact secret I asked you to remember earlier? Reply with just the secret."
+
+    def adopt_session_arg(self, preserved_dir: Path) -> str:
+        """Return the value to hand the adopting create via ``ADOPT_SESSION_ENV_VAR``.
+
+        Computed from the just-preserved agent dir (``preserved/<name>--<id>/``): either a
+        session/conversation id the plugin can resolve, or an absolute path to the agent's
+        native session file/dir under ``preserved_dir``. Only called when
+        ``adopts_preserved_session`` is set; the default refuses so an opted-in profile
+        that forgets to supply it fails loudly.
+        """
+        raise NotImplementedError(f"{type(self).__name__} sets adopts_preserved_session but has no adopt_session_arg")
+
+    def prepare_adoption_workspace(self, work_dir: Path) -> None:
+        """Seed the fresh worktree the adopting agent is created against.
+
+        A *distinct* dir from the original workspace, so adoption must rebind the native
+        session's original-cwd binding rather than getting it for free. Defaults to an
+        empty git repo; override to add agent-specific trust inputs.
+        """
+        init_git_repo(work_dir, initial_commit=True)
 
 
 def _agent_state_dir(host_dir: Path) -> Path:
@@ -228,16 +269,15 @@ def _assert_transcripts_preserved(
     (``build_transcript_preserved_items``'s other half) are checked, plus each
     ``native_session_relpaths`` entry (the agent's own resumable session store).
 
-    FIXME(adopt-session): this asserts the bytes landed on disk, not that they resume.
-    Once `mngr create --adopt-session` exists for these agents (only claude has it today),
-    extend the arc to adopt the preserved store into a fresh agent and assert it recalls
-    the pre-destroy secret. Manual validation confirmed all four preserved stores *are*
-    resumable, but adoption into a fresh agent (a new worktree) needs per-agent handling
-    of the native session's original-cwd binding -- a plain file copy is not enough:
+    This asserts the bytes landed on disk; that they actually *resume* is exercised
+    separately by the adopt-from-preserved arc step (gated on ``adopts_preserved_session``),
+    which adopts this store into a fresh agent and asserts it recalls the pre-destroy
+    secret. Adoption into a fresh agent (a new worktree) needs per-agent handling of the
+    native session's original-cwd binding -- a plain file copy is not enough:
       - antigravity: nothing extra; resumes by conversation id, directory-agnostic.
-      - codex: resumes by session id, but pops an interactive "Choose working directory
-        to resume this session" modal (recorded cwd != new worktree) that must be
-        auto-answered.
+      - codex: resumes by session id, but the recorded cwd (the destroyed source worktree)
+        differs from the new worktree; the rebind rewrites it so codex resumes without its
+        "Choose working directory to resume this session" modal.
       - opencode: the `session` row stores an absolute `directory` (the destroyed source
         worktree); the recall POST returns 204 but silently no-ops against it. Adoption must
         rebind the session to the new work_dir -- `session.directory`, `project.worktree`, and
@@ -246,7 +286,7 @@ def _assert_transcripts_preserved(
         in the db, so `storage/` being empty on current opencode is fine.
       - pi-coding: rewrite the `pi_session_file` pointer to the adopted jsonl's new path,
         AND clear pi's blocking "cwd from session file does not exist" dialog (the cwd is
-        embedded in the session jsonl) -- ideally by rewriting that cwd before launch.
+        embedded in the session jsonl) -- by rewriting that cwd before launch.
     """
     preserved_dir = _preserved_agent_dir(host_dir, agent_name)
     common = preserved_dir / "events" / subdir / "common_transcript" / "events.jsonl"
@@ -268,6 +308,65 @@ def _assert_transcripts_preserved(
             f"native session store not preserved (or empty) at {native}; "
             f"preserved tree: {list(preserved_dir.rglob('*'))}"
         )
+
+
+def _adopt_preserved_and_recall(
+    profile: AgentReleaseProfile,
+    ctx: AgentReleaseContext,
+    *,
+    subdir: str,
+    secret: str,
+    preserved_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Create a fresh agent that adopts the just-preserved session, then assert it recalls
+    the pre-destroy secret.
+
+    Runs after the source agent is destroyed (so its live state dir is gone and the only
+    agent under ``agents/`` is this adopting one). The adopting agent is created against a
+    *new* worktree -- exercising the per-agent original-cwd rebind -- with the resolved
+    adopt argument passed via ``ADOPT_SESSION_ENV_VAR``. No secret is seeded: recall must
+    succeed purely from the adopted session's restored context.
+    """
+    host_dir = ctx.host_dir
+    adopt_work = tmp_path / "adopt_work"
+    profile.prepare_adoption_workspace(adopt_work)
+    adopt_ctx = ctx.model_copy(
+        update={
+            "workspace": adopt_work,
+            "env": {**ctx.env, ADOPT_SESSION_ENV_VAR: profile.adopt_session_arg(preserved_dir)},
+        }
+    )
+    adopt_name = f"{profile.agent_type.replace('-', '')}-adopt-{get_short_random_string()}"
+    created = False
+    try:
+        create = profile.run_mngr(
+            adopt_ctx,
+            "create",
+            adopt_name,
+            profile.agent_type,
+            "--no-connect",
+            "--yes",
+            *profile.create_extra_args(adopt_ctx),
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        assert create.returncode == 0, f"adopt create failed:\n{create.stdout}\n{create.stderr}"
+        created = True
+
+        recall = profile.run_mngr(
+            adopt_ctx, "message", adopt_name, "--message", profile.recall_prompt(), timeout=_MESSAGE_TIMEOUT_SECONDS
+        )
+        assert recall.returncode == 0, f"adopt recall message failed:\n{recall.stdout}\n{recall.stderr}"
+        _wait_for_records(
+            host_dir,
+            subdir,
+            lambda records: _assistant_recalled_secret(records, secret),
+            timeout=_RESPONSE_TIMEOUT_SECONDS,
+            description=f"adopting agent did not recall the secret {secret!r} from the preserved session",
+        )
+    finally:
+        if created:
+            profile.run_mngr(adopt_ctx, "destroy", adopt_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
 
 
 def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) -> None:
@@ -378,6 +477,20 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
             _assert_transcripts_preserved(
                 host_dir, agent_name, subdir, secret, profile.native_session_preserved_relpaths
             )
+
+            # 9. Adopt the just-preserved session into a fresh agent (new worktree) and prove
+            #    it recalls the pre-destroy secret -- that the preserved store *resumes*, not
+            #    just that its bytes survived. Opt-in per agent (its plugin must implement the
+            #    resolve + cwd-rebind path the ADOPT_SESSION_ENV_VAR seam triggers).
+            if profile.adopts_preserved_session:
+                _adopt_preserved_and_recall(
+                    profile,
+                    ctx,
+                    subdir=subdir,
+                    secret=secret,
+                    preserved_dir=_preserved_agent_dir(host_dir, agent_name),
+                    tmp_path=tmp_path,
+                )
     finally:
         try:
             if not destroyed:
