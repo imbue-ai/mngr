@@ -20,9 +20,9 @@ event_ids already in the output file).
 
 Invoked as ``python3 common_transcript_convert.py`` with the input/output paths
 passed via the ``_INPUT_FILE`` / ``_OUTPUT_FILE`` environment variables that
-common_transcript.sh sets; routine per-line skip warnings go to stdout, which the
-shell does not capture (the appended count comes from diffing the output file's
-line count). Split out of
+common_transcript.sh sets. Malformed or null lines are dropped silently; only an
+uncaught exception writes to stderr, which the shell reports as a convert error
+(the appended count comes from diffing the output file's line count). Split out of
 the shell script (it used to be an inline ``python3`` heredoc) so the logic is
 lintable, type-checked, and unit-testable directly rather than only through a
 subprocess.
@@ -31,9 +31,7 @@ subprocess.
 from __future__ import annotations
 
 import json
-import logging
 import os
-import sys
 from typing import Any
 from typing import Union
 
@@ -46,16 +44,15 @@ _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
 
-def _extract_user_text(content: JsonValue, conv_id: str, step_index: JsonValue) -> str | None:
+def _extract_user_text(content: JsonValue) -> str | None:
     """Return the user's typed text from a USER_INPUT record.
 
     agy's SQLite store (the decode_agy_transcript.py source) records the clean typed text
     directly in ``CortexStepUserInput.query``, so ``content`` is already the user's message --
     we only strip surrounding whitespace. A non-string content is a real schema break, so we
-    log it and drop the event.
+    drop the event.
     """
     if not isinstance(content, str):
-        logging.warning("USER_INPUT content is not a string for conv=%s step=%s; dropping event", conv_id, step_index)
         return None
     return content.strip()
 
@@ -88,8 +85,7 @@ def _load_existing_ids(output_file: str) -> set[str]:
                 continue
             try:
                 ids.add(json.loads(line)["event_id"])
-            except (json.JSONDecodeError, KeyError) as exc:
-                logging.warning("skipping unreadable common-transcript output line: %s", exc)
+            except (json.JSONDecodeError, KeyError):
                 continue
     return ids
 
@@ -112,8 +108,7 @@ def convert(input_file: str, output_file: str) -> int:
                 continue
             try:
                 raw = json.loads(line)
-            except json.JSONDecodeError as exc:
-                logging.warning("skipping malformed antigravity transcript line: %s", exc)
+            except json.JSONDecodeError:
                 continue
             if not isinstance(raw, dict):
                 continue
@@ -132,8 +127,8 @@ def convert(input_file: str, output_file: str) -> int:
                 event_id = f"{conv_id}-{step_index}-user"
                 if event_id in existing_ids:
                     continue
-                text = _extract_user_text(raw.get("content"), conv_id, step_index)
-                # _extract_user_text returns the stripped typed text, or None (already logged)
+                text = _extract_user_text(raw.get("content"))
+                # _extract_user_text returns the stripped typed text, or None when dropped
                 # when content is not a string. Empty results -- a None or otherwise empty
                 # content -- are dropped here as they carry no signal.
                 if not text:
@@ -206,12 +201,9 @@ def convert(input_file: str, output_file: str) -> int:
                     continue
                 # A non-string content (JSON null, or a list/dict) carries no usable
                 # output and would crash _truncate (it calls len()/slices, assuming a
-                # str), so warn and drop rather than emit an empty tool_result.
+                # str), so drop rather than emit an empty tool_result.
                 content = raw.get("content")
                 if not isinstance(content, str):
-                    logging.warning(
-                        "dropping CODE_ACTION with non-string content for conv=%s step=%s", conv_id, step_index
-                    )
                     continue
                 output = _truncate(content, _MAX_OUTPUT_LENGTH)
                 new_events.append(
@@ -250,10 +242,4 @@ def convert(input_file: str, output_file: str) -> int:
 
 
 if __name__ == "__main__":
-    # Route routine per-line skip warnings to stdout. common_transcript.sh treats
-    # any stderr output as a "convert error", so a truncated trailing line caught
-    # mid-write must not land there; stdout is not captured (the shell reports the
-    # appended count by diffing the output file's line count). Genuine uncaught
-    # exceptions still hit stderr via the default traceback and surface as errors.
-    logging.basicConfig(stream=sys.stdout, level=logging.WARNING, format="%(message)s")
     convert(os.environ["_INPUT_FILE"], os.environ["_OUTPUT_FILE"])

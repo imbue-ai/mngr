@@ -12,9 +12,9 @@ uuid, so re-processing the same input never produces duplicate output.
 
 Invoked as ``python3 common_transcript_convert.py`` with the input/output paths
 passed via the ``_INPUT_FILE`` / ``_OUTPUT_FILE`` environment variables that
-common_transcript.sh sets; routine per-line skip warnings go to stdout, which the
-shell does not capture (the appended count comes from diffing the output file's
-line count). Split out of
+common_transcript.sh sets. Malformed or null lines are dropped silently; only an
+uncaught exception writes to stderr, which the shell reports as a convert error
+(the appended count comes from diffing the output file's line count). Split out of
 the shell script (it used to be an inline ``python3`` heredoc) so the logic is
 lintable, type-checked, and unit-testable directly rather than only through a
 subprocess.
@@ -23,9 +23,7 @@ subprocess.
 from __future__ import annotations
 
 import json
-import logging
 import os
-import sys
 from typing import Any
 from typing import Union
 
@@ -102,8 +100,7 @@ def _load_existing_ids(output_file: str) -> set[str]:
                 continue
             try:
                 ids.add(json.loads(line)["event_id"])
-            except (json.JSONDecodeError, KeyError) as exc:
-                logging.warning("skipping unreadable common-transcript output line: %s", exc)
+            except (json.JSONDecodeError, KeyError):
                 continue
     return ids
 
@@ -128,8 +125,7 @@ def convert(input_file: str, output_file: str) -> int:
                 continue
             try:
                 raw = json.loads(line)
-            except json.JSONDecodeError as exc:
-                logging.warning("skipping malformed claude transcript line: %s", exc)
+            except json.JSONDecodeError:
                 continue
 
             event_type = raw.get("type", "")
@@ -148,9 +144,8 @@ def convert(input_file: str, output_file: str) -> int:
 
                 raw_message = raw.get("message")
                 if not isinstance(raw_message, dict):
-                    # A null/missing message carries no usable content -- warn and
-                    # drop the line rather than emit an empty event or crash.
-                    logging.warning("dropping %s event with non-dict message (uuid=%s)", event_type, uuid)
+                    # A null/missing message carries no usable content -- drop the
+                    # line rather than emit an empty event or crash.
                     continue
                 message = raw_message
                 content_blocks = message.get("content", [])
@@ -222,9 +217,8 @@ def convert(input_file: str, output_file: str) -> int:
             elif event_type == "user":
                 raw_message = raw.get("message")
                 if not isinstance(raw_message, dict):
-                    # A null/missing message carries no usable content -- warn and
-                    # drop the line rather than emit an empty event or crash.
-                    logging.warning("dropping %s event with non-dict message (uuid=%s)", event_type, uuid)
+                    # A null/missing message carries no usable content -- drop the
+                    # line rather than emit an empty event or crash.
                     continue
                 message = raw_message
                 content = message.get("content")
@@ -334,10 +328,4 @@ def convert(input_file: str, output_file: str) -> int:
 
 
 if __name__ == "__main__":
-    # Route routine per-line skip warnings to stdout. common_transcript.sh treats
-    # any stderr output as a "convert error", so a truncated trailing line caught
-    # mid-write must not land there; stdout is not captured (the shell reports the
-    # appended count by diffing the output file's line count). Genuine uncaught
-    # exceptions still hit stderr via the default traceback and surface as errors.
-    logging.basicConfig(stream=sys.stdout, level=logging.WARNING, format="%(message)s")
     convert(os.environ["_INPUT_FILE"], os.environ["_OUTPUT_FILE"])

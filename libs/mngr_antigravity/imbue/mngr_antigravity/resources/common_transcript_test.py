@@ -146,6 +146,17 @@ def _run_converter(state_dir: Path) -> str:
     return result.stderr
 
 
+def _run_single_pass(state_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Run one pass and return the full process so callers can inspect stdout/stderr."""
+    return subprocess.run(
+        ["bash", str(_SCRIPT_PATH), "--single-pass"],
+        env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
 def _read_common_events(state_dir: Path) -> list[dict[str, Any]]:
     output_path = state_dir / "events" / "antigravity" / "common_transcript" / "events.jsonl"
     if not output_path.exists():
@@ -477,6 +488,38 @@ def test_malformed_lines_are_skipped_not_fatal(state_dir: Path) -> None:
     events = _read_common_events(state_dir)
     assert len(events) == 1
     assert events[0]["content"] == "after the broken line"
+
+
+def test_missing_output_file_emits_nothing_to_pane(state_dir: Path) -> None:
+    """Regression: on the first pass the output file does not exist yet, and the
+    watcher must stay completely silent on stdout/stderr. A bare
+    `wc -l < "$OUTPUT_FILE"` leaked a "No such file or directory" redirection
+    error to stderr (the watcher shell's own, so the command's 2>/dev/null did not
+    catch it), which surfaced in the agent's tmux pane on every poll.
+    """
+    _write_raw_transcript(state_dir, [_user_input("conv-A", 0, "Hello")])
+    output_path = state_dir / "events" / "antigravity" / "common_transcript" / "events.jsonl"
+    assert not output_path.exists()
+
+    result = _run_single_pass(state_dir)
+    assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
+    assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
+    assert len(_read_common_events(state_dir)) == 1
+
+
+def test_dropped_lines_emit_nothing_to_pane(state_dir: Path) -> None:
+    """Regression: malformed lines are dropped silently. The converter used to log
+    per-line skip warnings to stdout, which the shell did not capture, so they
+    leaked into the agent's tmux pane.
+    """
+    raw_path = state_dir / "logs" / "antigravity_transcript" / "events.jsonl"
+    raw_path.write_text("{ not valid json\n" + _user_input("conv-A", 0, "kept") + "\n")
+
+    result = _run_single_pass(state_dir)
+    assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
+    assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
+    events = _read_common_events(state_dir)
+    assert [e["content"] for e in events] == ["kept"]
 
 
 def test_event_ids_are_stable_and_per_conversation(state_dir: Path) -> None:
