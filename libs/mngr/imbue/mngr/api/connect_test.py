@@ -65,6 +65,22 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     assert "tmux attach -t =mngr-my-agent" in script
 
 
+def test_build_ssh_activity_wrapper_script_targets_private_tmux_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The remote attach wrapper exports TMUX_TMPDIR so the SSH-side tmux uses mngr's private server.
+
+    In production there is no MNGR_TMUX_TMPDIR override, so the remote socket dir
+    is derived from the remote host_dir.
+    """
+    monkeypatch.delenv("MNGR_TMUX_TMPDIR", raising=False)
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+
+    # The export must come before the attach / show-options calls that depend on it.
+    assert "export TMUX_TMPDIR=/home/user/.mngr/tmux" in script
+    assert script.index("export TMUX_TMPDIR=") < script.index("tmux attach")
+
+
 def test_build_ssh_activity_wrapper_script_guards_sigwinch_on_manual_window_size() -> None:
     # The post-attach SIGWINCH nudge must be skipped for a pinned ("manual")
     # window: it never resizes on attach, so there is nothing to redraw. The check

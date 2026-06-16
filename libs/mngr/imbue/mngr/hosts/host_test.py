@@ -2,6 +2,11 @@
 
 import io
 import json
+import os
+import shlex
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
@@ -39,6 +44,9 @@ from imbue.mngr.hosts.host import _is_transient_ssh_error
 from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
+from imbue.mngr.hosts.tmux import TMUX_ENV_VAR
+from imbue.mngr.hosts.tmux import TMUX_TMPDIR_ENV_VAR
+from imbue.mngr.hosts.tmux import get_mngr_tmux_tmpdir
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -704,6 +712,24 @@ def test_build_start_agent_shell_command_produces_single_command(
     assert "pane_pid" in result
 
 
+def test_build_start_agent_shell_command_creates_private_tmux_dir_before_new_session(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The start command pre-creates mngr's TMUX_TMPDIR before new-session.
+
+    tmux silently falls back to the default socket when TMUX_TMPDIR does not
+    exist, so the directory must be created first.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    tmux_dir = get_mngr_tmux_tmpdir(temp_host_dir)
+    assert f"mkdir -p {shlex.quote(str(tmux_dir))}" in result
+    assert result.index("mkdir -p") < result.index("new-session")
+
+
 def test_build_start_agent_shell_command_uses_default_dimensions_when_unset(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
@@ -1057,6 +1083,7 @@ class _FakePyinfraHost:
         self._put_file_call_count = 0
         self._run_shell_command_call_count = 0
         self.disconnect_call_count = 0
+        self.run_shell_command_kwargs: list[dict[str, Any]] = []
 
     def connect(self, raise_exceptions: bool = False) -> None:
         self.connected = True
@@ -1100,6 +1127,7 @@ class _FakePyinfraHost:
         command: StringCommand,
         **kwargs: Any,
     ) -> tuple[bool, CommandOutput]:
+        self.run_shell_command_kwargs.append(kwargs)
         idx = self._run_shell_command_call_count
         self._run_shell_command_call_count += 1
         if idx < len(self._run_shell_command_results):
@@ -1985,6 +2013,140 @@ def test_run_shell_command_wraps_timeout_error_in_host_connection_error(
 
     with pytest.raises(HostConnectionError, match="timed out reading output"):
         host._run_shell_command(StringCommand("echo hello"))
+
+
+# =========================================================================
+# Tests for private tmux server injection (TMUX_TMPDIR / cleared TMUX)
+# =========================================================================
+
+
+def test_run_shell_command_injects_private_tmux_tmpdir_and_clears_tmux(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Every host command targets mngr's private tmux server and ignores an inherited $TMUX.
+
+    The injection happens at _run_shell_command before the local/remote branch,
+    so it covers both. Here we exercise the remote (pyinfra) path via the fake
+    connector and inspect the _env handed to pyinfra.
+    """
+    fake = _FakePyinfraHost()
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    host._run_shell_command(StringCommand("tmux list-sessions"))
+
+    assert len(fake.run_shell_command_kwargs) == 1
+    injected_env = fake.run_shell_command_kwargs[0]["_env"]
+    assert injected_env[TMUX_TMPDIR_ENV_VAR] == str(get_mngr_tmux_tmpdir(host.host_dir))
+    assert injected_env[TMUX_ENV_VAR] == ""
+
+
+def test_run_shell_command_preserves_caller_env_alongside_tmux_injection(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Caller-supplied env vars survive the tmux injection (and win on conflict)."""
+    fake = _FakePyinfraHost()
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    host._run_shell_command(
+        StringCommand("echo hi"),
+        _env={"FOO": "bar", TMUX_TMPDIR_ENV_VAR: "/caller/override"},
+    )
+
+    injected_env = fake.run_shell_command_kwargs[0]["_env"]
+    assert injected_env["FOO"] == "bar"
+    # A caller that explicitly sets TMUX_TMPDIR overrides the default injection.
+    assert injected_env[TMUX_TMPDIR_ENV_VAR] == "/caller/override"
+    # TMUX is still cleared even when the caller passes its own env.
+    assert injected_env[TMUX_ENV_VAR] == ""
+
+
+def test_run_shell_command_local_overrides_ambient_tmux_env(
+    local_provider: LocalProviderInstance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the real local execution path, a command sees mngr's TMUX_TMPDIR and an empty $TMUX.
+
+    Even when the ambient environment points TMUX_TMPDIR at the user's own
+    socket dir and $TMUX marks an enclosing session, the command run through the
+    host layer is rerouted to mngr's private server and has $TMUX cleared.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert host.is_local
+
+    monkeypatch.setenv("TMUX_TMPDIR", "/tmp/some-user-tmux-dir")
+    monkeypatch.setenv("TMUX", "/tmp/some-user-tmux-dir/sock,4242,0")
+
+    tmpdir_result = host.execute_idempotent_command('printf "%s" "$TMUX_TMPDIR"', timeout_seconds=10)
+    assert tmpdir_result.success
+    assert tmpdir_result.stdout == str(get_mngr_tmux_tmpdir(host.host_dir))
+    assert tmpdir_result.stdout != "/tmp/some-user-tmux-dir"
+
+    tmux_result = host.execute_idempotent_command('printf "%s" "$TMUX"', timeout_seconds=10)
+    assert tmux_result.success
+    assert tmux_result.stdout == ""
+
+
+@pytest.mark.tmux
+def test_session_created_via_host_is_isolated_from_user_default_server(
+    local_provider: LocalProviderInstance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session created through the host layer lives only on mngr's private tmux server.
+
+    Stands up two real tmux servers: mngr's private one (selected by
+    MNGR_TMUX_TMPDIR) and a separate "user default" one. A session created via
+    the host layer must be visible only on mngr's server; a session created
+    directly on the user's server must be invisible to the host layer. This is
+    the end-to-end isolation guarantee that motivates the dedicated socket.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+
+    mngr_tmpdir = Path(tempfile.mkdtemp(prefix="mngr-tmux-priv-", dir="/tmp"))
+    user_tmpdir = Path(tempfile.mkdtemp(prefix="mngr-tmux-user-", dir="/tmp"))
+    monkeypatch.setenv("MNGR_TMUX_TMPDIR", str(mngr_tmpdir))
+    monkeypatch.setenv("TMUX_TMPDIR", str(user_tmpdir))
+    monkeypatch.delenv("TMUX", raising=False)
+
+    # Direct (non-host) tmux calls below stand in for the user's own tmux usage,
+    # which targets the user default server -- never mngr's private one.
+    user_env = {**os.environ, "TMUX_TMPDIR": str(user_tmpdir)}
+    user_env.pop("TMUX", None)
+
+    mngr_session = "mngr-isolation-probe"
+    user_session = "user-isolation-probe"
+    try:
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", user_session, "sleep 600"],
+            env=user_env,
+            check=True,
+            capture_output=True,
+        )
+        create_result = host.execute_idempotent_command(
+            f"tmux new-session -d -s {mngr_session} 'sleep 600'",
+            timeout_seconds=10,
+        )
+        assert create_result.success, create_result.stderr
+
+        host_sessions = host.execute_idempotent_command("tmux list-sessions -F '#{session_name}'", timeout_seconds=10)
+        assert host_sessions.success
+        host_session_names = host_sessions.stdout.split()
+        assert mngr_session in host_session_names
+        assert user_session not in host_session_names
+
+        user_ls = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            env=user_env,
+            capture_output=True,
+            text=True,
+        )
+        user_session_names = user_ls.stdout.split()
+        assert user_session in user_session_names
+        assert mngr_session not in user_session_names
+    finally:
+        host.execute_idempotent_command("tmux kill-server", timeout_seconds=10)
+        subprocess.run(["tmux", "kill-server"], env=user_env, capture_output=True)
+        shutil.rmtree(mngr_tmpdir, ignore_errors=True)
+        shutil.rmtree(user_tmpdir, ignore_errors=True)
 
 
 # =========================================================================
@@ -2914,6 +3076,9 @@ def test_host_collect_agent_env_vars_includes_mngr_variables(
     # alongside MNGR_GIT_BASE_BRANCH and must hold the same value.
     assert "CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH" in env
     assert env["CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH"] == env["MNGR_GIT_BASE_BRANCH"]
+    # tmux run inside the agent shell (ttyd's attach, user-opened windows) must
+    # target mngr's private server, so the agent env file carries TMUX_TMPDIR.
+    assert env[TMUX_TMPDIR_ENV_VAR] == str(get_mngr_tmux_tmpdir(host.host_dir))
 
 
 def test_host_collect_agent_env_vars_with_env_file(
