@@ -59,6 +59,12 @@ _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/common_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
+# Shared common-transcript primitives: the convert lock that serializes this
+# converter's read-modify-write against any concurrent --single-pass flush (see
+# the library header for why duplicates would result without it).
+# shellcheck source=mngr_common_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+
 # Count lines in the output file, or 0 if it doesn't exist yet. A bare
 # `wc -l < "$OUTPUT_FILE"` leaks a "No such file or directory" redirection
 # error to this watcher's stderr (the failing `<` is the shell's own, so the
@@ -78,6 +84,11 @@ convert_new_events() {
         return
     fi
 
+    if ! mngr_common_transcript_acquire_lock; then
+        log_warn "could not acquire convert lock; skipping pass"
+        return
+    fi
+
     local before_count
     before_count=$(_count_output_lines)
 
@@ -88,6 +99,10 @@ convert_new_events() {
     convert_stderr=$(mktemp)
     _INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" \
         python3 "$SCRIPT_DIR/common_transcript_convert.py" 1>/dev/null 2>"$convert_stderr" || true
+
+    # The read-modify-write is done; drop the lock before the (lock-free)
+    # logging below so a concurrent pass can proceed immediately.
+    mngr_common_transcript_release_lock
 
     if [ -s "$convert_stderr" ]; then
         # Forward the converter's stderr to both the structured log (via

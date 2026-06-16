@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
-from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -27,7 +26,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
@@ -52,6 +50,7 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
@@ -73,6 +72,7 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
@@ -1531,12 +1531,19 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         The PermissionRequest hook creates a 'permissions_waiting' file when Claude
         is blocked on a permission dialog. When present, this overrides RUNNING to
         WAITING since the agent cannot make progress without user intervention.
+
+        Delegates the gating decision to the shared classify_waiting_reason so this
+        promotion and the waiting_reason field generator cannot drift: a RUNNING
+        base state means the 'active' marker is present and the process is alive, so
+        the classifier's is_active gate is satisfied and a PERMISSIONS verdict is
+        what promotes RUNNING to WAITING.
         """
         state = super().get_lifecycle_state()
-        if state == AgentLifecycleState.RUNNING:
-            if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
-                return AgentLifecycleState.WAITING
-        return state
+        if state != AgentLifecycleState.RUNNING:
+            return state
+        is_blocked = self._check_file_exists(self._get_agent_dir() / "permissions_waiting")
+        reason = classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked)
+        return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else state
 
     def get_expected_process_name(self) -> str:
         """Return 'claude' as the expected process name.
@@ -2530,38 +2537,20 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentT
     return ("claude", ClaudeAgent, ClaudeAgentConfig)
 
 
-class WaitingReason(UpperCaseStrEnum):
-    """Why a Claude agent is in the WAITING lifecycle state."""
-
-    PERMISSIONS = auto()
-    END_OF_TURN = auto()
-
-
-def _host_file_exists(host: OnlineHostInterface, path: Path) -> bool:
-    """Check if a file exists on the host without SSH overhead."""
-    try:
-        host.read_text_file(path)
-        return True
-    except FileNotFoundError:
-        return False
-
-
 def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
     """Return why the agent is waiting based on marker files, or None.
 
     Checks the agent state directory for marker files rather than calling
-    get_lifecycle_state() (which involves tmux/ps SSH commands).
-
-    - permissions_waiting exists -> PERMISSIONS (blocked on permission dialog)
-    - active file absent -> END_OF_TURN (idle, turn complete)
-    - otherwise -> None (agent is actively running)
+    get_lifecycle_state() (which involves tmux/ps SSH commands), then delegates the
+    decision to the shared ``classify_waiting_reason`` so this and the lifecycle
+    promotion stay in lockstep. ``permissions_waiting`` is only read when ``active``
+    is present, both to short-circuit the idle case and because the classifier
+    ignores the permission signal when the agent is not in a turn.
     """
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    if _host_file_exists(host, agent_dir / "permissions_waiting"):
-        return WaitingReason.PERMISSIONS
-    if not _host_file_exists(host, agent_dir / "active"):
-        return WaitingReason.END_OF_TURN
-    return None
+    is_active = host.path_exists(agent_dir / "active")
+    is_blocked_on_permission = is_active and host.path_exists(agent_dir / "permissions_waiting")
+    return classify_waiting_reason(is_active, is_blocked_on_permission)
 
 
 @hookimpl
