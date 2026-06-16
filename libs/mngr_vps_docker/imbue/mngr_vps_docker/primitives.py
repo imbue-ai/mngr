@@ -1,7 +1,15 @@
 from enum import auto
+from typing import Final
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
+
+# SSH key-file names under a provider instance's ``key_dir``. Shared so the
+# provider (substrate) and the bare realizer -- which reuses the VPS keys to
+# reach the agent on the VM's own port-22 sshd -- refer to the same files.
+VPS_SSH_KEY_NAME: Final[str] = "vps_ssh_key"
+VPS_HOST_KEY_NAME: Final[str] = "host_key"
+VPS_KNOWN_HOSTS_NAME: Final[str] = "vps_known_hosts"
 
 
 class VpsInstanceId(NonEmptyStr):

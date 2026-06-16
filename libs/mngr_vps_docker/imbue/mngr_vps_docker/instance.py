@@ -105,6 +105,9 @@ from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.interfaces import HostRealizer
 from imbue.mngr_vps_docker.primitives import IsolationMode
+from imbue.mngr_vps_docker.primitives import VPS_HOST_KEY_NAME
+from imbue.mngr_vps_docker.primitives import VPS_KNOWN_HOSTS_NAME
+from imbue.mngr_vps_docker.primitives import VPS_SSH_KEY_NAME
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 
@@ -515,7 +518,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _get_vps_ssh_keypair(self) -> tuple[Path, str]:
         """Load or create the SSH keypair for authenticating to the VPS."""
-        return load_or_create_ssh_keypair(self._key_dir(), "vps_ssh_key")
+        return load_or_create_ssh_keypair(self._key_dir(), VPS_SSH_KEY_NAME)
 
     def _get_container_ssh_keypair(self) -> tuple[Path, str]:
         """Load or create the SSH keypair for authenticating to the container.
@@ -528,14 +531,14 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _get_vps_host_keypair(self) -> tuple[Path, str]:
         """Load or create the Ed25519 host keypair injected into VPS via cloud-init."""
-        return load_or_create_host_keypair(self._key_dir(), "host_key")
+        return load_or_create_host_keypair(self._key_dir(), VPS_HOST_KEY_NAME)
 
     def _get_container_host_keypair(self) -> tuple[Path, str]:
         """Load or create the Ed25519 host keypair for the container's sshd."""
         return load_or_create_host_keypair(self._key_dir(), CONTAINER_HOST_KEY_NAME)
 
     def _vps_known_hosts_path(self) -> Path:
-        return self._key_dir() / "vps_known_hosts"
+        return self._key_dir() / VPS_KNOWN_HOSTS_NAME
 
     def record_outer_host_key(self, host: str, port: int, public_key: str) -> None:
         """Pin an outer (VPS-root) sshd host key in this provider's known_hosts.
