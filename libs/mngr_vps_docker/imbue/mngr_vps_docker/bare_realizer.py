@@ -10,6 +10,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
@@ -100,8 +101,7 @@ class BareRealizer(HostRealizer):
         # all means the agent (the VM) is running.
         raw = self._run_listing_script(outer, build_listing_collection_script(host_dir, prefix), timeout_seconds=60.0)
         parsed = parse_listing_collection_output(raw)
-        agent_data = [data for agent in parsed.get("agents", []) if isinstance((data := agent.get("data")), dict)]
-        return agent_data, True
+        return extract_agent_data_from_parsed_listing(parsed), True
 
     def is_placement_running(self, outer: OuterHostInterface, record: VpsDockerHostRecord) -> bool:
         # No container: the agent IS the VM, so a reachable VM is a running host.

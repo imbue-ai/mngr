@@ -240,16 +240,6 @@ def parse_vps_build_args(
     )
 
 
-def _extract_live_agent_data(parsed_listing: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Pull each agent's ``data.json`` dict out of a parsed listing."""
-    agent_data: list[dict[str, Any]] = []
-    for agent_raw in parsed_listing.get("agents", []):
-        data = agent_raw.get("data")
-        if isinstance(data, dict):
-            agent_data.append(data)
-    return agent_data
-
-
 class _VpsDiscoveryData(FrozenModel):
     """Host records, live agent data, and container running state gathered during discovery.
 

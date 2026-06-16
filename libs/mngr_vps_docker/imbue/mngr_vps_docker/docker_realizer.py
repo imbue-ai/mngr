@@ -15,6 +15,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
+from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
@@ -117,11 +118,6 @@ def _read_live_listing_from_vps(
     return parse_listing_collection_output(result.stdout)
 
 
-def _agent_data_from_parsed_listing(parsed_listing: dict[str, Any]) -> list[dict[str, Any]]:
-    """Pull each agent's ``data.json`` dict out of a parsed listing."""
-    return [data for agent in parsed_listing.get("agents", []) if isinstance((data := agent.get("data")), dict)]
-
-
 class DockerRealizer(HostRealizer):
     """Places the agent inside a Docker container on the VPS.
 
@@ -174,7 +170,7 @@ class DockerRealizer(HostRealizer):
         self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
     ) -> tuple[list[dict[str, Any]], bool]:
         parsed = _read_live_listing_from_vps(outer, host_id, host_dir, prefix)
-        return _agent_data_from_parsed_listing(parsed), parsed.get("container_state") == "running"
+        return extract_agent_data_from_parsed_listing(parsed), parsed.get("container_state") == "running"
 
     def is_placement_running(self, outer: OuterHostInterface, record: VpsDockerHostRecord) -> bool:
         assert record.config is not None and record.config.container_name is not None

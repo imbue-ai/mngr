@@ -66,7 +66,6 @@ from imbue.mngr_vps_docker.host_store_test import _make_local_connector
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import _VpsDiscoveryData
-from imbue.mngr_vps_docker.instance import _extract_live_agent_data
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
@@ -375,23 +374,6 @@ def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
 
     assert result.records == ()
     assert result.live_agent_data_by_host_id == {}
-
-
-def test_extract_live_agent_data_returns_data_dicts_and_skips_malformed() -> None:
-    """Only well-formed ``{"data": {...}}`` entries contribute agent data."""
-    parsed_listing = {
-        "container_state": "running",
-        "agents": [
-            {"data": {"id": "a-1", "name": "system-services"}},
-            {"data": {"id": "a-2", "name": "chat-host"}},
-            {"user_activity_mtime": 123},
-        ],
-    }
-
-    assert _extract_live_agent_data(parsed_listing) == [
-        {"id": "a-1", "name": "system-services"},
-        {"id": "a-2", "name": "chat-host"},
-    ]
 
 
 def test_read_records_from_vps_surfaces_live_in_container_agents(
