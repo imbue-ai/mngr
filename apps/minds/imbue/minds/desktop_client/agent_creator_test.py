@@ -1019,7 +1019,7 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
         ai_provider=AIProvider.IMBUE_CLOUD,
         account_email="alice@imbue.com",
     )
-    _wait_until_finished(creator, creation_id, deadline_seconds=30.0)
+    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
