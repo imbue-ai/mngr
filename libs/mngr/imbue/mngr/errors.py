@@ -151,6 +151,10 @@ class AgentError(MngrError):
     """
 
 
+class AgentInstallationError(AgentError):
+    """Raised when an agent's CLI binary is missing and cannot be installed."""
+
+
 class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 

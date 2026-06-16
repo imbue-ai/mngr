@@ -106,6 +106,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
@@ -120,6 +121,7 @@ from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
@@ -342,6 +344,10 @@ class AntigravityAgentConfig(AgentTypeConfig):
         description="When True, auto-trust the source repo without prompting. "
         "When False (default), the user is prompted interactively.",
     )
+    check_installation: bool = Field(
+        default=True,
+        description="Check whether agy is installed and install it if missing (if False, assume it is already present).",
+    )
     # emit_common_transcript gates the JSONL -> common-schema converter that
     # writes to ``events/antigravity/common_transcript/events.jsonl``. The raw
     # transcript at ``logs/antigravity_transcript/events.jsonl`` is always
@@ -367,6 +373,7 @@ class AntigravityAgent(
     HasSessionPreservationMixin,
     HasUnattendedModeMixin,
     HasPermissionPolicyMixin,
+    HasAutoInstallMixin,
 ):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
@@ -541,6 +548,9 @@ class AntigravityAgent(
         policy = self.agent_config.settings_overrides.get("permissions", {})
         return policy if isinstance(policy, Mapping) else {}
 
+    def get_install_command(self) -> str:
+        return "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and conversation-id history before the state dir is deleted."""
         if self.agent_config.preserve_on_destroy:
@@ -572,6 +582,8 @@ class AntigravityAgent(
         4. Install the transcript scripts and the background-tasks supervisor
            under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
+        if self.agent_config.check_installation:
+            ensure_cli_installed(host, mngr_ctx, self.get_expected_process_name(), self.get_install_command())
         host_home, host_uname = self._resolve_host_home_and_os(host)
         self._ensure_source_repo_trusted(host, host_home, mngr_ctx)
         self._provision_agy_home(host, host_home, host_uname)

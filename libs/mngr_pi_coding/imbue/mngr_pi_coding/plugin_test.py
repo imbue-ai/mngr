@@ -19,7 +19,7 @@ from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
@@ -417,7 +417,7 @@ def test_provision_raises_when_pi_not_installed_locally(tmp_path: Path, pi_agent
     options = _make_options()
     mngr_ctx = _make_test_mngr_ctx(tmp_path, is_auto_approve=False)
 
-    with pytest.raises(PluginMngrError, match="pi is not installed"):
+    with pytest.raises(AgentInstallationError, match="pi is not installed"):
         pi_agent.provision(host, options, mngr_ctx)
 
 
@@ -464,7 +464,7 @@ def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent:
         concurrency_group=ConcurrencyGroup(name="test"),
     )
 
-    with pytest.raises(PluginMngrError, match="automatic remote installation is disabled"):
+    with pytest.raises(AgentInstallationError, match="automatic remote installation is disabled"):
         pi_agent.provision(host, options, mngr_ctx)
 
 

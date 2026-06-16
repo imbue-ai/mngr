@@ -90,6 +90,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
@@ -104,6 +105,7 @@ from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
@@ -236,6 +238,11 @@ class CodexAgentConfig(AgentTypeConfig):
         description="When True, set approval_policy='never' so codex never prompts for tool "
         "approval (the sandbox set by sandbox_mode still applies).",
     )
+    check_installation: bool = Field(
+        default=True,
+        description="Check whether codex is installed and install it if missing "
+        "(if False, assume it is already present).",
+    )
     # config_overrides is a free-form blob merged last (shallow) into the
     # per-agent config.toml. Covers anything not surfaced as a typed knob (extra
     # [notice] keys, a [profiles.*] table, model_provider, etc.).
@@ -298,6 +305,7 @@ class CodexAgent(
     HasUnattendedModeMixin,
     HasPermissionPolicyMixin,
     HasVersionManagementMixin,
+    HasAutoInstallMixin,
 ):
     """Agent implementation for the OpenAI Codex CLI (``codex``)."""
 
@@ -395,6 +403,9 @@ class CodexAgent(
         # codex follows an update policy (ask / auto / never) rather than pinning a version.
         return str(self.agent_config.update_policy)
 
+    def get_install_command(self) -> str:
+        return "npm i -g @openai/codex"
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""
         if self.agent_config.preserve_on_destroy:
@@ -457,6 +468,8 @@ class CodexAgent(
         5. Install the transcript scripts + background supervisor under
            ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
+        if self.agent_config.check_installation:
+            ensure_cli_installed(host, mngr_ctx, self.get_expected_process_name(), self.get_install_command())
         user_codex_home = self._resolve_user_codex_home(host)
         canonical_work_dir = self._resolve_canonical_path(host, self.work_dir)
         self._ensure_source_repo_trusted(host, user_codex_home, mngr_ctx)

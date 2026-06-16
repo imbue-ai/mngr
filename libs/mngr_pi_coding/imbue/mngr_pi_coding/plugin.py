@@ -16,6 +16,7 @@ from pydantic import field_validator
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
@@ -31,6 +32,7 @@ from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
@@ -257,24 +259,8 @@ class PiCodingAgentConfig(AgentTypeConfig):
     )
 
 
-def _check_pi_installed(host: OnlineHostInterface) -> bool:
-    """Check if pi is installed on the host."""
-    result = host.execute_idempotent_command("command -v pi", timeout_seconds=10.0)
-    return result.success
-
-
-# The npm package pi ships under (used for the remote-host auto-install).
+# The npm package pi ships under (used for the auto-install command).
 _PI_NPM_PACKAGE: str = "@earendil-works/pi-coding-agent"
-
-
-def _install_pi(host: OnlineHostInterface) -> None:
-    """Install pi on the host via npm."""
-    result = host.execute_idempotent_command(
-        f"npm install -g {_PI_NPM_PACKAGE}",
-        timeout_seconds=300.0,
-    )
-    if not result.success:
-        raise PluginMngrError(f"Failed to install pi. stderr: {result.stderr}")
 
 
 def _has_api_credentials_available(
@@ -315,7 +301,11 @@ def _has_api_credentials_available(
 
 
 class PiCodingAgent(
-    BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin, HasUnattendedModeMixin
+    BaseAgent[PiCodingAgentConfig],
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
+    HasAutoInstallMixin,
 ):
     """Agent implementation for the pi coding agent.
 
@@ -629,21 +619,7 @@ class PiCodingAgent(
         config = self.agent_config
 
         if config.check_installation:
-            is_installed = _check_pi_installed(host)
-            if is_installed:
-                logger.debug("pi is already installed on the host")
-            else:
-                install_hint = f"npm install -g {_PI_NPM_PACKAGE}"
-                if host.is_local and not mngr_ctx.is_auto_approve:
-                    raise PluginMngrError(f"pi is not installed. Please install it with:\n  {install_hint}")
-                elif not host.is_local and not mngr_ctx.config.is_remote_agent_installation_allowed:
-                    raise PluginMngrError(
-                        "pi is not installed on the remote host and automatic remote installation is disabled."
-                    )
-                else:
-                    logger.info("Installing pi...")
-                    _install_pi(host)
-                    logger.info("pi installed successfully")
+            ensure_cli_installed(host, mngr_ctx, self.get_expected_process_name(), self.get_install_command())
 
         # Trust gate first (consent + durable global record), so a declined /
         # non-interactive-without-opt-in case exits cleanly before any setup.
@@ -801,6 +777,9 @@ class PiCodingAgent(
         # pi has no tool-approval gate, so it always runs unattended; the config
         # field is pinned True (False is rejected at validation).
         return self.agent_config.auto_allow_permissions
+
+    def get_install_command(self) -> str:
+        return f"npm install -g {_PI_NPM_PACKAGE}"
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and the session-file pointer before the state dir is deleted.

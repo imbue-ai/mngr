@@ -657,3 +657,19 @@ class HasVersionManagementMixin(ABC):
     def get_version_policy(self) -> str:
         """Return a short label of how this agent instance manages its binary version."""
         ...
+
+
+class HasAutoInstallMixin(ABC):
+    """Mixin for agent types that can install their CLI binary if it is missing.
+
+    A base capability every real agent should have: provisioning checks whether
+    the binary is present and, if not, installs it (gated by consent on local
+    hosts and a config flag on remote hosts). The bare config-driven command
+    shells do not have it -- they run an arbitrary command, not a known binary.
+    This contract returns the per-CLI install command.
+    """
+
+    @abstractmethod
+    def get_install_command(self) -> str:
+        """Return the shell command that installs this agent's CLI binary."""
+        ...

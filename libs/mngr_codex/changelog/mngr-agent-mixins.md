@@ -3,3 +3,5 @@ The agent now declares the `HasSessionPreservationMixin` capability mixin: its `
 Also declares the `HasUnattendedModeMixin` capability (`is_unattended_enabled` reports the `auto_allow_permissions` config), so "can run unattended" is a code-detectable capability in the matrix.
 
 Also declares `HasPermissionPolicyMixin` (sandbox mode + approval policy) and `HasVersionManagementMixin` (the codex update policy).
+
+Also declares `HasAutoInstallMixin`: provisioning now checks whether the `codex` CLI is installed and installs it (`npm i -g @openai/codex`) if missing, gated by consent on local hosts and the remote-install config flag on remote hosts. The install-if-missing check runs before the existing best-effort update notifier. A new `check_installation` config field (default `True`) disables the check when set to `False`.

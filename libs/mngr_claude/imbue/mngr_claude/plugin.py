@@ -57,6 +57,7 @@ from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
@@ -679,13 +680,8 @@ CLAUDE_INSTALL_PATH: Final[str] = "$HOME/.local/bin"
 """Directory where the Claude Code installer places the claude binary."""
 
 
-def _install_claude(host: OnlineHostInterface, version: str | None = None) -> None:
-    """Install claude on the host using the official installer.
-
-    Downloads the install script to a temp file, runs it, then verifies
-    the binary exists. When version is specified, passes it as a positional
-    argument (e.g., 'bash /tmp/install_claude.sh 2.1.50').
-    """
+def _build_claude_install_command(version: str | None) -> str:
+    """Build the official-installer shell command, pinning ``version`` when given."""
     version_arg = f" {shlex.quote(version)}" if version else ""
     steps = [
         "curl --version",
@@ -695,8 +691,17 @@ def _install_claude(host: OnlineHostInterface, version: str | None = None) -> No
         f"test -x {CLAUDE_INSTALL_PATH}/claude",
         f"""grep -qF 'export PATH="{CLAUDE_INSTALL_PATH}:$PATH"' ~/.bashrc 2>/dev/null || echo 'export PATH="{CLAUDE_INSTALL_PATH}:$PATH"' >> ~/.bashrc""",
     ]
-    install_command = " && ".join(steps)
-    result = host.execute_idempotent_command(install_command, timeout_seconds=300.0)
+    return " && ".join(steps)
+
+
+def _install_claude(host: OnlineHostInterface, version: str | None = None) -> None:
+    """Install claude on the host using the official installer.
+
+    Downloads the install script to a temp file, runs it, then verifies
+    the binary exists. When version is specified, passes it as a positional
+    argument (e.g., 'bash /tmp/install_claude.sh 2.1.50').
+    """
+    result = host.execute_idempotent_command(_build_claude_install_command(version), timeout_seconds=300.0)
     if not result.success:
         raise PluginMngrError(f"Failed to install claude. stderr: {result.stderr}")
 
@@ -1393,6 +1398,7 @@ class ClaudeAgent(
     HasSessionPreservationMixin,
     HasUnattendedModeMixin,
     HasVersionManagementMixin,
+    HasAutoInstallMixin,
 ):
     """Agent implementation for Claude with session resumption support."""
 
@@ -2413,6 +2419,9 @@ class ClaudeAgent(
     def get_version_policy(self) -> str:
         # claude pins a specific version when set, otherwise follows its own auto-update.
         return self.agent_config.version or "auto-update"
+
+    def get_install_command(self) -> str:
+        return _build_claude_install_command(self.agent_config.version)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.

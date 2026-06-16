@@ -11,6 +11,7 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
@@ -145,6 +146,12 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         description="Preserves session/transcript files when the agent is destroyed, so the conversation is not lost. Baseline; every port wants it.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasSessionPreservationMixin,
+    ),
+    AgentCapability(
+        key="auto_install",
+        description="Installs its CLI binary at provision time if missing (gated by consent locally, a config flag remotely). Baseline; every real agent wants it.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=HasAutoInstallMixin,
     ),
     AgentCapability(
         key="unattended_operation",
