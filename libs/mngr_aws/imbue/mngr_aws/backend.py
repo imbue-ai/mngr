@@ -1,4 +1,3 @@
-import json
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -26,7 +25,6 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -35,7 +33,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -57,10 +54,12 @@ from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
 from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
-from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import _AGENT_TAG_FIELDS
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -70,16 +69,6 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
-# Per-agent metadata is mirrored onto the instance as up to three EC2 tags per
-# agent, keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the key,
-# not a value), so a *stopped* instance (no public IP, SSH unreachable) still
-# surfaces its agents in discovery and resolves by name. ``name``/``type`` are
-# stored raw; ``labels`` as compact JSON. One tag per field (rather than one
-# packed tag per agent) gives ``labels`` the full 256-char value budget; a field
-# whose value still overflows is dropped, not failed.
-AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
-_AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
-_MAX_TAG_VALUE_LEN: Final[int] = 256
 # EC2 allows 50 (non-``aws:``) tags per resource. When a host has so many agents
 # that mirroring another would exceed this, we surface a NotImplementedError
 # (which the CLI turns into an "open an issue" prompt) rather than failing
@@ -90,9 +79,8 @@ _AWS_MAX_TAGS_PER_INSTANCE: Final[int] = 50
 # tags. ``stopping`` is included so a host doesn't vanish from discovery during
 # the (seconds-long) stop transition before it reaches the terminal ``stopped``.
 _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
-# The ``Name`` tag is set to ``mngr-<host_name>`` at launch; strip the prefix to
-# recover the host name when reconstructing a stopped host from tags.
-_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
+# The host name is mirrored into the EC2 ``Name`` tag (as ``mngr-<host_name>``).
+_HOST_NAME_TAG_KEY: Final[str] = "Name"
 
 # Self-stopping idle watcher (host-side). The in-container activity watcher
 # writes ``IDLE_SENTINEL_FILENAME`` into the host_dir/commands directory on the
@@ -266,13 +254,16 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AwsProvider(OfflineCapableVpsDockerProvider):
+class AwsProvider(TagMirrorVpsDockerProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     aws_client: AwsVpsClient = Field(frozen=True, description="EC2 API client")
     aws_config: AwsProviderConfig = Field(frozen=True, description="AWS-specific configuration")
+
+    def _host_name_tag_key(self) -> str:
+        return _HOST_NAME_TAG_KEY
 
     def _host_identity(self) -> S3StateHostIdentity | None:
         """Return the bucket-write IAM host identity (uncached), or None when unresolvable.
@@ -1093,170 +1084,6 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
                 "--use-offline-host-dir yes`, then recreate the host so it picks up the profile.",
                 host_id,
             )
-
-    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
-        """Render one agent field as a tag-value string, or ``None`` if absent/empty.
-
-        ``name``/``type`` are stored raw; ``labels`` as compact JSON (empty labels
-        are treated as absent so no ``-labels`` tag is written).
-        """
-        if field == "labels":
-            labels = agent_data.get("labels")
-            return json.dumps(labels, separators=(",", ":")) if labels else None
-        value = agent_data.get(field)
-        return None if value is None else str(value)
-
-    def _agent_field_tags(
-        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
-    ) -> tuple[dict[str, str], list[str]]:
-        """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
-
-        Returns ``(tags_to_set, keys_to_delete)``. ``persist_agent_data`` is an
-        upsert that is sometimes called with a *partial* record (e.g. an update
-        carrying only ``id``/``type``), so a field absent from ``agent_data`` means
-        "unchanged" -- it is left alone, NOT removed (deleting it would clobber the
-        ``name`` tag that offline resolve-by-name depends on). A field that *is*
-        present but renders empty (e.g. ``labels={}``, an explicit removal) or
-        overflows the 256-char tag limit (realistically only ``labels``) is dropped
-        and its existing tag, if any, is deleted so no stale value lingers. The
-        agent id is carried in the tag *key*, not a value.
-        """
-        set_tags: dict[str, str] = {}
-        delete_keys: list[str] = []
-        for field in _AGENT_TAG_FIELDS:
-            if field not in agent_data:
-                continue
-            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
-            value = self._agent_field_value(field, agent_data)
-            if value is not None and len(value) <= _MAX_TAG_VALUE_LEN:
-                set_tags[key] = value
-                continue
-            # Present but empty (an explicit removal, e.g. labels={}) or too large
-            # for a single tag: drop it, and delete any existing tag so no stale
-            # value lingers. Only oversized values warrant a warning.
-            if value is not None:
-                logger.warning(
-                    "Agent {} {} ({} chars) exceeds the {}-char EC2 tag limit; omitted from the "
-                    "stopped-host tag mirror",
-                    agent_data.get("name", agent_id),
-                    field,
-                    len(value),
-                    _MAX_TAG_VALUE_LEN,
-                )
-            delete_keys.append(key)
-        existing = set(self._tag_dict_from_normalized(instance))
-        return set_tags, [key for key in delete_keys if key in existing]
-
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` tags.
-
-        Groups the per-field tags by agent id (recovered from the tag key, split on
-        the final ``-`` so ids may themselves contain dashes), and rebuilds one
-        dict per agent. A malformed/externally-edited ``-labels`` tag (not valid
-        JSON, or not a JSON object) is skipped for that field with a warning rather
-        than crashing the discovery sweep.
-        """
-        by_id: dict[str, dict] = {}
-        for key, value in self._tag_dict_from_normalized(instance).items():
-            if not key.startswith(AGENT_TAG_PREFIX):
-                continue
-            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
-            if not sep or field not in _AGENT_TAG_FIELDS:
-                continue
-            record = by_id.setdefault(agent_id, {"id": agent_id})
-            if field == "labels":
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping unparseable agent labels tag {!r}", key)
-                    continue
-                if not isinstance(parsed, dict):
-                    logger.warning("Skipping agent labels tag {!r}: value is not a JSON object", key)
-                    continue
-                record["labels"] = parsed
-            else:
-                record[field] = value
-        return list(by_id.values())
-
-    def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
-        tags: dict[str, str] = {}
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if sep:
-                tags[key] = value
-        return tags
-
-    def _host_name_from_tags(self, tags: Mapping[str, str]) -> HostName:
-        """Recover the host name from the ``Name=mngr-<host_name>`` tag (fallback: host_id)."""
-        name_tag = tags.get("Name", "")
-        if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
-            return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
-        if name_tag:
-            return HostName(name_tag)
-        return HostName(tags.get("mngr-host-id", "unknown"))
-
-    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from an instance's tags, or None if not a mngr host."""
-        tags = self._tag_dict_from_normalized(instance)
-        host_id_str = tags.get("mngr-host-id")
-        if host_id_str is None:
-            return None
-        return DiscoveredHost(
-            host_id=HostId(host_id_str),
-            host_name=self._host_name_from_tags(tags),
-            provider_name=self.name,
-            host_state=HostState.STOPPED,
-        )
-
-    def _host_record_from_instance(self, instance: Mapping[str, Any]) -> VpsDockerHostRecord:
-        """Build a minimal STOPPED host record from a stopped instance's own ``mngr-*`` tags.
-
-        Uses only the base tags mngr writes at launch (host-id, Name, created-at),
-        so it works regardless of the external-store mode -- including a bucket-mode
-        host created before the bucket existed (whose ``host_state.json`` is absent).
-        """
-        tags = self._tag_dict_from_normalized(instance)
-        host_id = HostId(tags.get("mngr-host-id", ""))
-        created_at_raw = tags.get("mngr-created-at")
-        now = datetime.now(timezone.utc)
-        created_at = now
-        if created_at_raw:
-            try:
-                created_at = datetime.fromisoformat(created_at_raw)
-            except ValueError as e:
-                # mngr writes this tag at launch, so a parse failure means the tag
-                # was externally edited/corrupted: surface it rather than silently
-                # using now() (which would misreport a long-stopped host as fresh).
-                logger.opt(exception=e).warning(
-                    "Malformed mngr-created-at tag {!r} on host {}; falling back to now()",
-                    created_at_raw,
-                    host_id,
-                )
-        certified = CertifiedHostData(
-            host_id=str(host_id),
-            host_name=str(self._host_name_from_tags(tags)),
-            created_at=created_at,
-            updated_at=now,
-            stop_reason=HostState.STOPPED.value,
-        )
-        return VpsDockerHostRecord(certified_host_data=certified)
-
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
-        del host_id
-        return self._create_offline_host(self._host_record_from_instance(instance))
-
-    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Rebuild a minimal STOPPED host record from the instance's own ``mngr-*`` tags, or None.
-
-        Returns None when no instance carries the host's tag. Backs the tag store's
-        ``read_host_record`` and the universal fallback in ``to_offline_host``.
-        """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return None
-        return self._host_record_from_instance(instance)
 
 
 class _Ec2TagHostStateStore(HostStateStore):

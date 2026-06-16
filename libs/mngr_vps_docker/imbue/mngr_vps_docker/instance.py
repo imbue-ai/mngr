@@ -2315,6 +2315,198 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
             return self._persisted_agent_dicts_from_instance(instance)
 
 
+# Per-agent records are mirrored into instance tags as up to three tags per agent,
+# keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the tag key), so a
+# stopped instance still surfaces its agents in discovery and resolves by name.
+AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
+_AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
+# Max length of a single instance/VM tag value (EC2 and Azure both cap at 256).
+_MAX_TAG_VALUE_LEN: Final[int] = 256
+# The host-name tag value is stored as ``mngr-<host_name>``; strip the prefix to
+# recover the bare host name when reconstructing a stopped host.
+_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
+
+
+class TagMirrorVpsDockerProvider(OfflineCapableVpsDockerProvider):
+    """``OfflineCapableVpsDockerProvider`` whose offline mirror lives in key=value instance tags.
+
+    AWS (EC2 tags) and Azure (VM tags) mirror the host name and per-agent records
+    into the instance's own ``mngr-*`` tags, so a stopped instance still lists and
+    resolves by name from the tag listing alone. This class supplies that shared
+    tag reconstruction; the only per-provider knob is the host-name tag key
+    (``_host_name_tag_key``). GCP differs (it mirrors into GCE metadata, not tags)
+    and so extends ``OfflineCapableVpsDockerProvider`` directly instead.
+    """
+
+    @abstractmethod
+    def _host_name_tag_key(self) -> str:
+        """Tag key whose value holds ``mngr-<host_name>`` (EC2: ``Name``; Azure: ``mngr-host-name``)."""
+        ...
+
+    def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
+        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
+        tags: dict[str, str] = {}
+        for kv in instance.get("tags", ()):
+            key, sep, value = kv.partition("=")
+            if sep:
+                tags[key] = value
+        return tags
+
+    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
+        """Render one agent field as a tag-value string, or ``None`` if absent/empty.
+
+        ``name``/``type`` are stored raw; ``labels`` as compact JSON (empty labels
+        are treated as absent so no ``-labels`` tag is written).
+        """
+        if field == "labels":
+            labels = agent_data.get("labels")
+            return json.dumps(labels, separators=(",", ":")) if labels else None
+        value = agent_data.get(field)
+        return None if value is None else str(value)
+
+    def _agent_field_tags(
+        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
+    ) -> tuple[dict[str, str], list[str]]:
+        """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
+
+        Returns ``(tags_to_set, keys_to_delete)``. ``persist_agent_data`` is an
+        upsert that is sometimes called with a *partial* record (e.g. an update
+        carrying only ``id``/``type``), so a field absent from ``agent_data`` means
+        "unchanged" -- it is left alone, NOT removed (deleting it would clobber the
+        ``name`` tag that offline resolve-by-name depends on). A field that *is*
+        present but renders empty (e.g. ``labels={}``, an explicit removal) or
+        overflows the tag-value limit (realistically only ``labels``) is dropped and
+        its existing tag, if any, is deleted so no stale value lingers. The agent id
+        is carried in the tag *key*, not a value.
+        """
+        set_tags: dict[str, str] = {}
+        delete_keys: list[str] = []
+        for field in _AGENT_TAG_FIELDS:
+            if field not in agent_data:
+                continue
+            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
+            value = self._agent_field_value(field, agent_data)
+            if value is not None and len(value) <= _MAX_TAG_VALUE_LEN:
+                set_tags[key] = value
+                continue
+            # Present but empty (an explicit removal, e.g. labels={}) or too large
+            # for a single tag: drop it, and delete any existing tag so no stale
+            # value lingers. Only oversized values warrant a warning.
+            if value is not None:
+                logger.warning(
+                    "Agent {} {} ({} chars) exceeds the {}-char tag limit; omitted from the stopped-host tag mirror",
+                    agent_data.get("name", agent_id),
+                    field,
+                    len(value),
+                    _MAX_TAG_VALUE_LEN,
+                )
+            delete_keys.append(key)
+        existing = set(self._tag_dict_from_normalized(instance))
+        return set_tags, [key for key in delete_keys if key in existing]
+
+    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
+        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` tags.
+
+        Groups the per-field tags by agent id (recovered from the tag key, split on
+        the final ``-`` so ids may themselves contain dashes), and rebuilds one
+        dict per agent. A malformed/externally-edited ``-labels`` tag (not valid
+        JSON, or not a JSON object) is skipped for that field with a warning rather
+        than crashing the discovery sweep.
+        """
+        by_id: dict[str, dict] = {}
+        for key, value in self._tag_dict_from_normalized(instance).items():
+            if not key.startswith(AGENT_TAG_PREFIX):
+                continue
+            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
+            if not sep or field not in _AGENT_TAG_FIELDS:
+                continue
+            record = by_id.setdefault(agent_id, {"id": agent_id})
+            if field == "labels":
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping unparseable agent labels tag {!r}", key)
+                    continue
+                if not isinstance(parsed, dict):
+                    logger.warning("Skipping agent labels tag {!r}: value is not a JSON object", key)
+                    continue
+                record["labels"] = parsed
+            else:
+                record[field] = value
+        return list(by_id.values())
+
+    def _host_name_from_tags(self, tags: Mapping[str, str]) -> HostName:
+        """Recover the host name from the ``<key>=mngr-<host_name>`` tag (fallback: host-id)."""
+        name_tag = tags.get(self._host_name_tag_key(), "")
+        if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
+            return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
+        if name_tag:
+            return HostName(name_tag)
+        return HostName(tags.get("mngr-host-id", "unknown"))
+
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        """Build a STOPPED-state DiscoveredHost from an instance's tags, or None if not a mngr host."""
+        tags = self._tag_dict_from_normalized(instance)
+        host_id_str = tags.get("mngr-host-id")
+        if host_id_str is None:
+            return None
+        return DiscoveredHost(
+            host_id=HostId(host_id_str),
+            host_name=self._host_name_from_tags(tags),
+            provider_name=self.name,
+            host_state=HostState.STOPPED,
+        )
+
+    def _host_record_from_instance(self, instance: Mapping[str, Any]) -> VpsDockerHostRecord:
+        """Build a minimal STOPPED host record from a stopped instance's own ``mngr-*`` tags.
+
+        Uses only the base tags mngr writes at launch (host-id, host-name, created-at),
+        so it works regardless of the external-store mode -- including a bucket-mode
+        host created before the bucket existed (whose ``host_state.json`` is absent).
+        """
+        tags = self._tag_dict_from_normalized(instance)
+        host_id = HostId(tags.get("mngr-host-id", ""))
+        now = datetime.now(timezone.utc)
+        created_at = now
+        created_at_raw = tags.get("mngr-created-at")
+        if created_at_raw:
+            try:
+                created_at = datetime.fromisoformat(created_at_raw)
+            except ValueError as e:
+                # mngr writes this tag at launch, so a parse failure means the tag
+                # was externally edited/corrupted: surface it rather than silently
+                # using now() (which would misreport a long-stopped host as fresh).
+                logger.opt(exception=e).warning(
+                    "Malformed mngr-created-at tag {!r} on host {}; falling back to now()",
+                    created_at_raw,
+                    host_id,
+                )
+        certified = CertifiedHostData(
+            host_id=str(host_id),
+            host_name=str(self._host_name_from_tags(tags)),
+            created_at=created_at,
+            updated_at=now,
+            stop_reason=HostState.STOPPED.value,
+        )
+        return VpsDockerHostRecord(certified_host_data=certified)
+
+    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
+        del host_id
+        return self._create_offline_host(self._host_record_from_instance(instance))
+
+    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        """Rebuild a minimal STOPPED host record from the instance's own ``mngr-*`` tags, or None.
+
+        Returns None when no instance carries the host's tag. Backs the tag store's
+        ``read_host_record`` and the universal fallback in ``to_offline_host``.
+        """
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return None
+        return self._host_record_from_instance(instance)
+
+
 class MinimalVpsDockerProvider(VpsDockerProvider):
     """``VpsDockerProvider`` for use cases where VPS provisioning is externally managed.
 
