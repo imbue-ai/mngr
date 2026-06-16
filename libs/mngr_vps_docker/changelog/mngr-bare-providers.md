@@ -31,6 +31,10 @@ realizer methods (`find_host_record`, `read_live_listing`, `is_placement_running
 reads the record from the fixed store path and runs the listing script directly
 on the VM. Behavior-preserving for Docker.
 
+The `AGENT_TAG_FIELDS` constant (used by the AWS/Azure tag-mirror code) is now
+public, matching its sibling `AGENT_TAG_PREFIX`, so it is no longer imported as
+a private name across modules.
+
 `VpsHostConfig.container_name`/`volume_name` are now nullable so a bare host
 record (which has no container or Docker volume) is representable, and the
 agent-sshd wait now targets the realizer's endpoint port (the container port
