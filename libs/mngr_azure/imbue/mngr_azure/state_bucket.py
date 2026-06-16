@@ -32,19 +32,7 @@ from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
-
-# Object-key layout in the state bucket, per host. The full host record lives at
-# ``hosts/<host_id_hex>/host_state.json`` and each agent's record under
-# ``hosts/<host_id_hex>/agents/<agent_id>.json``. ``<host_id_hex>`` matches the
-# per-host btrfs subvolume naming (``host_id.get_uuid().hex``) so the same id keys
-# both the on-instance volume and the bucket. Identical to the AWS S3 layout.
-_HOSTS_PREFIX: Final[str] = "hosts"
-_HOST_STATE_FILENAME: Final[str] = "host_state.json"
-_AGENTS_SUBPREFIX: Final[str] = "agents"
-# The instance pushes its host_dir mirror under this subprefix of the host's
-# prefix, i.e. ``hosts/<host_id_hex>/host_dir/...``. The offline-read volume is
-# scoped here so reads see exactly the host_dir tree. Identical to the AWS layout.
-HOST_DIR_SUBPREFIX: Final[str] = "host_dir"
+from imbue.mngr_vps_docker import state_keys
 
 # The Azure analog of an S3 bucket is a Blob *container* inside a *storage
 # account*. The container name is fixed (container names allow hyphens, 3-63
@@ -90,7 +78,7 @@ def host_identity_name_for_account(account_name: str) -> str:
 
 def host_dir_blob_prefix_for(host_id: HostId) -> str:
     """Return the ``hosts/<host_id_hex>/host_dir/`` blob prefix the sync daemon pushes to."""
-    return f"{_HOSTS_PREFIX}/{host_id.get_uuid().hex}/{HOST_DIR_SUBPREFIX}/"
+    return state_keys.host_dir_prefix(host_id)
 
 
 class BlobStateBucketError(MngrError):
@@ -146,26 +134,17 @@ class BlobStateBucket(MutableModel):
     def _container(self) -> Any:
         return self._blob_service().get_container_client(self.container_name)
 
-    def _host_prefix(self, host_id: HostId) -> str:
-        return f"{_HOSTS_PREFIX}/{host_id.get_uuid().hex}"
-
-    def _host_state_key(self, host_id: HostId) -> str:
-        return f"{self._host_prefix(host_id)}/{_HOST_STATE_FILENAME}"
-
-    def _agent_key(self, host_id: HostId, agent_id: str) -> str:
-        return f"{self._host_prefix(host_id)}/{_AGENTS_SUBPREFIX}/{agent_id}.json"
-
     def write_host_record(self, host_id: HostId, record_json: str) -> None:
         """Write the host record JSON for a host, overwriting any existing blob."""
-        self._put_blob(self._host_state_key(host_id), record_json)
+        self._put_blob(state_keys.host_state_key(host_id), record_json)
 
     def read_host_record(self, host_id: HostId) -> str | None:
         """Return the host record JSON for a host, or None if no blob exists."""
-        return self._get_blob(self._host_state_key(host_id))
+        return self._get_blob(state_keys.host_state_key(host_id))
 
     def write_agent_record(self, host_id: HostId, agent_id: str, data: Mapping[str, object]) -> None:
         """Write a single agent's record (serialized as JSON) under the host's prefix."""
-        self._put_blob(self._agent_key(host_id, agent_id), json.dumps(dict(data)))
+        self._put_blob(state_keys.agent_key(host_id, agent_id), json.dumps(dict(data)))
 
     def list_agent_records(self, host_id: HostId) -> list[dict]:
         """Return every agent record stored under the host's ``agents/`` prefix.
@@ -173,9 +152,8 @@ class BlobStateBucket(MutableModel):
         A stored blob that is not valid JSON (externally edited / corrupted) is
         skipped with a warning rather than crashing the listing.
         """
-        agents_prefix = f"{self._host_prefix(host_id)}/{_AGENTS_SUBPREFIX}/"
         records: list[dict] = []
-        for key in self._list_keys(agents_prefix):
+        for key in self._list_keys(state_keys.agents_prefix(host_id)):
             body = self._get_blob(key)
             if body is None:
                 continue
@@ -192,17 +170,17 @@ class BlobStateBucket(MutableModel):
 
     def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
         """Delete a single agent's record. Idempotent (no error if absent)."""
-        self._delete_blob(self._agent_key(host_id, agent_id))
+        self._delete_blob(state_keys.agent_key(host_id, agent_id))
 
     def delete_host_state(self, host_id: HostId) -> None:
         """Delete every blob under the host's prefix. Idempotent."""
-        for key in self._list_keys(f"{self._host_prefix(host_id)}/"):
+        for key in self._list_keys(f"{state_keys.host_prefix(host_id)}/"):
             self._delete_blob(key)
 
     def has_any_host_state(self) -> bool:
         """Return whether any blob exists under the ``hosts/`` prefix."""
         with _translate_blob_errors(self.account_name):
-            for _ in self._container().list_blobs(name_starts_with=f"{_HOSTS_PREFIX}/"):
+            for _ in self._container().list_blobs(name_starts_with=f"{state_keys.HOSTS_PREFIX}/"):
                 return True
         return False
 
@@ -215,7 +193,7 @@ class BlobStateBucket(MutableModel):
         ``OfflineHostWithVolume`` addresses files (relative to ``host_dir``).
         Mirrors ``S3StateBucket.volume_for_host``.
         """
-        host_dir_prefix = f"{self._host_prefix(host_id)}/{HOST_DIR_SUBPREFIX}"
+        host_dir_prefix = state_keys.host_dir_prefix(host_id).rstrip("/")
         return BlobVolume(
             credential=self.credential,
             account_name=self.account_name,
@@ -230,7 +208,7 @@ class BlobStateBucket(MutableModel):
         the VM has no bucket-write managed identity). Mirrors
         ``S3StateBucket.host_dir_prefix_has_objects``.
         """
-        prefix = f"{self._host_prefix(host_id)}/{HOST_DIR_SUBPREFIX}/"
+        prefix = state_keys.host_dir_prefix(host_id)
         with _translate_blob_errors(self.account_name):
             for _ in self._container().list_blobs(name_starts_with=prefix):
                 return True

@@ -20,19 +20,7 @@ from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
-
-# Object-key layout in the state bucket, per host. The full host record lives
-# at ``hosts/<host_id_hex>/host_state.json`` and each agent's record under
-# ``hosts/<host_id_hex>/agents/<agent_id>.json``. ``<host_id_hex>`` matches the
-# per-host btrfs subvolume naming (``host_id.get_uuid().hex``) so the same id
-# keys both the on-instance volume and the bucket.
-_HOSTS_PREFIX: Final[str] = "hosts"
-_HOST_STATE_FILENAME: Final[str] = "host_state.json"
-_AGENTS_SUBPREFIX: Final[str] = "agents"
-# The instance pushes its host_dir mirror under this subprefix of the host's
-# prefix, i.e. ``hosts/<host_id_hex>/host_dir/...``. The offline-read volume is
-# scoped here so reads see exactly the host_dir tree.
-HOST_DIR_SUBPREFIX: Final[str] = "host_dir"
+from imbue.mngr_vps_docker import state_keys
 
 # Trust policy + inline policy name for the per-bucket host identity (Decision 3).
 # The trust policy lets EC2 assume the role; the inline policy grants ONLY the
@@ -82,7 +70,7 @@ def host_identity_name_for_bucket(bucket_name: str) -> str:
 
 def host_dir_sync_target_for(bucket_name: str, host_id: HostId) -> str:
     """Return the ``s3://<bucket>/hosts/<host_id_hex>/host_dir/`` sync destination URI."""
-    return f"s3://{bucket_name}/{_HOSTS_PREFIX}/{host_id.get_uuid().hex}/{HOST_DIR_SUBPREFIX}/"
+    return f"s3://{bucket_name}/{state_keys.host_dir_prefix(host_id)}"
 
 
 class S3StateBucket(MutableModel):
@@ -107,26 +95,17 @@ class S3StateBucket(MutableModel):
             self._cached_s3_client = self.session.client("s3", region_name=self.region)
         return self._cached_s3_client
 
-    def _host_prefix(self, host_id: HostId) -> str:
-        return f"{_HOSTS_PREFIX}/{host_id.get_uuid().hex}"
-
-    def _host_state_key(self, host_id: HostId) -> str:
-        return f"{self._host_prefix(host_id)}/{_HOST_STATE_FILENAME}"
-
-    def _agent_key(self, host_id: HostId, agent_id: str) -> str:
-        return f"{self._host_prefix(host_id)}/{_AGENTS_SUBPREFIX}/{agent_id}.json"
-
     def write_host_record(self, host_id: HostId, record_json: str) -> None:
         """Write the host record JSON for a host, overwriting any existing object."""
-        self._put_object(self._host_state_key(host_id), record_json)
+        self._put_object(state_keys.host_state_key(host_id), record_json)
 
     def read_host_record(self, host_id: HostId) -> str | None:
         """Return the host record JSON for a host, or None if no object exists."""
-        return self._get_object(self._host_state_key(host_id))
+        return self._get_object(state_keys.host_state_key(host_id))
 
     def write_agent_record(self, host_id: HostId, agent_id: str, data: Mapping[str, object]) -> None:
         """Write a single agent's record (serialized as JSON) under the host's prefix."""
-        self._put_object(self._agent_key(host_id, agent_id), json.dumps(dict(data)))
+        self._put_object(state_keys.agent_key(host_id, agent_id), json.dumps(dict(data)))
 
     def list_agent_records(self, host_id: HostId) -> list[dict]:
         """Return every agent record stored under the host's ``agents/`` prefix.
@@ -134,9 +113,8 @@ class S3StateBucket(MutableModel):
         A stored object that is not valid JSON (externally edited / corrupted)
         is skipped with a warning rather than crashing the listing.
         """
-        agents_prefix = f"{self._host_prefix(host_id)}/{_AGENTS_SUBPREFIX}/"
         records: list[dict] = []
-        for key in self._list_keys(agents_prefix):
+        for key in self._list_keys(state_keys.agents_prefix(host_id)):
             body = self._get_object(key)
             if body is None:
                 continue
@@ -153,11 +131,11 @@ class S3StateBucket(MutableModel):
 
     def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
         """Delete a single agent's record. Idempotent (no error if absent)."""
-        self._delete_object(self._agent_key(host_id, agent_id))
+        self._delete_object(state_keys.agent_key(host_id, agent_id))
 
     def delete_host_state(self, host_id: HostId) -> None:
         """Delete every object under the host's prefix. Idempotent."""
-        self._delete_keys(self._list_keys(f"{self._host_prefix(host_id)}/"))
+        self._delete_keys(self._list_keys(f"{state_keys.host_prefix(host_id)}/"))
 
     def volume_for_host(self, host_id: HostId) -> Volume:
         """Return a Volume scoped to ``hosts/<host_id_hex>/host_dir/`` for offline reads.
@@ -167,7 +145,7 @@ class S3StateBucket(MutableModel):
         rooted at the host's ``host_dir`` tree, matching how
         ``OfflineHostWithVolume`` addresses files (relative to ``host_dir``).
         """
-        host_dir_prefix = f"{self._host_prefix(host_id)}/{HOST_DIR_SUBPREFIX}"
+        host_dir_prefix = state_keys.host_dir_prefix(host_id).rstrip("/")
         return S3Volume(session=self.session, region=self.region, bucket_name=self.bucket_name).scoped(host_dir_prefix)
 
     def host_dir_prefix_has_objects(self, host_id: HostId) -> bool:
@@ -177,7 +155,7 @@ class S3StateBucket(MutableModel):
         means the instance never pushed its host_dir (e.g. the sync daemon never
         ran, or the instance has no bucket-write identity).
         """
-        prefix = f"{self._host_prefix(host_id)}/{HOST_DIR_SUBPREFIX}/"
+        prefix = state_keys.host_dir_prefix(host_id)
         with _translate_s3_errors(self.bucket_name):
             response = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=prefix, MaxKeys=1)
         return response.get("KeyCount", 0) > 0
@@ -185,7 +163,9 @@ class S3StateBucket(MutableModel):
     def has_any_host_state(self) -> bool:
         """Return whether any object exists under the ``hosts/`` prefix."""
         with _translate_s3_errors(self.bucket_name):
-            response = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=f"{_HOSTS_PREFIX}/", MaxKeys=1)
+            response = self._s3().list_objects_v2(
+                Bucket=self.bucket_name, Prefix=f"{state_keys.HOSTS_PREFIX}/", MaxKeys=1
+            )
         return response.get("KeyCount", 0) > 0
 
     def bucket_exists(self) -> bool:
@@ -312,7 +292,7 @@ def build_host_identity_inline_policy(bucket_name: str) -> str:
                     "Sid": "ReadWriteHostObjects",
                     "Effect": "Allow",
                     "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
-                    "Resource": [f"{bucket_arn}/{_HOSTS_PREFIX}/*"],
+                    "Resource": [f"{bucket_arn}/{state_keys.HOSTS_PREFIX}/*"],
                 },
             ],
         }
