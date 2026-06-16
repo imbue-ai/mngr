@@ -671,7 +671,9 @@ def test_discover_records_unreachable_endpoints_and_resets_between_sweeps(
     """Unreachable VPSes are tracked per sweep; a later clean sweep clears the prior one."""
     good_host = HostId.generate()
     provider.hostnames = ["10.0.0.8", "10.0.0.9"]
-    provider.per_vps_records["10.0.0.8"] = _VpsDiscoveryData(records=(_make_record(good_host, "host-good", "10.0.0.8"),))
+    provider.per_vps_records["10.0.0.8"] = _VpsDiscoveryData(
+        records=(_make_record(good_host, "host-good", "10.0.0.8"),)
+    )
     provider.per_vps_outer_errors["10.0.0.9"] = HostConnectionError("connection refused")
 
     provider._discover_host_records_with_agents()
