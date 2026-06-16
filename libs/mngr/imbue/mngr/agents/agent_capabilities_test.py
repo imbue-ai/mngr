@@ -38,8 +38,10 @@ class _FakeTuiSnapshotAgent(CliBackedAgentMixin, HasStreamingSnapshotMixin): ...
 class _FakeAdoptingAgent(CliBackedAgentMixin, HasSessionAdoptionMixin): ...
 
 
-# A headless CLI agent that structurally inherits the adoption mixin (as headless_claude
-# inherits it from ClaudeAgent): session_resume is interactive-only, so it is n/a here.
+# A headless CLI agent that structurally inherits the adoption mixin: session_resume is
+# interactive-only, so it renders n/a here rather than raising. Exercises that an inherited
+# but out-of-scope CLASS_MIXIN capability is tolerated on a kind the capability does not apply
+# to (the real headless_claude no longer inherits the mixin; this fixture forces the case).
 class _FakeHeadlessAdoptingAgent(CliBackedAgentMixin, StreamingHeadlessAgentMixin, HasSessionAdoptionMixin): ...
 
 
