@@ -251,17 +251,22 @@ minds-tailwind:
   bash apps/minds/scripts/fetch_tailwind.sh
 
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
-# in FCT. Default FCT path is $HOME/Developer/imbue/forever-claude-template;
-# override by passing a positional arg. Position the mngr checkout at the
-# exact commit you want to vendor first -- your release PR branch HEAD / the
-# verified release SHA, NOT blindly `main`, which can drift past it between
-# verification and merge. The recipe archives HEAD, replaces vendor/mngr/
-# with that snapshot, and commits in FCT. Does not push. Aborts if FCT has
-# uncommitted changes. Full release flow: apps/minds/docs/release.md.
-sync-vendor-mngr fct="$HOME/Developer/imbue/forever-claude-template":
+# in FCT. Pass the FCT checkout path as the positional arg -- no path is baked
+# in. Position the mngr checkout at the exact commit you want to vendor first
+# -- your release PR branch HEAD / the verified release SHA, NOT blindly
+# `main`, which can drift past it between verification and merge. The recipe
+# archives HEAD, replaces vendor/mngr/ with that snapshot, and commits in FCT.
+# Does not push. Aborts if FCT has uncommitted changes.
+# Full release flow: apps/minds/docs/release.md.
+sync-vendor-mngr fct="":
     #!/bin/bash
     set -ueo pipefail
     fct="{{fct}}"
+    if [ -z "$fct" ]; then
+        echo "error: pass the forever-claude-template checkout path:" >&2
+        echo "  just sync-vendor-mngr /path/to/forever-claude-template" >&2
+        exit 2
+    fi
     if [ ! -d "$fct/vendor/mngr" ]; then
         echo "Error: $fct/vendor/mngr not found"
         exit 1
