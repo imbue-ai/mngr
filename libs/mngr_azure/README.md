@@ -160,9 +160,9 @@ resources).
 
 If a `mngr create` fails *after* the public IP + NIC are provisioned but before
 the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up —
-immediately when possible, or otherwise reclaimed at the start of the next
-`mngr create` (Azure reserves the NIC for the would-be VM for 180s, so immediate
-deletion can be briefly blocked). A `SkuNotAvailable` error means the chosen VM
+immediately when possible, or otherwise reclaimed at GC time by `mngr gc` (which
+also runs after every `mngr destroy`) (Azure reserves the NIC for the would-be VM
+for 180s, so immediate deletion can be briefly blocked). A `SkuNotAvailable` error means the chosen VM
 size has no capacity in the region right now; pick another size with
 `-b --azure-vm-size=...` or another region.
 
