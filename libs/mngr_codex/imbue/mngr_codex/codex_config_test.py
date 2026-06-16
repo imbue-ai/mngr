@@ -13,6 +13,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STOPPED_SCRIPT_NAME
@@ -270,14 +271,29 @@ def test_build_codex_hooks_config_maps_lifecycle_events_to_the_marker_scripts() 
     stop = hooks["hooks"]["Stop"]
     subagent_start = hooks["hooks"]["SubagentStart"]
     subagent_stop = hooks["hooks"]["SubagentStop"]
+    permission_request = hooks["hooks"]["PermissionRequest"]
+    post_tool_use = hooks["hooks"]["PostToolUse"]
     # Subagents run asynchronously, so SubagentStart/Stop ARE hooked now: they
     # track in-flight subagents to keep the marker RUNNING after the root Stop.
-    assert set(hooks["hooks"]) == {"UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop"}
+    # PermissionRequest/PostToolUse maintain the permissions_waiting marker.
+    assert set(hooks["hooks"]) == {
+        "UserPromptSubmit",
+        "Stop",
+        "SubagentStart",
+        "SubagentStop",
+        "PermissionRequest",
+        "PostToolUse",
+    }
     assert SET_ACTIVE_MARKER_SCRIPT_NAME in user_prompt[0]["hooks"][0]["command"]
     assert user_prompt[0]["hooks"][0]["type"] == "command"
     assert CLEAR_ACTIVE_MARKER_SCRIPT_NAME in stop[0]["hooks"][0]["command"]
     assert SUBAGENT_STARTED_SCRIPT_NAME in subagent_start[0]["hooks"][0]["command"]
     assert SUBAGENT_STOPPED_SCRIPT_NAME in subagent_stop[0]["hooks"][0]["command"]
+    # The permission marker is a plain inline touch/remove, not a provisioned script.
+    assert (
+        permission_request[0]["hooks"][0]["command"] == f'touch "$MNGR_AGENT_STATE_DIR/{PERMISSIONS_WAITING_FILENAME}"'
+    )
+    assert post_tool_use[0]["hooks"][0]["command"] == f'rm -f "$MNGR_AGENT_STATE_DIR/{PERMISSIONS_WAITING_FILENAME}"'
 
 
 def test_serialize_codex_hooks_round_trips_to_json() -> None:

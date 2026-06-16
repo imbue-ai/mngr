@@ -67,8 +67,10 @@ _WILDCARD_SCOPE: Final[str] = "any"
 # Detent's catch-all *permission* schema. It matches every request, so a
 # rule like ``{"slack-api": ["any"]}`` grants all Slack access. The
 # catalog file never lists it (every scope implicitly admits it); the
-# dialog injects it as an opt-in, never-pre-checked option.
-_ALWAYS_AVAILABLE_PERMISSION: Final[str] = "any"
+# dialog injects it as an opt-in, never-pre-checked option. It is the
+# stored/wire value; the dialog presents it to users as ``all`` (see
+# the handlers' template layer) for clarity.
+WILDCARD_PERMISSION_NAME: Final[str] = "any"
 
 
 class ServiceCatalogError(RuntimeError):
@@ -151,8 +153,8 @@ def _service_info_from_entry(name: str, entry: _ServiceScopeEntry) -> ServicePer
     renders it as an opt-in choice, not a pre-checked default. Per-schema
     descriptions are carried over so the dialog can show them.
     """
-    permission_schemas: tuple[str, ...] = (_ALWAYS_AVAILABLE_PERMISSION,) + tuple(
-        permission.name for permission in entry.permissions if permission.name != _ALWAYS_AVAILABLE_PERMISSION
+    permission_schemas: tuple[str, ...] = (WILDCARD_PERMISSION_NAME,) + tuple(
+        permission.name for permission in entry.permissions if permission.name != WILDCARD_PERMISSION_NAME
     )
     description_by_permission_name = {
         permission.name: permission.description for permission in entry.permissions if permission.description
