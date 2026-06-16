@@ -150,7 +150,7 @@ judgement for a v1 service.
 
 6. **[Correctness — Low-Medium] `mngr list` non-zero return short-circuits
    before parsing, and `returncode=1` is an overloaded sentinel.**
-   _[RESOLVED — FCT commit `f129139b`; parse list regardless of exit, distinct `RUNNER_FAILURE_RETURNCODE`, preserve timeout stdout]_
+   _[RESOLVED — FCT commits `f129139b` (parse list regardless of exit, distinct `RUNNER_FAILURE_RETURNCODE`, preserve timeout stdout) + `444ea1c9` (follow-up: `TimeoutExpired.stdout` is bytes even under `text=True`, so the partial-output preservation needed an explicit decode to actually work)]_
    `watcher.py:269` returns before `parse_agent_summaries`, so if `mngr list`
    ever exits non-zero while still emitting a valid `{"agents": [...]}` payload,
    no alert is sent. `_default_command_runner:213` also maps every
