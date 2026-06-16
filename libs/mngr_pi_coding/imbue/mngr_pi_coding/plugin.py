@@ -14,6 +14,11 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -24,9 +29,13 @@ from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_pi_coding import resources as _pi_resources
@@ -74,6 +83,16 @@ _SESSION_STARTED_SENTINEL_NAME: str = "pi_session_started"
 # evaluated) by ``assemble_command`` to resume via ``pi --session <file>``. Kept
 # in sync with ``SESSION_FILE_NAME`` in mngr_pi_lifecycle.ts.
 _SESSION_FILE_NAME: str = "pi_session_file"
+
+# The per-agent pi config dir, relative to the agent state dir (POSIX). Replaces
+# ~/.pi/agent/ for this agent via ``PI_CODING_AGENT_DIR`` (see ``get_pi_config_dir``).
+_PI_CONFIG_DIR_RELPATH: str = "plugin/pi_coding"
+
+# pi's native resumable session store, relative to the agent state dir (POSIX):
+# pi writes its session JSONLs under ``<PI_CODING_AGENT_DIR>/sessions``. Preserved
+# on destroy so the conversation content survives (not just the dangling pointer).
+# ``auth.json`` (a sibling under the config dir) is path-separate and excluded.
+_PI_SESSIONS_DIR_RELPATH: str = f"{_PI_CONFIG_DIR_RELPATH}/sessions"
 
 # How long to wait for the readiness sentinel at create time. Matches the
 # TUI-ready budget in ``tui_utils`` -- startup can be slow on remote hosts that
@@ -202,6 +221,11 @@ class PiCodingAgentConfig(AgentTypeConfig):
             "Also implied by `mngr create --yes`. When False and the source repo is not already "
             "trusted, mngr prompts interactively and refuses to run non-interactively."
         ),
+    )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
 
 
@@ -356,7 +380,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         This directory replaces ~/.pi/agent/ for this agent when PI_CODING_AGENT_DIR
         is set. Located at $MNGR_AGENT_STATE_DIR/plugin/pi_coding/.
         """
-        return self._get_agent_dir() / "plugin" / "pi_coding"
+        return self._get_agent_dir() / _PI_CONFIG_DIR_RELPATH
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Isolate pi's config per-agent and hand the lifecycle extension its knobs.
@@ -741,7 +765,47 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         """No post-provisioning steps needed."""
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
-        """No extra cleanup needed -- the per-agent config dir is deleted with the agent state."""
+        """Preserve transcripts and the session-file pointer before the state dir is deleted.
+
+        The per-agent config dir is deleted with the agent state, so there is no
+        other cleanup to do.
+        """
+        if self.agent_config.preserve_on_destroy:
+            preserve_agent_state(_pi_coding_preserved_items(), self, host)
+
+
+def _pi_coding_preserved_items() -> list[PreservedItem]:
+    """Return the files to preserve from a pi-coding agent's state directory.
+
+    The raw and common transcripts, the recorded session-file pointer (which
+    records where pi stored the conversation, used to resume it), and pi's native
+    resumable session store directory. Preserving the store keeps the conversation
+    content itself, not just the (post-destroy dangling) pointer. ``auth.json`` is a
+    path-separate sibling of the store and is excluded (and absent under env-var auth).
+    """
+    return [
+        *build_transcript_preserved_items(_PI_AGENT_TYPE),
+        PreservedItem(rel_path=_SESSION_FILE_NAME, kind=FileType.FILE),
+        PreservedItem(rel_path=_PI_SESSIONS_DIR_RELPATH, kind=FileType.DIRECTORY),
+    ]
+
+
+def _pi_coding_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) pi-coding agent, or None to skip it."""
+    return flag_gated_items(ref, "preserve_on_destroy", _pi_coding_preserved_items())
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve pi-coding transcripts from the host's volume before it is destroyed.
+
+    Mirrors ``PiCodingAgent.on_destroy`` for the offline path, where a host is
+    destroyed without per-agent ``on_destroy`` calls but agent state still lives
+    on the host's persisted volume.
+    """
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName(_PI_AGENT_TYPE), _pi_coding_items_to_preserve_for_discovered_agent
+    )
 
 
 @hookimpl
