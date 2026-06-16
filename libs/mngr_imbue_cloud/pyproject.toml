@@ -17,6 +17,7 @@ dependencies = [
     "click",
     "click-option-group",
     "paramiko>=3.0",
+    "psutil",
     "psycopg2-binary",
 ]
 

@@ -15,6 +15,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -28,6 +29,7 @@ from urllib.parse import urlencode
 from uuid import uuid4
 
 import click
+import psutil
 import psycopg2
 from loguru import logger
 from tabulate import tabulate
@@ -52,6 +54,7 @@ from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.data_types import SlicePricingRow
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
+from imbue.mngr_imbue_cloud.errors import SliceBakeTerminatedError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import OVH_US_DATACENTER_CODES
@@ -697,6 +700,38 @@ def _bake_into_outcomes(
     )
 
 
+def _raise_on_bake_termination_signal(signum: int, _frame: object) -> None:
+    """SIGTERM/SIGINT handler: raise so the bake's main-thread try/except runs cleanup.
+
+    Kept trivial (just raises) so the kill+reap logic can live in ``allocate_slices``
+    where the server / key / DSN are in scope, rather than being bound into the
+    handler. Raising interrupts the main thread's ``thread.join()``.
+    """
+    raise SliceBakeTerminatedError(f"slice bake received signal {signum}")
+
+
+def _kill_bake_worker_processes(grace_seconds: float = 5.0) -> None:
+    """Terminate every child process of this bake (the in-flight ``mngr create`` workers).
+
+    On a top-level kill (e.g. the minds wrapper's subprocess timeout SIGTERMs us),
+    the worker subprocesses would otherwise be reparented and keep carving VMs after
+    we exit -- leaking both processes and VMs. SIGTERM them (then SIGKILL stragglers)
+    so no new VM can appear on the box once the orphan reap has run.
+    """
+    children = psutil.Process().children(recursive=True)
+    for child in children:
+        try:
+            child.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _gone, alive = psutil.wait_procs(children, timeout=grace_seconds)
+    for child in alive:
+        try:
+            child.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
 def _reap_orphan_slice_vms(*, server: BareMetalServer, private_key_path: Path, database_url: str) -> None:
     """Delete slice VMs on the box that have no pool_hosts row (orphans from killed bakes).
 
@@ -859,16 +894,42 @@ def allocate_slices(
             for idx in range(count)
         ]
         logger.info("Baking {} slice(s) on {} ({} at a time)", count, server.public_address, max_concurrency)
+
+        # ``signal.signal`` only works on the main thread; the admin CLI always runs
+        # allocate_slices there, but guard so an off-main-thread caller falls back to
+        # the finally reap rather than crashing on install.
+        is_main_thread = threading.current_thread() is threading.main_thread()
+        previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_bake_termination_signal) if is_main_thread else None
+        previous_sigint = signal.signal(signal.SIGINT, _raise_on_bake_termination_signal) if is_main_thread else None
         try:
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join()
+        except SliceBakeTerminatedError:
+            # Top-level kill (e.g. the minds wrapper's subprocess timeout SIGTERMs us).
+            # Without this, the workers would be reparented and keep carving VMs. Ignore
+            # further signals, kill the in-flight workers so no new VM is carved, and let
+            # their threads settle; the finally reaps the orphans. Exit non-zero so the
+            # caller sees the failure.
+            if is_main_thread:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
+            logger.warning("Slice bake terminated by signal; killing in-flight workers before reap")
+            _kill_bake_worker_processes()
+            for thread in threads:
+                thread.join()
+            raise SystemExit(1) from None
         finally:
             # Reap VMs left orphaned by a killed/timed-out create (carved but never
             # inserted, so the provider's rollback never ran). Runs after all threads
-            # join, so every successful slice already has its row and is kept.
+            # join -- an individual-create timeout (already a 'failed' outcome by now)
+            # is cleaned here; the except above handles a top-level kill. Restore the
+            # signal handlers last so the reap itself isn't interrupted.
             _reap_orphan_slice_vms(server=server, private_key_path=private_key_path, database_url=database_url)
+            if is_main_thread:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+                signal.signal(signal.SIGINT, previous_sigint)
 
     succeeded = [outcome for outcome in outcomes if outcome.get("status") == "succeeded"]
     emit_json(

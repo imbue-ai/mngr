@@ -1,9 +1,11 @@
+import subprocess
 from datetime import datetime
 from datetime import timezone
 
 from click.testing import CliRunner
 
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
+from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
 from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
 from imbue.mngr_imbue_cloud.cli.server import server
@@ -96,3 +98,18 @@ def test_server_group_help_lists_commands() -> None:
     for command in ("prep", "list", "register", "set-status"):
         assert command in result.output
     assert "allocate-slice" not in result.output
+
+
+def test_kill_bake_worker_processes_terminates_a_child() -> None:
+    # On a top-level kill the bake's in-flight `mngr create` workers must be reaped
+    # so they don't keep carving VMs; this is the helper that does it. Spawn a child
+    # and confirm it is killed (the helper kills all children of this process).
+    child = subprocess.Popen(["sleep", "39517"])
+    try:
+        assert child.poll() is None
+        _kill_bake_worker_processes(grace_seconds=5.0)
+        assert child.wait(timeout=5) is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
