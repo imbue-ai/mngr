@@ -146,7 +146,8 @@ def convert(input_file: str, output_file: str) -> int:
                 if event_id in existing_ids:
                     continue
 
-                message = raw.get("message", {})
+                raw_message = raw.get("message")
+                message = raw_message if isinstance(raw_message, dict) else {}
                 content_blocks = message.get("content", [])
                 model = message.get("model", "unknown")
                 stop_reason = message.get("stop_reason")
@@ -214,7 +215,8 @@ def convert(input_file: str, output_file: str) -> int:
 
             # -- user messages (may contain text, tool results, or both) --
             elif event_type == "user":
-                message = raw.get("message", {})
+                raw_message = raw.get("message")
+                message = raw_message if isinstance(raw_message, dict) else {}
                 content = message.get("content")
 
                 # Emit user text message if there is actual user text
