@@ -1005,10 +1005,9 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_host_public_key: str,
     ) -> Host:
         """Create the Host object, configure activity watching, and persist state."""
-        # The container realizer always sets these; a later step makes the
-        # corresponding ``VpsHostConfig`` fields nullable for bare records.
-        # container_name/volume_name are None for a bare placement; the host
-        # record's config fields are nullable to represent that.
+        # The container realizer fills these in; a bare placement has no container
+        # or per-host docker volume, so they are None (the matching
+        # ``VpsHostConfig`` fields are nullable to represent that).
         container_name = realized.container_name
         volume_name = realized.volume_name
         host = self._create_host_object(host_id, name, vps_ip)
