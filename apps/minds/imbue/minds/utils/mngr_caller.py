@@ -191,7 +191,7 @@ class MngrCaller(MutableModel):
             is_checked=False,
             # Best-effort warmup: if the OS refuses the warmup fork, the first
             # real call will simply start the forkserver itself (cold).
-            on_failure=lambda exc: logger.exception("mngr forkserver pre-warm thread failed: {}", exc),
+            on_failure=lambda exc: logger.opt(exception=True).error("mngr forkserver pre-warm thread failed: {}", exc),
         )
 
     def _ensure_forkserver_running(self) -> None:

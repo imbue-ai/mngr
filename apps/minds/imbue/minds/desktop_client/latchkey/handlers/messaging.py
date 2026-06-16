@@ -87,7 +87,9 @@ class MngrMessageSender(MutableModel):
             args=(str(agent_id), text),
             name="mngr-message-send",
             is_checked=False,
-            on_failure=lambda exc: logger.exception("mngr message send to agent {} failed: {}", agent_id, exc),
+            on_failure=lambda exc: logger.opt(exception=True).error(
+                "mngr message send to agent {} failed: {}", agent_id, exc
+            ),
         )
 
     def try_send(self, target: str, text: str) -> bool:
