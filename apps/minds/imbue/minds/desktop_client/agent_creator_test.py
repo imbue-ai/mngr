@@ -619,7 +619,7 @@ def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> N
 def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> None:
     """Annotated tags resolve through `git fetch` + `checkout -B name FETCH_HEAD` just like branches.
 
-    This is the FALLBACK_BRANCH="v0.3.0" path used by the released minds
+    This is the FALLBACK_BRANCH="minds-v0.3.1" path used by the released minds
     binary: the input is a tag, not a branch.
     """
     origin = tmp_path / "origin"
