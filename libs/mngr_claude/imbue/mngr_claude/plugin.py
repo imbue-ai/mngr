@@ -1565,6 +1565,19 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             if indicator.matches(content):
                 raise DialogDetectedError(str(self.name), indicator.get_description())
 
+    def _session_started_path(self) -> Path:
+        """Path to the readiness marker the SessionStart hook touches when ready for input.
+
+        Removed on every (re)start in ``assemble_command`` and re-created by the
+        SessionStart hook once the new session can accept input, so it never
+        goes stale across a restart.
+        """
+        return self._get_agent_dir() / "session_started"
+
+    def _is_ready_for_input(self) -> bool:
+        """Whether Claude Code has signaled (via the SessionStart hook) that it can accept input."""
+        return self._check_file_exists(self._session_started_path())
+
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
@@ -1578,9 +1591,6 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         if timeout is None:
             timeout = _READY_SIGNAL_TIMEOUT_SECONDS
 
-        # this file is removed when we start the agent, see assemble_command, and created by the SessionStart hook when the session is ready
-        session_started_path = self._get_agent_dir() / "session_started"
-
         with log_span("Waiting for session_started file (timeout={}s)", timeout):
             # Run the start action (e.g., start the agent)
             with log_span("Calling start_action..."):
@@ -1588,7 +1598,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
             # Poll for the session_started file (created by SessionStart hook)
             if poll_until(
-                lambda: self._check_file_exists(session_started_path),
+                self._is_ready_for_input,
                 timeout=timeout,
                 poll_interval=0.05,
             ):
@@ -1598,6 +1608,34 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
                 str(self.name),
                 f"Agent did not signal readiness within {timeout}s. "
                 "This may indicate a trust dialog appeared or Claude Code failed to start.",
+            )
+
+    def wait_until_ready_for_input(self, timeout: float) -> None:
+        """Block until Claude Code can accept input, by polling the SessionStart marker.
+
+        Shares the ``session_started`` predicate with ``wait_for_ready_signal``.
+        Because the marker is hook-emitted and persists for the whole session,
+        an already-running agent -- including one mid-turn whose welcome banner
+        has scrolled off-screen -- passes on the first poll with negligible
+        cost. After a restart the marker is absent until the new session's
+        SessionStart hook re-touches it, so a send that lands during a restart
+        blocks only until the new session is ready, then proceeds.
+
+        Raises SendMessageError on timeout (the same error class the message-send
+        callers already handle).
+        """
+        with log_span("Waiting until Claude is ready for input (timeout={}s)", timeout):
+            if poll_until(
+                self._is_ready_for_input,
+                timeout=timeout,
+                poll_interval=0.05,
+            ):
+                return
+
+            raise SendMessageError(
+                str(self.name),
+                f"Timeout waiting for Claude to be ready for input (waited {timeout:.1f}s). "
+                "The session may still be starting or may have failed to start.",
             )
 
     def _build_background_tasks_command(self, session_name: str) -> str:

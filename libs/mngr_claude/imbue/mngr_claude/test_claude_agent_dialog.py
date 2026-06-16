@@ -57,6 +57,11 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
     # Use a short submission timeout so the test does not block for 60s waiting
     # for a tmux wait-for signal that will never arrive (no real Claude process)
     agent.enter_submission_timeout_seconds = 1.0
+    # A real started agent has signaled input-readiness via the SessionStart
+    # hook; create that marker so send_message's readiness gate passes and the
+    # test exercises the dialog check + downstream send path (not the gate).
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+    (agent._get_agent_dir() / "session_started").touch()
     session_name = agent.session_name
 
     try:

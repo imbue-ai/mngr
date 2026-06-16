@@ -72,9 +72,22 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
         interleaving tmux input. Runs ``_preflight_send_message`` first --
         errors from preflight indicate a condition that won't resolve by
         resending (e.g., a blocking dialog).
+
+        After preflight, and before typing, waits for the TUI to be ready to
+        receive input via ``wait_until_ready_for_input``. This closes the
+        restart-then-send race: an interrupt-then-resend (``mngr start
+        --restart`` followed immediately by a send) would otherwise type into a
+        still-booting TUI, the paste would never render, and the send would
+        fail. For an already-running agent the readiness marker is already
+        present, so the wait returns immediately and adds no perceptible latency
+        -- including for an agent that is mid-turn. Readiness runs *after*
+        ``_preflight_send_message`` so a blocking dialog (which keeps the TUI
+        from ever signaling readiness) surfaces as its specific error rather
+        than as a readiness timeout.
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._preflight_send_message(self.tmux_target)
+            self.wait_until_ready_for_input(self.get_ready_timeout_seconds())
             self._send_tmux_literal_keys(self.tmux_target, message)
             wait_for_paste_visible(self, self.tmux_target, message)
             self._send_enter_and_validate(self.tmux_target)

@@ -162,6 +162,24 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Send a message to the running agent via its stdin."""
         ...
 
+    def wait_until_ready_for_input(self, timeout: float) -> None:
+        """Block until the agent's TUI is ready to receive input, up to ``timeout`` seconds.
+
+        Called at the top of the message-send path so a send always reaches a
+        TUI that can accept it -- regardless of how the send was triggered
+        (a fresh queued message, or an interrupt-then-resend right after a
+        restart, where the TUI may still be booting).
+
+        The default is a no-op: agents without a hook-based readiness signal
+        keep their existing behavior. Implementations that *do* expose a
+        persistent, hook-emitted readiness marker (e.g. a file the agent's
+        SessionStart hook touches) should override this to poll that marker and
+        raise ``SendMessageError`` on timeout. Such markers stay present for the
+        whole session, so an already-running agent -- even one mid-turn whose
+        startup banner has scrolled off-screen -- passes the check immediately;
+        do NOT implement this by screen-scraping the pane.
+        """
+
     @abstractmethod
     def capture_pane_content(self, include_scrollback: bool = False, window: int | str | None = None) -> str | None:
         """Capture the current tmux pane content for this agent.
