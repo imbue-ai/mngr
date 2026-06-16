@@ -23,6 +23,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -158,6 +159,13 @@ def _derive_public_key(private_key_path: Path) -> str:
     return result.stdout.strip()
 
 
+# Hard timeout for the box-prep SSH script. Generous because prep does heavy,
+# network-bound one-time work: apt installs (incl. libguestfs-tools), the lima
+# download, the multi-hundred-MB guest-image download, and the virt-customize pass
+# that boots an appliance and apt-installs pinned Docker into the image.
+_BOX_PREP_SSH_TIMEOUT_SECONDS: Final[float] = 1800.0
+
+
 def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_path: Path, script: str) -> None:
     """Pipe a bash script to ``sudo bash`` on the box over SSH (base64 to dodge quoting)."""
     encoded = base64.b64encode(script.encode()).decode()
@@ -176,7 +184,7 @@ def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_pa
                 f"{ssh_user}@{server_address}",
                 remote,
             ],
-            timeout=600.0,
+            timeout=_BOX_PREP_SSH_TIMEOUT_SECONDS,
             is_checked_after=False,
             on_output=lambda line, _is_stdout: logger.info("  [box] {}", line.rstrip()),
         )

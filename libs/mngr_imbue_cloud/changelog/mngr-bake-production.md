@@ -1,0 +1,3 @@
+`mngr imbue_cloud admin server prep` now pre-installs the pinned Docker Engine (the same version the OVH VPS path pins) and inotify-tools into the staged golden slice image via `virt-customize` (adds a `libguestfs-tools` box dependency).
+
+Because each slice VM's first-boot provisioning guards on presence (`command -v docker` / `command -v inotifywait`), baking these into the golden image makes those steps skip entirely — so slice carves no longer download/install Docker per VM. This speeds up baking (especially in parallel) and removes a per-slice network dependency. To re-stage an already-prepped box with the new image, delete the staged image and re-run `prep` (the step is idempotent and re-customizes on a fresh download).
