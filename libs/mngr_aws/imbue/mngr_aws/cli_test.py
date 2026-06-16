@@ -40,6 +40,7 @@ from imbue.mngr_aws.cli import _perform_host_identity_cleanup
 from imbue.mngr_aws.cli import _perform_state_bucket_cleanup
 from imbue.mngr_aws.cli import _provision_host_identity
 from imbue.mngr_aws.cli import _refuse_cleanup_if_instances_exist
+from imbue.mngr_aws.cli import _resolve_and_provision_host_identity
 from imbue.mngr_aws.cli import _resolve_provider_config
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
@@ -359,6 +360,34 @@ def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:
 
 def test_perform_host_identity_cleanup_none_is_noop() -> None:
     assert _perform_host_identity_cleanup(None) is None
+
+
+def test_resolve_and_provision_host_identity_skips_when_bucket_not_set_up() -> None:
+    """'auto' provisions nothing (and touches no credentials) when the bucket was not set up.
+
+    The identity's inline policy is scoped to the bucket, so provisioning it is
+    meaningless without one; the gate must short-circuit before any IAM/STS call.
+    """
+    result = _resolve_and_provision_host_identity(
+        AwsProviderConfig(), region="us-east-1", use_offline_host_dir=AutoToggle.AUTO, was_bucket_set_up=False
+    )
+    assert result is None
+
+
+def test_resolve_and_provision_host_identity_yes_raises_when_bucket_not_set_up() -> None:
+    """'yes' fails loudly when the bucket was not set up: it cannot deliver offline host_dir."""
+    with pytest.raises(click.ClickException):
+        _resolve_and_provision_host_identity(
+            AwsProviderConfig(), region="us-east-1", use_offline_host_dir=AutoToggle.YES, was_bucket_set_up=False
+        )
+
+
+def test_resolve_and_provision_host_identity_no_is_noop_even_without_bucket() -> None:
+    """'no' provisions nothing regardless of bucket state, and never raises."""
+    result = _resolve_and_provision_host_identity(
+        AwsProviderConfig(), region="us-east-1", use_offline_host_dir=AutoToggle.NO, was_bucket_set_up=False
+    )
+    assert result is None
 
 
 # =============================================================================
