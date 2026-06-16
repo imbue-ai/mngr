@@ -149,13 +149,13 @@
   // painted by ``renderWorkspaces`` on the next tick.
   var accentByAgentId = {};
   // Tracks the agentId whose accent the chrome *wants* painted, regardless
-  // of whether the SSE cache has caught up yet. Bootstrap and the
-  // ``onLastWorkspaceAgentIdChanged`` path both set this even when the SSE
+  // of whether the SSE cache has caught up yet. The ``onAccentChanged`` path
+  // (and, in browser mode, the URL poll) sets this even when the SSE
   // workspaces payload hasn't arrived yet (cold start, freshly-created
   // workspace); the next ``workspaces`` tick replays the paint with the
   // now-populated cache. Independent of ``currentTitleAgentId`` so the
-  // accent-only call paths (bootstrap / last-workspace IPC) can update
-  // the titlebar without claiming to represent the displayed workspace.
+  // accent path can update the titlebar without claiming to represent the
+  // displayed workspace.
   var lastRequestedAccentAgentId = null;
   function rememberWorkspaceAccents(workspaces) {
     if (!workspaces) return;
@@ -302,70 +302,23 @@
     // that doesn't match /goto/<id>/, which would prevent the recovery-page
     // redirect from firing for the current agent.
     //
-    // ``onCurrentWorkspaceChanged`` is NARROW -- it carries null on every
-    // URL that isn't the workspace itself, including the workspace's own
-    // settings / sharing screens -- so it can't be the accent source on
-    // its own. The accent source is the WIDER ``lastWorkspaceAgentId``
-    // (main's ``parseAccentSourceAgentId``), which is the workspace id on
-    // any workspace-scoped screen (settings / sharing / ...) and null on a
-    // general screen. We use both: the current workspace drives the
-    // recovery-page redirect lock, the accent-source drives the color.
+    // ``onCurrentWorkspaceChanged`` is NARROW: it carries the agent id only
+    // while the content view is ACTUALLY displaying that workspace, and null on
+    // every other screen (including the workspace's own settings / sharing
+    // screens). It drives the recovery-redirect lock ONLY -- not the accent.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
-      // Authoritative for what THIS window is displaying: drive both the
-      // recovery-redirect lock and the accent off the same event.
       setDisplayedWorkspaceAgentId(agentId || null);
-      if (agentId) {
-        // Real workspace navigation -- apply the accent immediately. Main
-        // also persists this id so it survives a restart; we don't need to
-        // push it back over IPC here.
-        applyTitleAccent(agentId);
-        return;
-      }
-      // Not displaying a workspace: this is either a workspace-scoped
-      // screen (settings / sharing -- accent stays) or a general screen
-      // (Home, accounts, ... -- neutral chrome). Which one is encoded in
-      // the accent source, so re-query it. Main may also have just
-      // *cleared* it (sign-out, deletion of the displayed workspace).
-      // Re-query rather than relying on the ``onLastWorkspaceAgentIdChanged``
-      // broadcast: that broadcast's gate (``if (currentTitleAgentId)
-      // return;``) blocks the clear in any flow where the broadcast
-      // arrives BEFORE this null ``current-workspace-changed``, which is
-      // the case on sign-out (the two events come from different async
-      // streams and aren't ordered). The deletion path explicitly orders
-      // the IPC, but pulling the stored value here covers both paths
-      // uniformly -- and paints null (the neutral chrome) when that's what
-      // it resolves to.
-      window.minds.getLastWorkspaceAgentId().then(function (storedId) {
-        // A subsequent workspace open may have set ``currentTitleAgentId``
-        // while this IPC was in flight; let that win.
-        if (currentTitleAgentId) return;
-        applyTitleAccent(storedId || null);
-      });
     });
-    // Bootstrap: paint the accent on chrome page load from the current
-    // screen's accent source (set by main from the restored content URL),
-    // before any other IPC fires. Null (a general screen) leaves the
-    // neutral chrome in place.
-    window.minds.getLastWorkspaceAgentId().then(function (agentId) {
-      if (agentId && !currentTitleAgentId) applyTitleAccent(agentId);
-    });
-    // Main pushes the new value on workspace-delete / sign-out / any other
-    // update so the bar tracks the source of truth even when this renderer
-    // wasn't the one that triggered the change.
-    //
-    // Scope: ``updateBundleLastWorkspaceAgentId`` in main sends this event
-    // only to THIS window's chrome view, so it never carries another
-    // window's state. The gate on ``currentTitleAgentId`` exists for a
-    // different reason: when the displayed workspace is deleted or the
-    // user signs out, main fires this with ``null`` *before* the
-    // content view's redirect to ``/`` has had a chance to emit
-    // ``current-workspace-changed: null``. The gate keeps the accent
-    // visible across that brief window so the bar doesn't flash to the
-    // neutral chrome before the proper ``current-workspace-changed:
-    // null`` branch above re-queries ``getLastWorkspaceAgentId`` and
-    // applies the (now-null) value cleanly.
-    window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
-      if (currentTitleAgentId) return;
+    // The titlebar accent is a pure function of the current screen, pushed by
+    // main on every navigation: the workspace id on any workspace-scoped screen
+    // (the workspace itself plus its settings / sharing / destroying / recovery
+    // screens) and null on a general screen, where the neutral chrome takes
+    // over. Apply it unconditionally -- main is the single source of truth, so
+    // there is nothing to remember, re-query, or gate here. Main also re-pushes
+    // the current value when this chrome view (re)loads (via
+    // ``primeViewWithCachedChromeState``), so a fresh / rebuilt view paints the
+    // right accent without a bootstrap round-trip.
+    window.minds.onAccentChanged(function (agentId) {
       applyTitleAccent(agentId || null);
     });
   } else {
