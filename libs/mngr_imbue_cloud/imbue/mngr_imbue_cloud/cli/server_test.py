@@ -61,7 +61,8 @@ def test_build_registered_server_derives_slot_count_from_memory_per_slice() -> N
         ovh_order_id="8144904",
         status=SERVER_STATUS_READY,
     )
-    assert built.slot_count == 8
+    # 64GB box, 8GB slices: (64-8)*1024 // (8*1024 + 512) = 6 slots after host reserve.
+    assert built.slot_count == 6
     assert built.disk_gb == 477
     assert built.ovh_service_name == "ns1.ovh.us"
     assert str(built.status) == "ready"
@@ -72,9 +73,10 @@ def test_compute_server_slice_sizing_uses_server_inputs_and_specs() -> None:
     # 16 threads * 1.5 / 8 slots = 3 vCPU per slice.
     assert sizing["vcpus"] == 3
     assert sizing["advertised_memory_gb"] == 8
-    assert sizing["memory_mib"] == 8 * 1024 - 512
-    # Per-slice disk budget (477 - 20 reserve) // 8 slots, minus the fixed boot disk.
-    assert sizing["disk_gib"] == (477 - 20) // 8 - SLICE_BOOT_DISK_GIB
+    # Guest gets the full advertised RAM (per-VM overhead is accounted in slot_count).
+    assert sizing["memory_mib"] == 8 * 1024
+    # Per-slice disk budget = (477 - max(20, ceil(477*0.10))=48 reserve) // 8, minus boot.
+    assert sizing["disk_gib"] == (477 - 48) // 8 - SLICE_BOOT_DISK_GIB
     assert slice_advertised_attributes(sizing) == {"memory_gb": 8, "cpus": 3}
 
 

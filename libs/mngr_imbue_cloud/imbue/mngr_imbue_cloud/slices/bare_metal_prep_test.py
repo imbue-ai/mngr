@@ -64,6 +64,16 @@ def test_prep_script_installs_uv_for_service_user() -> None:
     assert "sudo -u limahost" in script
 
 
+def test_prep_script_provisions_swapfile() -> None:
+    # Slice hosts run RAM near capacity, so prep adds a real 32GiB swapfile (the
+    # OS-install default of two tiny partitions is useless). Idempotent + in fstab.
+    script = _script()
+    assert "mkswap /swapfile" in script
+    assert "swapon /swapfile" in script
+    assert "32G" in script
+    assert "/swapfile none swap sw 0 0" in script
+
+
 def test_prep_script_installs_libguestfs_for_image_customization() -> None:
     # virt-customize (from libguestfs-tools) is how we pre-install Docker + inotify
     # into the golden image; it must be among the box apt packages.

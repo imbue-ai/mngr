@@ -16,14 +16,28 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 
-# Per-slice RAM (MiB) held back from the VM for host + per-VM QEMU overhead: each
-# slice advertises ``memory_per_slice_gb`` but is allocated that minus this, so a
-# box's slices fit without RAM overcommit (the held-back total is the host's share).
-PER_SLICE_MEMORY_OVERHEAD_MIB: Final[int] = 512
+# RAM overhead is modeled in two parts so a box's slot count reflects what it can
+# REALISTICALLY run without overcommitting RAM:
+#  - PER-MACHINE (``HOST_RAM_RESERVE_GIB``): a fixed reserve for the kernel/OS plus
+#    page-cache/network headroom, subtracted once from the box's total RAM. (Measured
+#    ~3GiB kernel baseline on a busy box; 8 leaves a safety buffer so the box never
+#    runs at the ragged edge with the OOM killer.)
+#  - PER-VM (``PER_VM_RAM_OVERHEAD_MIB``): host-side overhead for EACH slice on top of
+#    its guest RAM -- the QEMU process (control structures + page tables) and the
+#    per-VM lima supervisor. (Measured ~0.2GiB/VM; 512 is conservative.) The guest
+#    itself gets the full advertised ``memory_per_slice_gb``.
+HOST_RAM_RESERVE_GIB: Final[int] = 8
+PER_VM_RAM_OVERHEAD_MIB: Final[int] = 512
 
-# Disk (GiB) held back on each box for the OS + lima/management before the rest of
-# the usable disk is divided evenly among the box's slices.
+# Disk held back on each box before the rest is split among slices, in two parts so a
+# per-slice allocation never exceeds the box's REAL usable filesystem:
+#  - ``DISK_RESERVE_GB``: a fixed floor for the OS + lima/management, and
+#  - ``DISK_RESERVE_FRACTION``: a fraction of the registered ``disk_gb`` that absorbs
+#    the GB-vs-GiB gap (an "N TB" spec is N*10^9 bytes ~= 0.93*N GiB) plus partition +
+#    filesystem metadata, so a nominally-registered disk_gb does not overcommit the
+#    actual disk. The reserve used is the larger of the two.
 DISK_RESERVE_GB: Final[int] = 20
+DISK_RESERVE_FRACTION: Final[float] = 0.10
 
 # Each slice VM has TWO disks whose sizes must sum to the slice's disk budget (no
 # disk overcommit, just like RAM): a fixed boot disk holding the guest OS + Docker
@@ -83,26 +97,33 @@ _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({SERVER_STATUS_READY, SERV
 
 @pure
 def compute_slot_count(ram_gb: int, memory_per_slice_gb: int) -> int:
-    """Return how many slices of ``memory_per_slice_gb`` a box with ``ram_gb`` total RAM holds."""
+    """Return how many slices of ``memory_per_slice_gb`` a box with ``ram_gb`` total RAM holds.
+
+    Subtracts the per-machine host reserve (``HOST_RAM_RESERVE_GIB``) once, then divides
+    the rest by the per-slice footprint -- the guest's advertised RAM PLUS the per-VM
+    host overhead (``PER_VM_RAM_OVERHEAD_MIB``). So the count is what the box can run
+    without overcommitting RAM, not just ``total / slice`` (which left no host headroom).
+    """
     if ram_gb < 0:
         raise BareMetalConfigError(f"ram_gb must be non-negative, got {ram_gb}")
     if memory_per_slice_gb <= 0:
         raise BareMetalConfigError(f"memory_per_slice_gb must be positive, got {memory_per_slice_gb}")
-    return ram_gb // memory_per_slice_gb
+    usable_mib = ram_gb * 1024 - HOST_RAM_RESERVE_GIB * 1024
+    per_slice_footprint_mib = memory_per_slice_gb * 1024 + PER_VM_RAM_OVERHEAD_MIB
+    return max(0, usable_mib // per_slice_footprint_mib)
 
 
 @pure
 def compute_slice_memory_mib(memory_per_slice_gb: int) -> int:
-    """Return the MiB to allocate each slice VM: the advertised RAM minus host/QEMU overhead."""
+    """Return the MiB to allocate each slice VM: the full advertised RAM.
+
+    The per-VM host overhead (QEMU + lima supervisor) is accounted on top in
+    ``compute_slot_count``, NOT taken from the guest -- so the guest gets exactly the
+    advertised ``memory_per_slice_gb``.
+    """
     if memory_per_slice_gb <= 0:
         raise BareMetalConfigError(f"memory_per_slice_gb must be positive, got {memory_per_slice_gb}")
-    memory_mib = memory_per_slice_gb * 1024 - PER_SLICE_MEMORY_OVERHEAD_MIB
-    if memory_mib <= 0:
-        raise BareMetalConfigError(
-            f"memory_per_slice_gb={memory_per_slice_gb} is too small for the "
-            f"{PER_SLICE_MEMORY_OVERHEAD_MIB}MiB per-slice overhead"
-        )
-    return memory_mib
+    return memory_per_slice_gb * 1024
 
 
 @pure
@@ -114,10 +135,11 @@ def compute_slice_disk_budget_gib(disk_gb: int, slot_count: int) -> int:
     """
     if slot_count <= 0:
         raise BareMetalConfigError(f"slot_count must be positive, got {slot_count}")
-    per_slice_budget_gib = (disk_gb - DISK_RESERVE_GB) // slot_count
+    reserve_gib = max(DISK_RESERVE_GB, math.ceil(disk_gb * DISK_RESERVE_FRACTION))
+    per_slice_budget_gib = (disk_gb - reserve_gib) // slot_count
     if per_slice_budget_gib <= 0:
         raise BareMetalConfigError(
-            f"disk_gb={disk_gb} minus {DISK_RESERVE_GB}GB reserve cannot be split across {slot_count} slot(s)"
+            f"disk_gb={disk_gb} minus {reserve_gib}GiB reserve cannot be split across {slot_count} slot(s)"
         )
     return per_slice_budget_gib
 

@@ -46,15 +46,16 @@ def _server(status: str, slot_count: int = 8) -> BareMetalServer:
     )
 
 
-def test_compute_slot_count_floors_by_memory_per_slice() -> None:
-    assert compute_slot_count(64, 8) == 8
-    assert compute_slot_count(128, 8) == 16
-    assert compute_slot_count(32, 8) == 4
-    # 70GB only yields 8 whole 8GB slices (the remainder is host headroom).
-    assert compute_slot_count(70, 8) == 8
+def test_compute_slot_count_reserves_host_and_per_vm_overhead() -> None:
+    # slots = floor((ram - 8 host reserve) GiB / (slice + 0.5 per-VM overhead) GiB).
+    # e.g. 256GB box, 8GB slices: (256-8)*1024 // (8*1024 + 512) = 253952 // 8704 = 29.
+    assert compute_slot_count(256, 8) == 29
+    assert compute_slot_count(64, 8) == 6
+    assert compute_slot_count(128, 8) == 14
+    # Too small to fit even one slice after the host reserve -> 0.
     assert compute_slot_count(4, 8) == 0
     # A larger per-slice RAM yields fewer slots.
-    assert compute_slot_count(64, 16) == 4
+    assert compute_slot_count(64, 16) == 3
 
 
 def test_compute_slot_count_rejects_negative_ram_and_nonpositive_per_slice() -> None:
@@ -64,10 +65,10 @@ def test_compute_slot_count_rejects_negative_ram_and_nonpositive_per_slice() -> 
         compute_slot_count(64, 0)
 
 
-def test_compute_slice_memory_mib_subtracts_overhead() -> None:
-    # 8 GiB advertised minus the 512 MiB per-slice overhead.
-    assert compute_slice_memory_mib(8) == 8 * 1024 - 512
-    assert compute_slice_memory_mib(16) == 16 * 1024 - 512
+def test_compute_slice_memory_mib_is_full_advertised() -> None:
+    # The guest gets the full advertised RAM; per-VM overhead is accounted in slot_count.
+    assert compute_slice_memory_mib(8) == 8 * 1024
+    assert compute_slice_memory_mib(16) == 16 * 1024
 
 
 def test_compute_slice_memory_mib_rejects_too_small() -> None:
@@ -76,15 +77,26 @@ def test_compute_slice_memory_mib_rejects_too_small() -> None:
 
 
 def test_compute_slice_disk_budget_splits_usable_disk() -> None:
-    # (500 - 20 reserve) / 8 slots = 60 GiB total budget each.
-    assert compute_slice_disk_budget_gib(500, 8) == 60
-    # Remainder is dropped (floor).
-    assert compute_slice_disk_budget_gib(477, 8) == (477 - 20) // 8
+    # reserve = max(20, ceil(500 * 0.10)) = 50; (500 - 50) // 8 = 56 GiB budget each.
+    assert compute_slice_disk_budget_gib(500, 8) == 56
+    # Small disk: the fixed 20GiB floor wins over the fraction.
+    assert compute_slice_disk_budget_gib(150, 8) == (150 - 20) // 8
+
+
+def test_compute_slice_disk_budget_does_not_overcommit_nominal_disk() -> None:
+    # A disk_gb registered from the nominal spec (e.g. "8 TB" -> 8000) must leave the
+    # per-slice allocations within the real usable GiB (~0.93 * 8000 = 7440) thanks to
+    # the fraction reserve, so slots * budget never exceeds usable.
+    disk_gb = 8000
+    slot_count = 29
+    budget = compute_slice_disk_budget_gib(disk_gb, slot_count)
+    usable_gib = int(disk_gb * 0.93)
+    assert slot_count * budget <= usable_gib
 
 
 def test_compute_slice_disk_gib_is_budget_minus_boot_disk() -> None:
     # Data disk = total budget minus the fixed boot disk, so boot + data == budget.
-    assert compute_slice_disk_gib(500, 8) == 60 - SLICE_BOOT_DISK_GIB
+    assert compute_slice_disk_gib(500, 8) == compute_slice_disk_budget_gib(500, 8) - SLICE_BOOT_DISK_GIB
     assert compute_slice_disk_gib(500, 8) + SLICE_BOOT_DISK_GIB == compute_slice_disk_budget_gib(500, 8)
 
 

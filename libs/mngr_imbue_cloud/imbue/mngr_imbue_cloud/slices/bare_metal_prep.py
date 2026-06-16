@@ -7,6 +7,13 @@ from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
 # Lima release to install on the box (matches what the slice path is tested against).
 DEFAULT_LIMA_VERSION: Final[str] = "2.1.2"
 
+# Swapfile size (GiB) to provision on the box. Slice hosts run RAM near capacity, so a
+# real swapfile is cheap OOM insurance against transient spikes (idle baked agents
+# don't thrash steady-state). Replaces the OS-install default (two tiny ~0.5GiB swap
+# partitions), which is too small to matter.
+_SWAPFILE_SIZE_GIB: Final[int] = 32
+_SWAPFILE_PATH: Final[str] = "/swapfile"
+
 # Packages the box needs to run lima/QEMU VMs and the slice bake (Docker lives
 # inside each VM, not on the box). ``libguestfs-tools`` provides ``virt-customize``,
 # used to pre-install Docker + inotify-tools into the golden slice image so per-VM
@@ -48,6 +55,8 @@ def build_box_prep_script(
     lima_tarball = f"lima-{lima_version}-Linux-x86_64.tar.gz"
     lima_url = f"https://github.com/lima-vm/lima/releases/download/v{lima_version}/{lima_tarball}"
     base_image_path = slice_base_image_path(lima_service_user)
+    swapfile_path = _SWAPFILE_PATH
+    swapfile_size_gib = _SWAPFILE_SIZE_GIB
     return f"""\
 #!/bin/bash
 set -euo pipefail
@@ -120,6 +129,18 @@ MNGR_SLICE_CUSTOMIZE
     chown {lima_service_user}:{lima_service_user} "$img.tmp"
     mv "$img.tmp" "$img"
 fi
+
+# 7. Provision a real swapfile (idempotent). Slice hosts run RAM near capacity; the
+#    OS-install default swap (two ~0.5GiB partitions) is too small to cushion spikes.
+if ! swapon --show=NAME --noheadings 2>/dev/null | grep -qx {swapfile_path}; then
+    if [ ! -f {swapfile_path} ]; then
+        fallocate -l {swapfile_size_gib}G {swapfile_path} || dd if=/dev/zero of={swapfile_path} bs=1M count=$(({swapfile_size_gib} * 1024))
+        chmod 600 {swapfile_path}
+        mkswap {swapfile_path}
+    fi
+    swapon {swapfile_path}
+fi
+grep -q "^{swapfile_path} " /etc/fstab || echo "{swapfile_path} none swap sw 0 0" >> /etc/fstab
 
 echo MNGR_BOX_PREP_DONE
 """
