@@ -191,7 +191,7 @@ own their `VpsClient`, state bucket, config, and the small cloud-specific hooks
 with the realizer their config selects.
 
 ```python
-realizer = BareRealizer(...) if config.mode is HostMode.BARE else DockerRealizer(...)
+realizer = BareRealizer(...) if config.isolation is IsolationMode.NONE else DockerRealizer(...)
 ```
 
 This keeps the grid to **3 clients x 2 realizers composed at config time**, not a
@@ -316,7 +316,7 @@ reviewable.
    behavior; they stay `mode=docker` and gain only the seam.
 3. Implement `BareRealizer` (agent runtime install, systemd unit, bare host store,
    no snapshots).
-4. Add `mode: docker | bare` config; reject Docker-only inputs in bare mode.
+4. Add `isolation: container | none` config; reject Docker-only inputs when `isolation = none`.
 5. Wire `aws` / `gcp` / `azure` to select the realizer from config; land bare on
    all three (no snapshots).
 6. Tests across all three clouds x both shapes; docs; per-project changelogs.

@@ -160,7 +160,7 @@ unaffected.
    `DockerRealizer`.
 3. `BareRealizer`: agent-runtime host-setup step, systemd watcher unit, bare host
    store, `build_agent_host` at `vps_ip:22`, `realize_placement` with no container.
-4. Reject Docker-only inputs when `mode=BARE` (image/build args, gVisor,
+4. Reject Docker-only inputs when `isolation=NONE` (image/build args, gVisor,
    `docker_runtime`, `default_start_args`).
 5. Wire AWS bare (vertical slice) + tests; then GCP/Azure.
 6. Mechanical `mngr_vps_docker` -> `mngr_vps` rename (package, 73 import sites,
