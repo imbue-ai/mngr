@@ -36,6 +36,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
@@ -113,6 +114,21 @@ MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
 MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
 
 
+def _resolve_mngr_host_dir(mngr_host_dir_str: str | None, root_name: str) -> Path:
+    """Resolve the mngr host dir for the ``mngr forward`` subprocess.
+
+    Honor an explicit ``MNGR_HOST_DIR`` override (set by ``apply_bootstrap`` and
+    the bundled Electron build). When unset, fall back to the value derived from
+    the already-resolved ``root_name`` -- ``mngr_host_dir_for(root_name)``
+    (``~/.{root_name}/mngr``) -- so the fallback agrees with the rest of `run`.
+    A bare ``~/.mngr`` fallback would point ``mngr forward`` at a different
+    (likely empty) agent topology than the rest of minds reads.
+    """
+    if mngr_host_dir_str:
+        return Path(mngr_host_dir_str).expanduser()
+    return mngr_host_dir_for(root_name)
+
+
 @click.command()
 @click.option(
     "--host",
@@ -167,6 +183,9 @@ def run(
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")
+    # The parent `cli` group always sets ctx.obj["output_format"] (cli_entry.py)
+    # before any subcommand runs, so the HUMAN default is reached only when this
+    # command is invoked directly with an empty obj -- the unit-test path.
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
 
     logger.info("Starting `minds run`...")
@@ -285,8 +304,7 @@ def run(
     # Minds API: agents reach it through the latchkey gateway's bundled
     # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
     # are needed here.
-    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
-    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+    mngr_host_dir = _resolve_mngr_host_dir(os.environ.get("MNGR_HOST_DIR"), root_name)
     # `mngr forward` and every other laptop-side mngr invocation (including the
     # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
     # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
@@ -539,6 +557,11 @@ class _StreamedPermissionRequestHandler(FrozenModel):
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
     def __call__(self, event: RequestEvent) -> None:
+        # ``app.state.request_inbox`` is ``| None`` only because
+        # ``create_desktop_client`` defaults its ``request_inbox`` parameter to
+        # None for test-built apps. The `minds run` wiring always constructs a
+        # real RequestInbox and passes it in, so this guard is defensive against
+        # the factory default rather than any state reachable here.
         current: RequestInbox | None = self.app.state.request_inbox
         if current is None:
             return

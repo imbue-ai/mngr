@@ -50,6 +50,8 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.minds.cli._activated_env import OVH_OPTIONAL_ENV_VARS
+from imbue.minds.cli._activated_env import OVH_REQUIRED_ENV_VARS
 from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME
 from imbue.minds.cli._activated_env import STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import require_activated_env_name
@@ -67,16 +69,6 @@ _POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 7200
 # Neon pool DSN (username + password); leaking it into logs/terminals is the
 # exact issue this redaction closes.
 _SECRET_BEARING_FLAGS: Final[tuple[str, ...]] = ("--database-url",)
-
-# OVH provider-config env vars consumed by ``OvhProviderConfig`` (in
-# ``libs/mngr_ovh``). The three AK/AS/CK keys are required; the
-# endpoint is optional (defaults to ``ovh-us`` in the provider config).
-_OVH_REQUIRED_ENV_VARS: Final[tuple[str, ...]] = (
-    "OVH_APPLICATION_KEY",
-    "OVH_APPLICATION_SECRET",
-    "OVH_CONSUMER_KEY",
-)
-_OVH_OPTIONAL_ENV_VARS: Final[tuple[str, ...]] = ("OVH_ENDPOINT",)
 
 # Vault key the management SSH private key lives under (per host-pool-setup.md
 # step 2). The connector deploys with this private key pushed to a Modal
@@ -368,14 +360,14 @@ def resolve_ovh_env_from_vault(
     deploy_config = load_deploy_config(tier)
     vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
     secret = read_vault_kv(VaultPath(f"{vault_prefix}/ovh"), parent_concurrency_group=parent_cg)
-    missing = [key for key in _OVH_REQUIRED_ENV_VARS if not secret.get(key)]
+    missing = [key for key in OVH_REQUIRED_ENV_VARS if not secret.get(key)]
     if missing:
         raise click.ClickException(
             f"Vault entry {vault_prefix}/ovh is missing required key(s) {missing}; "
             "see apps/minds/docs/host-pool-setup.md step 3 for the schema."
         )
-    env_vars: dict[str, str] = {key: secret[key] for key in _OVH_REQUIRED_ENV_VARS}
-    for key in _OVH_OPTIONAL_ENV_VARS:
+    env_vars: dict[str, str] = {key: secret[key] for key in OVH_REQUIRED_ENV_VARS}
+    for key in OVH_OPTIONAL_ENV_VARS:
         if value := secret.get(key):
             env_vars[key] = value
     return env_vars

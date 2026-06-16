@@ -40,6 +40,7 @@ from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
+from imbue.minds.cli._activated_env import OVH_REQUIRED_ENV_VARS
 from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME as _PRODUCTION_ENV_NAME
 from imbue.minds.cli._activated_env import STAGING_ENV_NAME as _STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
@@ -380,6 +381,28 @@ def _build_real_providers() -> Providers:
     )
 
 
+def _reject_partial_ovh_secret(ovh_secret: dict[str, str], vault_prefix: str) -> None:
+    """Reject a present-but-partial ``<vault_prefix>/ovh`` Vault entry.
+
+    A fully-absent entry (the caller passes an empty mapping) is allowed: a tier
+    with no OVH provisioning yet may legitimately leave it unpopulated, and the
+    deploy proceeds with empty OVH credentials. But when the entry *is* present,
+    every required OVH key must be non-empty -- otherwise the ``.get(..., "")``
+    defaults in the caller would silently turn a missing key into ``SecretStr("")``
+    and push a broken ``ovh`` Modal Secret (the same failure the surrounding
+    ``VaultReadError`` guard avoids). Mirrors ``pool.py``'s ``resolve_ovh_env_from_vault``
+    and the Neon/SuperTokens completeness checks in ``_load_dev_credentials_from_vault``.
+    """
+    if not ovh_secret:
+        return
+    missing = [key for key in OVH_REQUIRED_ENV_VARS if not ovh_secret.get(key)]
+    if missing:
+        raise VaultReadError(
+            f"Vault entry {vault_prefix}/ovh is missing required key(s) {missing}; "
+            "see apps/minds/docs/host-pool-setup.md step 3 for the schema."
+        )
+
+
 def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup) -> ProviderCredentials:
     """Read every per-provider dev-tier credential `minds env` needs from Vault.
 
@@ -416,6 +439,7 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     except VaultSecretNotFoundError as exc:
         logger.warning("No ovh Vault entry at {}/ovh ({}); proceeding with empty OVH credentials.", vault_prefix, exc)
         ovh_secret = {}
+    _reject_partial_ovh_secret(ovh_secret, vault_prefix)
 
     org_id = neon_admin.get("NEON_ORG_ID", "")
     api_token = neon_admin.get("NEON_API_TOKEN", "")
@@ -1003,8 +1027,12 @@ def _check_generation_id_and_wipe_local_state_on_mismatch(
 
     current = payload.get("generation_id") if isinstance(payload, dict) else None
     if not isinstance(current, str) or not current:
-        # Connector exposed an empty id, meaning the deploy never pushed
-        # one (e.g. pre-generation-lifecycle deploy). Skip the wipe;
+        # No usable generation id, so skip the wipe (this whole check is
+        # best-effort and non-blocking, like the network/parse guard above).
+        # Two ways to land here: the connector returned a well-formed but
+        # non-object JSON body (a list/string/number -> not a dict), or it
+        # exposed an empty/missing id because the deploy never pushed one
+        # (e.g. a pre-generation-lifecycle deploy). In either case the
         # operator can re-deploy to start tracking generations.
         return
 
@@ -1061,6 +1089,10 @@ def env_deactivate() -> None:
 def env_list(ctx: click.Context) -> None:
     """List every minds env on disk (every ``~/.minds*/`` dir)."""
     _refuse_if_any_recover_target_exists()
+    # The parent `cli` group always sets ctx.obj["output_format"] (cli_entry.py)
+    # before any subcommand runs, so the HUMAN default here is reached only when a
+    # subgroup is invoked directly with an empty obj -- i.e. the unit-test path,
+    # never production.
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     summaries = list_dev_envs()
     active = active_env_name_or_none()
@@ -1180,6 +1212,7 @@ def env_deploy(
     for shared tiers with no migration (staging / production prefer
     zero-downtime when nothing risky happened).
     """
+    # HUMAN default only reached via the empty-obj test path; see env_list.
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
@@ -1305,6 +1338,7 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     resources) and the generation-id removal (only for shared tiers
     that use generation tracking).
     """
+    # HUMAN default only reached via the empty-obj test path; see env_list.
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
