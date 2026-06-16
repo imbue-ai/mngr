@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
@@ -46,6 +45,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude_usage import resources as _resources
 from imbue.mngr_usage.api import aggregate_process_cumulative
+from imbue.mngr_usage.data_types import UsageEvent
 from imbue.mngr_usage.data_types import UsageSnapshot
 
 # Source name the Claude writer emits under ($STATE_DIR/events/claude/usage/...);
@@ -229,7 +229,7 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
 @hookimpl
 def aggregate_usage_source(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     since_seconds: int,
     now: int,
 ) -> UsageSnapshot | None:

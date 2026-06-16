@@ -133,6 +133,7 @@ from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_ACTIVE_FILENAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
+from imbue.mngr_codex.codex_config import SESSIONS_RELATIVE_PATH
 from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENTS_DIRNAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
@@ -290,11 +291,8 @@ class CodexAgentConfig(AgentTypeConfig):
     )
     preserve_on_destroy: bool = Field(
         default=True,
-        description="Preserve this agent's transcripts locally before its state directory is "
-        "deleted on destroy. When enabled, the raw and common transcripts and the root session-id "
-        "history are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the "
-        "agent's state-directory layout. For remote agents, files are pulled to the local machine "
-        "so they survive host destruction. Set to False to discard transcript data on destroy.",
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
 
 
@@ -882,13 +880,15 @@ class CodexAgent(
 def _codex_preserved_items() -> list[PreservedItem]:
     """Return the files to preserve from a codex agent's state directory.
 
-    The raw and common transcripts plus the root session-id history (used to
-    resume the conversation). Native rollout JSONLs under ``CODEX_HOME`` are not
-    preserved -- that directory also holds the auth-token symlink and config.
+    The raw and common transcripts, the root session-id history (used to resume
+    the conversation), and codex's native resumable rollout store. The native
+    JSONLs are preserved by targeting ``CODEX_HOME/sessions`` specifically, which
+    excludes the auth-token symlink and config that sit as siblings in CODEX_HOME.
     """
     return [
         *build_transcript_preserved_items("codex"),
         PreservedItem(rel_path=ROOT_SESSION_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=SESSIONS_RELATIVE_PATH, kind=FileType.DIRECTORY),
     ]
 
 

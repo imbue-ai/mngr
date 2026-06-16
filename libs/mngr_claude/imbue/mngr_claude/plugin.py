@@ -320,12 +320,8 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     preserve_sessions_on_destroy: bool = Field(
         default=True,
-        description="Preserve Claude session files locally before the agent's state directory is deleted on destroy. "
-        "When enabled, session JSONL files, transcripts (raw and common), and the session ID history "
-        "are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the agent's "
-        "state-directory layout. For remote agents, files are pulled to the local machine so they "
-        "survive host destruction. "
-        "Set to False to discard session data on destroy.",
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
     use_env_config_dir: bool = Field(
         default=False,

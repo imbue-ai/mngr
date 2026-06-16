@@ -99,6 +99,10 @@ from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENABLED_VALUE
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
+from imbue.mngr_opencode.opencode_config import NATIVE_DB_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import NATIVE_DB_SHM_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import NATIVE_DB_WAL_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import NATIVE_STORAGE_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import OPENCODE_BIN_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_WORKDIR_ENV_VAR
@@ -222,11 +226,8 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
     preserve_on_destroy: bool = Field(
         default=True,
-        description="Preserve this agent's transcripts locally before its state directory is "
-        "deleted on destroy. When enabled, the raw and common transcripts and the root session-id "
-        "history are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the "
-        "agent's state-directory layout. For remote agents, files are pulled to the local machine "
-        "so they survive host destruction. Set to False to discard transcript data on destroy.",
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
 
 
@@ -572,13 +573,21 @@ class OpenCodeAgent(
 def _opencode_preserved_items() -> list[PreservedItem]:
     """Return the files to preserve from an opencode agent's state directory.
 
-    The raw and common transcripts plus the root session-id history. Native
-    session storage under the per-agent data home is not preserved -- that
-    directory also holds the auth-token file.
+    The raw and common transcripts, the root session-id history, and opencode's
+    native resumable session store (the SQLite ``opencode.db`` plus its ``-wal``/``-shm``
+    WAL sidecars, and ``storage/``) so the session can be resumed/adopted. The native
+    store is targeted by those specific paths so the sibling ``auth.json`` (a symlink to
+    shared creds) and ``log/`` are excluded. The ``-wal``/``-shm`` sidecars carry writes
+    not yet checkpointed into the main db; preservation skips them when absent (e.g. once
+    checkpointed by a clean shutdown), as it does any missing item.
     """
     return [
         *build_transcript_preserved_items("opencode"),
         PreservedItem(rel_path=ROOT_SESSION_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=NATIVE_DB_RELATIVE_PATH, kind=FileType.FILE),
+        PreservedItem(rel_path=NATIVE_DB_WAL_RELATIVE_PATH, kind=FileType.FILE),
+        PreservedItem(rel_path=NATIVE_DB_SHM_RELATIVE_PATH, kind=FileType.FILE),
+        PreservedItem(rel_path=NATIVE_STORAGE_RELATIVE_PATH, kind=FileType.DIRECTORY),
     ]
 
 

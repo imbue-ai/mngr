@@ -10,10 +10,9 @@ back to ``aggregate_process_cumulative`` in the dispatcher. This keeps
 hardcoding per-harness aggregation.
 """
 
-from typing import Any
-
 import pluggy
 
+from imbue.mngr_usage.data_types import UsageEvent
 from imbue.mngr_usage.data_types import UsageSnapshot
 
 hookspec = pluggy.HookspecMarker("mngr")
@@ -23,7 +22,7 @@ hookspec = pluggy.HookspecMarker("mngr")
 def aggregate_usage_source(
     source_name: str,
     # agent_id -> the agent's parsed usage events for this source
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     since_seconds: int,
     now: int,
 ) -> UsageSnapshot | None:

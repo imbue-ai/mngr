@@ -146,6 +146,24 @@ def test_corrupt_existing_output_line_is_skipped(tmp_path: Path) -> None:
     assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
 
 
+def test_null_message_line_is_dropped(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    # A null (rather than dict) message carries no usable content, so the line is
+    # dropped -- not raised on (AttributeError aborting the run) and not emitted as
+    # an empty event. A following valid line must still convert.
+    _write(
+        input_file,
+        [
+            {"type": "assistant", "uuid": "u1", "timestamp": "2026-01-01T00:00:01Z", "message": None},
+            {"type": "user", "uuid": "u2", "timestamp": "2026-01-01T00:00:02Z", "message": None},
+            _user_text("u3", "real message"),
+        ],
+    )
+    common_transcript_convert.convert(str(input_file), str(output_file))
+    # Only the valid line is emitted; the two null-message lines produce nothing.
+    assert [e.get("content") for e in _events(output_file)] == ["real message"]
+
+
 def test_events_without_uuid_or_timestamp_are_skipped(tmp_path: Path) -> None:
     input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     _write(input_file, [{"type": "user", "message": {"content": "no uuid"}}])

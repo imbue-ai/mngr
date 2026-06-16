@@ -47,7 +47,6 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from typing import overload
 
 import pluggy
 from loguru import logger
@@ -76,8 +75,11 @@ from imbue.mngr_usage.data_types import EVENTS_JSONL_FILENAME
 from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import TokenSnapshot
 from imbue.mngr_usage.data_types import USAGE_DIR_NAME
+from imbue.mngr_usage.data_types import UsageEvent
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
+from imbue.mngr_usage.data_types import add_optional
+from imbue.mngr_usage.data_types import sub_optional
 from imbue.mngr_usage.preservation import discover_preserved_agents
 from imbue.mngr_usage.pricing import compute_cost
 
@@ -95,14 +97,16 @@ _EVENTS_JSONL_FILENAME = EVENTS_JSONL_FILENAME
 
 
 @pure
-def parse_events_from_content(content: str, source_for_warnings: str) -> list[dict[str, Any]]:
-    """Return every well-formed JSON object from a JSONL events file's content.
+def parse_events_from_content(content: str, source_for_warnings: str) -> list[UsageEvent]:
+    """Parse a JSONL events file's content into typed ``UsageEvent``s.
 
-    Skips malformed lines with a warning (most commonly a writer mid-flight
-    truncated trailing line); ``source_for_warnings`` is included in the
-    warning so the user can locate the offending events file.
+    Each well-formed JSON object line is parsed (malformed lines skipped with a
+    warning -- most commonly a writer mid-flight truncated trailing line) and then
+    run through ``parse_usage_events``, which drops events lacking a parseable
+    timestamp / session_id. ``source_for_warnings`` is included in the warning so
+    the user can locate the offending events file.
     """
-    events: list[dict[str, Any]] = []
+    raw_events: list[dict[str, Any]] = []
     for raw in content.splitlines():
         if not raw.strip():
             continue
@@ -112,8 +116,8 @@ def parse_events_from_content(content: str, source_for_warnings: str) -> list[di
             logger.warning("Skipping malformed event line in {}: {}", source_for_warnings, e)
             continue
         if isinstance(event, dict):
-            events.append(event)
-    return events
+            raw_events.append(event)
+    return parse_usage_events(raw_events, source_for_warnings)
 
 
 @pure
@@ -127,6 +131,7 @@ def _parse_iso_timestamp(value: Any) -> int | None:
         return None
 
 
+@pure
 def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     """Reshape an event's ``rate_limits`` payload into UsageSnapshot windows.
 
@@ -154,6 +159,7 @@ def _windows_from_event(event: dict[str, Any]) -> dict[str, WindowSnapshot]:
     return windows
 
 
+@pure
 def _cost_from_event(event: dict[str, Any]) -> CostSnapshot | None:
     """Reshape an event's ``cost`` payload into a CostSnapshot, or None if absent.
 
@@ -178,6 +184,7 @@ def _cost_from_event(event: dict[str, Any]) -> CostSnapshot | None:
         return None
 
 
+@pure
 def _tokens_from_event(event: dict[str, Any]) -> TokenSnapshot | None:
     """Reshape an event's ``tokens`` payload into a TokenSnapshot, or None if absent.
 
@@ -195,12 +202,14 @@ def _tokens_from_event(event: dict[str, Any]) -> TokenSnapshot | None:
         return None
 
 
+@pure
 def _model_from_event(event: dict[str, Any]) -> str | None:
     """Extract the canonical ``<provider>/<model>`` string from the event, or None."""
     model = event.get("model")
     return model if isinstance(model, str) and model else None
 
 
+@pure
 def _cost_mode_hint_from_event(event: dict[str, Any]) -> CostMode | None:
     """Extract a writer-declared ``cost_mode`` hint, or None if absent / unrecognized."""
     hint = event.get("cost_mode")
@@ -213,10 +222,90 @@ def _cost_mode_hint_from_event(event: dict[str, Any]) -> CostMode | None:
         return None
 
 
+@pure
 def _session_id_from_event(event: dict[str, Any]) -> str | None:
     """Extract a session_id string from the event, or None if absent / unusable."""
     session_id = event.get("session_id")
     return session_id if isinstance(session_id, str) and session_id else None
+
+
+@pure
+def _str_field_from_event(event: dict[str, Any], key: str) -> str | None:
+    """Extract a non-empty string field from the event, or None if absent / unusable."""
+    value = event.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+@pure
+def _parse_usage_event(raw: dict[str, Any], source_name: str) -> UsageEvent | None:
+    """Parse one raw event dict into a ``UsageEvent``, or None to drop it.
+
+    Folds in every per-field extractor. Two drop conditions:
+
+    - an unparseable / absent ``timestamp`` drops the event SILENTLY (matches
+      the old ``timed``-list skip -- malformed timestamps are common mid-write);
+    - a missing / empty ``session_id`` drops the event with a WARNING (the
+      bundled writers always emit it, so a miss is writer/reader drift).
+
+    Malformed cost / tokens / window sub-blocks are individually dropped with a
+    ``logger.debug`` inside their extractors rather than dropping the event.
+    """
+    timestamp_unix = _parse_iso_timestamp(raw.get("timestamp"))
+    if timestamp_unix is None:
+        return None
+    session_id = _session_id_from_event(raw)
+    if session_id is None:
+        logger.warning(
+            "Dropping event without session_id from source {} (event_id={})",
+            source_name,
+            raw.get("event_id"),
+        )
+        return None
+    return UsageEvent(
+        timestamp_unix=timestamp_unix,
+        session_id=session_id,
+        event_id=_str_field_from_event(raw, "event_id"),
+        message_id=_str_field_from_event(raw, "message_id"),
+        cost=_cost_from_event(raw),
+        tokens=_tokens_from_event(raw),
+        windows=_windows_from_event(raw),
+        model=_model_from_event(raw),
+        cost_mode_hint=_cost_mode_hint_from_event(raw),
+    )
+
+
+@pure
+def parse_usage_events(raw_events: list[dict[str, Any]], source_name: str) -> list[UsageEvent]:
+    """Parse + validate every raw event dict into a ``UsageEvent``, dropping the unparseable.
+
+    The conversion entry point for callers/tests holding raw dicts (the reader
+    boundary calls it via ``parse_events_from_content``). Does NOT sort -- the
+    walker preamble (``_sorted_usage_events``) owns that.
+    """
+    return [event for raw in raw_events if (event := _parse_usage_event(raw, source_name)) is not None]
+
+
+@pure
+def _sorted_usage_events(events: list[UsageEvent]) -> list[UsageEvent]:
+    """Sort already-parsed events by timestamp.
+
+    Shared preamble for all three walkers; the parse happened upstream at the read
+    boundary. The stable timestamp sort makes a single writer's append-only stream
+    monotonic even if concurrent renders arrived out of file order.
+    """
+    return sorted(events, key=lambda event: event.timestamp_unix)
+
+
+@pure
+def _message_key_for_event(event: UsageEvent) -> str | None:
+    """Dedup key for one message within a session: ``message_id``, else ``event_id``.
+
+    A session-incremental writer emits one event per message update carrying a
+    ``message_id``; the reader keeps the freshest event per message so re-fires of
+    a streaming message (growing cost) collapse to its final reading. Falling back
+    to ``event_id`` makes each event its own message when no ``message_id`` is set.
+    """
+    return event.message_id if event.message_id is not None else event.event_id
 
 
 # =============================================================================
@@ -262,54 +351,25 @@ class _AccumulatingSession(MutableModel):
     last_event_at: int
 
 
-@overload
-def _sub_optional(current: int | None, baseline: int | None) -> int | None: ...
-
-
-@overload
-def _sub_optional(current: float | None, baseline: float | None) -> float | None: ...
-
-
-def _sub_optional(current: int | float | None, baseline: int | float | None) -> int | float | None:
-    """Single-field clamped subtraction for cost-delta computation.
-
-    Treats a missing baseline as zero so the first session in a process
-    (baseline = all-None CostSnapshot) just gets its own cumulative
-    reading. A missing current field stays None (no delta to report).
-    Negative deltas are clamped to zero defensively -- they shouldn't
-    occur within a process (cost is monotonic) but if a writer ever emits
-    an out-of-order pair we'd rather show 0 than a misleading negative
-    spend.
-
-    Overloaded for ``int`` and ``float`` separately so the delta's typed
-    field signature matches the per-session field type in CostSnapshot
-    (durations/line-counts stay int; USD stays float). Mirrors the
-    pattern used by ``_sum_optional`` in data_types.
-    """
-    if current is None:
-        return None
-    delta = current - (baseline if baseline is not None else 0)
-    return delta if delta >= 0 else type(current)(0)
-
-
 @pure
 def _cost_delta(current: CostSnapshot, baseline: CostSnapshot) -> CostSnapshot:
     """Element-wise ``current - baseline`` clamped at zero per numeric field.
 
-    See ``_sub_optional`` for per-field semantics; this is just the
-    CostSnapshot-shaped wrapper used by ``_finalize_process`` to convert
-    each session's cumulative reading into its own contribution within
-    the Claude Code process.
+    See ``sub_optional`` (in ``data_types``) for per-field semantics; this is
+    just the CostSnapshot-shaped wrapper used by ``_finalize_process`` to convert
+    each session's cumulative reading into its own contribution within the Claude
+    Code process.
     """
     return CostSnapshot(
-        total_cost_usd=_sub_optional(current.total_cost_usd, baseline.total_cost_usd),
-        total_duration_ms=_sub_optional(current.total_duration_ms, baseline.total_duration_ms),
-        total_api_duration_ms=_sub_optional(current.total_api_duration_ms, baseline.total_api_duration_ms),
-        total_lines_added=_sub_optional(current.total_lines_added, baseline.total_lines_added),
-        total_lines_removed=_sub_optional(current.total_lines_removed, baseline.total_lines_removed),
+        total_cost_usd=sub_optional(current.total_cost_usd, baseline.total_cost_usd),
+        total_duration_ms=sub_optional(current.total_duration_ms, baseline.total_duration_ms),
+        total_api_duration_ms=sub_optional(current.total_api_duration_ms, baseline.total_api_duration_ms),
+        total_lines_added=sub_optional(current.total_lines_added, baseline.total_lines_added),
+        total_lines_removed=sub_optional(current.total_lines_removed, baseline.total_lines_removed),
     )
 
 
+@pure
 def _finalize_process(
     ordered_sessions: list[_AccumulatingSession],
     *,
@@ -329,7 +389,7 @@ def _finalize_process(
     different auth is a new process and gets classified independently).
     """
     records: list[SessionCostRecord] = []
-    # All-None baseline (zero-equivalent under _sub_optional) for the first session in the process.
+    # All-None baseline (zero-equivalent under sub_optional) for the first session in the process.
     baseline = CostSnapshot()
     for accum in ordered_sessions:
         records.append(
@@ -354,6 +414,7 @@ class _AgentWalkResult(FrozenModel):
     session_records: tuple[SessionCostRecord, ...]
 
 
+@pure
 def _classify_process(has_rate_limits: bool) -> CostMode:
     """Map per-process rate_limits presence to a ``CostMode``.
 
@@ -372,11 +433,12 @@ def _classify_process(has_rate_limits: bool) -> CostMode:
     return CostMode.SUBSCRIPTION if has_rate_limits else CostMode.API_KEY
 
 
-def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+@pure
+def _walk_agent_events(events: list[UsageEvent], source_name: str) -> _AgentWalkResult:
     """Walk one agent's events in time order, producing all the per-agent reductions.
 
     Combines four concerns that all gate on the same "is this event valid"
-    check (parseable timestamp + non-empty session_id):
+    check (parseable timestamp + non-empty session_id, enforced by the parser):
       1. Track the freshest rate_limits payload observed (windows).
       2. Track the max event timestamp (for snapshot freshness / staleness).
       3. Partition events into Claude Code processes via cost-drop detection,
@@ -384,26 +446,15 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
       4. Classify each process as ``subscription`` or ``api_key`` based on
          whether any of its events carried a non-empty rate_limits payload.
 
-    Events lacking ``session_id`` are dropped with a WARNING log naming
-    source + event_id -- the bundled Claude writer always emits it, so a
-    miss means writer/reader drift worth surfacing.
-
-    Doing all four in one walk (rather than separate passes) ensures the
-    session_id requirement filters windows the same way it filters sessions:
-    a malformed event can't contribute its windows while having its cost/
-    sessions dropped, which would be a silent partial-data trap.
+    Events lacking a parseable timestamp or ``session_id`` were already dropped
+    upstream at the read boundary by ``parse_usage_events`` (silently / with a
+    WARNING respectively), so every ``UsageEvent`` here is valid. Because windows
+    are only ever read off a parsed event, the session_id requirement filters
+    windows the same way it filters sessions: a malformed event can't contribute
+    its windows while having its cost / sessions dropped, which would be a silent
+    partial-data trap.
     """
-    # Stable timestamp sort. File order is the natural order for a single
-    # writer's append-only emissions, but events from concurrent renders
-    # could in principle be reordered; sorting defensively guarantees
-    # in-process monotonic cost is reflected in the walk order.
-    timed: list[tuple[int, dict[str, Any]]] = []
-    for event in events:
-        ts = _parse_iso_timestamp(event.get("timestamp"))
-        if ts is None:
-            continue
-        timed.append((ts, event))
-    timed.sort(key=lambda pair: pair[0])
+    timed = _sorted_usage_events(events)
 
     max_timestamp = -1
     freshest_windows_timestamp = -1
@@ -420,25 +471,19 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
     # auth-mode classification independently.
     current_process_has_rate_limits = False
 
-    for timestamp, event in timed:
-        session_id = _session_id_from_event(event)
-        if session_id is None:
-            logger.warning(
-                "Dropping event without session_id from source {} (event_id={})",
-                source_name,
-                event.get("event_id"),
-            )
-            continue
+    for event in timed:
+        timestamp = event.timestamp_unix
+        session_id = event.session_id
 
         if timestamp > max_timestamp:
             max_timestamp = timestamp
 
-        windows = _windows_from_event(event)
+        windows = event.windows
         if windows and timestamp > freshest_windows_timestamp:
             freshest_windows_timestamp = timestamp
             freshest_windows = windows
 
-        cost = _cost_from_event(event)
+        cost = event.cost
 
         # Process-boundary detection: a cost-bearing event whose cumulative
         # total_cost_usd is strictly below the prior cost-bearing event's is
@@ -511,7 +556,7 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
 
 def aggregate_process_cumulative(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     *,
     since_seconds: int,
     now: int,
@@ -539,6 +584,7 @@ def aggregate_process_cumulative(
     return _combine_agent_walks(source_name, agents_events, _walk_agent_events, since_seconds=since_seconds, now=now)
 
 
+@pure
 def _resolve_session_cost_and_provenance(
     cost: CostSnapshot | None,
     tokens: TokenSnapshot | None,
@@ -595,7 +641,8 @@ class _SessionCumulativeAccumulator(MutableModel):
     last_event_at: int
 
 
-def _walk_agent_events_session_cumulative(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+@pure
+def _walk_agent_events_session_cumulative(events: list[UsageEvent], source_name: str) -> _AgentWalkResult:
     """Walk one agent's events treating each ``session_id`` as its own cumulative counter.
 
     Unlike ``_walk_agent_events`` (process-cumulative), there is no process
@@ -605,13 +652,7 @@ def _walk_agent_events_session_cumulative(events: list[dict[str, Any]], source_n
     (reported vs token-estimated) and mode (writer hint -> rate_limits -> API_KEY)
     at the end.
     """
-    timed: list[tuple[int, dict[str, Any]]] = []
-    for event in events:
-        timestamp = _parse_iso_timestamp(event.get("timestamp"))
-        if timestamp is None:
-            continue
-        timed.append((timestamp, event))
-    timed.sort(key=lambda pair: pair[0])
+    timed = _sorted_usage_events(events)
 
     max_timestamp = -1
     freshest_windows_timestamp = -1
@@ -619,27 +660,21 @@ def _walk_agent_events_session_cumulative(events: list[dict[str, Any]], source_n
     accumulator_by_session: dict[str, _SessionCumulativeAccumulator] = {}
     session_order: list[str] = []
 
-    for timestamp, event in timed:
-        session_id = _session_id_from_event(event)
-        if session_id is None:
-            logger.warning(
-                "Dropping event without session_id from source {} (event_id={})",
-                source_name,
-                event.get("event_id"),
-            )
-            continue
+    for event in timed:
+        timestamp = event.timestamp_unix
+        session_id = event.session_id
 
         if timestamp > max_timestamp:
             max_timestamp = timestamp
-        windows = _windows_from_event(event)
+        windows = event.windows
         if windows and timestamp > freshest_windows_timestamp:
             freshest_windows_timestamp = timestamp
             freshest_windows = windows
 
-        cost = _cost_from_event(event)
-        tokens = _tokens_from_event(event)
-        model = _model_from_event(event)
-        hint = _cost_mode_hint_from_event(event)
+        cost = event.cost
+        tokens = event.tokens
+        model = event.model
+        hint = event.cost_mode_hint
 
         accumulator = accumulator_by_session.get(session_id)
         if accumulator is None:
@@ -715,7 +750,7 @@ def _walk_agent_events_session_cumulative(events: list[dict[str, Any]], source_n
 
 def aggregate_session_cumulative(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     *,
     since_seconds: int,
     now: int,
@@ -734,13 +769,7 @@ def aggregate_session_cumulative(
     )
 
 
-def _add_optional_int(left: int | None, right: int | None) -> int | None:
-    """Add two optional ints, treating None as 'missing' (None + None stays None)."""
-    if left is None and right is None:
-        return None
-    return (left or 0) + (right or 0)
-
-
+@pure
 def _sum_token_snapshots(left: TokenSnapshot | None, right: TokenSnapshot | None) -> TokenSnapshot | None:
     """Field-wise sum of two optional TokenSnapshots; None when both are None."""
     if left is None:
@@ -748,26 +777,11 @@ def _sum_token_snapshots(left: TokenSnapshot | None, right: TokenSnapshot | None
     if right is None:
         return left
     return TokenSnapshot(
-        input=_add_optional_int(left.input, right.input),
-        output=_add_optional_int(left.output, right.output),
-        cache_read=_add_optional_int(left.cache_read, right.cache_read),
-        cache_creation=_add_optional_int(left.cache_creation, right.cache_creation),
+        input=add_optional(left.input, right.input),
+        output=add_optional(left.output, right.output),
+        cache_read=add_optional(left.cache_read, right.cache_read),
+        cache_creation=add_optional(left.cache_creation, right.cache_creation),
     )
-
-
-def _message_key_from_event(event: dict[str, Any]) -> str | None:
-    """Dedup key for one message within a session: ``message_id``, else ``event_id``.
-
-    A session-incremental writer emits one event per message update carrying a
-    ``message_id``; the reader keeps the freshest event per message so re-fires of
-    a streaming message (growing cost) collapse to its final reading. Falling back
-    to ``event_id`` makes each event its own message when no ``message_id`` is set.
-    """
-    message_id = event.get("message_id")
-    if isinstance(message_id, str) and message_id:
-        return message_id
-    event_id = event.get("event_id")
-    return event_id if isinstance(event_id, str) and event_id else None
 
 
 class _IncrementalSessionAccumulator(MutableModel):
@@ -779,8 +793,8 @@ class _IncrementalSessionAccumulator(MutableModel):
     """
 
     session_id: str
-    # message key -> the freshest (timestamp, event) seen for that message
-    freshest_event_by_message: dict[str, tuple[int, dict[str, Any]]]
+    # message key -> the freshest parsed event seen for that message
+    freshest_event_by_message: dict[str, UsageEvent]
     model: str | None
     model_timestamp: int
     cost_mode_hint: CostMode | None
@@ -789,7 +803,8 @@ class _IncrementalSessionAccumulator(MutableModel):
     last_event_at: int
 
 
-def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+@pure
+def _walk_agent_events_session_incremental(events: list[UsageEvent], source_name: str) -> _AgentWalkResult:
     """Walk one agent's events summing **per-message** contributions within each session.
 
     For harnesses that report cost/tokens per assistant message (OpenCode, pi):
@@ -799,13 +814,7 @@ def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_
     token-estimated; the session is ``ESTIMATED`` if any message was estimated.
     Windows and max timestamp are tracked as in the other strategies.
     """
-    timed: list[tuple[int, dict[str, Any]]] = []
-    for event in events:
-        timestamp = _parse_iso_timestamp(event.get("timestamp"))
-        if timestamp is None:
-            continue
-        timed.append((timestamp, event))
-    timed.sort(key=lambda pair: pair[0])
+    timed = _sorted_usage_events(events)
 
     max_timestamp = -1
     freshest_windows_timestamp = -1
@@ -813,28 +822,22 @@ def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_
     accumulator_by_session: dict[str, _IncrementalSessionAccumulator] = {}
     session_order: list[str] = []
 
-    for timestamp, event in timed:
-        session_id = _session_id_from_event(event)
-        if session_id is None:
-            logger.warning(
-                "Dropping event without session_id from source {} (event_id={})",
-                source_name,
-                event.get("event_id"),
-            )
-            continue
-        message_key = _message_key_from_event(event)
+    for event in timed:
+        timestamp = event.timestamp_unix
+        session_id = event.session_id
+        message_key = _message_key_for_event(event)
         if message_key is None:
             continue
 
         if timestamp > max_timestamp:
             max_timestamp = timestamp
-        windows = _windows_from_event(event)
+        windows = event.windows
         if windows and timestamp > freshest_windows_timestamp:
             freshest_windows_timestamp = timestamp
             freshest_windows = windows
 
-        model = _model_from_event(event)
-        hint = _cost_mode_hint_from_event(event)
+        model = event.model
+        hint = event.cost_mode_hint
 
         accumulator = accumulator_by_session.get(session_id)
         if accumulator is None:
@@ -852,8 +855,8 @@ def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_
             session_order.append(session_id)
 
         existing = accumulator.freshest_event_by_message.get(message_key)
-        if existing is None or timestamp >= existing[0]:
-            accumulator.freshest_event_by_message[message_key] = (timestamp, event)
+        if existing is None or timestamp >= existing.timestamp_unix:
+            accumulator.freshest_event_by_message[message_key] = event
         accumulator.first_event_at = min(accumulator.first_event_at, timestamp)
         accumulator.last_event_at = max(accumulator.last_event_at, timestamp)
         if windows:
@@ -870,10 +873,10 @@ def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_
         total_cost_usd: float | None = None
         summed_tokens: TokenSnapshot | None = None
         is_any_estimated = False
-        for _timestamp, event in accumulator.freshest_event_by_message.values():
-            cost = _cost_from_event(event)
-            tokens = _tokens_from_event(event)
-            model = _model_from_event(event)
+        for message_event in accumulator.freshest_event_by_message.values():
+            cost = message_event.cost
+            tokens = message_event.tokens
+            model = message_event.model
             resolved_cost, provenance = _resolve_session_cost_and_provenance(
                 cost, tokens, model, source_name=source_name, session_id=session_id
             )
@@ -914,7 +917,7 @@ def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_
 
 def aggregate_session_incremental(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     *,
     since_seconds: int,
     now: int,
@@ -933,8 +936,8 @@ def aggregate_session_incremental(
 
 def _combine_agent_walks(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
-    walk_agent_events: Callable[[list[dict[str, Any]], str], _AgentWalkResult],
+    agents_events: dict[str, list[UsageEvent]],
+    walk_agent_events: Callable[[list[UsageEvent], str], _AgentWalkResult],
     *,
     since_seconds: int,
     now: int,
@@ -979,7 +982,6 @@ def _combine_agent_walks(
     )
 
 
-@pure
 # =============================================================================
 # Derived window fields
 # =============================================================================
@@ -1016,6 +1018,7 @@ def derive_elapsed(window: WindowSnapshot, now: int) -> tuple[int | None, float 
     return elapsed_seconds, elapsed_percentage
 
 
+@pure
 def window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
     """Window's snapshot fields plus computed seconds_until_reset / elapsed_* / is_present.
 
@@ -1035,6 +1038,7 @@ def window_render_dict(snap: WindowSnapshot, now: int) -> dict[str, Any]:
     }
 
 
+@pure
 def session_render_dict(session: SessionCostRecord, now: int) -> dict[str, Any]:
     """Render one session record as a dict for JSON / CEL surfaces.
 
@@ -1054,6 +1058,7 @@ def session_render_dict(session: SessionCostRecord, now: int) -> dict[str, Any]:
     }
 
 
+@pure
 def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any]:
     """Build the per-source dict that ``mngr usage wait``'s ``--until`` CEL filters evaluate against.
 
@@ -1096,7 +1101,16 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
         "session_count": snapshot.session_count,
         "sessions": [session_render_dict(s, now) for s in snapshot.sessions],
     }
+    # Window keys are writer-chosen and share the top-level namespace with the
+    # reserved source-level fields above. A window key that collides with one
+    # would silently clobber it, so reject the collision loudly instead.
+    reserved_keys = set(ctx)
     for key, window in snapshot.windows.items():
+        if key in reserved_keys:
+            raise MngrError(
+                f"Window key {key!r} from source {snapshot.source_name!r} collides with a reserved "
+                f"source-level CEL field; rename the window key in the writer."
+            )
         ctx[key] = window_render_dict(window, now)
     return ctx
 
@@ -1106,7 +1120,7 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
 # =============================================================================
 
 
-def _events_per_source_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> dict[str, list[dict[str, Any]]]:
+def _events_per_source_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> dict[str, list[UsageEvent]]:
     """Read all usage events from one agent's events directory, grouped by source_name.
 
     Builds an ``EventsTarget`` for the agent (works for local + remote +
@@ -1129,7 +1143,7 @@ def _events_per_source_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> 
     except MngrError as e:
         logger.debug("Could not discover events for agent {}: {}", agent.name, e)
         return {}
-    by_source: dict[str, list[dict[str, Any]]] = {}
+    by_source: dict[str, list[UsageEvent]] = {}
     for source in sources:
         if not source.source_path.endswith(_USAGE_SOURCE_SUFFIX) or not source.is_current_file_present:
             continue
@@ -1169,7 +1183,7 @@ class _RawEventsCollector(MutableModel):
     """
 
     mngr_ctx: MngrContext
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    events_by_source: dict[str, dict[str, list[UsageEvent]]] = {}
     _lock: Lock = PrivateAttr(default_factory=Lock)
 
     model_config = {"arbitrary_types_allowed": True}
@@ -1184,7 +1198,7 @@ class _RawEventsCollector(MutableModel):
                 self.events_by_source.setdefault(source_name, {}).setdefault(agent_id, []).extend(events)
 
 
-def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[dict[str, Any]]]:
+def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[UsageEvent]]:
     """Read a destroyed agent's preserved usage events, grouped by source_name.
 
     The preserved layout mirrors the live state dir: usage events live at
@@ -1193,7 +1207,7 @@ def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[dict[str
     the dir holds no usage events.
     """
     events_root = preserved_dir / EVENTS_DIR_NAME
-    by_source: dict[str, list[dict[str, Any]]] = {}
+    by_source: dict[str, list[UsageEvent]] = {}
     if not events_root.is_dir():
         return by_source
     for source_dir in sorted(events_root.iterdir()):
@@ -1213,7 +1227,7 @@ def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[dict[str
 
 def _merge_preserved_events(
     mngr_ctx: MngrContext,
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
+    events_by_source: dict[str, dict[str, list[UsageEvent]]],
     *,
     include_filters: tuple[str, ...],
     exclude_filters: tuple[str, ...],
@@ -1243,7 +1257,7 @@ def _merge_preserved_events(
 def _dispatch_source_aggregation(
     pm: pluggy.PluginManager,
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     *,
     since_seconds: int,
     now: int,
@@ -1266,7 +1280,7 @@ def _dispatch_source_aggregation(
 
 def _aggregate_via_dispatch(
     pm: pluggy.PluginManager,
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
+    events_by_source: dict[str, dict[str, list[UsageEvent]]],
     *,
     since_seconds: int,
     now: int,
@@ -1283,12 +1297,12 @@ def _aggregate_via_dispatch(
 def gather_usage_snapshots(
     mngr_ctx: MngrContext,
     *,
-    include_filters: tuple[str, ...] = (),
-    exclude_filters: tuple[str, ...] = (),
-    provider_names: tuple[str, ...] | None = None,
-    since_seconds: int = 86400,
-    now: int | None = None,
-    include_preserved: bool = True,
+    now: int,
+    include_filters: tuple[str, ...],
+    exclude_filters: tuple[str, ...],
+    provider_names: tuple[str, ...] | None,
+    since_seconds: int,
+    include_preserved: bool,
 ) -> list[UsageSnapshot]:
     """Enumerate matching agents, collect raw events, aggregate per source.
 
@@ -1303,13 +1317,11 @@ def gather_usage_snapshots(
     kept regardless of session recency, since rate limits track the
     underlying account quota's current state.
 
-    When ``include_preserved`` is True (the default), usage events preserved
+    When ``include_preserved`` is True, usage events preserved
     from destroyed agents (under ``<local_host_dir>/preserved/``) are folded in
     too, so destroyed agents' spend still counts. They are filtered by the same
     provider / CEL predicates as live agents via their preserved data.json.
     """
-    if now is None:
-        now = int(time.time())
     collector = _RawEventsCollector(mngr_ctx=mngr_ctx)
     list_agents(
         mngr_ctx=mngr_ctx,
@@ -1386,7 +1398,7 @@ def wait_for_usage(
     until_filters: Sequence[Any],
     timeout_seconds: float | None,
     interval_seconds: float,
-    now_fn: Callable[[], int] = lambda: int(time.time()),
+    now_fn: Callable[[], int],
 ) -> WaitForUsageResult:
     """Poll until any source's CEL context satisfies all ``until_filters``, or timeout.
 

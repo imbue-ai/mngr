@@ -74,8 +74,6 @@ _HAIKU_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     cache_read_input_token_cost=0.0000001,
 )
 
-# Canonical pricing key is "<provider>/<model>" (the provider qualifier
-# disambiguates multi-provider harnesses like pi, where the same model name can
 # OpenAI per-token pricing, mirrored verbatim from litellm's
 # model_prices_and_context_window map (the ultimate source). OpenAI has no
 # cache-*write* surcharge -- caching is automatic, only reads are discounted --

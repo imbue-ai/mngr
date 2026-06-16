@@ -1,0 +1,1 @@
+Removed a redundant `register_marker("lima: ...")` call from the test conftest: the `lima` pytest marker is already auto-registered for the whole session by the resource_guards infrastructure (mngr_lima's `lima` resource guard), so the manual registration was duplicative. Test selection and the marker's meaning are unchanged.

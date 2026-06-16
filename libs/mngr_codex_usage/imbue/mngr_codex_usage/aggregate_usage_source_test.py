@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr_codex_usage.plugin import aggregate_usage_source
+from imbue.mngr_usage.api import parse_usage_events
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostProvenance
 
@@ -37,14 +38,20 @@ def test_codex_hookimpl_takes_freshest_cumulative_and_estimates_cost() -> None:
     snapshot = aggregate_usage_source(
         source_name="codex",
         agents_events={
-            "agent-1": [
-                _codex_event(
-                    "s1", "line-1-usage", 1, {"input": 100, "output": 0, "cache_read": 0, "cache_creation": None}
-                ),
-                _codex_event(
-                    "s1", "line-2-usage", 2, {"input": 1_000_000, "output": 0, "cache_read": 0, "cache_creation": None}
-                ),
-            ]
+            "agent-1": parse_usage_events(
+                [
+                    _codex_event(
+                        "s1", "line-1-usage", 1, {"input": 100, "output": 0, "cache_read": 0, "cache_creation": None}
+                    ),
+                    _codex_event(
+                        "s1",
+                        "line-2-usage",
+                        2,
+                        {"input": 1_000_000, "output": 0, "cache_read": 0, "cache_creation": None},
+                    ),
+                ],
+                "codex",
+            )
         },
         since_seconds=_SINCE,
         now=_NOW,
@@ -61,18 +68,29 @@ def test_codex_hookimpl_surfaces_windows_and_subscription_mode() -> None:
     snapshot = aggregate_usage_source(
         source_name="codex",
         agents_events={
-            "agent-1": [
-                _codex_event(
-                    "s1",
-                    "line-1-usage",
-                    1,
-                    {"input": 100, "output": 50, "cache_read": 200, "cache_creation": None},
-                    rate_limits={
-                        "five_hour": {"used_percentage": 23.0, "resets_at": 9_999_999_999, "window_seconds": 18000},
-                        "seven_day": {"used_percentage": 27.0, "resets_at": 9_999_999_999, "window_seconds": 604800},
-                    },
-                )
-            ]
+            "agent-1": parse_usage_events(
+                [
+                    _codex_event(
+                        "s1",
+                        "line-1-usage",
+                        1,
+                        {"input": 100, "output": 50, "cache_read": 200, "cache_creation": None},
+                        rate_limits={
+                            "five_hour": {
+                                "used_percentage": 23.0,
+                                "resets_at": 9_999_999_999,
+                                "window_seconds": 18000,
+                            },
+                            "seven_day": {
+                                "used_percentage": 27.0,
+                                "resets_at": 9_999_999_999,
+                                "window_seconds": 604800,
+                            },
+                        },
+                    )
+                ],
+                "codex",
+            )
         },
         since_seconds=_SINCE,
         now=_NOW,
@@ -85,7 +103,11 @@ def test_codex_hookimpl_surfaces_windows_and_subscription_mode() -> None:
 def test_codex_hookimpl_declines_non_codex_sources() -> None:
     snapshot = aggregate_usage_source(
         source_name="opencode",
-        agents_events={"agent-1": [_codex_event("s1", "line-1-usage", 1, {"input": 1, "output": 1})]},
+        agents_events={
+            "agent-1": parse_usage_events(
+                [_codex_event("s1", "line-1-usage", 1, {"input": 1, "output": 1})], "opencode"
+            )
+        },
         since_seconds=_SINCE,
         now=_NOW,
     )

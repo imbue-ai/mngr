@@ -759,6 +759,50 @@ def test_read_codex_versions_latest_is_none_for_unusable_cache(
 
 
 # =============================================================================
+# Preservation on destroy
+# =============================================================================
+
+
+def test_codex_config_preserves_on_destroy_by_default() -> None:
+    assert CodexAgentConfig().preserve_on_destroy is True
+
+
+def _populate_codex_transcripts(agent: CodexAgent) -> None:
+    """Write the raw/common transcripts and the root session-id history into the state dir."""
+    agent_dir = agent._get_agent_dir()
+    (agent_dir / "logs" / "codex_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "logs" / "codex_transcript" / "events.jsonl").write_text('{"type":"raw"}\n')
+    (agent_dir / "events" / "codex" / "common_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "events" / "codex" / "common_transcript" / "events.jsonl").write_text('{"type":"common"}\n')
+    (agent_dir / ROOT_SESSION_FILENAME).write_text("sess-codex\n")
+
+
+@pytest.mark.rsync
+def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy copies transcripts and session-id history to the mirrored preserved layout."""
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=True))
+    _populate_codex_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert (dest_dir / "logs" / "codex_transcript" / "events.jsonl").read_text() == '{"type":"raw"}\n'
+    assert (dest_dir / "events" / "codex" / "common_transcript" / "events.jsonl").read_text() == '{"type":"common"}\n'
+    assert (dest_dir / ROOT_SESSION_FILENAME).read_text() == "sess-codex\n"
+
+
+def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy preserves nothing when preserve_on_destroy is False."""
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=False))
+    _populate_codex_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert not dest_dir.exists()
+
+
+# =============================================================================
 # Lifecycle promotion + waiting_reason field generator
 # =============================================================================
 
@@ -864,47 +908,3 @@ def test_waiting_reason_returns_none_when_active(codex_agent: CodexAgent) -> Non
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ACTIVE_MARKER_FILENAME).touch()
     assert _waiting_reason(codex_agent, codex_agent.host) is None
-
-
-# =============================================================================
-# Preservation on destroy
-# =============================================================================
-
-
-def test_codex_config_preserves_on_destroy_by_default() -> None:
-    assert CodexAgentConfig().preserve_on_destroy is True
-
-
-def _populate_codex_transcripts(agent: CodexAgent) -> None:
-    """Write the raw/common transcripts and the root session-id history into the state dir."""
-    agent_dir = agent._get_agent_dir()
-    (agent_dir / "logs" / "codex_transcript").mkdir(parents=True, exist_ok=True)
-    (agent_dir / "logs" / "codex_transcript" / "events.jsonl").write_text('{"type":"raw"}\n')
-    (agent_dir / "events" / "codex" / "common_transcript").mkdir(parents=True, exist_ok=True)
-    (agent_dir / "events" / "codex" / "common_transcript" / "events.jsonl").write_text('{"type":"common"}\n')
-    (agent_dir / ROOT_SESSION_FILENAME).write_text("sess-codex\n")
-
-
-@pytest.mark.rsync
-def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """on_destroy copies transcripts and session-id history to the mirrored preserved layout."""
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=True))
-    _populate_codex_transcripts(agent)
-
-    agent.on_destroy(agent.host)
-
-    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
-    assert (dest_dir / "logs" / "codex_transcript" / "events.jsonl").read_text() == '{"type":"raw"}\n'
-    assert (dest_dir / "events" / "codex" / "common_transcript" / "events.jsonl").read_text() == '{"type":"common"}\n'
-    assert (dest_dir / ROOT_SESSION_FILENAME).read_text() == "sess-codex\n"
-
-
-def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """on_destroy preserves nothing when preserve_on_destroy is False."""
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=False))
-    _populate_codex_transcripts(agent)
-
-    agent.on_destroy(agent.host)
-
-    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
-    assert not dest_dir.exists()
