@@ -65,8 +65,11 @@ from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.tmux import TMUX_ENV_VAR
+from imbue.mngr.hosts.tmux import TMUX_TMPDIR_ENV_VAR
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.hosts.tmux import get_mngr_tmux_tmpdir
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -380,6 +383,16 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         Prefer using execute_command() instead whenever possible.
         """
+        # Point every tmux command mngr runs at mngr's private server (see
+        # get_mngr_tmux_tmpdir). This is the single chokepoint all host command
+        # execution funnels through, so it covers local and remote uniformly.
+        # TMUX is cleared so an inherited value (mngr invoked from inside a tmux
+        # session) cannot pin commands to that server instead of mngr's socket.
+        _env = {
+            TMUX_ENV_VAR: "",
+            TMUX_TMPDIR_ENV_VAR: str(get_mngr_tmux_tmpdir(self.host_dir)),
+            **(_env or {}),
+        }
         if self.is_local:
             # Bypass pyinfra's LocalConnector, which spawns local processes via
             # gevent. gevent attaches a libev SIGCHLD child watcher to the
@@ -2176,6 +2189,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         env_vars["MNGR_AGENT_STATE_DIR"] = str(agent_state_dir)
         env_vars["MNGR_AGENT_WORK_DIR"] = str(agent.work_dir)
         env_vars["LLM_USER_PATH"] = str(agent_state_dir / "llm_data")
+        # So tmux run from inside the agent shell (e.g. ttyd's `unset TMUX; tmux
+        # attach`, or a user-opened window) targets mngr's private server.
+        env_vars[TMUX_TMPDIR_ENV_VAR] = str(get_mngr_tmux_tmpdir(self.host_dir))
 
         # 2. Add programmatic defaults
         base_branch = (options.git.base_branch if options.git else None) or ""
@@ -3034,6 +3050,9 @@ def _build_start_agent_shell_command(
     guard = f"tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
 
     steps: list[str] = []
+
+    # tmux requires TMUX_TMPDIR to exist before it will create its socket there.
+    steps.append(f"mkdir -p {shlex.quote(str(get_mngr_tmux_tmpdir(host_dir)))}")
 
     # Unset environment variables
     for var_name in unset_vars:

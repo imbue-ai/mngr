@@ -1,4 +1,6 @@
+import os
 import shlex
+from pathlib import Path
 from typing import Final
 
 from pydantic import Field
@@ -13,6 +15,29 @@ _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 # Messages at or above this length use load-buffer/paste-buffer instead of send-keys
 # to avoid tmux "command too long" errors. Used by both base_agent.py and host.py.
 LONG_MESSAGE_THRESHOLD: Final[int] = 1024
+
+# tmux env var selecting the directory that holds its server socket.
+TMUX_TMPDIR_ENV_VAR: Final[str] = "TMUX_TMPDIR"
+
+# tmux sets this inside a session; when it is non-empty tmux talks to that server
+# and ignores TMUX_TMPDIR, so mngr clears it to keep commands on its own socket.
+TMUX_ENV_VAR: Final[str] = "TMUX"
+
+# Overrides the derived tmux tmpdir. A unix socket path has a ~104-char limit, so
+# a host_dir deeper than that (e.g. a pytest tmp_path) needs a shorter location.
+MNGR_TMUX_TMPDIR_ENV_VAR: Final[str] = "MNGR_TMUX_TMPDIR"
+
+
+def get_mngr_tmux_tmpdir(host_dir: Path) -> Path:
+    """Directory mngr points TMUX_TMPDIR at, giving mngr a private tmux server.
+
+    Isolating mngr's server from the user's default socket keeps mngr's
+    server-global options and key bindings off the user's own tmux sessions.
+    """
+    override = os.environ.get(MNGR_TMUX_TMPDIR_ENV_VAR)
+    if override:
+        return Path(override)
+    return host_dir / "tmux"
 
 
 class TmuxSessionTarget(FrozenModel):

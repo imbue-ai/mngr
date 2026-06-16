@@ -273,6 +273,9 @@ def isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
     """
     tmux_tmpdir = Path(tempfile.mkdtemp(prefix="mngr-tmux-", dir="/tmp"))
     monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmpdir))
+    # Point mngr's own tmux server at the same short socket dir; a host_dir under
+    # pytest's tmp_path would overflow the unix socket path limit.
+    monkeypatch.setenv("MNGR_TMUX_TMPDIR", str(tmux_tmpdir))
     monkeypatch.delenv("TMUX", raising=False)
 
     yield
