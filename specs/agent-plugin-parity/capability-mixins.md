@@ -155,7 +155,7 @@ out-of-scope hit *there* means the scope is wrong and rendering raises -- a drif
 
 ## The capability registry
 
-One module (`libs/mngr/imbue/mngr/interfaces/agent_capabilities.py`) declares the
+One module (`libs/mngr/imbue/mngr/agents/agent_capabilities.py`) declares the
 capabilities and how to detect each. Sketch:
 
 ```python
