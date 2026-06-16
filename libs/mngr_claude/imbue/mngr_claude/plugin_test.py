@@ -3563,7 +3563,7 @@ def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrConte
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    with pytest.raises(UserInputError, match="--adopt-session can only be used with a Claude agent type"):
+    with pytest.raises(UserInputError, match="--adopt-session can only be used with an interactive Claude agent type"):
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
