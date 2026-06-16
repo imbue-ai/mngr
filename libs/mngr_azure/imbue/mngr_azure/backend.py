@@ -673,31 +673,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         self._host_record_cache[host_id] = updated_record
         return super().start_host(host_id, snapshot_id)
 
-    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
-        """Locate this host's VM by its ``mngr-host-id`` tag (works while deallocated).
-
-        Reads only the VM list tags (no SSH), so it resolves a deallocated VM.
-        Refuses (raises) when more than one VM carries the same ``mngr-host-id``.
-        Mirrors ``AwsProvider._find_instance_for_host``.
-        """
-        matches = self._instances_matching_host_id(host_id)
-        if not matches:
-            self._instances_cache = None
-            matches = self._instances_matching_host_id(host_id)
-        if len(matches) > 1:
-            ids = sorted(str(m.get("id")) for m in matches)
-            raise MngrError(
-                f"Azure provider {self.name!r}: {len(matches)} VMs are tagged "
-                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
-                "Resolve the duplicate tags (or delete the stray VM) and retry."
-            )
-        return matches[0] if matches else None
-
-    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Return every cached VM tagged ``mngr-host-id=<host_id>``."""
-        wanted = f"mngr-host-id={host_id}"
-        return [instance for instance in self._list_instances_cached() if wanted in instance.get("tags", ())]
-
     # =========================================================================
     # Self-stopping idle watcher (sentinel + host-side systemd deallocate)
     # =========================================================================
