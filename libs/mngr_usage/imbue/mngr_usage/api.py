@@ -793,7 +793,6 @@ class _IncrementalSessionAccumulator(MutableModel):
     """
 
     session_id: str
-    # message key -> the freshest (timestamp, event) seen for that message
     # message key -> the freshest parsed event seen for that message
     freshest_event_by_message: dict[str, UsageEvent]
     model: str | None
