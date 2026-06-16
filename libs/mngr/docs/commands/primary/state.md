@@ -11,8 +11,6 @@ mngr state [TARGET] [--quick] [--fields FIELDS]
 
 Show the current state and details of a single agent or host.
 
-Show the current state and details of a single agent or host.
-
 Unlike `mngr list`, which enumerates every provider and then filters, `state`
 resolves just the one target (querying only its provider) and fetches only it --
 so it is cheap even when you have many agents, as long as you know which one you want.
