@@ -29,9 +29,13 @@ truth those resources are kept in sync with.
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import UserInputError
@@ -272,3 +276,177 @@ def build_opencode_config(
 def serialize_opencode_config(config: Mapping[str, Any]) -> str:
     """Serialize an ``opencode.json`` body as two-space-indented JSON."""
     return json.dumps(dict(config), indent=2)
+
+
+# Interim trigger seam for session adoption, until the central ``--adopt-session`` flag
+# mixin lands. When this env var is set on a ``mngr create``, the opencode plugin resolves
+# its value (a ``ses_...`` session id, or an absolute path to a source ``opencode.db``)
+# against its preserved / live-agent / user-native session stores and rebinds it into the
+# new agent so its first launch resumes that session. Hardcoded here (not imported from the
+# release-test harness, which imports pytest); the future flag reads
+# ``plugin_data["adopt_session"]`` with this env var as a fallback.
+ADOPT_SESSION_ENV_VAR: Final[str] = "MNGR_ADOPT_SESSION"
+
+# Per-agent OpenCode data root relative to the agent state dir (the ``XDG_DATA_HOME``
+# value), as POSIX path parts -- used to locate an agent's native ``opencode.db`` when
+# scanning live/preserved mngr agents for a session to adopt.
+_AGENT_DATA_HOME_PARTS: Final[tuple[str, ...]] = _DATA_HOME_RELATIVE_PATH
+
+# Where a user-native (plain-CLI) OpenCode install keeps its data, relative to the data
+# home root resolved from ``$XDG_DATA_HOME`` (or ``~/.local/share``).
+_USER_DATA_HOME_PARTS: Final[tuple[str, ...]] = (".local", "share")
+
+
+def get_opencode_db_path_for_data_home(data_home: Path) -> Path:
+    """Return the ``opencode.db`` path under a ``XDG_DATA_HOME`` root."""
+    return get_opencode_app_data_dir(data_home) / _DB_FILENAME
+
+
+def get_user_native_opencode_db_path() -> Path:
+    """Return the user-native ``opencode.db`` (plain-CLI install), honoring ``$XDG_DATA_HOME``."""
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    data_home = Path(xdg_data_home) if xdg_data_home else Path.home().joinpath(*_USER_DATA_HOME_PARTS)
+    return get_opencode_db_path_for_data_home(data_home)
+
+
+def _agent_opencode_db_paths(agents_root: Path) -> list[Path]:
+    """Return every per-agent ``opencode.db`` under an agents root (live or preserved)."""
+    if not agents_root.is_dir():
+        return []
+    db_paths: list[Path] = []
+    for agent_dir in sorted(agents_root.iterdir()):
+        db_path = agent_dir.joinpath(*_AGENT_DATA_HOME_PARTS, _OPENCODE_APP_DIR_NAME, _DB_FILENAME)
+        if db_path.is_file():
+            db_paths.append(db_path)
+    return db_paths
+
+
+def collect_adopt_search_db_paths(local_agents_root: Path, local_preserved_root: Path) -> list[Path]:
+    """Return the ``opencode.db`` paths an adopt session id is searched across (local only).
+
+    The user-native db plus every live local mngr agent and every preserved agent (each stores
+    its db at ``plugin/opencode/data/opencode/opencode.db``). Local sources only: the resolved
+    db is copied onto the destination host from a path reachable as a local source.
+    """
+    return [
+        get_user_native_opencode_db_path(),
+        *_agent_opencode_db_paths(local_agents_root),
+        *_agent_opencode_db_paths(local_preserved_root),
+    ]
+
+
+def _db_has_session(db_path: Path, session_id: str) -> bool:
+    """Return whether ``db_path`` (an OpenCode SQLite db) contains a session with ``session_id``.
+
+    Opened read-only so a live agent's db is never disturbed; a malformed/locked db is
+    treated as "no match" so one bad store can't block resolving a session that lives
+    elsewhere.
+    """
+    try:
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        cursor = connection.execute("SELECT 1 FROM session WHERE id = ? LIMIT 1", (session_id,))
+        return cursor.fetchone() is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        connection.close()
+
+
+def resolve_adopt_session_db(adopt_session_arg: str, search_db_paths: Sequence[Path]) -> tuple[str, Path]:
+    """Resolve an adopt argument to a ``(session_id, source_db_path)`` pair.
+
+    Accepts either an absolute path to a source ``opencode.db`` (its single root session is
+    used), or a ``ses_...`` session id searched across ``search_db_paths`` (user-native +
+    every live and preserved mngr agent's db). A session id found in more than one db is
+    rejected as ambiguous (mirrors the claude adopt resolver), so the caller must pass the
+    db path instead.
+    """
+    if adopt_session_arg.endswith(".db"):
+        source_db = Path(adopt_session_arg).resolve()
+        if not source_db.is_file():
+            raise UserInputError(f"OpenCode session db not found: {source_db}")
+        return _read_only_root_session_id(source_db), source_db
+
+    matches = [db_path for db_path in search_db_paths if _db_has_session(db_path, adopt_session_arg)]
+    if not matches:
+        raise UserInputError(
+            f"OpenCode session {adopt_session_arg} not found in any live, preserved, or user-native "
+            "store. Check that the session id is correct, or pass a path to the source opencode.db."
+        )
+    if len(matches) > 1:
+        match_list = "\n".join(f"  {match}" for match in matches)
+        raise UserInputError(
+            f"OpenCode session {adopt_session_arg} found in multiple stores:\n{match_list}\n"
+            "Pass the full path to the source opencode.db to specify which one."
+        )
+    return adopt_session_arg, matches[0]
+
+
+def _read_only_root_session_id(db_path: Path) -> str:
+    """Return the lone root (parent-less) session id in ``db_path``, opened read-only.
+
+    Adoption resumes one root conversation; a db with zero or several roots is ambiguous
+    when addressed by path, so require exactly one.
+    """
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = connection.execute("SELECT id FROM session WHERE parent_id IS NULL").fetchall()
+    except sqlite3.Error as exc:
+        raise UserInputError(f"Could not read sessions from OpenCode db {db_path}: {exc}") from exc
+    finally:
+        connection.close()
+    if len(rows) != 1:
+        raise UserInputError(
+            f"OpenCode db {db_path} has {len(rows)} root sessions; expected exactly one. "
+            "Pass a session id instead of a db path to disambiguate."
+        )
+    return str(rows[0][0])
+
+
+def build_opencode_rebind_commands(db_path: Path, session_id: str, new_directory: Path) -> tuple[str, ...]:
+    """Build the host shell commands that rebind an adopted session's stored cwd.
+
+    OpenCode stores the absolute source worktree on the ``session`` row, the owning
+    ``project`` row, and a ``project_directory`` row; after copying the db into the new
+    agent these all still point at the destroyed source worktree, so the session must be
+    rebound to the new agent's work dir or recall silently no-ops against it. Returns, in
+    order: a WAL checkpoint (fold the ``-wal``/``-shm`` sidecars into the main db so the
+    rebind sees and rewrites the committed rows), then the rebind ``UPDATE``s plus the
+    ``project_directory`` upsert (its PK is ``(project_id, directory)``). Verified live
+    against opencode 1.17.7.
+    """
+    quoted_db = _sqlite_quote(str(db_path))
+    quoted_session = _sqlite_quote(session_id)
+    quoted_dir = _sqlite_quote(str(new_directory))
+    # One transactional script: look the session's project up, then rewrite every stored
+    # directory. The upsert leaves any pre-existing project_directory row in place (its PK
+    # includes the directory, so the new row is additive) -- harmless, and it matches how
+    # OpenCode itself records additional directories for a project.
+    rebind_sql = (
+        f"UPDATE session SET directory = {quoted_dir} WHERE id = {quoted_session};"
+        f"UPDATE project SET worktree = {quoted_dir} "
+        f"WHERE id = (SELECT project_id FROM session WHERE id = {quoted_session});"
+        f"INSERT INTO project_directory (project_id, directory, time_created) "
+        f"SELECT project_id, {quoted_dir}, CAST(strftime('%s','now') AS INTEGER) * 1000 "
+        f"FROM session WHERE id = {quoted_session} "
+        f"ON CONFLICT (project_id, directory) DO NOTHING;"
+    )
+    return (
+        f"sqlite3 {quoted_db} 'PRAGMA wal_checkpoint(TRUNCATE);'",
+        f"sqlite3 {quoted_db} {_shell_quote_sql(rebind_sql)}",
+    )
+
+
+def _sqlite_quote(value: str) -> str:
+    """Quote a value as a SQLite string literal (single quotes doubled)."""
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _shell_quote_sql(sql: str) -> str:
+    """Shell-quote a SQL script for ``sqlite3 <db> <sql>`` (the SQL already uses '' literals)."""
+    escaped = sql.replace("'", "'\\''")
+    return f"'{escaped}'"

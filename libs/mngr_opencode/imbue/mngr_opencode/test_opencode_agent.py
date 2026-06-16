@@ -46,6 +46,7 @@ from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 
 # A free model on the OpenCode Zen provider that needs no credentials. Pinned so the
 # test does not depend on the developer's configured default model.
@@ -78,6 +79,15 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
     # / on-disk message parts), so the plugin preserves them when present but the arc does
     # not require them.
     native_session_preserved_relpaths = ("plugin/opencode/data/opencode/opencode.db",)
+    # After destroy, the arc adopts the preserved session into a fresh agent (new worktree)
+    # and asserts it recalls the pre-destroy secret -- proving the preserved db resumes once
+    # the plugin copies it in and rebinds the stored source-worktree path to the new work dir.
+    adopts_preserved_session = True
+
+    def adopt_session_arg(self, preserved_dir: Path) -> str:
+        # The launch script records the root session id here; the plugin resolves this id
+        # against the preserved store's opencode.db (and rebinds it onto the new work dir).
+        return (preserved_dir / ROOT_SESSION_FILENAME).read_text().strip()
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("opencode") is None:
@@ -152,6 +162,7 @@ def _opencode_agent_state_dir(host_dir: Path) -> Path:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.rsync
 @pytest.mark.timeout(900)
 def test_opencode_waiting_reason_reports_permissions(tmp_path: Path) -> None:
     """End-to-end: a blocking approval prompt raises the ``permissions_waiting`` marker.

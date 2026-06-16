@@ -1,0 +1,5 @@
+Added session adoption for the opencode agent type: a newly created opencode agent can now resume an existing OpenCode conversation instead of starting fresh.
+
+At create time the plugin resolves an adopt argument -- a `ses_...` session id (searched across the user-native opencode db and every live/preserved mngr agent's db) or an absolute path to a source `opencode.db` -- then copies the resolved SQLite db (and its `-wal`/`-shm` sidecars) into the new agent's data dir, checkpoints the WAL, rebinds the session's stored source-worktree path to the new agent's work dir (`session.directory`, `project.worktree`, and the `project_directory` upsert), and writes the adopted session id into the resume pointer so the agent's first launch attaches to it.
+
+This is the per-agent mechanics; for now it is triggered by the interim `MNGR_ADOPT_SESSION` env var (the future central `--adopt-session` flag will supply it via `plugin_data["adopt_session"]`, with the env var as a fallback). Parity with the claude adopt resolver: adoption works from a preserved (destroyed) agent, a live mngr agent, and a plain-CLI run.

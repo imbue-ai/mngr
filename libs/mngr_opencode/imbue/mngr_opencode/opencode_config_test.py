@@ -2,6 +2,8 @@
 
 import importlib.resources
 import json
+import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,8 @@ from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_PORT_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_ROLE
 from imbue.mngr_opencode.opencode_config import build_opencode_config
+from imbue.mngr_opencode.opencode_config import build_opencode_rebind_commands
+from imbue.mngr_opencode.opencode_config import collect_adopt_search_db_paths
 from imbue.mngr_opencode.opencode_config import get_opencode_app_data_dir
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
@@ -38,6 +42,7 @@ from imbue.mngr_opencode.opencode_config import get_opencode_root_session_file_p
 from imbue.mngr_opencode.opencode_config import get_opencode_server_port_file_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
 from imbue.mngr_opencode.opencode_config import read_opencode_config
+from imbue.mngr_opencode.opencode_config import resolve_adopt_session_db
 from imbue.mngr_opencode.opencode_config import serialize_opencode_config
 
 
@@ -152,3 +157,120 @@ def test_launch_script_literals_stay_in_sync_with_constants() -> None:
     assert f"{ROLE_ENV_VAR}={SERVER_ROLE}" in launch_source
     for env_var in (OPENCODE_BIN_ENV_VAR, OPENCODE_PORT_ENV_VAR, OPENCODE_WORKDIR_ENV_VAR):
         assert env_var in launch_source
+
+
+def _write_opencode_db(db_path: Path, session_id: str, directory: str, *, parent_id: str | None = None) -> str:
+    """Create a minimal OpenCode-shaped db with one project + one session; return the project id.
+
+    Mirrors only the columns the adopt resolver / rebind touch (verified against the real
+    opencode 1.17.7 schema): session.(id, project_id, parent_id, directory), project.(id,
+    worktree), project_directory.(project_id, directory).
+    """
+    project_id = f"proj_{session_id}"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, directory TEXT NOT NULL);"
+            "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL);"
+            "CREATE TABLE project_directory (project_id TEXT NOT NULL, directory TEXT NOT NULL, time_created INTEGER, "
+            "PRIMARY KEY (project_id, directory));"
+        )
+        connection.execute(
+            "INSERT INTO session (id, project_id, parent_id, directory) VALUES (?, ?, ?, ?)",
+            (session_id, project_id, parent_id, directory),
+        )
+        connection.execute("INSERT INTO project (id, worktree) VALUES (?, ?)", (project_id, directory))
+        connection.execute(
+            "INSERT INTO project_directory (project_id, directory, time_created) VALUES (?, ?, 0)",
+            (project_id, directory),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return project_id
+
+
+def test_resolve_adopt_session_db_by_path_uses_lone_root_session(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _write_opencode_db(db_path, "ses_root", "/src/work")
+    session_id, source_db = resolve_adopt_session_db(str(db_path), [])
+    assert session_id == "ses_root"
+    assert source_db == db_path
+
+
+def test_resolve_adopt_session_db_by_path_rejects_multiple_roots(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    _write_opencode_db(db_path, "ses_root", "/src/work")
+    # A second parent-less session makes the db ambiguous when addressed by path.
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "INSERT INTO session (id, project_id, parent_id, directory) VALUES (?, ?, NULL, ?)",
+        ("ses_other", "proj_ses_root", "/src/work"),
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(UserInputError, match="root sessions"):
+        resolve_adopt_session_db(str(db_path), [])
+
+
+def test_resolve_adopt_session_db_by_id_searches_stores(tmp_path: Path) -> None:
+    db_a = tmp_path / "a" / "opencode.db"
+    db_b = tmp_path / "b" / "opencode.db"
+    _write_opencode_db(db_a, "ses_aaa", "/a/work")
+    _write_opencode_db(db_b, "ses_bbb", "/b/work")
+    session_id, source_db = resolve_adopt_session_db("ses_bbb", [db_a, db_b])
+    assert session_id == "ses_bbb"
+    assert source_db == db_b
+
+
+def test_resolve_adopt_session_db_by_id_missing_raises(tmp_path: Path) -> None:
+    db_a = tmp_path / "a" / "opencode.db"
+    _write_opencode_db(db_a, "ses_aaa", "/a/work")
+    with pytest.raises(UserInputError, match="not found"):
+        resolve_adopt_session_db("ses_zzz", [db_a])
+
+
+def test_resolve_adopt_session_db_by_id_ambiguous_raises(tmp_path: Path) -> None:
+    db_a = tmp_path / "a" / "opencode.db"
+    db_b = tmp_path / "b" / "opencode.db"
+    _write_opencode_db(db_a, "ses_dup", "/a/work")
+    _write_opencode_db(db_b, "ses_dup", "/b/work")
+    with pytest.raises(UserInputError, match="multiple stores"):
+        resolve_adopt_session_db("ses_dup", [db_a, db_b])
+
+
+def test_collect_adopt_search_db_paths_includes_agent_and_preserved_dbs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agents_root = tmp_path / "agents"
+    preserved_root = tmp_path / "preserved"
+    live_db = agents_root / "agent-1" / "plugin" / "opencode" / "data" / "opencode" / "opencode.db"
+    preserved_db = preserved_root / "name--id" / "plugin" / "opencode" / "data" / "opencode" / "opencode.db"
+    _write_opencode_db(live_db, "ses_live", "/live/work")
+    _write_opencode_db(preserved_db, "ses_preserved", "/preserved/work")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "user-data"))
+    paths = collect_adopt_search_db_paths(agents_root, preserved_root)
+    assert live_db in paths
+    assert preserved_db in paths
+    # The user-native db path is always included (even when it does not exist on disk).
+    assert (tmp_path / "user-data" / "opencode" / "opencode.db") in paths
+
+
+def test_build_opencode_rebind_commands_actually_rebinds(tmp_path: Path) -> None:
+    """The emitted sqlite3 commands rewrite every stored source-worktree path to the new dir."""
+    db_path = tmp_path / "opencode.db"
+    _write_opencode_db(db_path, "ses_root", "/old/src/work")
+    new_directory = tmp_path / "new" / "work"
+    for command in build_opencode_rebind_commands(db_path, "ses_root", new_directory):
+        subprocess.run(command, shell=True, check=True, capture_output=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        assert connection.execute("SELECT directory FROM session WHERE id='ses_root'").fetchone()[0] == str(
+            new_directory
+        )
+        assert connection.execute("SELECT worktree FROM project").fetchone()[0] == str(new_directory)
+        directories = {row[0] for row in connection.execute("SELECT directory FROM project_directory").fetchall()}
+        assert str(new_directory) in directories
+    finally:
+        connection.close()
