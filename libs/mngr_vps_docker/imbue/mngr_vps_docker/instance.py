@@ -334,9 +334,6 @@ class _VpsDiscoveryData(FrozenModel):
     is_running_by_host_id: dict[HostId, bool] = Field(
         default_factory=dict, description="Container running state keyed by host id"
     )
-    is_unreachable: bool = Field(
-        default=False, description="True iff the VPS was unreachable (its SSH read raised) during this read"
-    )
 
 
 def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> dict[str, str]:
@@ -428,7 +425,6 @@ class VpsDockerProvider(BaseProviderInstance):
 
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
     _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
-    _unreachable_endpoints: list[str] = PrivateAttr(default_factory=list)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -451,20 +447,6 @@ class VpsDockerProvider(BaseProviderInstance):
             self._evict_cached_host(host_id)
         self._host_record_cache.clear()
         self._instances_cache = None
-        self._unreachable_endpoints.clear()
-
-    @property
-    def unreachable_endpoints(self) -> tuple[str, ...]:
-        """VPS IPs whose records could not be read during the last discovery.
-
-        When a VPS is unreachable its agents are absent from the discovery
-        result (the host itself may still appear, as offline, but its agent
-        list comes back empty). Exposing the endpoints lets callers such as
-        ``mngr connect`` tell "no such agent" apart from "the agent's host
-        was unreachable". Populated and reset per sweep in
-        ``_discover_host_records_with_agents``.
-        """
-        return tuple(self._unreachable_endpoints)
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """Provider-specific listing hook: return the raw instance dicts from the API.
@@ -1738,10 +1720,6 @@ class VpsDockerProvider(BaseProviderInstance):
         that VPS so the hosts still appear in the listing (with an offline
         state) instead of disappearing entirely; one bad VPS must not silently
         drop its hosts.
-
-        ``is_unreachable`` is ``True`` iff the VPS was unreachable (the SSH
-        path raised); the caller records the endpoint so ``mngr connect`` can
-        tell "no such agent" apart from "agent's host was unreachable".
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -1799,7 +1777,7 @@ class VpsDockerProvider(BaseProviderInstance):
                     self.name,
                     e,
                 )
-            return _VpsDiscoveryData(records=tuple(cached_records), is_unreachable=True)
+            return _VpsDiscoveryData(records=tuple(cached_records))
 
     def _discover_host_records_with_agents(self) -> _VpsDiscoveryData:
         """Discover host records and live agent data from all VPSes for this provider.
@@ -1812,9 +1790,6 @@ class VpsDockerProvider(BaseProviderInstance):
         by the slowest VPS rather than the sum.
         """
         vps_ips = self._list_provider_vps_hostnames()
-        # Reset so ``unreachable_endpoints`` reflects only this sweep; it is
-        # repopulated single-threaded in the join loop below.
-        self._unreachable_endpoints.clear()
         if not vps_ips:
             return _VpsDiscoveryData()
 
@@ -1833,10 +1808,8 @@ class VpsDockerProvider(BaseProviderInstance):
                 ) as executor:
                     futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
 
-                for vps_ip, future in zip(vps_ips, futures, strict=False):
+                for future in futures:
                     vps_data = future.result()
-                    if vps_data.is_unreachable:
-                        self._unreachable_endpoints.append(vps_ip)
                     all_records.extend(vps_data.records)
                     for host_id, agents in vps_data.live_agent_data_by_host_id.items():
                         all_agent_data.setdefault(host_id, []).extend(agents)

@@ -10,8 +10,6 @@ from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
-from imbue.mngr.api.find import _with_unreachable_hint
-from imbue.mngr.api.find import describe_unreachable_endpoints
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import filter_all_hosts
@@ -40,7 +38,6 @@ from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 
 
 def test_parse_host_location_address_with_agent_only() -> None:
@@ -1063,77 +1060,3 @@ def test_ensure_agent_started_respects_config_when_data_unset(
     ensure_agent_started(agent, agent.host, is_start_desired=True)
 
     assert agent.captured_timeouts == [37.5]
-
-
-def _mock_provider_with_unreachable(
-    name: str,
-    unreachable: tuple[str, ...],
-    temp_host_dir: Path,
-    temp_mngr_ctx: MngrContext,
-) -> MockProviderInstance:
-    return MockProviderInstance(
-        name=ProviderInstanceName(name),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        mock_unreachable_endpoints=unreachable,
-    )
-
-
-def test_describe_unreachable_endpoints_empty_when_all_reachable(
-    temp_host_dir: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """No unreachable hosts -> no hint to append to a not-found error."""
-    provider = _mock_provider_with_unreachable("aws", (), temp_host_dir, temp_mngr_ctx)
-
-    assert describe_unreachable_endpoints([provider]) == ""
-
-
-def test_describe_unreachable_endpoints_names_provider_and_ips(
-    temp_host_dir: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """The hint must name the provider and the IPs, and flag that an agent could be missing."""
-    provider = _mock_provider_with_unreachable("aws", ("50.17.2.88",), temp_host_dir, temp_mngr_ctx)
-
-    hint = describe_unreachable_endpoints([provider])
-
-    assert "aws" in hint
-    assert "50.17.2.88" in hint
-    assert "missing" in hint
-    # Designed to be concatenated onto an existing message, so it must lead with a space.
-    assert hint.startswith(" ")
-
-
-def test_describe_unreachable_endpoints_aggregates_across_providers(
-    temp_host_dir: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """Every provider with an unreachable host is named; fully-reachable ones are omitted."""
-    aws = _mock_provider_with_unreachable("aws", ("50.17.2.88", "10.0.0.1"), temp_host_dir, temp_mngr_ctx)
-    reachable = _mock_provider_with_unreachable("vultr", (), temp_host_dir, temp_mngr_ctx)
-
-    hint = describe_unreachable_endpoints([aws, reachable])
-
-    assert "aws" in hint
-    assert "50.17.2.88" in hint
-    assert "10.0.0.1" in hint
-    assert "vultr" not in hint
-
-
-def test_with_unreachable_hint_preserves_user_input_error_type() -> None:
-    """An unknown agent name yields a UserInputError; the hint is appended, type preserved."""
-    original = UserInputError("Could not find agent with ID or name: my-agent")
-
-    result = _with_unreachable_hint(original, " Note: host X unreachable.")
-
-    assert isinstance(result, UserInputError)
-    assert str(result) == "Could not find agent with ID or name: my-agent Note: host X unreachable."
-
-
-def test_with_unreachable_hint_preserves_agent_not_found_error_type() -> None:
-    """An unknown agent id yields an AgentNotFoundError; the hint is appended, type preserved."""
-    original = AgentNotFoundError("agent-123")
-
-    result = _with_unreachable_hint(original, " Note: host X unreachable.")
-
-    assert isinstance(result, AgentNotFoundError)
-    assert "agent-123" in str(result)
-    assert "host X unreachable" in str(result)

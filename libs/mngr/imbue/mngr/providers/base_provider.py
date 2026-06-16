@@ -42,17 +42,6 @@ class BaseProviderInstance(ProviderInstanceInterface):
     def reset_caches(self) -> None:
         pass
 
-    @property
-    def unreachable_endpoints(self) -> tuple[str, ...]:
-        """Hosts that could not be reached during the most recent discovery.
-
-        Empty by default. Providers that discover remote hosts over the
-        network (e.g. the VPS-backed ones) override this to report endpoints
-        whose records could not be read, so callers can tell "no such agent"
-        apart from "the agent's host was unreachable".
-        """
-        return ()
-
     def create_host(
         self,
         name: HostName,

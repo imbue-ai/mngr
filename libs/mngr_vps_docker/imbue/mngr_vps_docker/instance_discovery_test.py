@@ -348,7 +348,6 @@ def test_read_records_from_vps_falls_back_to_cache_on_host_connection_error(
 
     assert result.records == (cached_on_unreachable,)
     assert result.live_agent_data_by_host_id == {}
-    assert result.is_unreachable is True
 
 
 def test_read_records_from_vps_returns_empty_when_no_cache_and_ssh_fails(
@@ -361,7 +360,6 @@ def test_read_records_from_vps_returns_empty_when_no_cache_and_ssh_fails(
 
     assert result.records == ()
     assert result.live_agent_data_by_host_id == {}
-    assert result.is_unreachable is True
 
 
 def test_read_records_from_vps_falls_back_on_mngr_error(provider: _DiscoveryTestProvider) -> None:
@@ -374,7 +372,6 @@ def test_read_records_from_vps_falls_back_on_mngr_error(provider: _DiscoveryTest
     result = provider._read_records_from_vps("10.0.0.4")
 
     assert result.records == (cached,)
-    assert result.is_unreachable is True
 
 
 def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
@@ -392,8 +389,6 @@ def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
 
     assert result.records == ()
     assert result.live_agent_data_by_host_id == {}
-    # The outer connection succeeded -- "no container yet" is not unreachable.
-    assert result.is_unreachable is False
 
 
 def test_extract_live_agent_data_returns_data_dicts_and_skips_malformed() -> None:
@@ -658,28 +653,3 @@ def test_find_host_record_returns_none_when_discovery_finds_no_match(
     # Discovery still warms the cache with what it did find, so a subsequent
     # lookup for the real host short-circuits.
     assert host_other in provider._host_record_cache
-
-
-# =========================================================================
-# unreachable_endpoints -- so callers can explain a missing agent
-# =========================================================================
-
-
-def test_discover_records_unreachable_endpoints_and_resets_between_sweeps(
-    provider: _DiscoveryTestProvider,
-) -> None:
-    """Unreachable VPSes are tracked per sweep; a later clean sweep clears the prior one."""
-    good_host = HostId.generate()
-    provider.hostnames = ["10.0.0.8", "10.0.0.9"]
-    provider.per_vps_records["10.0.0.8"] = _VpsDiscoveryData(
-        records=(_make_record(good_host, "host-good", "10.0.0.8"),)
-    )
-    provider.per_vps_outer_errors["10.0.0.9"] = HostConnectionError("connection refused")
-
-    provider._discover_host_records_with_agents()
-    assert provider.unreachable_endpoints == ("10.0.0.9",)
-
-    # A subsequent all-reachable sweep must clear the stale endpoint rather than accumulate.
-    provider.hostnames = ["10.0.0.8"]
-    provider._discover_host_records_with_agents()
-    assert provider.unreachable_endpoints == ()

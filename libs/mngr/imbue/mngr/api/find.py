@@ -546,37 +546,6 @@ def _post_filter_matches_by_addresses(
     return filtered
 
 
-def describe_unreachable_endpoints(providers: Sequence[BaseProviderInstance]) -> str:
-    """Build a hint listing hosts that were unreachable during discovery.
-
-    Returns an empty string when every provider was fully reachable.
-    Otherwise returns a leading-space suffix suitable for appending to an
-    "agent not found" message, naming each provider and its unreachable
-    endpoints so a transiently-unreachable host is not mistaken for a
-    nonexistent agent.
-    """
-    parts: list[str] = []
-    for provider in providers:
-        endpoints = tuple(provider.unreachable_endpoints)
-        if endpoints:
-            parts.append(f"{len(endpoints)} on provider {provider.name!r} ({', '.join(endpoints)})")
-    if not parts:
-        return ""
-    return (
-        " Note: some hosts were unreachable during discovery (" + "; ".join(parts) + "); "
-        "an agent on one of them would be missing from this result. Check the host or retry."
-    )
-
-
-def _with_unreachable_hint(
-    error: UserInputError | AgentNotFoundError, hint: str
-) -> UserInputError | AgentNotFoundError:
-    """Re-create ``error`` with ``hint`` appended, preserving its type (and its tailored help text)."""
-    if isinstance(error, AgentNotFoundError):
-        return AgentNotFoundError(f"{error.agent_identifier}{hint}")
-    return UserInputError(f"{error}{hint}")
-
-
 def find_one_agent_and_agents_by_host(
     address: AgentAddress,
     mngr_ctx: MngrContext,
@@ -599,23 +568,11 @@ def find_one_agent_and_agents_by_host(
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
     agent cannot be resolved (see :func:`filter_one_agent`).
     """
-    agents_by_host, providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
+    agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
     if not agents_by_host and address.host is not None:
         raise UserInputError(f"No hosts found matching {address.host}")
 
-    try:
-        host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
-    except (UserInputError, AgentNotFoundError) as e:
-        # A no-match might be genuine, or the agent's host may have been
-        # unreachable during discovery (so it never made it into
-        # agents_by_host). filter_one_agent raises AgentNotFoundError for an
-        # unknown id and UserInputError for an unknown name -- but also for a
-        # multi-match, where the agent WAS found and the hint would mislead, so
-        # gate on a true zero-match.
-        hint = describe_unreachable_endpoints(providers)
-        if hint and not _filter_all_agents(address.agent, agents_by_host):
-            raise _with_unreachable_hint(e, hint) from e
-        raise
+    host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     return host_ref, agent_ref, agents_by_host
 
 
