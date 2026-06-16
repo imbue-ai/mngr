@@ -253,16 +253,31 @@ def _provision_host_identity(identity: S3StateHostIdentity | None, use_offline_h
 
 
 def _resolve_and_provision_host_identity(
-    base: AwsProviderConfig, region: str | None, use_offline_host_dir: AutoToggle
+    base: AwsProviderConfig, region: str | None, use_offline_host_dir: AutoToggle, *, was_bucket_set_up: bool
 ) -> str | None:
     """Resolve credentials, build the host identity, then provision it per the tri-state flag.
 
-    Wraps ``_provision_host_identity`` with credential resolution: a
-    no-credentials / bad-environment error is treated like an unresolvable
-    identity (warn-and-continue for ``AUTO``, raise for ``YES``). ``NO`` never
-    touches credentials.
+    Gates on the state bucket having been set up: the identity's inline policy is
+    scoped to the bucket, so provisioning it is only meaningful once the bucket
+    exists. When the bucket setup was skipped/failed (``was_bucket_set_up`` is
+    False), ``YES`` raises (it cannot deliver a working offline host_dir) and
+    ``AUTO`` / ``NO`` return None (the documented degraded outcome). When the
+    bucket is present, wraps ``_provision_host_identity`` with credential
+    resolution: a no-credentials / bad-environment error is treated like an
+    unresolvable identity (warn-and-continue for ``AUTO``, raise for ``YES``).
+    ``NO`` never touches credentials.
     """
     if use_offline_host_dir is AutoToggle.NO:
+        return None
+    if not was_bucket_set_up:
+        message = (
+            "Cannot provision the host-dir IAM identity: the S3 state bucket could not be set up "
+            "(its inline policy is scoped to that bucket). Re-run with sufficient S3/STS permissions, "
+            "or use --use-offline-host-dir auto/no."
+        )
+        if use_offline_host_dir is AutoToggle.YES:
+            raise click.ClickException(message)
+        logger.warning(message)
         return None
     try:
         identity = _build_host_identity(base, region)
@@ -527,7 +542,10 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # None. The bucket-only steps above are unconditional, so a later
     # `prepare --use-offline-host-dir yes` adds just the identity.
     host_identity_name = _resolve_and_provision_host_identity(
-        base, opts.region, AutoToggle(opts.use_offline_host_dir.upper())
+        base,
+        opts.region,
+        AutoToggle(opts.use_offline_host_dir.upper()),
+        was_bucket_set_up=state_bucket_name is not None,
     )
     _output_prepare_result(
         result, client.region, state_bucket_name, was_bucket_created, host_identity_name, output_opts.output_format
