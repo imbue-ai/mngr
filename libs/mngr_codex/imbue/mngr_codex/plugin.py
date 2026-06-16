@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import os
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -96,12 +97,15 @@ from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import get_preserved_agents_root_dir
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -173,6 +177,17 @@ _APPROVAL_POLICY_NEVER: Final[str] = "never"
 # (``codex --version`` output, then codex's version.json). Chosen to never collide
 # with a version string or JSON content.
 _VERSION_SPLIT_SENTINEL: Final[str] = "__MNGR_CODEX_VERSION_SPLIT__"
+
+# Interim trigger seam for session adoption, ahead of the central ``--adopt-session``
+# mixin/flag. When set on a ``mngr create``, ``on_after_provisioning`` resolves this
+# value (a codex session id or an absolute rollout ``.jsonl`` path) against the
+# preserved, live-mngr-agent, and user-native session stores, copies the resolved
+# rollout store into the new agent's ``CODEX_HOME/sessions``, rebinds the recorded cwd
+# to the new work dir, and writes the adopted session id as the resume pointer. The
+# string is hardcoded (not imported from the test harness, which pulls in pytest); once
+# the flag lands, ``plugin_data["adopt_session"]`` takes precedence and this is the
+# fallback. Keep in sync with ``ADOPT_SESSION_ENV_VAR`` in the release harness.
+_ADOPT_SESSION_ENV_VAR: Final[str] = "MNGR_ADOPT_SESSION"
 
 
 class CodexUpdatePolicy(UpperCaseStrEnum):
