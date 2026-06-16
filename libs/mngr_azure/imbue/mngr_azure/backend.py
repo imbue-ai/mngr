@@ -68,7 +68,9 @@ _AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
 # dropped, not failed (realistically only ``labels``).
 _MAX_TAG_VALUE_LEN: Final[int] = 256
 # ``mngr-host-name`` tag holds ``mngr-<host_name>``; strip the prefix on read.
-_HOST_NAME_PREFIX: Final[str] = "mngr-"
+# Named to match ``AwsProvider`` (both mirror the host name into instance tags);
+# GCP differs (GCE metadata) and keeps its own ``_HOST_NAME_PREFIX``.
+_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
 
 # Self-stopping idle watcher (host-side). Like AWS/GCP, the in-container activity
 # watcher writes ``IDLE_SENTINEL_FILENAME`` onto the shared volume when idle and a
@@ -716,8 +718,8 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
     def _host_name_from_tags(self, tags: Mapping[str, str]) -> HostName:
         """Recover the host name from the ``mngr-host-name=mngr-<name>`` tag (fallback: host-id)."""
         name_tag = tags.get(HOST_NAME_TAG_KEY, "")
-        if name_tag.startswith(_HOST_NAME_PREFIX):
-            return HostName(name_tag[len(_HOST_NAME_PREFIX) :])
+        if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
+            return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
         if name_tag:
             return HostName(name_tag)
         return HostName(tags.get("mngr-host-id", "unknown"))

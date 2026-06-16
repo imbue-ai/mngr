@@ -25,6 +25,7 @@ from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -662,7 +663,9 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_store = open_host_store(outer, host_volume_name_for(host_id))
                 existing = host_store.read_host_record()
                 if existing is not None:
-                    updated = existing.model_copy(update={"certified_host_data": certified_data})
+                    updated = existing.model_copy_update(
+                        to_update(existing.field_ref().certified_host_data, certified_data)
+                    )
                     host_store.write_host_record(updated)
         except MngrError as e:
             logger.warning("Failed to sync certified data to VPS host volume: {}", e)
@@ -1392,11 +1395,14 @@ class VpsDockerProvider(BaseProviderInstance):
             # carries it, so the subclass needs no second write. The write must
             # land before any deeper stop, since the volume is unreachable after.
             host_store = open_host_store(outer, host_record.config.volume_name)
-            record_updates: dict[str, object] = {"updated_at": datetime.now(timezone.utc)}
+            certified = host_record.certified_host_data
+            data_updates = [to_update(certified.field_ref().updated_at, datetime.now(timezone.utc))]
             if stop_reason is not None:
-                record_updates["stop_reason"] = stop_reason.value
-            updated_data = host_record.certified_host_data.model_copy(update=record_updates)
-            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+                data_updates.append(to_update(certified.field_ref().stop_reason, stop_reason.value))
+            updated_data = certified.model_copy_update(*data_updates)
+            updated_record = host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_data)
+            )
             host_store.write_host_record(updated_record)
 
         self._host_record_cache[host_id] = updated_record
@@ -2295,10 +2301,14 @@ class VpsDockerProvider(BaseProviderInstance):
             # Update certified data with new snapshot
             existing_snapshots = host_record.certified_host_data.snapshots
             updated_snapshots = list(existing_snapshots) + [snapshot_record]
-            updated_data = host_record.certified_host_data.model_copy(
-                update={"snapshots": updated_snapshots, "updated_at": datetime.now(timezone.utc)}
+            certified = host_record.certified_host_data
+            updated_data = certified.model_copy_update(
+                to_update(certified.field_ref().snapshots, updated_snapshots),
+                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
             )
-            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+            updated_record = host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_data)
+            )
 
             # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
             host_store = open_host_store(outer, host_record.config.volume_name)
@@ -2361,10 +2371,14 @@ class VpsDockerProvider(BaseProviderInstance):
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
 
-        updated_data = host_record.certified_host_data.model_copy(
-            update={"host_name": str(name), "updated_at": datetime.now(timezone.utc)}
+        certified = host_record.certified_host_data
+        updated_data = certified.model_copy_update(
+            to_update(certified.field_ref().host_name, str(name)),
+            to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
         )
-        updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+        updated_record = host_record.model_copy_update(
+            to_update(host_record.field_ref().certified_host_data, updated_data)
+        )
 
         if host_record.vps_ip is not None:
             if host_record.config is None:
