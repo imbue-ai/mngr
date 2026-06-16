@@ -9,3 +9,6 @@ that the bare mode supersedes the "single mode of operation" framing in
 `specs/vps-docker-provider/spec.md`, and `specs/bare-providers/extraction_design.md`
 giving the implementation-level `HostRealizer` seam contract, state-ownership
 split, host-record evolution, and per-method migration for Stage 1.
+
+Updated the root pytest coverage config to track the renamed `imbue.mngr_vps`
+package (was `imbue.mngr_vps_docker`).
