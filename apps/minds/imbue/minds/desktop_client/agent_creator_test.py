@@ -990,8 +990,14 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
     )
 
 
-def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 10.0) -> None:
-    """Poll ``get_creation_info`` until status is DONE or FAILED, then return."""
+def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 30.0) -> None:
+    """Poll ``get_creation_info`` until status is DONE or FAILED, then return.
+
+    The deadline is only a ceiling -- the loop returns the instant the status is
+    terminal, so a passing test never waits for it. It is set to 30s (matching the
+    ``@pytest.mark.timeout(30)`` on the litellm-key tests) so heavy setup under
+    offload CI contention does not trip a spurious timeout at the old 10s.
+    """
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
         info = creator.get_creation_info(creation_id)
