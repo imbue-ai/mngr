@@ -158,38 +158,38 @@ judgement for a v1 service.
    stdout is discarded) to `returncode=1`, colliding with a real exit-1.
 
 7. **[Robustness — Low] Window targeting by name is ambiguous on duplicate
-   names.** `watcher.py:249` — `capture-pane -t {session}:{window}` resolves a
+   names.** _[NOT FIXED — deliberate. Bootstrap names each service window `svc-<name>` uniquely, so duplicate names cannot arise in practice; the index-based refactor adds complexity to a deliberately-simple script for a case that does not occur, and the review itself notes the name-based approach is consistent with bootstrap's own pattern.]_ `watcher.py:249` — `capture-pane -t {session}:{window}` resolves a
    duplicate name to one window, so the other is never scanned and the two
    share a `seen` key. Mirrors bootstrap's own name-based `list-windows`
    approach, so it's consistent with the existing codebase pattern;
    `#{window_index}` would be unambiguous.
 
-8. **[Test gap — Medium] The I/O shell is untested.** `watcher.py:324` (`main`),
+8. **[Test gap — Medium] The I/O shell is untested.** _[RESOLVED — `_default_command_runner` (success / missing-binary / timeout / sentinel) and `_alert_random_agent`'s send-failure & list-failure branches are now covered by FCT commits `dd2b89d3` (#2) and `f129139b` (#6); `_handle_signal` is covered by FCT commit `840b5b9b`. `main()`'s `while True` loop is intentionally left to live tmux verification rather than unit-tested, to avoid refactoring it purely for testability.]_ `watcher.py:324` (`main`),
    `_handle_signal`, the `ERROR_WATCHER_PATTERN` wiring, `_alert_random_agent`'s
    send-failure / list-failure branches, and `_default_command_runner` have no
    coverage. REQ-SPAWN-4 (failed send logged, not crashing) and REQ-MATCH-4 (env
    wiring) are asserted nowhere; a regression there would pass CI.
 
 9. **[Cleanup/Reuse — Low-Medium] `build_list_command` / `build_message_command`
-   duplicate existing builders.** `watcher.py:121,126` are byte-for-byte copies
+   duplicate existing builders.** _[NOT FIXED — deliberate. `mngr_cli_contract` is a test-only validator that depends on `imbue-mngr`, and `error_watcher`/`telegram_bot` do not declare it as a runtime dependency (it is only importable via the dev workspace venv). Centralizing the builders there would pull all of mngr into those libs' runtime closures for four trivial argv lines, and the design intent is that this service stays a simple FCT-side script that does not couple to the mngr interface. The minor duplication is the better trade.]_ `watcher.py:121,126` are byte-for-byte copies
    of `_build_list_command` (`claude_auth.py:312`) and `_build_message_command`
    (`telegram_bot/bot.py:59`) — now three copies. The `mngr_cli_contract` lib
    (already a shared dep of all three) is a natural home for one shared builder.
 
 10. **[Spec accuracy — Low] SIGTERM/SIGINT handlers aren't on the real stop
-    path.** `watcher.py:335` — bootstrap stops services via `tmux kill-window`
+    path.** _[RESOLVED — FCT commit `840b5b9b` installs an explicit SIGHUP handler (the signal `tmux kill-window` actually delivers) alongside SIGTERM/SIGINT, so the watcher now exits via an installed handler on the real stop path. Note: the spec prose itself lives in the monorepo and was left unchanged per the constraint that only review.md is edited here.]_ `watcher.py:335` — bootstrap stops services via `tmux kill-window`
     (`manager.py:617`), which delivers SIGHUP (confirmed by
     `vendor/mngr/.../testing.py`), not SIGTERM. The process still exits cleanly
     via the default SIGHUP action, and this exactly mirrors `app_watcher` (which
     the spec says to mirror), so the outcome satisfies Scenario 5 — but the
     spec's description of the mechanism is inaccurate.
 
-11. **[Consistency — Low] No `if __name__ == "__main__": main()` guard.** Both
+11. **[Consistency — Low] No `if __name__ == "__main__": main()` guard.** _[RESOLVED — FCT commit `840b5b9b`]_ Both
     siblings (`app_watcher/watcher.py`, `telegram_bot/bot.py`) have one; here
     `python -m error_watcher.watcher` is a silent no-op. The `uv run
     error-watcher` console script (the actual launch path) works fine.
 
-12. **[Efficiency — Low] `get_session_name` re-shells every poll.**
+12. **[Efficiency — Low] `get_session_name` re-shells every poll.** _[NOT FIXED — deliberate. The cost is one `tmux display-message` call per 5s poll (negligible), while hoisting the session would change `run_one_poll`'s signature and ripple through every integration test. Left as-is to keep the change minimal, per the guidance to not change more than necessary.]_
     `watcher.py:306` — the session name is constant for the process lifetime but
     is re-fetched via `tmux display-message` every 5 s. `main()` already hoists
     `pattern` / `rng` / `seen` out of the loop; the session could be hoisted the
@@ -210,3 +210,20 @@ most likely day-one annoyance in practice. Everything else is low-severity
 hardening, test-coverage, or cleanup. Recommended follow-up: fix #1 (record
 `seen` only after a successful send) and decide whether #4 needs a coarser
 dedup key; the rest can be tracked as v1.1 polish.
+
+## Resolution (post-review fix pass)
+
+All findings have been addressed in the FCT clone (branch `preston/error-checker`),
+each in its own commit (see the per-finding annotations above):
+
+- **Fixed:** #1 (`6735584e`), #2 (`dd2b89d3`), #3 (`0a67eb66`), #4 (`507e214a`),
+  #5 (`36740cda`), #6 (`f129139b`), #8 / #10 / #11 (`840b5b9b`).
+- **Deliberately not fixed** (rationale inline): #7 (duplicate window names cannot
+  arise — bootstrap names service windows uniquely), #9 (centralizing the argv
+  builders would couple this simple FCT script to the `imbue-mngr` runtime), #12
+  (negligible per-poll cost; the fix would churn `run_one_poll`'s signature and
+  every test). #8's only residual is `main()`'s `while True` loop, left to live
+  tmux verification.
+
+With #1–#6 fixed, the two highest-risk items the assessment flagged (lost-alert
+ordering and the volatile-line re-alert storm) are resolved.
