@@ -106,7 +106,7 @@ most-severe first. None is a hard blocker; severities are the reviewer's
 judgement for a v1 service.
 
 1. **[Correctness — Medium-High] Dedup credit is consumed before the alert is
-   confirmed delivered.** `watcher.py:316` — `new_matches` adds the matched
+   confirmed delivered.** _[RESOLVED — FCT commit `6735584e`]_ `watcher.py:316` — `new_matches` adds the matched
    lines to `seen[window]` during the scan loop, then `_alert_random_agent`
    runs at `:321`. If enumeration returns no messageable agent (Scenario 4),
    `mngr list` fails, or `mngr message` returns non-zero (logged, not raised at
@@ -118,14 +118,14 @@ judgement for a v1 service.
    "alerted".
 
 2. **[Correctness — Medium] Single random recipient with no fallback on send
-   failure.** `watcher.py:277,283` — `choose_recipient` picks exactly one agent;
+   failure.** _[RESOLVED — FCT commit `dd2b89d3`]_ `watcher.py:277,283` — `choose_recipient` picks exactly one agent;
    if `mngr message` to it fails, the failure is logged and the poll returns
    with no retry against the rest of the messageable pool. Combined with #1, one
    bad pick (e.g. the agent stopped between `list` and `message`) drops the
    alert entirely despite other reachable agents.
 
 3. **[Correctness — Medium] `select_messageable_names` excludes only
-   `STOPPED`.** `watcher.py:184` — `AgentLifecycleState`
+   `STOPPED`.** _[RESOLVED — FCT commit `0a67eb66`; added `type == "claude"` filter, kept STOPPED as the sole excluded state per mngr's actual send-path rule]_ `watcher.py:184` — `AgentLifecycleState`
    (`vendor/mngr/.../primitives.py:266`) also has `DONE`, `REPLACED`, `UNKNOWN`,
    `RUNNING_UNKNOWN_AGENT_TYPE`. `mngr message` resolves with `target_state=None`
    and `is_start_desired=False` (`message.py:146,175`), so it *attempts*
@@ -136,20 +136,21 @@ judgement for a v1 service.
    matches the spec's literal wording but not mngr's real deliverability.
 
 4. **[Correctness — Medium] Exact-line dedup re-alerts every poll for volatile
-   error lines.** `watcher.py:91` — dedup keys on the exact line string, so an
+   error lines.** _[RESOLVED — FCT commit `507e214a`; dedup now keys on a digit-normalized line]_ `watcher.py:91` — dedup keys on the exact line string, so an
    error line carrying a timestamp / counter / request-id (`[12:00:05] ERROR
    ...` then `[12:00:10] ERROR ...`) is a "new" match every 5 s and fires a
    fresh alert to a random agent. The stated non-goals only excuse benign
    *false positives* ("0 errors", "ErrorBoundary"), not an alert storm from
    volatile-but-real error lines.
 
-5. **[Resource — Low-Medium] `seen` grows without bound.** `watcher.py:79,93` —
+5. **[Resource — Low-Medium] `seen` grows without bound.** _[RESOLVED — FCT commit `36740cda`; prune closed windows + per-window key cap]_ `watcher.py:79,93` —
    the per-window sets only ever grow and window keys are never evicted, in a
    permanent process. Worsened by #4 (high-cardinality lines). A bounded /
    LRU structure, or hashing the matched block, would cap it.
 
 6. **[Correctness — Low-Medium] `mngr list` non-zero return short-circuits
    before parsing, and `returncode=1` is an overloaded sentinel.**
+   _[RESOLVED — FCT commit `f129139b`; parse list regardless of exit, distinct `RUNNER_FAILURE_RETURNCODE`, preserve timeout stdout]_
    `watcher.py:269` returns before `parse_agent_summaries`, so if `mngr list`
    ever exits non-zero while still emitting a valid `{"agents": [...]}` payload,
    no alert is sent. `_default_command_runner:213` also maps every
