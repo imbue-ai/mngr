@@ -8,4 +8,4 @@ Adds the `azure-mgmt-authorization` dependency (for the custom role + role assig
 
 `deallocate_instance` / `start_instance` now honor their `timeout_seconds`: the long-running operation is bounded and raises `VpsProvisioningError` if it outlasts the deadline (matching the AWS/GCP clients), instead of blocking indefinitely.
 
-Internal: Azure's stopped-host offline discovery and resolution now come from the shared `OfflineCapableVpsDockerProvider` base instead of an Azure-specific copy. No behavior change.
+Internal: Azure's stopped-host offline discovery and resolution, plus its deallocate/start lifecycle and idle-watcher install, now come from the shared `OfflineCapableVpsDockerProvider` base instead of Azure-specific copies; Azure supplies only its specifics as hooks (deallocate/start the VM, no-op known_hosts rebind for its static IP, the self-deallocate idle action + role assignment). No behavior change. The `_HOST_NAME_PREFIX` constant is renamed `_HOST_NAME_TAG_PREFIX` to match AwsProvider.

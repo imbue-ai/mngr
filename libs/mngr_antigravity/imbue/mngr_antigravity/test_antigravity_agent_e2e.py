@@ -78,6 +78,7 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
     observes_running_marker = False
     forces_tool_call = False
     asserts_usage = False
+    native_session_preserved_relpaths = ("plugin/antigravity/home/.gemini/antigravity-cli/conversations",)
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("agy") is None or not (_REAL_GEMINI / "oauth_creds.json").exists():
@@ -131,6 +132,7 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.rsync
 # Known-flaky: the post-resume "recall" step occasionally hits agy's TUI "Timeout waiting for
 # message submission signal (waited 90.0s)" and fails -- the conversation restores correctly,
 # only the message submit into the resumed TUI hangs. Seen once in two local runs on agy 1.0.8.
