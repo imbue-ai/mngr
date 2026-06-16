@@ -47,6 +47,7 @@ class _PiReleaseProfile(AgentReleaseProfile):
     forces_tool_call = True
     asserts_usage = True
     native_session_preserved_relpaths = ("plugin/pi_coding/sessions",)
+    adopts_preserved_session = True
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("pi") is None or not os.environ.get("ANTHROPIC_API_KEY"):
@@ -88,6 +89,37 @@ class _PiReleaseProfile(AgentReleaseProfile):
             "--model",
             _MODEL,
         ]
+
+    def adopt_session_arg(self, preserved_dir: Path) -> str:
+        """Return the absolute path to the preserved pi session JSONL to adopt.
+
+        ``pi_session_file`` (preserved alongside the store) holds the live agent's
+        session path; only its basename is stable across the destroy, so locate the
+        matching JSONL under the preserved ``sessions`` store and return that path.
+        """
+        pointer = preserved_dir / "pi_session_file"
+        session_basename = Path(pointer.read_text().strip()).name
+        sessions_root = preserved_dir / "plugin" / "pi_coding" / "sessions"
+        matches = [path for path in sessions_root.glob(f"*/{session_basename}")]
+        assert len(matches) == 1, (
+            f"expected exactly one preserved pi session named {session_basename} under {sessions_root}, "
+            f"found {matches}"
+        )
+        return str(matches[0])
+
+    def prepare_adoption_workspace(self, work_dir: Path) -> None:
+        """Seed the fresh adoption worktree with the same trust inputs the base source has.
+
+        A ``.agents/skills`` dir gives the worktree pi "project trust inputs"; ``mngr
+        create --yes`` pre-seeds trust so the dialog never appears, matching ``setup``.
+        """
+        init_git_repo(work_dir, initial_commit=True)
+        (work_dir / ".gitignore").write_text(".pi/\n")
+        skills_dir = work_dir / ".agents" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "example.md").write_text("# Example skill (gives the worktree pi trust inputs)\n")
+        run_git_command(work_dir, "add", ".gitignore", ".agents")
+        run_git_command(work_dir, "commit", "-m", "add gitignore and .agents/skills")
 
     def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
         # uv run mngr from the checkout, matching how the rest of this lib's e2e runs.

@@ -20,6 +20,7 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import get_preserved_agents_root_dir
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -30,6 +31,7 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
@@ -186,6 +188,131 @@ def _get_pi_home_dir(home_dir: Path | None = None) -> Path:
     if home_dir is None:
         home_dir = Path.home()
     return home_dir / _PI_HOME_DIR_NAME / _PI_AGENT_SUBDIR
+
+
+# Interim trigger seam for session adoption. While a public ``--adopt-session``
+# flag (which will arrive as ``plugin_data["adopt_session"]``) is built centrally,
+# adoption is triggered by this env var (the value is an id or a path resolved by
+# ``_resolve_adopt_session``). Hardcoded here on purpose -- the shared release
+# harness sets the same name, but importing it would pull in pytest. When the flag
+# lands, the env var becomes a fallback to the plugin_data read (see
+# ``_resolve_adopt_session_arg``).
+_MNGR_ADOPT_SESSION_ENV_VAR: str = "MNGR_ADOPT_SESSION"
+
+# The first line of a pi session JSONL is a ``{"type": "session", ..., "cwd": ...}``
+# record; ``cwd`` is the absolute (realpath) directory pi resumes into. When that
+# directory no longer exists pi refuses to resume ("Stored session working directory
+# does not exist"), so adoption rewrites this field to the new agent's work_dir.
+_PI_SESSION_RECORD_TYPE: str = "session"
+_PI_SESSION_CWD_KEY: str = "cwd"
+
+
+def _pi_session_store_dirs(mngr_ctx: MngrContext) -> list[Path]:
+    """Return the pi ``sessions`` directories to search on the local host.
+
+    Mirrors the claude resolver's scope: every live local mngr agent
+    (``<host_dir>/agents/<id>/...``) and every preserved agent
+    (``<host_dir>/preserved/<name>--<id>/...``), each of which stores its pi
+    session JSONLs under ``plugin/pi_coding/sessions/<encoded-cwd>/``.
+
+    Only the local host dir is scanned: an adopted session's files are copied
+    onto the destination host from a local source path, so remote agents' stores
+    are not searched here.
+    """
+    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
+    store_dirs: list[Path] = []
+    for parent in (get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)):
+        if not parent.is_dir():
+            continue
+        for agent_dir in sorted(parent.iterdir()):
+            sessions_dir = agent_dir / _PI_SESSIONS_DIR_RELPATH
+            if sessions_dir.is_dir():
+                store_dirs.append(sessions_dir)
+    return store_dirs
+
+
+def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, home_dir: Path | None = None) -> Path:
+    """Resolve an adopt-session argument to the source pi session JSONL path.
+
+    Accepts either:
+    - An absolute path to a ``.jsonl`` session file.
+    - A session id, searched across (all of):
+      * the user-native store ``~/.pi/agent/sessions/`` (a plain ``pi`` run)
+      * every live local mngr agent's ``plugin/pi_coding/sessions/``
+      * every preserved (destroyed) agent's ``plugin/pi_coding/sessions/``
+
+      The id matches a JSONL whose filename stem ends with the id (pi names files
+      ``<timestamp>_<id>.jsonl``, so the bare id is the trailing component). All
+      dirs are searched; a match in more than one is rejected as ambiguous (the
+      user must pass the full ``.jsonl`` path), exactly as claude does.
+
+    Returns the source session JSONL path.
+    """
+    if adopt_session_arg.endswith(".jsonl"):
+        session_file = Path(adopt_session_arg).resolve()
+        if not session_file.exists():
+            raise UserInputError(f"pi session file not found: {session_file}")
+        return session_file
+
+    candidate_dirs = [_get_pi_home_dir(home_dir) / "sessions", *_pi_session_store_dirs(mngr_ctx)]
+
+    # Deduplicate by resolved path while preserving candidate ordering.
+    search_dirs: list[Path] = []
+    seen_resolved_dirs: set[Path] = set()
+    for candidate in candidate_dirs:
+        resolved = candidate.resolve()
+        if resolved not in seen_resolved_dirs:
+            seen_resolved_dirs.add(resolved)
+            search_dirs.append(candidate)
+
+    matches: list[Path] = []
+    for sessions_dir in search_dirs:
+        if sessions_dir.is_dir():
+            for session_file in sessions_dir.glob(f"*/*{adopt_session_arg}.jsonl"):
+                if session_file.stem == adopt_session_arg or session_file.stem.endswith(f"_{adopt_session_arg}"):
+                    matches.append(session_file)
+
+    if not matches:
+        # Don't enumerate the searched dirs: there is one per local mngr agent, so the
+        # list can run long. The search scope is the user-native store, live agents,
+        # and preserved agents.
+        raise UserInputError(
+            f"pi session {adopt_session_arg} not found. "
+            "Check that the session id is correct, or pass an absolute path to the .jsonl file."
+        )
+    if len(matches) > 1:
+        match_list = "\n".join(f"  {match}" for match in matches)
+        raise UserInputError(
+            f"pi session {adopt_session_arg} found in multiple session stores:\n{match_list}\n"
+            "Pass the absolute path to the .jsonl file to specify which one."
+        )
+
+    return matches[0]
+
+
+def _rewrite_pi_session_cwd(content: str, new_cwd: str) -> str:
+    """Rewrite the embedded ``cwd`` in a pi session JSONL's first (``session``) record.
+
+    pi binds a session to the cwd it was created in (the first JSONL line's
+    ``cwd`` field) and refuses to resume when that directory no longer exists.
+    After adopting a session into a new agent's (new) work_dir we rewrite this to
+    the new work_dir so the resume never stalls at the missing-cwd dialog. Only
+    the first record is touched; later records carry no ``cwd``. A first line that
+    is not a ``session`` record is a schema we don't understand -- a hard error
+    rather than a silent no-op (which would leave the dialog in place).
+    """
+    lines = content.splitlines()
+    if not lines:
+        raise UserInputError("pi session file is empty; cannot rebind its working directory")
+    first = json.loads(lines[0])
+    if not isinstance(first, dict) or first.get("type") != _PI_SESSION_RECORD_TYPE:
+        raise UserInputError(
+            f"pi session file's first record is not a {_PI_SESSION_RECORD_TYPE!r} record; "
+            "cannot rebind its working directory"
+        )
+    first[_PI_SESSION_CWD_KEY] = new_cwd
+    lines[0] = json.dumps(first)
+    return "\n".join(lines) + "\n"
 
 
 class PiAutoAllowRequiredError(PluginMngrError, ValueError):
@@ -773,7 +900,54 @@ class PiCodingAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """No post-provisioning steps needed."""
+        """Adopt an existing pi session so the new agent resumes its conversation.
+
+        Triggered by ``plugin_data["adopt_session"]`` (the future ``--adopt-session``
+        flag) or, as an interim seam, the ``MNGR_ADOPT_SESSION`` env var. When set,
+        the named session is resolved across the user-native store, live mngr agents,
+        and preserved agents, copied into this agent's session store, rebound to this
+        agent's work_dir, and recorded as the resume pointer.
+        """
+        adopt_arg = self._resolve_adopt_session_arg(options)
+        if adopt_arg is not None:
+            self._adopt_session(host, adopt_arg)
+
+    def _resolve_adopt_session_arg(self, options: CreateAgentOptions) -> str | None:
+        """Return the adopt-session argument, preferring plugin_data over the env-var seam.
+
+        ``plugin_data["adopt_session"]`` is the future public-flag path; until that
+        flag exists it is unset and the ``MNGR_ADOPT_SESSION`` env var (the interim
+        trigger) supplies the value.
+        """
+        from_plugin_data = options.plugin_data.get("adopt_session")
+        if from_plugin_data:
+            return str(from_plugin_data)
+        return os.environ.get(_MNGR_ADOPT_SESSION_ENV_VAR) or None
+
+    def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
+        """Copy the resolved session into this agent's store, rebind it, and point resume at it.
+
+        Steps:
+        1. Resolve ``adopt_arg`` (id or path) to a source JSONL on the local host.
+        2. Copy the source's encoded-cwd subdir into this agent's ``sessions/`` so the
+           store mirrors pi's own layout (the subdir name is cosmetic -- pi resumes by
+           the absolute path recorded below).
+        3. Rewrite the adopted JSONL's embedded cwd to this agent's host-canonical
+           work_dir, so pi never stalls at its missing-cwd dialog.
+        4. Write the adopted JSONL's new absolute path to ``pi_session_file`` so the
+           launch ``pi --session <file>`` resumes it.
+        """
+        source_file = _resolve_adopt_session(adopt_arg, self.mngr_ctx)
+        sessions_dir = self.get_pi_config_dir() / "sessions"
+        dest_subdir = sessions_dir / source_file.parent.name
+        with log_span("Adopting pi session {} into {}", source_file, dest_subdir):
+            host.copy_directory(host, source_file.parent, dest_subdir)
+
+        adopted_file = dest_subdir / source_file.name
+        new_cwd = self._get_host_canonical_work_dir(host)
+        host.write_text_file(adopted_file, _rewrite_pi_session_cwd(host.read_text_file(adopted_file), new_cwd))
+        host.write_text_file(self._get_agent_dir() / _SESSION_FILE_NAME, str(adopted_file))
+        logger.info("Adopted pi session, resuming {} (rebound cwd -> {})", adopted_file, new_cwd)
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         preserve_agent_state(_pi_coding_preserved_items(), self, host)

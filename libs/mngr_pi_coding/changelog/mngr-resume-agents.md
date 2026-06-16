@@ -1,0 +1,3 @@
+Added session adoption for the `pi-coding` agent type: a newly created agent can resume an existing pi conversation instead of starting fresh.
+
+The session to adopt is resolved (by session id or absolute `.jsonl` path) across the user-native store (`~/.pi/agent/sessions/`), every live mngr agent, and every preserved (destroyed) agent. The resolved session is copied into the new agent's store, its embedded working directory is rebound to the new agent's work_dir (so pi never stalls at its "working directory does not exist" dialog), and the resume pointer is written so launch resumes it.
