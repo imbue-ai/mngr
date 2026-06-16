@@ -9,3 +9,9 @@ accompanying class renames (`VpsDockerProvider` -> `VpsProvider`,
 `VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
 `VpsHostRecord`, `VpsDockerError` -> `VpsError`, etc.). Import-only; no behavior
 change.
+
+
+Enabled bare placement (`isolation=NONE`): an Azure OS shutdown does not halt
+compute billing, so the bare agent's idle `shutdown.sh` runs the ARM
+self-deallocate directly (the same call the container idle watcher uses), keeping
+the self-deallocate role assignment and skipping the host-side sentinel watcher.

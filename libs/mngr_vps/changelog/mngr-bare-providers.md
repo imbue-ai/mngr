@@ -52,10 +52,12 @@ in both shapes.
 Bare placement is gated to providers with a machine stop/start lifecycle: a
 provider without one rejects `isolation=NONE` at create time
 (`BareIsolationNotSupportedError`) rather than strand a VM it cannot restart.
-AWS and GCP enable it (their bare idle path self-stops the instance via the
-OS-shutdown behavior); Azure stays gated off until its self-deallocate wiring
-lands (an Azure OS shutdown does not halt compute billing). No user-visible
-behavior change for existing container hosts on any provider.
+AWS, GCP, and Azure all enable it. AWS/GCP bare self-stops the instance via the
+OS-shutdown behavior; Azure bare instead runs the ARM self-deallocate from its
+idle `shutdown.sh` (an Azure OS shutdown does not halt compute billing), reusing
+the same deallocate call the container watcher uses and keeping the
+self-deallocate role assignment. No user-visible behavior change for existing
+container hosts on any provider.
 
 Renamed the package from `mngr_vps_docker` to `mngr_vps` (the distribution
 `imbue-mngr-vps-docker` to `imbue-mngr-vps`), since Docker is now one of two

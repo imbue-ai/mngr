@@ -228,30 +228,35 @@ def _build_idle_watcher_service_unit() -> str:
     )
 
 
-def _build_self_deallocate_script(sentinel_on_outer: str) -> str:
-    """Build the host-side self-deallocate script the idle ``.service`` runs.
+def _build_self_deallocate_script(sentinel_on_outer: str | None) -> str:
+    """Build the host-side self-deallocate script that halts this VM's compute billing.
 
-    Halts Azure compute billing from inside the guest: fetch the VM's
-    managed-identity token from IMDS (no az CLI needed -- plain curl), read this
-    VM's ARM resource id from IMDS, then POST the ARM ``deallocate`` action (it
-    returns 202 before the guest is torn down). ``curl -f`` makes a 403 (no role
-    assignment -- the graceful-degradation config) exit non-zero; the script then
-    just logs and exits non-zero. It deliberately does NOT poweroff on failure: an
-    Azure OS shutdown does not halt compute billing, so a fallback ``shutdown``
-    would only strand the VM unreachable while it keeps billing. The sentinel is
-    removed first so a resumed VM does not immediately re-trigger (and so the
-    ``.path`` unit re-fires this deallocate next time the watcher re-creates it).
+    Fetches the VM's managed-identity token from IMDS (no az CLI needed -- plain
+    curl), reads this VM's ARM resource id from IMDS, then POSTs the ARM
+    ``deallocate`` action (it returns 202 before the guest is torn down).
+    ``curl -f`` makes a 403 (no role assignment -- the graceful-degradation
+    config) exit non-zero; the script then just logs and exits non-zero. It
+    deliberately does NOT poweroff on failure: an Azure OS shutdown does not halt
+    compute billing, so a fallback ``shutdown`` would only strand the VM
+    unreachable while it keeps billing.
+
+    The container path passes ``sentinel_on_outer`` so the script removes the idle
+    sentinel first (a resumed VM must not immediately re-trigger, and the ``.path``
+    unit re-fires this deallocate next time the watcher re-creates it). The bare
+    path runs this directly as the agent's ``shutdown.sh`` -- there is no sentinel,
+    so it passes ``None`` and the removal line is omitted.
     """
     token_url = (
         "http://169.254.169.254/metadata/identity/oauth2/token"
         "?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F"
     )
     resource_id_url = "http://169.254.169.254/metadata/instance/compute/resourceId?api-version=2021-02-01&format=text"
+    remove_sentinel_line = f'rm -f "{sentinel_on_outer}"\n' if sentinel_on_outer is not None else ""
     return (
         "#!/bin/sh\n"
         "# Installed by mngr (AzureProvider) -- deallocate this VM when idle.\n"
         "set -u\n"
-        f'rm -f "{sentinel_on_outer}"\n'
+        f"{remove_sentinel_line}"
         f'token=$(curl -s -H "Metadata:true" "{token_url}" | grep -o \'"access_token":"[^"]*"\' | cut -d\'"\' -f4)\n'
         f'rid=$(curl -s -H "Metadata:true" "{resource_id_url}")\n'
         'if [ -n "$token" ] && [ -n "$rid" ] && curl -fsS -X POST '
@@ -669,6 +674,13 @@ class AzureProvider(TagMirrorVpsProvider):
     # Self-stopping idle watcher (sentinel + host-side systemd deallocate)
     # =========================================================================
 
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        # Azure VMs support deallocate/start, and the bare idle path self-deallocates
+        # directly (the agent runs the same ARM deallocate the container watcher uses),
+        # so bare placement is supported.
+        return True
+
     def _create_shutdown_script(self, host: Host) -> None:
         """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
 
@@ -677,9 +689,19 @@ class AzureProvider(TagMirrorVpsProvider):
         in-container watcher touches a sentinel; a host-side systemd path unit
         (installed in ``_on_host_finalized``) observes it and runs the
         self-deallocate script. Mirrors ``AwsProvider._create_shutdown_script``.
+
+        A bare placement is the VM's root and has no container, so its idle
+        ``shutdown.sh`` runs the self-deallocate script directly -- an OS
+        ``shutdown -P now`` would not halt Azure compute billing, so the bare path
+        must deallocate via ARM like the container watcher does (the role
+        assignment in ``_on_host_finalized`` still applies). No sentinel or
+        host-side watcher is needed.
         """
-        sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
-        shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
+        if self._realizer.idle_shutdown_stops_host:
+            shutdown_script = _build_self_deallocate_script(None)
+        else:
+            sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
+            shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
         commands_dir = host.host_dir / "commands"
         host.execute_idempotent_command(f"mkdir -p {commands_dir}")
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
@@ -692,6 +714,11 @@ class AzureProvider(TagMirrorVpsProvider):
         means no idle self-deallocate (manual ``mngr stop`` still works). The role
         assignment degrades gracefully when the operator lacks
         roleAssignments/write (see ``AzureVpsClient.assign_self_deallocate_role``).
+
+        A bare placement runs the self-deallocate ARM call directly from its idle
+        ``shutdown.sh`` (it is the VM's root), so it still needs the role
+        assignment but not the host-side sentinel watcher -- the watcher install
+        is skipped for bare.
         """
         # The base contract says this hook MUST NOT raise, so guard the whole
         # role-assignment path: _find_instance_for_host raises MngrError on an
@@ -708,15 +735,16 @@ class AzureProvider(TagMirrorVpsProvider):
                 host_id,
                 e,
             )
-        try:
-            self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            logger.warning(
-                "Azure idle watcher install failed for host {} ({}); the agent will not "
-                "auto-stop on idle, but `mngr stop` still works",
-                host_id,
-                e,
-            )
+        if not self._realizer.idle_shutdown_stops_host:
+            try:
+                self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
+            except MngrError as e:
+                logger.warning(
+                    "Azure idle watcher install failed for host {} ({}); the agent will not "
+                    "auto-stop on idle, but `mngr stop` still works",
+                    host_id,
+                    e,
+                )
         try:
             self._install_host_dir_sync(host_id=host_id, vps_ip=vps_ip)
         except MngrError as e:

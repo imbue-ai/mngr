@@ -686,6 +686,22 @@ def test_build_self_deallocate_script_fetches_token_resource_id_and_posts_deallo
     assert "exit 1" in script
 
 
+def test_build_self_deallocate_script_omits_sentinel_removal_for_bare() -> None:
+    """With no sentinel (bare path), the script still deallocates but skips the rm line.
+
+    The bare placement runs this directly as the agent's shutdown.sh -- there is no
+    idle sentinel, so passing None omits the ``rm -f`` line while keeping the ARM
+    deallocate. It still must not fall back to an OS poweroff (which would strand a
+    still-billing Azure VM).
+    """
+    script = _build_self_deallocate_script(None)
+    assert "rm -f" not in script
+    assert "/deallocate?api-version=" in script
+    assert "-X POST" in script
+    assert "shutdown" not in script
+    assert "exit 1" in script
+
+
 class _RecordingReclaimClient(_SubnetStubClient):
     """Client that records reclaim_orphaned_network_resources calls."""
 

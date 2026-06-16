@@ -9,7 +9,7 @@ This package is a library -- it provides abstract base classes that concrete VPS
 How an agent sits on the VPS is a selectable axis, chosen by the `isolation` config knob and implemented by a `HostRealizer`:
 
 - **`isolation=CONTAINER`** (default): the agent runs inside a Docker container, reached at `<vps_ip>:2222`. This is the original behavior and the only fully-wired shape today; the architecture below describes it.
-- **`isolation=NONE`** (bare): the agent runs directly on the VPS OS, reached at `<vps_ip>:22`. Supported only on providers with a machine stop/start lifecycle (aws/gcp; azure pending the self-deallocate wiring) -- a provider without one rejects `isolation=NONE` at create time, since the idle bare agent powers the VM off and would otherwise strand it.
+- **`isolation=NONE`** (bare): the agent runs directly on the VPS OS, reached at `<vps_ip>:22`. Supported only on providers with a machine stop/start lifecycle (aws/gcp/azure) -- a provider without one rejects `isolation=NONE` at create time, since the idle bare agent stops the machine and would otherwise strand it.
 
 The genuinely Docker-specific code lives in `docker_realizer.py` and `container_setup.py`; the rest of the package (provisioning, instance lifecycle, host record, discovery) is shape-agnostic.
 
