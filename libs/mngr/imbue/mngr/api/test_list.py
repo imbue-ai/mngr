@@ -1,7 +1,18 @@
-"""Integration tests for the list API module."""
+"""Integration tests for the list API module.
+
+NOTE: this module also still contains a number of fast, no-network pure-function
+unit tests (e.g. the ErrorInfo.build / agent_details_to_cel_context / _apply_cel_filters
+cases below) that, by convention, belong in the unit module ``list_test.py`` rather
+than an integration (``test_*.py``) module. They live here for historical reasons;
+the genuinely-integration tmux/``list_agents`` tests are the ones that justify this
+file's location. New pure-function unit tests should go in ``list_test.py``. A bulk
+relocation of the existing pure tests is intentionally deferred to avoid high-churn,
+low-correctness movement.
+"""
 
 import time
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
@@ -12,7 +23,6 @@ from click.testing import CliRunner
 from imbue.mngr.api.list import AgentErrorInfo
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
-from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import agent_details_to_cel_context
@@ -27,7 +37,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
@@ -35,6 +44,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import create_test_agent_via_cli
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import tmux_session_cleanup
 
 # =============================================================================
@@ -102,14 +112,6 @@ def test_agent_error_info_build_for_agent() -> None:
     assert error_info.agent_id == agent_id
 
 
-def test_list_result_defaults_to_empty_lists() -> None:
-    """Test that ListResult defaults to empty lists."""
-    result = ListResult()
-
-    assert result.agents == []
-    assert result.errors == []
-
-
 def test_agent_details_to_cel_context_basic_fields() -> None:
     """Test that agent_details_to_cel_context converts basic AgentDetails fields."""
     host_details = HostDetails(
@@ -175,7 +177,10 @@ def test_agent_details_to_cel_context_with_activity_time() -> None:
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    activity_time = datetime.now(timezone.utc)
+    # Use a fixed past point so we can assert idle is computed from the
+    # activity time (not from create_time or some other reference). A bug
+    # computing idle with the wrong sign/reference would land outside this band.
+    activity_time = datetime.now(timezone.utc) - timedelta(seconds=120)
     agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
@@ -192,9 +197,9 @@ def test_agent_details_to_cel_context_with_activity_time() -> None:
 
     context = agent_details_to_cel_context(agent_details)
 
-    # Idle should be computed and be very small (just computed)
+    # Idle should be ~120 seconds, derived from user_activity_time.
     assert "idle" in context
-    assert context["idle"] >= 0
+    assert context["idle"] == pytest.approx(120, abs=10)
 
 
 def test_agent_details_to_cel_context_with_state() -> None:
@@ -222,184 +227,126 @@ def test_agent_details_to_cel_context_with_state() -> None:
     assert context["state"] == AgentLifecycleState.STOPPED.value
 
 
-def test_apply_cel_filters_with_include_filter() -> None:
-    """Test that _apply_cel_filters includes matching agents."""
+def _make_filter_test_agent(
+    *,
+    name: str = "test-agent",
+    state: AgentLifecycleState = AgentLifecycleState.RUNNING,
+    provider_name: str = "local",
+    host_state: HostState | None = None,
+    resource: HostResources | None = None,
+    uptime_seconds: float | None = None,
+    is_locked: bool | None = None,
+    locked_time: datetime | None = None,
+    tags: dict[str, str] | None = None,
+    idle_mode: str | None = None,
+    idle_seconds: float | None = None,
+) -> AgentDetails:
+    """Build an AgentDetails for the CEL-filter parametrize cases.
+
+    Only the fields actually exercised by a filter expression are configurable;
+    everything else uses a fixed default so the cases differ by exactly one input.
+    """
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
-        provider_name=ProviderInstanceName("local"),
+        provider_name=ProviderInstanceName(provider_name),
+        state=host_state,
+        resource=resource,
+        uptime_seconds=uptime_seconds,
+        is_locked=is_locked,
+        locked_time=locked_time,
+        tags=tags or {},
     )
-    agent_details = AgentDetails(
+    return AgentDetails(
         id=AgentId.generate(),
-        name=AgentName("my-agent"),
+        name=AgentName(name),
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
         initial_branch="mngr/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
+        state=state,
+        idle_mode=idle_mode,
+        idle_seconds=idle_seconds,
         host=host_details,
     )
 
+
+@pytest.mark.parametrize(
+    ("agent", "include_filter", "exclude_filter", "expected"),
+    [
+        # include matches / does not match.
+        (_make_filter_test_agent(name="my-agent"), 'name == "my-agent"', None, True),
+        (_make_filter_test_agent(name="other-agent"), 'name == "my-agent"', None, False),
+        # exclude matches / does not match (the does-not-match -> True case was previously missing).
+        (_make_filter_test_agent(name="excluded-agent"), None, 'name == "excluded-agent"', False),
+        (_make_filter_test_agent(name="kept-agent"), None, 'name == "excluded-agent"', True),
+        # include + exclude together: include matches but exclude also matches -> excluded
+        # (this combination was previously untested).
+        (_make_filter_test_agent(name="my-agent"), 'name == "my-agent"', 'host.provider == "local"', False),
+        # agent-level state.
+        (_make_filter_test_agent(), f'state == "{AgentLifecycleState.RUNNING.value}"', None, True),
+        # host provider exposed under both names.
+        (_make_filter_test_agent(), 'host.provider == "local"', None, True),
+        (_make_filter_test_agent(), 'host.provider_name == "local"', None, True),
+        # host state.
+        (
+            _make_filter_test_agent(host_state=HostState.RUNNING),
+            f'host.state == "{HostState.RUNNING.value}"',
+            None,
+            True,
+        ),
+        # host resources.
+        (
+            _make_filter_test_agent(
+                provider_name="modal",
+                resource=HostResources(cpu=CpuResources(count=8), memory_gb=32.0, disk_gb=500.0),
+            ),
+            "host.resource.memory_gb >= 16",
+            None,
+            True,
+        ),
+        # host lock flag.
+        (
+            _make_filter_test_agent(is_locked=True, locked_time=datetime.now(timezone.utc)),
+            "host.is_locked == true",
+            None,
+            True,
+        ),
+        # host uptime.
+        (_make_filter_test_agent(uptime_seconds=100000.0), "host.uptime_seconds > 86400", None, True),
+        # host tags (schemaless dict).
+        (
+            _make_filter_test_agent(provider_name="modal", tags={"env": "production", "team": "ml"}),
+            'host.tags.env == "production"',
+            None,
+            True,
+        ),
+        # agent idle_mode / idle_seconds.
+        (_make_filter_test_agent(idle_mode=IdleMode.USER.value), f'idle_mode == "{IdleMode.USER.value}"', None, True),
+        (_make_filter_test_agent(idle_seconds=600.0), "idle_seconds > 300", None, True),
+    ],
+)
+def test_apply_cel_filters_single_expression(
+    agent: AgentDetails,
+    include_filter: str | None,
+    exclude_filter: str | None,
+    expected: bool,
+) -> None:
+    """_apply_cel_filters returns the expected include/exclude decision for one CEL expression.
+
+    Consolidates the previously-duplicated single-field-delta filter tests, and adds the
+    exclude-does-not-match -> True and include+exclude-both-match -> False combinations.
+    """
     include_filters, exclude_filters = compile_cel_filters(
-        include_filters=('name == "my-agent"',),
-        exclude_filters=(),
+        include_filters=(include_filter,) if include_filter is not None else (),
+        exclude_filters=(exclude_filter,) if exclude_filter is not None else (),
     )
 
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent, include_filters, exclude_filters)
 
-    assert result is True
-
-
-def test_apply_cel_filters_with_non_matching_include() -> None:
-    """Test that _apply_cel_filters excludes non-matching agents."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("other-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=('name == "my-agent"',),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is False
-
-
-def test_apply_cel_filters_with_exclude_filter() -> None:
-    """Test that _apply_cel_filters excludes matching agents."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("excluded-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=(),
-        exclude_filters=('name == "excluded-agent"',),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is False
-
-
-def test_apply_cel_filters_with_state_filter() -> None:
-    """Test filtering by lifecycle state."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=(f'state == "{AgentLifecycleState.RUNNING.value}"',),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
-
-
-def test_apply_cel_filters_with_host_provider_filter() -> None:
-    """Test filtering by host provider using dot notation."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=('host.provider == "local"',),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
-
-
-def test_apply_cel_filters_accepts_host_provider_name() -> None:
-    """host.provider_name should also work in CEL filters (alongside the short host.provider)."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=('host.provider_name == "local"',),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
+    assert result is expected
 
 
 def test_list_agents_returns_empty_when_no_agents(
@@ -521,24 +468,22 @@ def test_list_agents_with_callbacks(
             is_streaming=False,
         )
 
+        # The created agent must surface both in the result and via the callback.
+        result_names = [a.name for a in result.agents]
+        assert AgentName(agent_name) in result_names
+
         assert len(agents_received) == len(result.agents)
-        if result.agents:
-            assert agents_received[0].name == result.agents[0].name
+        assert len(agents_received) >= 1
+        received_names = [a.name for a in agents_received]
+        assert AgentName(agent_name) in received_names
 
 
-def test_list_agents_with_error_behavior_continue(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Test that list_agents with CONTINUE error behavior doesn't raise."""
-    # This should not raise even if there are issues
-    result = list_agents(
-        mngr_ctx=temp_mngr_ctx,
-        error_behavior=ErrorBehavior.CONTINUE,
-        is_streaming=False,
-    )
-
-    # Should return a result, possibly empty
-    assert isinstance(result, ListResult)
+# NOTE: the CONTINUE-error-behavior paths (a failing provider recorded as a
+# ProviderErrorInfo rather than raising) are covered behaviorally in the unit
+# module list_test.py via injected failing providers
+# (test_list_agents_batch_continue_mode_records_failing_provider_error and the
+# streaming counterpart). A bare "doesn't raise on an empty ctx" test here would
+# never exercise the CONTINUE branch, so it is intentionally omitted.
 
 
 # =============================================================================
@@ -635,69 +580,6 @@ def test_agent_details_to_cel_context_with_host_ssh() -> None:
     assert context["host"]["ssh"]["port"] == 22
 
 
-def test_apply_cel_filters_with_host_state_filter() -> None:
-    """Test filtering by host.state."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-        state=HostState.RUNNING,
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=(f'host.state == "{HostState.RUNNING.value}"',),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
-
-
-def test_apply_cel_filters_with_host_resource_filter() -> None:
-    """Test filtering by host.resource.memory_gb."""
-    resources = HostResources(cpu=CpuResources(count=8), memory_gb=32.0, disk_gb=500.0)
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("modal"),
-        resource=resources,
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=("host.resource.memory_gb >= 16",),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
-
-
 def test_agent_details_to_cel_context_with_host_lock_fields() -> None:
     """Test that agent_details_to_cel_context includes host.is_locked and host.locked_time fields."""
     lock_time = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
@@ -753,102 +635,6 @@ def test_agent_details_to_cel_context_with_host_not_locked() -> None:
 
     assert context["host"]["is_locked"] is False
     assert context["host"]["locked_time"] is None
-
-
-def test_apply_cel_filters_with_host_is_locked_filter() -> None:
-    """Test filtering by host.is_locked."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-        is_locked=True,
-        locked_time=datetime.now(timezone.utc),
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=("host.is_locked == true",),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
-
-
-def test_apply_cel_filters_with_host_uptime_filter() -> None:
-    """Test filtering by host.uptime_seconds."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-        # More than a day (86400 seconds)
-        uptime_seconds=100000.0,
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    # Filter for hosts running more than a day (86400 seconds)
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=("host.uptime_seconds > 86400",),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
-
-
-def test_apply_cel_filters_with_host_tags_filter() -> None:
-    """Test filtering by host.tags."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("modal"),
-        tags={"env": "production", "team": "ml"},
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=('host.tags.env == "production"',),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
 
 
 # =============================================================================
@@ -908,69 +694,6 @@ def test_agent_details_to_cel_context_with_idle_seconds() -> None:
     assert context["idle_seconds"] == 300.5
 
 
-def test_apply_cel_filters_with_idle_mode_filter() -> None:
-    """Test filtering by idle_mode."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        idle_mode=IdleMode.USER.value,
-        host=host_details,
-    )
-
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=(f'idle_mode == "{IdleMode.USER.value}"',),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
-
-
-def test_apply_cel_filters_with_idle_seconds_filter() -> None:
-    """Test filtering by idle_seconds."""
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("local"),
-    )
-    agent_details = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work/dir"),
-        initial_branch="mngr/test-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        idle_seconds=600.0,
-        host=host_details,
-    )
-
-    # Filter for agents idle more than 5 minutes (300 seconds)
-    include_filters, exclude_filters = compile_cel_filters(
-        include_filters=("idle_seconds > 300",),
-        exclude_filters=(),
-    )
-
-    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
-
-    assert result is True
-
-
 @pytest.mark.tmux
 def test_list_agents_populates_idle_mode(
     cli_runner: CliRunner,
@@ -998,15 +721,25 @@ def test_list_agents_populates_idle_mode(
 
 
 @pytest.mark.tmux
-def test_list_agents_populates_lock_fields_for_online_host(
+def test_list_agents_reports_unlocked_host_when_no_lock_is_held(
     cli_runner: CliRunner,
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that list_agents populates is_locked and locked_time for online hosts."""
-    agent_name = f"test-lock-fields-{int(time.time())}"
+    """list_agents reports is_locked=False for an online host while no lock is held.
+
+    This only exercises the unlocked path. Asserting the locked path
+    (is_locked=True, locked_time populated) is not feasible here: for local
+    hosts, Host.is_lock_held() probes the lock via a non-blocking flock, and
+    flock is process-scoped -- a lock acquired by this same process is not seen
+    as "held" by a re-probe in the same process. Proving the locked path would
+    require a second OS process to hold the flock, which is too flaky for a
+    tmux integration test. The locked-path field mapping is instead covered at
+    the pure-context layer by test_agent_details_to_cel_context_with_host_lock_fields.
+    """
+    agent_name = f"test-lock-fields-{get_short_random_string()}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1019,9 +752,8 @@ def test_list_agents_populates_lock_fields_for_online_host(
         our_agent = next((a for a in result.agents if a.name == AgentName(agent_name)), None)
         assert our_agent is not None, f"Agent {agent_name} not found in list"
 
-        # No lock is held during list, so is_locked should be False.
-        # locked_time may be non-None since the lock file persists on local hosts
-        # after flock release, but is_lock_held() correctly detects the lock is not active.
+        # No lock is held during list, so is_lock_held() must report False even
+        # though the lock file may persist on disk after a prior flock release.
         assert our_agent.host.is_locked is False
 
 
@@ -1083,17 +815,8 @@ def test_list_agents_streaming_returns_empty_when_no_agents(
     assert len(agents_received) == 0
 
 
-def test_list_agents_streaming_with_error_behavior_continue(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Test that streaming list_agents with CONTINUE error behavior doesn't raise."""
-    result = list_agents(
-        mngr_ctx=temp_mngr_ctx,
-        error_behavior=ErrorBehavior.CONTINUE,
-        is_streaming=True,
-    )
-
-    assert isinstance(result, ListResult)
+# NOTE: streaming CONTINUE-mode error recording is covered behaviorally in
+# list_test.py (test_list_agents_streaming_continue_mode_records_failing_provider_error).
 
 
 @pytest.mark.tmux
@@ -1113,11 +836,16 @@ def test_list_agents_with_provider_names_filter(
             cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, command="sleep 234567"
         )
 
-        result = list_agents(mngr_ctx=temp_mngr_ctx, provider_names=("local",), is_streaming=False)
+        result = list_agents(mngr_ctx=temp_mngr_ctx, provider_names=("local",), is_streaming=False, reset_caches=True)
 
         agent_names = [a.name for a in result.agents]
         assert AgentName(agent_name) in agent_names
 
-        result_empty = list_agents(mngr_ctx=temp_mngr_ctx, provider_names=("nonexistent",), is_streaming=False)
+        # reset_caches=True is required when calling list_agents a second time in
+        # the same process: without it the negative assertion below could pass
+        # because of cache bleed rather than the provider_names filter.
+        result_empty = list_agents(
+            mngr_ctx=temp_mngr_ctx, provider_names=("nonexistent",), is_streaming=False, reset_caches=True
+        )
 
         assert len(result_empty.agents) == 0

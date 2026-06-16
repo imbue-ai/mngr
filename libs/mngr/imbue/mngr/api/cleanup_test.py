@@ -1,14 +1,10 @@
 """Unit tests for cleanup API functions."""
 
-from collections.abc import Generator
-from collections.abc import Sequence
-from contextlib import contextmanager
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import Field
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
@@ -17,16 +13,12 @@ from imbue.mngr.api.cleanup import execute_cleanup
 from imbue.mngr.api.cleanup import find_agents_for_cleanup
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.data_types import CleanupResult
-from imbue.mngr.api.providers import _instance_cache
+from imbue.mngr.api.testing import inject_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import PyinfraConnector
-from imbue.mngr.interfaces.host import HostInterface
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -34,29 +26,17 @@ from imbue.mngr.primitives import CleanupAction
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.mock_provider_test import OfflineHostDestroyableProvider
+from imbue.mngr.providers.mock_provider_test import OfflineHostProvider
+from imbue.mngr.providers.mock_provider_test import StopFailingProvider
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import make_test_agent_details
-
-
-@contextmanager
-def _injected_provider(
-    name: ProviderInstanceName,
-    mngr_ctx: MngrContext,
-    instance: LocalProviderInstance,
-) -> Generator[None, None, None]:
-    """Temporarily inject a provider instance into the provider cache."""
-    cache_key = (name, id(mngr_ctx))
-    _instance_cache[cache_key] = instance
-    try:
-        yield
-    finally:
-        _instance_cache.pop(cache_key, None)
 
 
 class _DestroyErrorPlugin:
@@ -67,72 +47,36 @@ class _DestroyErrorPlugin:
         raise MngrError("Simulated destroy hook error")
 
 
-class _OfflineHostProvider(LocalProviderInstance):
-    """Provider that returns an offline HostInterface from get_host().
+class _VolumeGcErrorProvider(OfflineHostProvider):
+    """Provider whose post-cleanup garbage collection records (but does not raise) an error.
 
-    destroy_host() raises LocalHostNotDestroyableError (a MngrError), which
-    triggers the error path in _execute_destroy when the match arm falls through
-    to HostInterface (the offline branch).
+    get_host() is inherited from OfflineHostProvider and returns an offline host, so
+    the work-dir and machine GC passes skip it without touching tmux or raising.
+    list_volumes() reports one volume attached to an unknown host (so it is treated as
+    orphaned), and delete_volume() raises MngrError. With ErrorBehavior.CONTINUE (which
+    _run_post_cleanup_gc always uses), gc_volumes catches that error and appends it to
+    GcResult.errors rather than propagating it -- exactly the success-of-gc,
+    error-in-result branch that _run_post_cleanup_gc forwards with the "GC: " prefix.
 
-    get_host() has no return type annotation because it returns OfflineHost, which
-    satisfies HostInterface but is not a subclass of Host (the parent's declared
-    return type). Adding a return annotation would produce a type error.
+    delete_volume_call_count records invocations so the test can confirm the GC
+    delete path was actually exercised.
     """
 
-    def get_host(self, host: HostId | HostName):
-        host_id = host if isinstance(host, HostId) else HostId.generate()
-        now = datetime.now(timezone.utc)
-        certified_data = CertifiedHostData(
-            created_at=now,
-            updated_at=now,
-            host_id=str(host_id),
-            host_name="test-offline-host",
-        )
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=certified_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-        )
+    delete_volume_call_count: int = Field(default=0)
 
+    def list_volumes(self) -> list[VolumeInfo]:
+        return [
+            VolumeInfo(
+                volume_id=VolumeId.generate(),
+                name="orphaned-gc-error-volume",
+                size_bytes=0,
+                host_id=None,
+            )
+        ]
 
-class _OfflineHostSuccessProvider(_OfflineHostProvider):
-    """Provider that returns an offline HostInterface from get_host() and
-    whose destroy_host() succeeds (no-op).
-
-    Used to test the success path in _execute_destroy for offline hosts.
-    """
-
-    def destroy_host(self, host: HostInterface | HostId) -> None:
-        pass
-
-
-class _StopFailingHost(Host):
-    """Host subclass whose stop_agents always raises MngrError.
-
-    Used to test that _execute_stop records stop errors and respects ABORT.
-    """
-
-    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
-        raise MngrError("Simulated stop error")
-
-
-class _StopFailingProvider(LocalProviderInstance):
-    """Provider that returns a _StopFailingHost from get_host().
-
-    Injects the stop-error path into _execute_stop without requiring tmux.
-    """
-
-    def get_host(self, host: HostId | HostName) -> _StopFailingHost:
-        pyinfra_host = self._create_local_pyinfra_host()
-        connector = PyinfraConnector(pyinfra_host)
-        return _StopFailingHost(
-            id=self.host_id,
-            host_name=HostName("test"),
-            connector=connector,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-        )
+    def delete_volume(self, volume_id: VolumeId) -> None:
+        self.delete_volume_call_count += 1
+        raise MngrError("Simulated volume deletion failure")
 
 
 def test_execute_cleanup_dry_run_destroy_populates_destroyed_agents(
@@ -202,21 +146,6 @@ def test_execute_cleanup_dry_run_with_no_agents_returns_empty_result(
     assert result.destroyed_agents == []
     assert result.stopped_agents == []
     assert result.errors == []
-
-
-def test_execute_cleanup_dry_run_returns_cleanup_result_type(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Dry-run should return a CleanupResult instance."""
-    result = execute_cleanup(
-        mngr_ctx=temp_mngr_ctx,
-        agents=[make_test_agent_details("test-agent")],
-        action=CleanupAction.DESTROY,
-        is_dry_run=True,
-        error_behavior=ErrorBehavior.ABORT,
-    )
-
-    assert isinstance(result, CleanupResult)
 
 
 # --- Integration tests with real local provider ---
@@ -478,13 +407,13 @@ def test_execute_cleanup_destroy_offline_host_error_with_abort(
     # LocalProviderInstance.destroy_host() always raises LocalHostNotDestroyableError
     # (a MngrError), which is exactly the error path we want to exercise.
     provider_name = ProviderInstanceName("offline-test-provider")
-    offline_provider = _OfflineHostProvider(
+    offline_provider = OfflineHostProvider(
         name=provider_name,
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
 
-    with _injected_provider(provider_name, temp_mngr_ctx, offline_provider):
+    with inject_provider_instance(offline_provider, temp_mngr_ctx):
         # Create two agents on the fake offline host so we can verify ABORT stops
         # processing after the first host's error.
         first_agent = make_test_agent_details(
@@ -506,6 +435,9 @@ def test_execute_cleanup_destroy_offline_host_error_with_abort(
             error_behavior=ErrorBehavior.ABORT,
         )
 
+        # The injected provider must actually have been consulted (guards against
+        # a cache-key mismatch silently resolving a real provider instead).
+        assert offline_provider.get_host_call_count >= 1
         # The destroy error must be recorded.
         assert len(result.errors) == 1
         assert any("Cannot destroy the local host" in e for e in result.errors)
@@ -558,18 +490,18 @@ def test_execute_cleanup_stop_error_with_abort_stops_processing(
     processing stops immediately.
 
 
-    The error is triggered by injecting a _StopFailingProvider into the instance
-    cache.  Its get_host() returns a _StopFailingHost whose stop_agents() always
+    The error is triggered by injecting a StopFailingProvider into the instance
+    cache.  Its get_host() returns a StopFailingHost whose stop_agents() always
     raises MngrError, bypassing any tmux infrastructure.
     """
     provider_name = ProviderInstanceName("stop-error-test-provider")
-    stop_provider = _StopFailingProvider(
+    stop_provider = StopFailingProvider(
         name=provider_name,
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
 
-    with _injected_provider(provider_name, temp_mngr_ctx, stop_provider):
+    with inject_provider_instance(stop_provider, temp_mngr_ctx):
         first_agent = make_test_agent_details(
             name="stop-error-agent-one",
             host_id=stop_provider.host_id,
@@ -591,6 +523,9 @@ def test_execute_cleanup_stop_error_with_abort_stops_processing(
             error_behavior=ErrorBehavior.ABORT,
         )
 
+        # The injected provider must actually have been consulted (guards against
+        # a cache-key mismatch silently resolving a real provider instead).
+        assert stop_provider.get_host_call_count >= 1
         # The stop error must be recorded.
         assert len(result.errors) == 1
         assert "Error stopping agents on host" in result.errors[0]
@@ -658,19 +593,50 @@ def test_run_post_cleanup_gc_provider_error_is_recorded_in_result(
     assert result.errors[0].startswith("Post-cleanup garbage collection failed:")
 
 
+@pytest.mark.allow_warnings(match=r"Failed to delete volume orphaned-gc-error-volume")
+def test_run_post_cleanup_gc_forwards_gc_errors_with_prefix(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When garbage collection itself succeeds but records non-fatal errors, those
+    errors are forwarded into the cleanup result with the "GC: " prefix.
+
+    This exercises the success branch of _run_post_cleanup_gc (cleanup.py:217-226):
+    api_gc runs without raising, but gc_volumes records a delete failure in
+    gc_result.errors, which _run_post_cleanup_gc must re-emit verbatim under "GC: ".
+    """
+    provider_name = LOCAL_PROVIDER_NAME
+    gc_error_provider = _VolumeGcErrorProvider(
+        name=provider_name,
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with inject_provider_instance(gc_error_provider, temp_mngr_ctx):
+        result = CleanupResult()
+        _run_post_cleanup_gc(temp_mngr_ctx, result)
+
+    # The GC delete path was actually exercised (the injected provider was consulted).
+    assert gc_error_provider.delete_volume_call_count >= 1
+    # The recorded GC error is forwarded with the "GC: " prefix.
+    gc_errors = [e for e in result.errors if e.startswith("GC: ")]
+    assert len(gc_errors) == 1
+    assert "Simulated volume deletion failure" in gc_errors[0]
+
+
 def test_execute_cleanup_destroy_offline_host_success(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """When destroying an offline host succeeds, agents are added to destroyed_agents."""
     provider_name = ProviderInstanceName("offline-success-provider")
-    success_provider = _OfflineHostSuccessProvider(
+    success_provider = OfflineHostDestroyableProvider(
         name=provider_name,
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
 
-    with _injected_provider(provider_name, temp_mngr_ctx, success_provider):
+    with inject_provider_instance(success_provider, temp_mngr_ctx):
         first_agent = make_test_agent_details(
             name="offline-success-agent-one",
             host_id=HostId.generate(),
@@ -690,6 +656,9 @@ def test_execute_cleanup_destroy_offline_host_success(
             error_behavior=ErrorBehavior.CONTINUE,
         )
 
+        # The injected provider must actually have been consulted (guards against
+        # a cache-key mismatch silently resolving a real provider instead).
+        assert success_provider.get_host_call_count >= 1
         assert result.errors == []
         assert AgentName("offline-success-agent-one") in result.destroyed_agents
         assert AgentName("offline-success-agent-two") in result.destroyed_agents
@@ -702,13 +671,13 @@ def test_execute_cleanup_stop_on_offline_host_skips_with_warning(
 ) -> None:
     """When a STOP action is attempted on an offline host, the host is skipped with a warning."""
     provider_name = ProviderInstanceName("offline-stop-provider")
-    offline_provider = _OfflineHostProvider(
+    offline_provider = OfflineHostProvider(
         name=provider_name,
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
 
-    with _injected_provider(provider_name, temp_mngr_ctx, offline_provider):
+    with inject_provider_instance(offline_provider, temp_mngr_ctx):
         agent = make_test_agent_details(
             name="offline-stop-agent",
             host_id=HostId.generate(),
@@ -723,6 +692,9 @@ def test_execute_cleanup_stop_on_offline_host_skips_with_warning(
             error_behavior=ErrorBehavior.CONTINUE,
         )
 
+        # The injected provider must actually have been consulted (guards against
+        # a cache-key mismatch silently resolving a real provider instead).
+        assert offline_provider.get_host_call_count >= 1
         # Offline host agents are not stopped, a warning is recorded instead.
         assert result.stopped_agents == []
         assert len(result.errors) == 1

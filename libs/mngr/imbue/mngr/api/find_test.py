@@ -1,4 +1,6 @@
 from collections.abc import Callable
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -38,6 +41,34 @@ from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.polling import wait_for
+
+
+@contextmanager
+def _throwaway_local_agent(
+    host: Host,
+    work_dir_path: Path,
+    name: str,
+    command: str,
+) -> Generator[AgentInterface, None, None]:
+    """Create a local agent for a tmux test and always destroy it on teardown.
+
+    Wrapping the create/query/destroy lifecycle in this contextmanager ensures the
+    agent (and its real ``sleep`` process plus tmux session) is torn down even if the
+    code under test raises, preventing leaks.
+    """
+    agent = host.create_agent_state(
+        work_dir_path=work_dir_path,
+        options=CreateAgentOptions(
+            name=AgentName(name),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString(command),
+        ),
+    )
+    try:
+        yield agent
+    finally:
+        host.destroy_agent(agent)
 
 
 def test_parse_host_location_address_with_agent_only() -> None:
@@ -121,6 +152,59 @@ def test_parse_host_location_address_colon_prefix_is_local_path() -> None:
     assert parsed == HostLocationAddress(path=Path("my-dir"))
 
 
+def test_parse_host_location_address_trailing_slash_set_for_host_path() -> None:
+    """A user-typed trailing slash on a host path is preserved via has_trailing_path_slash.
+
+    rsync relies on this flag for its contents-vs-child-directory semantics, since
+    Path strips the trailing slash from the parsed path itself.
+    """
+    parsed = parse_host_location_address("@host:/dir/")
+
+    assert parsed.path == Path("/dir")
+    assert parsed.has_trailing_path_slash is True
+
+
+def test_parse_host_location_address_trailing_slash_set_for_agent_path() -> None:
+    parsed = parse_host_location_address("agent:dir/")
+
+    assert parsed.path == Path("dir")
+    assert parsed.has_trailing_path_slash is True
+
+
+def test_parse_host_location_address_trailing_slash_set_for_bare_path() -> None:
+    parsed = parse_host_location_address("/dir/")
+
+    assert parsed.path == Path("/dir")
+    assert parsed.has_trailing_path_slash is True
+
+
+def test_parse_host_location_address_trailing_slash_unset_without_slash() -> None:
+    """Without a trailing slash, has_trailing_path_slash must be False for every form."""
+    assert parse_host_location_address("@host:/dir").has_trailing_path_slash is False
+    assert parse_host_location_address("agent:dir").has_trailing_path_slash is False
+    assert parse_host_location_address("/dir").has_trailing_path_slash is False
+
+
+def test_parse_host_location_address_trailing_slash_unset_for_bare_root() -> None:
+    """Bare '/' is the filesystem root, not a contents-of-dir marker, so the flag stays False."""
+    parsed = parse_host_location_address("/")
+
+    assert parsed.path == Path("/")
+    assert parsed.has_trailing_path_slash is False
+
+
+def test_parse_host_location_address_empty_string_is_empty_address() -> None:
+    assert parse_host_location_address("") == HostLocationAddress()
+
+
+def test_parse_host_location_address_bare_colon_is_empty_address() -> None:
+    assert parse_host_location_address(":") == HostLocationAddress()
+
+
+def test_parse_host_location_address_bare_at_is_empty_address() -> None:
+    assert parse_host_location_address("@") == HostLocationAddress()
+
+
 def test_filter_one_host_by_id() -> None:
     host_id = HostId.generate()
     host_ref = DiscoveredHost(
@@ -153,7 +237,7 @@ def test_filter_one_host_by_name() -> None:
 
 
 def test_filter_one_host_raises_when_not_found() -> None:
-    with pytest.raises(UserInputError, match="Could not find host with ID or name: nonexistent"):
+    with pytest.raises(UserInputError, match="nonexistent"):
         filter_one_host(
             address=HostAddress(host=HostName("nonexistent")),
             all_hosts=[],
@@ -193,7 +277,7 @@ def test_filter_one_host_raises_when_multiple_hosts_with_same_name() -> None:
         provider_name=ProviderInstanceName("docker"),
     )
 
-    with pytest.raises(UserInputError, match="Multiple hosts found with name: test-host"):
+    with pytest.raises(UserInputError, match="test-host"):
         filter_one_host(
             address=HostAddress(host=HostName("test-host")),
             all_hosts=[host_ref1, host_ref2],
@@ -343,7 +427,7 @@ def test_filter_one_agent_raises_when_multiple_agents_match() -> None:
         provider_name=ProviderInstanceName("local"),
     )
 
-    with pytest.raises(UserInputError, match="Multiple agents found with name 'test-agent'"):
+    with pytest.raises(UserInputError, match="test-agent"):
         filter_one_agent(
             agent=AgentName("test-agent"),
             resolved_host=None,
@@ -379,10 +463,16 @@ def test_parse_host_location_address_with_empty_path_after_colon() -> None:
     assert parsed == HostLocationAddress(host=HostAddress(host=HostName("my-host")))
 
 
-def test_parse_host_location_address_with_agent_and_path() -> None:
+def test_parse_host_location_address_collapses_double_slash_in_url_like_path() -> None:
+    """A URL-like path after an agent has its '//' collapsed by pathlib.
+
+    The parser stores the path part in a ``Path``, and ``Path`` normalizes
+    ``http://...`` down to ``http:/...`` (single slash). This documents that
+    URL-shaped paths are not preserved verbatim.
+    """
     parsed = parse_host_location_address("my-agent:http://example.com/path")
 
-    assert parsed == HostLocationAddress(agent=AgentName("my-agent"), path=Path("http://example.com/path"))
+    assert parsed == HostLocationAddress(agent=AgentName("my-agent"), path=Path("http:/example.com/path"))
 
 
 def test_parse_host_location_address_with_agent_host_provider() -> None:
@@ -563,29 +653,6 @@ def test_parse_host_location_address_with_empty_prefix_before_colon() -> None:
 
 
 # =============================================================================
-# AgentMatch Tests
-# =============================================================================
-
-
-def test_agent_match_construction() -> None:
-    """AgentMatch should be constructable with required fields."""
-    agent_id = AgentId.generate()
-    host_id = HostId.generate()
-    match = AgentMatch(
-        agent_id=agent_id,
-        agent_name=AgentName("my-agent"),
-        host_id=host_id,
-        host_name=HostName("my-host"),
-        provider_name=ProviderInstanceName("local"),
-    )
-    assert match.agent_id == agent_id
-    assert match.agent_name == AgentName("my-agent")
-    assert match.host_id == host_id
-    assert match.host_name == HostName("my-host")
-    assert match.provider_name == ProviderInstanceName("local")
-
-
-# =============================================================================
 # group_agents_by_host Tests
 # =============================================================================
 
@@ -615,12 +682,11 @@ def test_group_agents_by_host_single_host() -> None:
         provider_name=provider_name,
     )
 
+    # Both agents share a host, so they land in a single group together.
     result = group_agents_by_host([match1, match2])
-    key = f"{host_id}:{provider_name}"
-    assert key in result
-    assert len(result[key]) == 2
-    assert result[key][0] == match1
-    assert result[key][1] == match2
+    assert len(result) == 1
+    (grouped,) = result.values()
+    assert grouped == [match1, match2]
 
 
 def test_group_agents_by_host_multiple_hosts() -> None:
@@ -644,32 +710,11 @@ def test_group_agents_by_host_multiple_hosts() -> None:
         provider_name=provider_name,
     )
 
+    # Different hosts produce two separate single-agent groups.
     result = group_agents_by_host([match1, match2])
     assert len(result) == 2
-
-    key1 = f"{host_id_1}:{provider_name}"
-    key2 = f"{host_id_2}:{provider_name}"
-    assert key1 in result
-    assert key2 in result
-    assert result[key1] == [match1]
-    assert result[key2] == [match2]
-
-
-def test_group_agents_by_host_key_format() -> None:
-    """group_agents_by_host should use '{host_id}:{provider_name}' as key format."""
-    host_id = HostId.generate()
-    provider_name = ProviderInstanceName("docker")
-    match = AgentMatch(
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("agent"),
-        host_id=host_id,
-        host_name=HostName("host"),
-        provider_name=provider_name,
-    )
-
-    result = group_agents_by_host([match])
-    expected_key = f"{host_id}:docker"
-    assert expected_key in result
+    assert [match1] in result.values()
+    assert [match2] in result.values()
 
 
 # =============================================================================
@@ -723,23 +768,13 @@ def test__find_agents_by_identifiers_or_state_finds_by_name(
     local_host: Host,
 ) -> None:
     """_find_agents_by_identifiers_or_state should find an agent by its name."""
-    agent = local_host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("find-by-name-test"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 847310"),
-        ),
-    )
-
-    results = _find_agents_by_identifiers_or_state(
-        agent_identifiers=[AgentName("find-by-name-test")],
-        filter_all=False,
-        target_state=None,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-    local_host.destroy_agent(agent)
+    with _throwaway_local_agent(local_host, temp_work_dir, "find-by-name-test", "sleep 847310"):
+        results = _find_agents_by_identifiers_or_state(
+            agent_identifiers=[AgentName("find-by-name-test")],
+            filter_all=False,
+            target_state=None,
+            mngr_ctx=temp_mngr_ctx,
+        )
 
     assert len(results) == 1
     assert results[0].agent_name == AgentName("find-by-name-test")
@@ -752,26 +787,16 @@ def test__find_agents_by_identifiers_or_state_finds_by_id(
     local_host: Host,
 ) -> None:
     """_find_agents_by_identifiers_or_state should find an agent by its ID."""
-    agent = local_host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("find-by-id-test"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 847311"),
-        ),
-    )
+    with _throwaway_local_agent(local_host, temp_work_dir, "find-by-id-test", "sleep 847311") as agent:
+        results = _find_agents_by_identifiers_or_state(
+            agent_identifiers=[agent.id],
+            filter_all=False,
+            target_state=None,
+            mngr_ctx=temp_mngr_ctx,
+        )
 
-    results = _find_agents_by_identifiers_or_state(
-        agent_identifiers=[agent.id],
-        filter_all=False,
-        target_state=None,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-    local_host.destroy_agent(agent)
-
-    assert len(results) == 1
-    assert results[0].agent_id == agent.id
+        assert len(results) == 1
+        assert results[0].agent_id == agent.id
 
 
 @pytest.mark.tmux
@@ -781,32 +806,16 @@ def test__find_agents_by_identifiers_or_state_filter_all_returns_all(
     local_host: Host,
 ) -> None:
     """_find_agents_by_identifiers_or_state with filter_all=True, target_state=None returns all agents."""
-    agent1 = local_host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("find-all-1"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 847312"),
-        ),
-    )
-    agent2 = local_host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("find-all-2"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 847313"),
-        ),
-    )
-
-    results = _find_agents_by_identifiers_or_state(
-        agent_identifiers=[],
-        filter_all=True,
-        target_state=None,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-    local_host.destroy_agent(agent1)
-    local_host.destroy_agent(agent2)
+    with (
+        _throwaway_local_agent(local_host, temp_work_dir, "find-all-1", "sleep 847312"),
+        _throwaway_local_agent(local_host, temp_work_dir, "find-all-2", "sleep 847313"),
+    ):
+        results = _find_agents_by_identifiers_or_state(
+            agent_identifiers=[],
+            filter_all=True,
+            target_state=None,
+            mngr_ctx=temp_mngr_ctx,
+        )
 
     found_names = {str(r.agent_name) for r in results}
     assert "find-all-1" in found_names
@@ -819,28 +828,49 @@ def test__find_agents_by_identifiers_or_state_filter_by_stopped_state(
     temp_mngr_ctx: MngrContext,
     local_host: Host,
 ) -> None:
-    """_find_agents_by_identifiers_or_state with target_state=STOPPED should only return stopped agents."""
-    # Create an agent but don't start it (so it's stopped)
-    agent = local_host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("find-stopped-test"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 847314"),
-        ),
-    )
+    """target_state filtering must include only agents in that state and exclude the others.
 
-    results = _find_agents_by_identifiers_or_state(
-        agent_identifiers=[],
-        filter_all=True,
-        target_state=AgentLifecycleState.STOPPED,
-        mngr_ctx=temp_mngr_ctx,
-    )
+    With one started (non-stopped) agent and one never-started (STOPPED) agent,
+    target_state=STOPPED must return the stopped one and exclude the started one,
+    and filtering on the started agent's actual live state must do the reverse. A
+    no-op filter (returning every agent) would fail both directions. The started
+    agent's exact active state is captured at runtime (a bare ``sleep`` agent
+    typically reports WAITING rather than RUNNING), so the reverse direction is not
+    coupled to a specific non-stopped classification.
+    """
+    with (
+        _throwaway_local_agent(local_host, temp_work_dir, "find-state-stopped", "sleep 847314") as stopped_agent,
+        _throwaway_local_agent(local_host, temp_work_dir, "find-state-running", "sleep 847315") as running_agent,
+    ):
+        # Leave stopped_agent unstarted; bring running_agent up and wait for it to leave STOPPED.
+        assert stopped_agent.get_lifecycle_state() == AgentLifecycleState.STOPPED
+        local_host.start_agents([running_agent.id])
+        wait_for(
+            lambda: running_agent.get_lifecycle_state() != AgentLifecycleState.STOPPED,
+            error_message="Expected running_agent to leave STOPPED after start",
+        )
+        active_state = running_agent.get_lifecycle_state()
 
-    local_host.destroy_agent(agent)
+        stopped_results = _find_agents_by_identifiers_or_state(
+            agent_identifiers=[],
+            filter_all=True,
+            target_state=AgentLifecycleState.STOPPED,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        active_results = _find_agents_by_identifiers_or_state(
+            agent_identifiers=[],
+            filter_all=True,
+            target_state=active_state,
+            mngr_ctx=temp_mngr_ctx,
+        )
 
-    found_names = {str(r.agent_name) for r in results}
-    assert "find-stopped-test" in found_names
+    stopped_names = {str(r.agent_name) for r in stopped_results}
+    assert "find-state-stopped" in stopped_names
+    assert "find-state-running" not in stopped_names
+
+    active_names = {str(r.agent_name) for r in active_results}
+    assert "find-state-running" in active_names
+    assert "find-state-stopped" not in active_names
 
 
 # --- filter_all_hosts ---

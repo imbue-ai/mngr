@@ -4,23 +4,41 @@ import shlex
 import shutil
 import subprocess
 import types
+from collections.abc import Generator
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.discovery_events import DiscoveredProvider
+from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.git import LocalGitContext
+from imbue.mngr.api.observe import AgentObserver
+from imbue.mngr.api.observe import get_default_events_base_dir
+from imbue.mngr.api.providers import _instance_cache
+from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.base_provider import BaseProviderInstance
 
 
 @contextmanager
@@ -191,3 +209,85 @@ class SyncTestContext(FrozenModel):
 def has_uncommitted_changes(path: Path, cg: ConcurrencyGroup) -> bool:
     """Check for uncommitted changes using LocalGitContext."""
     return LocalGitContext(cg=cg).has_uncommitted_changes(path)
+
+
+class FixedProcessNameAgent(BaseAgent):
+    """A ``BaseAgent`` whose ``get_expected_process_name`` returns a fixed value.
+
+    ``BaseAgent.get_expected_process_name`` reads data.json via the host connector,
+    which fails for SSH hosts in tests (no SSH server is running). This double
+    short-circuits that path so connect/disconnect tests can run against a remote
+    host without provisioning real agent state.
+
+    Named without a ``Test`` prefix so pytest does not attempt to collect it.
+    """
+
+    def get_expected_process_name(self) -> str:
+        return "test-process"
+
+
+def make_fixed_process_name_agent(
+    host: OnlineHostInterface,
+    mngr_ctx: MngrContext,
+    agent_name: str = "test-agent",
+) -> FixedProcessNameAgent:
+    """Build a ``FixedProcessNameAgent`` running on ``host``."""
+    return FixedProcessNameAgent(
+        id=AgentId(f"agent-{uuid4().hex}"),
+        name=AgentName(agent_name),
+        agent_type=AgentTypeName("generic"),
+        work_dir=Path("/tmp/work"),
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=mngr_ctx,
+        agent_config=AgentTypeConfig(),
+        host=host,
+    )
+
+
+def make_test_agent_observer(mngr_ctx: MngrContext, mngr_binary: str) -> AgentObserver:
+    """Create an ``AgentObserver`` with events_base_dir derived from the test config.
+
+    ``mngr_binary`` should be a no-op binary that accepts any arguments (e.g. the
+    ``noop_binary`` fixture), since the observer shells out to it.
+    """
+    return AgentObserver(
+        mngr_ctx=mngr_ctx,
+        events_base_dir=get_default_events_base_dir(mngr_ctx.config),
+        mngr_binary=mngr_binary,
+    )
+
+
+def make_test_provider(name: str, backend: str = "docker") -> DiscoveredProvider:
+    """Create a ``DiscoveredProvider`` with the given name and (enabled) backend."""
+    return make_discovered_provider(
+        ProviderInstanceName(name),
+        ProviderInstanceConfig(backend=ProviderBackendName(backend), is_enabled=True),
+    )
+
+
+@contextmanager
+def inject_provider_instance(
+    provider: BaseProviderInstance,
+    mngr_ctx: MngrContext,
+) -> Generator[None, None, None]:
+    """Temporarily inject ``provider`` into the provider-instance cache that
+    ``get_provider_instance`` (and thus ``resolve_target_host`` / cleanup) reads.
+
+    The cache is keyed by ``(provider.name, id(mngr_ctx))``, so the same
+    ``mngr_ctx`` object must be passed both here and to the code under test.
+    Any prior cache entry for the same key is saved and restored on exit, and the
+    injected entry is removed, so nothing leaks into other tests.
+    """
+    cache_key = (provider.name, id(mngr_ctx))
+    had_prior = cache_key in _instance_cache
+    prior_instance = _instance_cache.get(cache_key)
+    _instance_cache[cache_key] = provider
+    try:
+        yield
+    finally:
+        if had_prior:
+            assert prior_instance is not None
+            _instance_cache[cache_key] = prior_instance
+        else:
+            _instance_cache.pop(cache_key, None)

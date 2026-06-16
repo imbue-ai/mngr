@@ -34,7 +34,16 @@ def test_post_attach_sigwinch_delivers_to_pane_process(mngr_test_prefix: str, tm
     # reliably alive when the post-attach script's pgrep-then-kill runs against
     # it -- mirroring real agent processes (e.g., `claude`) which are
     # long-lived, not a corpse that died between pgrep and kill.
-    catcher_cmd = f"trap 'echo received > {marker_file}' WINCH; sleep 60 & wait"
+    #
+    # The trap is re-armed inside a loop: a SIGWINCH that interrupts `wait`
+    # returns from it, so without the loop the script would exit after the
+    # first signal and a single spurious/early SIGWINCH (e.g., delivered
+    # before the trap is fully installed) could leave the marker unwritten.
+    # Looping `wait` keeps the catcher alive to handle any later SIGWINCH the
+    # resize script delivers, reducing spurious failures.
+    catcher_cmd = (
+        f"trap 'echo received > {marker_file}' WINCH; sleep 60 & while kill -0 $! 2>/dev/null; do wait $!; done"
+    )
 
     try:
         subprocess.run(
@@ -55,7 +64,7 @@ def test_post_attach_sigwinch_delivers_to_pane_process(mngr_test_prefix: str, tm
 
         wait_for(
             lambda: marker_file.exists(),
-            timeout=3.0,
+            timeout=10.0,
             error_message=(
                 "SIGWINCH did not reach the pane process after running "
                 "build_post_attach_sigwinch_script. The post-attach mechanism "

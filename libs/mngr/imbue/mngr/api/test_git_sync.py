@@ -13,11 +13,13 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.git import GitSyncError
+from imbue.mngr.api.git import _build_git_url_and_env
 from imbue.mngr.api.git import git_pull
 from imbue.mngr.api.git import git_push
 from imbue.mngr.api.testing import FakeAgent
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.api.testing import SyncTestContext
+from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.testing import init_git_repo
@@ -90,6 +92,8 @@ def test_git_pull_raises_on_merge_conflict(
     local_git_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
 ) -> None:
+    # Diverging edits to the same tracked file (README.md, seeded by init_git_repo)
+    # produce a genuine merge conflict rather than a fast-forward.
     (local_git_ctx.agent_dir / "README.md").write_text("agent version")
     run_git_command(local_git_ctx.agent_dir, "add", "README.md")
     run_git_command(local_git_ctx.agent_dir, "commit", "-m", "Agent change")
@@ -97,6 +101,12 @@ def test_git_pull_raises_on_merge_conflict(
     (local_git_ctx.local_dir / "README.md").write_text("local version")
     run_git_command(local_git_ctx.local_dir, "add", "README.md")
     run_git_command(local_git_ctx.local_dir, "commit", "-m", "Local change")
+
+    # Force a merge (not a rebase) so divergent same-file edits actually conflict.
+    # Without this, modern git aborts a divergent pull with "Need to specify how to
+    # reconcile divergent branches" *before* merging, leaving the tree clean -- which
+    # would not exercise the conflict path this test targets.
+    run_git_command(local_git_ctx.local_dir, "config", "pull.rebase", "false")
 
     with pytest.raises(GitSyncError):
         git_pull(
@@ -106,6 +116,22 @@ def test_git_pull_raises_on_merge_conflict(
             extra_args=("main", "--no-edit"),
             cg=cg,
         )
+
+    # The GitSyncError message itself only carries git's stderr, but git writes the
+    # "CONFLICT"/"Automatic merge failed" notice to stdout, so we cannot match on the
+    # exception text. Instead, assert the working tree was left in a conflict state --
+    # this distinguishes a merge conflict from any other pull failure (bad URL, missing
+    # branch, config error), which would leave the tree clean and unmerged-path-free.
+    status = run_git_command(local_git_ctx.local_dir, "status", "--porcelain")
+    assert "UU README.md" in status.stdout
+
+    conflicted_readme = (local_git_ctx.local_dir / "README.md").read_text()
+    assert "<<<<<<< HEAD" in conflicted_readme
+    assert ">>>>>>>" in conflicted_readme
+    # The local side's version is preserved within the conflict markers, so the user
+    # can recover their work.
+    assert "local version" in conflicted_readme
+    assert "agent version" in conflicted_readme
 
 
 # =============================================================================
@@ -200,3 +226,64 @@ def test_git_push_force_overwrites_diverged_history(
 
     assert (local_git_ctx.agent_dir / "local_file.txt").exists()
     assert not (local_git_ctx.agent_dir / "agent_file.txt").exists()
+
+
+# =============================================================================
+# Remote (is_local=False) URL/transport/env assembly
+#
+# Every happy-path git_pull/git_push test above runs through FakeHost(is_local=True),
+# which exercises only the bare-local-path branch of _build_git_url_and_env. The
+# remote SSH branch (ssh:// URL building, GIT_SSH_COMMAND, GIT_LFS_SKIP_PUSH) is not
+# reachable from those tests without a real SSH endpoint, so we drive the lowest-level
+# production helper directly with a non-local FakeHost carrying ssh_info. This keeps
+# the remote-path coverage in-process (no network/SSH) while still asserting the
+# production URL/transport/env assembly rather than a re-implementation of it.
+# =============================================================================
+
+
+def _remote_fake_host() -> FakeHost:
+    """A non-local FakeHost with deterministic SSH connection info and known_hosts."""
+    return FakeHost(
+        is_local=False,
+        ssh_info=("agent", "10.0.0.5", 2222, Path("/keys/id_ed25519")),
+        ssh_known_hosts_file="/keys/known_hosts",
+    )
+
+
+def test_build_git_url_and_env_for_remote_push_assembles_ssh_url_and_env() -> None:
+    host = _remote_fake_host()
+    remote_path = Path("/remote/repo")
+
+    url, env = _build_git_url_and_env(
+        cast(OnlineHostInterface, host),
+        remote_path,
+        is_push=True,
+    )
+
+    assert url == "ssh://agent@10.0.0.5:2222/remote/repo/.git"
+    assert env is not None
+    # The transport command must match what the production SSH helper produces for this
+    # key/port/known_hosts, and it must be carried via GIT_SSH_COMMAND.
+    expected_transport = build_ssh_transport_command(Path("/keys/id_ed25519"), 2222, Path("/keys/known_hosts"))
+    assert env["GIT_SSH_COMMAND"] == expected_transport
+    # Push skips LFS uploads so a tracked LFS file doesn't try to reach an LFS server
+    # the agent's repo isn't configured for.
+    assert env["GIT_LFS_SKIP_PUSH"] == "1"
+
+
+def test_build_git_url_and_env_for_remote_pull_omits_lfs_skip() -> None:
+    host = _remote_fake_host()
+    remote_path = Path("/remote/repo")
+
+    url, env = _build_git_url_and_env(
+        cast(OnlineHostInterface, host),
+        remote_path,
+        is_push=False,
+    )
+
+    assert url == "ssh://agent@10.0.0.5:2222/remote/repo/.git"
+    assert env is not None
+    expected_transport = build_ssh_transport_command(Path("/keys/id_ed25519"), 2222, Path("/keys/known_hosts"))
+    assert env["GIT_SSH_COMMAND"] == expected_transport
+    # GIT_LFS_SKIP_PUSH is a push-only concern; pull must not set it.
+    assert "GIT_LFS_SKIP_PUSH" not in env

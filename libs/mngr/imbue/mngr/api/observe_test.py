@@ -3,16 +3,14 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
-from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import _make_envelope_fields
-from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mngr.api.observe import AGENT_STATES_EVENT_SOURCE
-from imbue.mngr.api.observe import AgentObserver
 from imbue.mngr.api.observe import AgentStateChangeEvent
 from imbue.mngr.api.observe import AgentStateEvent
 from imbue.mngr.api.observe import FullAgentStateEvent
@@ -35,12 +33,12 @@ from imbue.mngr.api.observe import make_agent_state_change_event
 from imbue.mngr.api.observe import make_agent_state_event
 from imbue.mngr.api.observe import make_full_agent_state_event
 from imbue.mngr.api.observe import release_observe_lock
+from imbue.mngr.api.testing import make_test_agent_observer
+from imbue.mngr.api.testing import make_test_provider
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostState
-from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
@@ -51,8 +49,14 @@ from imbue.mngr.utils.testing import make_test_discovered_host
 
 
 def test_get_default_events_base_dir_expands_home(temp_config: MngrConfig) -> None:
-    events_base_dir = get_default_events_base_dir(temp_config)
-    assert events_base_dir == temp_config.default_host_dir.expanduser()
+    # Point default_host_dir at a ~-containing path so we verify the helper
+    # actually expands "~" rather than mirroring a no-op expanduser() call.
+    tilde_config = temp_config.model_copy_update(
+        to_update(temp_config.field_ref().default_host_dir, Path("~/.mngr-observe-test"))
+    )
+    events_base_dir = get_default_events_base_dir(tilde_config)
+    assert not str(events_base_dir).startswith("~")
+    assert events_base_dir == Path.home() / ".mngr-observe-test"
 
 
 def test_get_observe_events_dir_returns_correct_path(temp_host_dir: Path) -> None:
@@ -384,18 +388,9 @@ def test_agent_state_change_event_serializes_to_valid_json() -> None:
 # === AgentObserver Tests ===
 
 
-def _make_observer(temp_mngr_ctx: MngrContext, noop_binary: str) -> AgentObserver:
-    """Create an AgentObserver with events_base_dir derived from the test config."""
-    return AgentObserver(
-        mngr_ctx=temp_mngr_ctx,
-        events_base_dir=get_default_events_base_dir(temp_mngr_ctx.config),
-        mngr_binary=noop_binary,
-    )
-
-
 def test_agent_observer_handle_full_snapshot_tracks_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that _handle_full_snapshot correctly populates known hosts from host records."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     host1 = make_test_discovered_host()
     host2 = make_test_discovered_host()
     agent1 = make_test_discovered_agent()
@@ -412,7 +407,7 @@ def test_agent_observer_handle_full_snapshot_tracks_hosts(temp_mngr_ctx: MngrCon
 
 def test_agent_observer_handle_full_snapshot_removes_stale_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that hosts from a prior snapshot are removed when not in a new snapshot."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     host_a = make_test_discovered_host()
     host_b = make_test_discovered_host()
 
@@ -429,7 +424,7 @@ def test_agent_observer_handle_full_snapshot_removes_stale_hosts(temp_mngr_ctx: 
 
 def test_agent_observer_on_activity_event_queues_host(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that _on_activity_event adds the host to the activity queue."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     observer._on_activity_event('{"type":"SOME_EVENT"}', is_stdout=True, host_id_str="host-123")
     assert observer._activity_queue.qsize() == 1
     assert observer._activity_queue.get_nowait() == "host-123"
@@ -437,14 +432,14 @@ def test_agent_observer_on_activity_event_queues_host(temp_mngr_ctx: MngrContext
 
 def test_agent_observer_on_activity_event_ignores_stderr(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that stderr output is ignored."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     observer._on_activity_event("some stderr", is_stdout=False, host_id_str="host-123")
     assert observer._activity_queue.qsize() == 0
 
 
 def test_agent_observer_on_activity_event_ignores_empty_lines(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that empty/whitespace lines are ignored."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     observer._on_activity_event("", is_stdout=True, host_id_str="host-123")
     observer._on_activity_event("   \n", is_stdout=True, host_id_str="host-123")
     assert observer._activity_queue.qsize() == 0
@@ -452,7 +447,7 @@ def test_agent_observer_on_activity_event_ignores_empty_lines(temp_mngr_ctx: Mng
 
 def test_agent_observer_emit_agent_state_writes_event_to_file(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that _emit_agent_state writes an AGENT_STATE event to the events file."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(name="observed-agent")
 
     observer._emit_agent_state(agent)
@@ -468,7 +463,7 @@ def test_agent_observer_emit_agent_state_writes_event_to_file(temp_mngr_ctx: Mng
 
 def test_agent_observer_emit_agent_state_updates_tracking(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that _emit_agent_state updates the last known state tracking."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details()
 
     observer._emit_agent_state(agent)
@@ -482,7 +477,7 @@ def test_agent_observer_emit_agent_state_emits_state_change_for_new_agent(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that _emit_agent_state emits a state change event for a newly seen agent."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(name="new-agent", state=AgentLifecycleState.RUNNING)
 
     observer._emit_agent_state(agent)
@@ -502,25 +497,25 @@ def test_agent_observer_emit_agent_state_no_state_change_when_same_state(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that no state change event is emitted when the lifecycle state field is the same."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(state=AgentLifecycleState.RUNNING)
-
-    # First emit triggers state change (None -> RUNNING)
-    observer._emit_agent_state(agent)
-    # Second emit with same state should not add another state change
-    observer._emit_agent_state(agent)
-
-    # Only the initial state change should be emitted (None -> RUNNING), not a duplicate
     states_path = get_agent_states_events_path(observer.events_base_dir)
-    lines = states_path.read_text().strip().splitlines()
-    assert len(lines) == 1
+
+    # First emit triggers a state change (None -> RUNNING), writing exactly one line.
+    observer._emit_agent_state(agent)
+    assert len(states_path.read_text().strip().splitlines()) == 1
+
+    # Second emit with the same state must be a no-op for the agent_states stream:
+    # the line count stays at 1 rather than growing to 2.
+    observer._emit_agent_state(agent)
+    assert len(states_path.read_text().strip().splitlines()) == 1
 
 
 def test_agent_observer_emit_agent_state_detects_state_transition(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that _emit_agent_state emits a state change when state transitions from a known value."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent_running = make_test_agent_details(name="transitioning", state=AgentLifecycleState.RUNNING)
 
     # First emit: None -> RUNNING
@@ -549,7 +544,7 @@ def test_agent_observer_emit_agent_state_detects_state_transition(
 
 def test_agent_observer_stop_sets_stop_event(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that stop() signals the observer to halt."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     assert not observer._stop_event.is_set()
     observer.stop()
     assert observer._stop_event.is_set()
@@ -559,7 +554,7 @@ def test_agent_observer_on_discovery_stream_output_ignores_non_stdout(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that stderr output from the discovery stream is ignored."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     observer._on_discovery_stream_output("some error message", is_stdout=False)
     assert len(observer._known_hosts) == 0
 
@@ -568,7 +563,7 @@ def test_agent_observer_on_discovery_stream_output_raises_on_invalid_json(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Invalid JSON on the discovery stream surfaces as a JSONDecodeError so the upstream bug is visible."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     with pytest.raises(json.JSONDecodeError):
         observer._on_discovery_stream_output("not valid json at all", is_stdout=True)
     assert len(observer._known_hosts) == 0
@@ -576,7 +571,7 @@ def test_agent_observer_on_discovery_stream_output_raises_on_invalid_json(
 
 def test_agent_observer_do_full_state_snapshot_writes_event(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that _do_full_state_snapshot writes an AGENTS_FULL_STATE event."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
 
     observer._do_full_state_snapshot()
 
@@ -592,7 +587,7 @@ def test_agent_observer_process_snapshot_agents_emits_state_changes(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that _process_snapshot_agents detects state field changes and emits to agent_states."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(name="snapshot-agent", state=AgentLifecycleState.STOPPED)
 
     # Pre-populate with a different state to simulate a transition
@@ -622,7 +617,7 @@ def test_agent_observer_process_snapshot_agents_no_change_when_same_state(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that _process_snapshot_agents does not emit a state change when state is unchanged."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(name="stable-agent", state=AgentLifecycleState.RUNNING)
 
     # Pre-populate with the same agent and host state
@@ -644,7 +639,7 @@ def test_agent_observer_emit_state_change_writes_to_agent_states_stream(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that _emit_state_change writes an AGENT_STATE_CHANGE event to the agent_states file."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(name="transitioning-agent", state=AgentLifecycleState.STOPPED)
 
     observer._emit_state_change(agent, "RUNNING", "RUNNING")
@@ -666,7 +661,7 @@ def test_agent_observer_emit_agent_state_detects_host_state_change(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that a state change event is emitted when host state changes but agent state stays the same."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(
         name="host-changing", state=AgentLifecycleState.RUNNING, host_state=HostState.PAUSED
     )
@@ -692,7 +687,7 @@ def test_agent_observer_process_snapshot_agents_detects_host_state_change(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that _process_snapshot_agents detects host state changes and emits to agent_states."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_agent_details(
         name="host-transition-agent", state=AgentLifecycleState.RUNNING, host_state=HostState.PAUSED
     )
@@ -716,7 +711,7 @@ def test_agent_observer_process_snapshot_agents_detects_host_state_change(
 
 def test_agent_observer_handle_host_destroyed_removes_host(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Verify that _handle_host_destroyed removes the host from known_hosts."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     host = make_test_discovered_host()
 
     with observer._concurrency_group:
@@ -742,7 +737,7 @@ def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """Verify that _on_discovery_stream_output dispatches HostDestroyedEvent correctly."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     host = make_test_discovered_host()
 
     with observer._concurrency_group:
@@ -768,13 +763,6 @@ def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
 # === UNKNOWN State Tests ===
 
 
-def _make_provider(name: str) -> DiscoveredProvider:
-    return make_discovered_provider(
-        ProviderInstanceName(name),
-        ProviderInstanceConfig(backend=ProviderBackendName("docker"), is_enabled=True),
-    )
-
-
 def test_make_unknown_agent_details_sets_state_unknown_and_preserves_identity() -> None:
     """Synthetic UNKNOWN AgentDetails keeps name/type/id but flips state + host.state to UNKNOWN."""
     original = make_test_agent_details(name="ghost-agent", state=AgentLifecycleState.RUNNING)
@@ -796,12 +784,12 @@ def test_agent_observer_handle_full_snapshot_records_errored_providers(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """A snapshot with error_by_provider_name populates _currently_errored_providers."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     errored = ProviderInstanceName("modal")
     snapshot = make_full_discovery_snapshot_event(
         [],
         [],
-        providers=(_make_provider("local"),),
+        providers=(make_test_provider("local"),),
         error_by_provider_name={
             errored: DiscoveryError(
                 type_name="ImbueCloudAuthError",
@@ -823,14 +811,14 @@ def test_agent_observer_handle_full_snapshot_clears_polling_loop_crashed(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """A successful snapshot clears any prior _polling_loop_crashed flag."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     observer._polling_loop_crashed = True
 
     with observer._concurrency_group:
         snapshot = make_full_discovery_snapshot_event(
             [],
             [],
-            providers=(_make_provider("local"),),
+            providers=(make_test_provider("local"),),
             error_by_provider_name={},
         )
         observer._handle_full_snapshot(snapshot)
@@ -841,7 +829,7 @@ def test_agent_observer_handle_discovery_error_event_with_provider_name_adds_to_
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """A DiscoveryErrorEvent with provider_name adds it to the errored set and triggers a snapshot."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     timestamp, event_id = _make_envelope_fields()
     event = DiscoveryErrorEvent(
         timestamp=timestamp,
@@ -863,7 +851,7 @@ def test_agent_observer_handle_discovery_error_event_without_provider_name_marks
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """A DiscoveryErrorEvent with provider_name=None sets _polling_loop_crashed."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     timestamp, event_id = _make_envelope_fields()
     event = DiscoveryErrorEvent(
         timestamp=timestamp,
@@ -885,7 +873,7 @@ def test_process_snapshot_agents_emits_unknown_when_provider_errored(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """A previously-observed agent on an errored provider becomes UNKNOWN, not dropped."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     provider = ProviderInstanceName("modal")
     agent = make_test_agent_details(
         name="ghost",
@@ -927,7 +915,7 @@ def test_process_snapshot_agents_drops_agent_when_provider_removed_from_config(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """If a previously-observed agent's provider is no longer in _known_provider_names, drop it."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     provider = ProviderInstanceName("modal")
     agent = make_test_agent_details(
         name="config-removed",
@@ -951,7 +939,7 @@ def test_process_snapshot_agents_drops_agent_when_provider_healthy_and_agent_abs
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """A previously-observed agent whose provider is healthy but who's missing from the listing is dropped (implicit destroy)."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     provider = ProviderInstanceName("local")
     agent = make_test_agent_details(
         name="implicit-destroyed",
@@ -973,7 +961,7 @@ def test_process_snapshot_agents_unknown_is_sticky_until_reappearance(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """An UNKNOWN agent leaves UNKNOWN only when it reappears in a snapshot."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     provider = ProviderInstanceName("modal")
     running_agent = make_test_agent_details(
         name="resurrecting",
@@ -1003,7 +991,7 @@ def test_process_snapshot_agents_polling_crashed_makes_all_agents_unknown(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
     """While _polling_loop_crashed is set, every previously-tracked agent gets UNKNOWN."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer = make_test_agent_observer(temp_mngr_ctx, noop_binary)
     agent_a = make_test_agent_details(name="a", provider_name=ProviderInstanceName("local"))
     agent_b = make_test_agent_details(name="b", provider_name=ProviderInstanceName("modal"))
 

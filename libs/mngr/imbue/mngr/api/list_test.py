@@ -37,7 +37,6 @@ from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
@@ -68,10 +67,10 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
-from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr.utils.testing import register_test_backend
 
 # =============================================================================
 # Helpers
@@ -214,14 +213,6 @@ def test_error_info_build_creates_correct_error_from_exception() -> None:
     assert error.message == "something went wrong"
 
 
-def test_error_info_build_captures_custom_exception_type() -> None:
-    """ErrorInfo.build() should capture custom exception class names."""
-    exception = ValueError("bad value")
-    error = ErrorInfo.build(exception)
-    assert error.exception_type == "ValueError"
-    assert error.message == "bad value"
-
-
 # =============================================================================
 # ProviderErrorInfo Tests
 # =============================================================================
@@ -267,30 +258,11 @@ def test_agent_error_info_build_for_agent() -> None:
     assert error.agent_id == agent_id
 
 
-# =============================================================================
-# ListResult Tests
-# =============================================================================
-
-
-def test_list_result_initializes_with_empty_lists() -> None:
-    """ListResult should initialize with empty agents and errors lists."""
-    result = ListResult()
-    assert result.agents == []
-    assert result.errors == []
-
-
-def test_list_result_allows_appending() -> None:
-    """ListResult agents and errors lists should be mutable."""
-    result = ListResult()
-    host_details = _make_host_details()
-    agent = _make_agent_details("test-agent", host_details)
-    result.agents.append(agent)
-    assert len(result.agents) == 1
-    assert result.agents[0].name == AgentName("test-agent")
-
-    error = ErrorInfo.build(RuntimeError("oops"))
-    result.errors.append(error)
-    assert len(result.errors) == 1
+# NOTE: ListResult is a plain pydantic model with default-empty lists; its
+# initialization and list-append behavior is pure Pydantic and is exercised in
+# substance by every list_agents / _collect_and_emit_details_for_host test that
+# reads result.agents / result.errors, so dedicated constructor round-trip tests
+# are intentionally omitted.
 
 
 # =============================================================================
@@ -312,20 +284,9 @@ def test_agent_details_to_cel_context_basic_fields() -> None:
 
 def test_agent_details_to_cel_context_computes_age() -> None:
     """agent_details_to_cel_context should compute 'age' from create_time."""
-    host_details = _make_host_details()
+    base = _make_agent_details("aging-agent", _make_host_details())
     create_time = datetime.now(timezone.utc) - timedelta(hours=2)
-    agent = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("aging-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work"),
-        initial_branch=None,
-        create_time=create_time,
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=host_details,
-    )
+    agent = base.model_copy_update(to_update(base.field_ref().create_time, create_time))
     context = agent_details_to_cel_context(agent)
 
     assert "age" in context
@@ -336,20 +297,8 @@ def test_agent_details_to_cel_context_computes_age() -> None:
 
 def test_agent_details_to_cel_context_computes_runtime() -> None:
     """agent_details_to_cel_context should set 'runtime' from runtime_seconds."""
-    host_details = _make_host_details()
-    agent = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("running-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work"),
-        initial_branch="feature/custom-work",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        runtime_seconds=3600.0,
-        host=host_details,
-    )
+    base = _make_agent_details("running-agent", _make_host_details())
+    agent = base.model_copy_update(to_update(base.field_ref().runtime_seconds, 3600.0))
     context = agent_details_to_cel_context(agent)
 
     assert context["runtime"] == 3600.0
@@ -357,21 +306,9 @@ def test_agent_details_to_cel_context_computes_runtime() -> None:
 
 def test_agent_details_to_cel_context_computes_idle() -> None:
     """agent_details_to_cel_context should compute 'idle' from activity times."""
-    host_details = _make_host_details()
+    base = _make_agent_details("idle-agent", _make_host_details())
     activity_time = datetime.now(timezone.utc) - timedelta(minutes=5)
-    agent = AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName("idle-agent"),
-        type="claude",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/work"),
-        initial_branch="mngr/idle-agent",
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        user_activity_time=activity_time,
-        host=host_details,
-    )
+    agent = base.model_copy_update(to_update(base.field_ref().user_activity_time, activity_time))
     context = agent_details_to_cel_context(agent)
 
     assert "idle" in context
@@ -614,6 +551,10 @@ def test_apply_cel_filters_warns_on_typoed_strict_field(exclude_expr: str) -> No
     out of the filter loop's evaluate() call and is logged.
     """
     agent = _make_agent_details("test-agent", _make_host_details())
+    # Guard the premise: `providr` must genuinely be a missing strict-field key.
+    # If a future alias ever makes it a real key, this test would silently invert
+    # its meaning (the access would stop erroring), so fail loudly here instead.
+    assert "providr" not in build_agent_cel_context(agent)["host"]
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=(),
         exclude_filters=(exclude_expr,),
@@ -897,10 +838,12 @@ def test_list_agents_batch_mode_on_agent_callback_is_called(
 
     local_host.destroy_agent(agent)
 
-    assert len(result.agents) >= 1
-    assert len(found_agents) >= 1
+    # temp_mngr_ctx isolates the host dir, so exactly this test's single agent
+    # is listed and the callback must fire exactly once for it.
+    result_names = [str(a.name) for a in result.agents]
+    assert result_names == ["list-callback-test"]
     found_names = [str(a.name) for a in found_agents]
-    assert "list-callback-test" in found_names
+    assert found_names == ["list-callback-test"]
 
 
 @pytest.mark.tmux
@@ -930,10 +873,12 @@ def test_list_agents_streaming_mode_on_agent_callback_is_called(
 
     local_host.destroy_agent(agent)
 
-    assert len(result.agents) >= 1
-    assert len(found_agents) >= 1
+    # temp_mngr_ctx isolates the host dir, so exactly this test's single agent
+    # is listed and the callback must fire exactly once for it.
+    result_names = [str(a.name) for a in result.agents]
+    assert result_names == ["list-stream-test"]
     found_names = [str(a.name) for a in found_agents]
-    assert "list-stream-test" in found_names
+    assert found_names == ["list-stream-test"]
 
 
 @pytest.mark.tmux
@@ -973,9 +918,10 @@ def test_list_agents_with_include_filter_excludes_non_matching(
     local_host.destroy_agent(agent1)
     local_host.destroy_agent(agent2)
 
+    # With the include filter and an isolated host dir, the matching agent is the
+    # only result -- the non-matching one must be excluded entirely.
     result_names = [str(a.name) for a in result.agents]
-    assert "list-include-yes" in result_names
-    assert "list-include-no" not in result_names
+    assert result_names == ["list-include-yes"]
 
 
 # =============================================================================
@@ -1109,7 +1055,12 @@ def test_offline_agent_field_generators_hookspec_is_registered_and_collected(
     """The offline_agent_field_generators hookspec is registered and collects plugin results.
 
     This mirrors the collection loop in list_agents, guarding against the hookspec
-    being missing (which would make the hook call silently return nothing)."""
+    being missing (which would make the hook call silently return nothing).
+
+    Note: this is intentionally a narrow registration/collection guard -- it does
+    NOT exercise list_agents' downstream *use* of the collected generators. That
+    behavior is covered by
+    test_collect_and_emit_details_for_host_populates_offline_plugin_data."""
     # The plugin_manager fixture loads real setuptools entrypoints, so other installed
     # plugins (e.g. kanpan) may also register this hook. Use a unique test-plugin name
     # and assert membership rather than exact equality so the test stays correct
@@ -1259,13 +1210,38 @@ def test_field_generators_none_plugin_is_skipped(
     assert "none_plugin" not in details.plugin
 
 
-def test_no_field_generators_produces_empty_plugin(
+@pytest.mark.tmux
+def test_unregistered_field_generator_plugins_do_not_appear(
+    temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
+    local_host: Host,
 ) -> None:
-    """list_agents with no field generator plugins should leave plugin={} on all agents."""
+    """list_agents must not fabricate plugin entries for generators that were never registered.
+
+    A real agent is created (so the check is not vacuous) but no custom field
+    generator plugins are registered here. The default field generators that ship
+    with mngr may legitimately populate ``plugin`` (e.g. the ``claude`` waiting
+    reason), so we cannot assert ``plugin == {}``; instead we assert that the
+    custom plugin keys exercised by the sibling field-generator tests are absent.
+    A regression where list_agents injected spurious plugin data under those keys
+    would be caught.
+    """
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("no-field-gen-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847320"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
     result = list_agents(mngr_ctx=temp_mngr_ctx, is_streaming=False)
-    for agent in result.agents:
-        assert agent.plugin == {}
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "no-field-gen-test")
+    for unregistered_key in ("test_plugin", "plugin_a", "plugin_b", "real_plugin", "none_plugin"):
+        assert unregistered_key not in details.plugin
 
 
 # =============================================================================
@@ -1299,18 +1275,13 @@ def test_discover_hosts_and_agents_groups_agents_by_host(
 
     local_host.destroy_agent(agent)
 
-    # There should be at least one host with agents
+    # temp_mngr_ctx isolates the host dir, so exactly one host has agents, and it
+    # holds exactly the single agent this test created.
     non_empty_hosts = {k: v for k, v in agents_by_host.items() if v}
-    assert len(non_empty_hosts) >= 1
-
-    # Find our agent in the results
-    found_agent = False
-    for _host_ref, agent_refs in agents_by_host.items():
-        for ref in agent_refs:
-            if str(ref.agent_name) == "grouped-test":
-                found_agent = True
-                break
-    assert found_agent
+    assert len(non_empty_hosts) == 1
+    (agent_refs,) = non_empty_hosts.values()
+    grouped_names = [str(ref.agent_name) for ref in agent_refs]
+    assert grouped_names == ["grouped-test"]
 
 
 # =============================================================================
@@ -1420,9 +1391,9 @@ def test_discover_hosts_and_agents_propagates_unavailable_provider(
     omitting that provider's agents. Targeted commands avoid this by scoping
     discovery to the relevant provider(s).
     """
-    _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
-    _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(
+        _UNAVAILABLE_DISCOVERY_BACKEND_NAME, _UnavailableDiscoveryProviderBackend, ProviderInstanceConfig
+    ):
         mngr_ctx = _make_unavailable_alongside_local_ctx(temp_mngr_ctx)
 
         with pytest.raises(ProviderUnavailableError):
@@ -1433,9 +1404,6 @@ def test_discover_hosts_and_agents_propagates_unavailable_provider(
                 include_destroyed=True,
                 reset_caches=False,
             )
-    finally:
-        del _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
-        del _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
 
 
 class _RaisingDetailProviderInstance(MockProviderInstance):
@@ -1841,9 +1809,7 @@ def test_list_agents_batch_continue_mode_handles_mismatched_provider_name(
     In CONTINUE mode this triggers a ProviderInstanceNotFoundError that should
     be recorded (not raised).
     """
-    _backend_registry[_MISMATCHED_BACKEND_NAME] = _MismatchedProviderBackend
-    _provider_config_registry[_MISMATCHED_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(_MISMATCHED_BACKEND_NAME, _MismatchedProviderBackend, ProviderInstanceConfig):
         captured_errors: list[ErrorInfo] = []
         result = list_agents(
             mngr_ctx=temp_mngr_ctx,
@@ -1857,9 +1823,6 @@ def test_list_agents_batch_continue_mode_handles_mismatched_provider_name(
         assert any("nonexistent-provider-xyz" in str(e.provider_name) for e in provider_errors)
         assert len(captured_errors) >= 1
         assert all(isinstance(e, ProviderErrorInfo) for e in captured_errors)
-    finally:
-        del _backend_registry[_MISMATCHED_BACKEND_NAME]
-        del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
 
 
 def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
@@ -1871,9 +1834,7 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
     ProviderInstanceNotFoundError must propagate (wrapped by the
     ConcurrencyGroupExecutor) rather than be swallowed.
     """
-    _backend_registry[_MISMATCHED_BACKEND_NAME] = _MismatchedProviderBackend
-    _provider_config_registry[_MISMATCHED_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(_MISMATCHED_BACKEND_NAME, _MismatchedProviderBackend, ProviderInstanceConfig):
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             list_agents(
                 mngr_ctx=temp_mngr_ctx,
@@ -1881,9 +1842,6 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
                 error_behavior=ErrorBehavior.ABORT,
             )
         assert exc_info.value.only_exception_is_instance_of(MngrError)
-    finally:
-        del _backend_registry[_MISMATCHED_BACKEND_NAME]
-        del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
 
 
 # =============================================================================
@@ -1915,9 +1873,9 @@ def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
     must be caught and stored as a ProviderErrorInfo on the result, and the
     on_error callback must be called.
     """
-    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
-    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(
+        _RAISING_DISCOVERY_BACKEND_NAME, _RaisingDiscoveryProviderBackend, ProviderInstanceConfig
+    ):
         mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
         result = ListResult()
         lock = Lock()
@@ -1942,18 +1900,15 @@ def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
         assert "simulated discovery failure from test" in result.errors[0].message
         assert len(captured_errors) == 1
         assert captured_errors[0] is result.errors[0]
-    finally:
-        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
-        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
 
 
 def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """_construct_discover_and_emit_for_provider re-raises the MngrError in ABORT mode."""
-    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
-    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(
+        _RAISING_DISCOVERY_BACKEND_NAME, _RaisingDiscoveryProviderBackend, ProviderInstanceConfig
+    ):
         mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
         result = ListResult()
         lock = Lock()
@@ -1970,35 +1925,17 @@ def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
             )
 
         assert result.errors == []
-    finally:
-        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
-        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
 
 
-def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """_construct_discover_and_emit_for_provider processes hosts and agents when discovery succeeds.
-
-    Uses the local provider (registered by default) and tests the success path:
-    construction, discovery, and host submission to the executor all complete
-    without errors. The local provider has no agents in a fresh tmpdir so
-    no agent details are emitted, but result.errors must be empty.
-    """
-    result = ListResult()
-    lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
-
-    _construct_discover_and_emit_for_provider(
-        provider_name=ProviderInstanceName("local"),
-        mngr_ctx=temp_mngr_ctx,
-        params=params,
-        result=result,
-        results_lock=lock,
-        reset_caches=False,
-    )
-
-    assert result.errors == []
+# NOTE: the success path of _construct_discover_and_emit_for_provider (construct,
+# discover, then emit agents) is covered behaviorally elsewhere: the empty-result
+# case by test_list_agents_streaming_mode_no_agents_returns_empty_result, the
+# end-to-end emit-an-agent case by the tmux test
+# test_list_agents_streaming_mode_on_agent_callback_is_called (which drives this
+# function through a real local provider holding a real agent), and the
+# host->agent emission step by the _collect_and_emit_details_for_host tests. A
+# bare "local provider with no agents -> errors == []" unit test added nothing
+# those don't already cover, so it is intentionally omitted.
 
 
 # =============================================================================
@@ -2030,9 +1967,7 @@ def test_list_agents_streaming_abort_mode_silently_skips_empty_provider(
 
     Regression for: `mngr list` aborting when the Modal env didn't exist yet.
     """
-    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
-    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(_EMPTY_BACKEND_NAME, _EmptyProviderBackend, ProviderInstanceConfig):
         mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
         result = list_agents(
             mngr_ctx=mngr_ctx,
@@ -2041,9 +1976,6 @@ def test_list_agents_streaming_abort_mode_silently_skips_empty_provider(
         )
 
         assert result.errors == []
-    finally:
-        del _backend_registry[_EMPTY_BACKEND_NAME]
-        del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
 def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
@@ -2053,9 +1985,7 @@ def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
     an empty provider rather than wrapping the error into a ProviderDiscoveryError
     that would abort the whole listing.
     """
-    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
-    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
+    with register_test_backend(_EMPTY_BACKEND_NAME, _EmptyProviderBackend, ProviderInstanceConfig):
         mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
         result = list_agents(
             mngr_ctx=mngr_ctx,
@@ -2064,9 +1994,6 @@ def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
         )
 
         assert result.errors == []
-    finally:
-        del _backend_registry[_EMPTY_BACKEND_NAME]
-        del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
 # =============================================================================

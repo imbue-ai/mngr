@@ -9,7 +9,10 @@ from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UnknownBackendError
+from imbue.mngr.plugin_catalog import get_catalog_entry
+from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
+from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
@@ -38,11 +41,24 @@ def test_get_unknown_backend_raises() -> None:
 
 
 def test_get_unknown_backend_includes_plugin_install_hint_for_cataloged_backend() -> None:
-    """Unknown backend errors should name the actual package for cataloged plugins."""
-    with pytest.raises(UnknownBackendError) as exc_info:
-        get_backend("modal")
-    formatted = exc_info.value.format_message()
+    """Unknown backend errors should name the actual package for cataloged plugins.
+
+    The catalog-driven install hint is a property of ``UnknownBackendError``
+    (it calls ``get_plugin_install_hint`` for the backend name), not of the
+    registry. We assert it directly with a cataloged backend name rather than
+    routing through ``get_backend("modal")``: the latter only raises because the
+    modal plugin happens to be unregistered in this environment, so it would
+    fail for an unrelated reason wherever the modal backend is installed.
+    """
+    cataloged_backend = "modal"
+    # Sanity-check the precondition: the chosen name really is in the catalog,
+    # so the hint is expected to name its package rather than fall back.
+    assert get_catalog_entry(cataloged_backend) is not None
+    error = UnknownBackendError(cataloged_backend, registered=["local"])
+    formatted = error.format_message()
     assert "imbue-mngr-modal" in formatted
+    # The hint must come from the catalog lookup, not from fabricating a name.
+    assert "imbue-mngr-modal" in get_plugin_install_hint(cataloged_backend, kind=PluginKind.PROVIDER)
 
 
 def test_get_unknown_backend_uses_generic_hint_for_uncataloged_backend() -> None:
@@ -103,16 +119,28 @@ def test_get_all_provider_instances_with_configured_providers(
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
     providers = get_all_provider_instances(mngr_ctx)
 
+    # The configured custom provider plus the built-in default backends must all be
+    # present, and no provider may appear more than once. The full set of default
+    # backends depends on which provider plugins are installed (e.g. lima), so we
+    # assert membership plus no-duplicates rather than pinning an exact set, which
+    # would be environment-fragile.
     provider_names = [p.name for p in providers]
-    assert custom_name in provider_names
+    assert {custom_name, ProviderInstanceName("local"), ProviderInstanceName("ssh")} <= set(provider_names)
+    assert len(provider_names) == len(set(provider_names)), f"duplicate provider instances: {provider_names}"
+    assert provider_names.count(custom_name) == 1
 
 
 def test_get_all_provider_instances_includes_default_backends(temp_mngr_ctx: MngrContext) -> None:
     """Test get_all_provider_instances includes default backends."""
     providers = get_all_provider_instances(temp_mngr_ctx)
 
+    # With no configured providers, the built-in default backends must be present
+    # and unique. The exact default set depends on installed provider plugins
+    # (e.g. lima), so we assert membership plus no-duplicates rather than an exact
+    # set, which would be environment-fragile.
     provider_names = [str(p.name) for p in providers]
-    assert "local" in provider_names
+    assert {"local", "ssh"} <= set(provider_names)
+    assert len(provider_names) == len(set(provider_names)), f"duplicate provider instances: {provider_names}"
 
 
 def test_get_all_provider_instances_excludes_disabled_providers(
@@ -162,9 +190,13 @@ def test_get_all_provider_instances_empty_enabled_backends_allows_all(temp_mngr_
     assert temp_mngr_ctx.config.enabled_backends == []
     providers = get_all_provider_instances(temp_mngr_ctx)
 
-    # Should have at least local backend
+    # Empty enabled_backends allows every registered backend. The built-in local
+    # and ssh backends must be present and unique; the full set depends on
+    # installed provider plugins (e.g. lima), so we assert membership plus
+    # no-duplicates rather than an exact set, which would be environment-fragile.
     provider_names = [str(p.name) for p in providers]
-    assert "local" in provider_names
+    assert {"local", "ssh"} <= set(provider_names)
+    assert len(provider_names) == len(set(provider_names)), f"duplicate provider instances: {provider_names}"
 
 
 def test_get_all_provider_instances_filters_by_provider_names(temp_mngr_ctx: MngrContext) -> None:
