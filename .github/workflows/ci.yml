@@ -250,6 +250,35 @@ jobs:
         run: uv run python scripts/cleanup_old_modal_test_environments.py --max-age-hours 1.0
 
 
+  # Clean up old Vultr test VPS instances left behind by the mngr_vultr release
+  # tests (run manually / locally against the shared Vultr account, so this CI
+  # job is their only scheduled safety net). The script no-ops if VULTR_API_KEY
+  # is unset, so this job is safe before the secret is configured.
+  cleanup-vultr-instances:
+    runs-on: ubuntu-latest
+    env:
+      VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Clean up old Vultr test instances
+        run: uv run python scripts/cleanup_old_vultr_test_instances.py --max-age-hours 1.0
+
+
   # Acceptance tests via offload on Modal
   test-offload-acceptance:
     runs-on: ubuntu-latest

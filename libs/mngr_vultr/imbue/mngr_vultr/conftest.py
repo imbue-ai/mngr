@@ -17,15 +17,17 @@ The mechanism is tag-based:
      subprocess and inherits the env, so this works transparently across
      ``_run_mngr`` calls.
 
-     The timestamp tag exists for an *out-of-band, age-based* reaper
-     (analogous to Modal's ``cleanup_old_modal_test_environments.py``):
-     the in-process check in ``pytest_sessionfinish`` only reaps leaks
-     from sessions that survive to run it, so a session/runner killed
-     mid-run leaves orphans that no future session -- each with a fresh
-     uuid -- can match. The timestamp lets a scheduled reaper find and
-     destroy those by age, independent of the random session uuid. The
-     format mirrors Modal's ``TEST_ENV_PATTERN`` so such a reaper can
-     reuse the same parsing.
+     The timestamp tag feeds the *out-of-band, age-based* reaper in
+     ``imbue.mngr_vultr.cleanup`` (driven by
+     ``scripts/cleanup_old_vultr_test_instances.py``, analogous to Modal's
+     ``cleanup_old_modal_test_environments.py``): the in-process check in
+     ``pytest_sessionfinish`` only reaps leaks from sessions that survive
+     to run it, so a session/runner killed mid-run leaves orphans that no
+     future session -- each with a fresh uuid -- can match. The timestamp
+     lets the scheduled reaper find and destroy those by age, independent
+     of the random session uuid. The tag is built by
+     ``build_test_created_tag`` so its format stays in lockstep with the
+     reaper that parses it.
   2. ``pytest_sessionfinish`` lists Vultr instances, filters to those
      bearing the session tag, destroys any survivors, and fails the
      session on any real leak. A real leak is any survivor that was
@@ -55,19 +57,18 @@ from pydantic import SecretStr
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vultr.cleanup import build_test_created_tag
 from imbue.mngr_vultr.client import VultrVpsClient
 
 _SESSION_TAG_KEY: Final[str] = "mngr-vultr-test-session"
 _SESSION_TAG: Final[str] = f"{_SESSION_TAG_KEY}={uuid.uuid4().hex}"
 
-# Out-of-band age-based reaping (for sessions killed before
-# ``pytest_sessionfinish`` runs). Format mirrors Modal's
-# ``TEST_ENV_PATTERN`` (``%Y-%m-%d-%H-%M-%S``, no colons -> safe as a Vultr
-# tag) so a future scheduled reaper can reuse the same parsing. Computed at
-# import (session start), which is within seconds of the first VPS create.
-_CREATED_TAG_KEY: Final[str] = "mngr-vultr-test-created"
-_CREATED_TAG_TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d-%H-%M-%S"
-_CREATED_TAG: Final[str] = f"{_CREATED_TAG_KEY}={datetime.now(timezone.utc).strftime(_CREATED_TAG_TIMESTAMP_FORMAT)}"
+# Timestamp tag for out-of-band age-based reaping (of sessions killed before
+# ``pytest_sessionfinish`` runs). Built by ``build_test_created_tag`` so the
+# format stays in lockstep with the reaper that parses it
+# (``imbue.mngr_vultr.cleanup``). Computed at import (session start), which is
+# within seconds of the first VPS create.
+_CREATED_TAG: Final[str] = build_test_created_tag(datetime.now(timezone.utc))
 
 
 class _LeakDestroyOutcome(UpperCaseStrEnum):
