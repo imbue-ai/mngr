@@ -115,6 +115,15 @@ get_other_stop_hooks() {
 # $1 (optional): reason for marking inactive (e.g. "signal:SIGTERM")
 mark_inactive() {
     local reason="${1:-}"
+    # Flush the transcript pipeline before clearing the marker (see the comment
+    # above the lib source below). This lives in mark_inactive -- not
+    # run_post_completion -- so it runs on EVERY turn-end path, including the
+    # no-/proc fast path and the SIGTERM/SIGINT handler, both of which clear the
+    # marker without going through run_post_completion. Best-effort and guarded
+    # so a missing lib or flush failure can never strand the turn-end signal.
+    if command -v mngr_common_transcript_flush >/dev/null 2>&1; then
+        mngr_common_transcript_flush
+    fi
     rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
     mkdir -p "$MNGR_HOST_DIR/events/mngr/activity"
     local extra=""
@@ -154,17 +163,17 @@ upload_autofix_issues() {
     uv run modal volume put "${volume_name}" "$issues_file" "/${nested_path}/autofix.json" --force 2>/dev/null || true
 }
 
-# --- Flush the transcript pipeline so the WAITING signal can't outrun it ---
+# --- Source the shared common-transcript helpers (provides the flush) ---
 # The raw streamer (1s poll) and common-transcript converter (5s poll) lag
-# behind Claude's session JSONL. mark_inactive (below) clears the `active`
-# marker, which is the turn-end signal `mngr wait --state WAITING` reads --
-# and consumers that harvest the final assistant message from the common
-# transcript on that signal (e.g. Catalyst's mngr_runner) would otherwise
-# race the converter. mngr_common_transcript_flush forces one synchronous pass
-# of each converter, in pipeline order, so the common transcript reflects the
-# final message before the marker is cleared (see the shared library header).
-# Sourced and called defensively: the lib is provisioned by
-# Host._ensure_shared_shell_libs, but a missing lib or flush failure must never
+# behind Claude's session JSONL. mark_inactive clears the `active` marker, which
+# is the turn-end signal `mngr wait --state WAITING` reads -- and consumers that
+# harvest the final assistant message from the common transcript on that signal
+# (e.g. Catalyst's mngr_runner) would otherwise race the converter.
+# mngr_common_transcript_flush (defined in the shared lib) forces one synchronous
+# pass of each converter, in pipeline order, so the common transcript reflects
+# the final message before the marker is cleared (see the shared library header).
+# mark_inactive calls it on every turn-end path. Sourced defensively: the lib is
+# provisioned by Host._ensure_shared_shell_libs, but a missing lib must never
 # strand the turn-end signal.
 if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh" ]; then
     # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_common_transcript_lib.sh
@@ -173,11 +182,6 @@ fi
 
 # --- Post-completion actions (run after all other stop hooks finish) ---
 run_post_completion() {
-    # Flush the transcript pipeline before mark_inactive clears the marker.
-    if command -v mngr_common_transcript_flush >/dev/null 2>&1; then
-        mngr_common_transcript_flush
-    fi
-
     # Only run post-completion if the orchestrator succeeded.
     # The code-guardian orchestrator writes .reviewer/outputs/orchestrator_success
     # on success with the commit hash.
