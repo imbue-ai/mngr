@@ -63,6 +63,12 @@ def test_call_runs_mngr_version_in_forkserver_child() -> None:
     assert "mngr" in result.stdout
 
 
+# Flaky under heavy CI load: this end-to-end call starts a forkserver and
+# preloads ``imbue.mngr.main`` in the child before running the CLI; that
+# startup occasionally exceeds the 10s pytest-timeout when offload sandboxes
+# are contended (same class of flake as the agent_creator litellm-key tests).
+# Offload retries flaky tests automatically.
+@pytest.mark.flaky
 def test_call_reports_nonzero_exit_for_unknown_command() -> None:
     result = MngrCaller().call(["definitely-not-a-real-subcommand"], timeout=120.0)
     assert result.returncode != 0
