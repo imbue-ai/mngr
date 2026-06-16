@@ -160,8 +160,11 @@ the scope is wrong and rendering raises -- a drift guard.
 
 ## The capability registry
 
-One module (`libs/mngr/imbue/mngr/agents/agent_capabilities.py`) declares the
-capabilities and how to detect each. Sketch:
+One module (`scripts/make_agent_capabilities_doc.py`) declares the
+capabilities and how to detect each. It is dev-only tooling (it generates the matrix
+doc and drift-guards it via `--check`), so it lives in `scripts/` rather than the shipped
+`mngr` wheel; the capability *mixins* it references stay in `imbue.mngr.interfaces.agent`,
+since agent classes inherit them at runtime. Sketch:
 
 ```python
 class AgentCapability(FrozenModel):
@@ -317,9 +320,9 @@ in the parity spec, because their content is how-not-whether.
 
 ## Implementation plan -- core phases done
 
-1. **(done)** `agents/agent_capabilities.py`: `AgentCapability`, `AgentClassInfo`, the
+1. **(done)** `scripts/make_agent_capabilities_doc.py`: `AgentCapability`, `AgentClassInfo`, the
    registry, and the matrix renderer, with class-mixin / field-generator / plugin-hookimpl /
-   usage-source detection. Unit-tested.
+   usage-source detection. Unit-tested. (Dev tooling in `scripts/`, not shipped in the wheel.)
 2. **(done)** The live `build_agent_class_infos(plugin_manager)` builder, the generated matrix
    doc (`libs/mngr/docs/concepts/agent_capabilities.md`), and the drift-guard test
    (`just regenerate-agent-capabilities-doc`).

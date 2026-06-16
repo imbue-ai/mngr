@@ -184,7 +184,7 @@ test-quick args="":
 
 # Regenerate the code-derived agent capability matrix doc (libs/mngr/docs/concepts/agent_capabilities.md)
 regenerate-agent-capabilities-doc:
-  MNGR_REGEN_CAPABILITY_DOC=1 uv run pytest -p no:xdist --no-cov libs/mngr/imbue/mngr/agents/test_agent_capabilities.py::test_capability_matrix_doc_is_current
+  uv run python scripts/make_agent_capabilities_doc.py
 
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
