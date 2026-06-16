@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+## Internal: disable the new `gcp` provider in Vultr release-test settings
+
+- The Vultr release tests write a `settings.toml` that disables every other remote provider so the create-host preflight does not trip resolving their credentials. With the new `gcp` provider now registered as a remote backend, it is added to that disable-set (matching the existing modal/aws/ovh/imbue_cloud entries). No behavioral change for Vultr.
+
 ## 2026-06-12
 
 ## AWS provider support: shared VPS-Docker base refactor

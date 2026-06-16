@@ -278,6 +278,21 @@ class AgentLifecycleState(UpperCaseStrEnum):
     UNKNOWN = auto()
 
 
+class WaitingReason(UpperCaseStrEnum):
+    """Why an agent in the WAITING lifecycle state is waiting.
+
+    Reported as the ``waiting_reason`` field by agent plugins (see the
+    ``agent_field_generators`` hook). Shared across plugins so the codex and claude
+    implementations agree on the vocabulary; see ``classify_waiting_reason`` in
+    ``imbue.mngr.hosts.common`` for the shared rule that produces it.
+    """
+
+    # Blocked on a tool-approval dialog, waiting for the user to respond.
+    PERMISSIONS = auto()
+    # Idle with its turn complete, waiting for the user's next message.
+    END_OF_TURN = auto()
+
+
 class AgentId(RandomId):
     """Unique identifier for an agent."""
 

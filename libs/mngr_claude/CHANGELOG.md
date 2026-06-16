@@ -6,6 +6,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.15] - 2026-06-16
+
+### Changed
+
+- Changed: `wait_for_stop_hook.sh` now flushes the transcript pipeline (synchronous `--single-pass` of the raw streamer and common-transcript converter) before clearing the `active` marker, so consumers reading the common transcript on a WAITING transition cannot outrun the converter. The flush and the convert lock come from the shared `mngr_common_transcript_lib.sh` rather than being duplicated per agent.
+- Changed: `waiting_reason` field in `mngr list` is now gated on the agent's `active` (in-turn) marker — a stranded `permissions_waiting` file that outlived its turn reports `END_OF_TURN` instead of wrongly showing `PERMISSIONS`.
+
 ## [v0.2.14] - 2026-06-15
 
 ### Added

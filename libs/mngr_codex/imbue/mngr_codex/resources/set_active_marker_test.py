@@ -8,10 +8,11 @@ then clears the root-turn flag only for that root session, so a nested/recursive
 codex process sharing this CODEX_HOME can't flip the agent to WAITING. The tests
 pin: turn-opener records root + transcript path + sets the marker via the
 flag/recompute, a mid-turn invocation does NOT overwrite the root or transcript
-path (so a nested codex doesn't steal them), a missing session id still sets the
-marker, transcript paths with spaces/slashes survive, stdout silence (codex
-treats UserPromptSubmit stdout as injected model context), and loud failure on a
-missing state dir.
+path (so a nested codex doesn't steal them), a fresh root turn clears a stranded
+permissions_waiting marker while a mid-turn (nested) invocation leaves it intact,
+a missing session id still sets the marker, transcript paths with spaces/slashes
+survive, stdout silence (codex treats UserPromptSubmit stdout as injected model
+context), and loud failure on a missing state dir.
 """
 
 from __future__ import annotations
@@ -66,6 +67,10 @@ def _transcript_file(state_dir: Path) -> Path:
     return state_dir / "codex_transcript_path"
 
 
+def _permissions_waiting(state_dir: Path) -> Path:
+    return state_dir / "permissions_waiting"
+
+
 def test_turn_opener_records_root_transcript_and_sets_marker(tmp_path: Path) -> None:
     provision_commands_dir(tmp_path, (_SCRIPT,))
     result = _run(tmp_path, _payload(_ROOT_SESSION, _ROOT_TRANSCRIPT))
@@ -102,6 +107,30 @@ def test_new_turn_after_clear_records_new_root(tmp_path: Path) -> None:
     assert _root_file(tmp_path).read_text() == _NESTED_SESSION
     assert _transcript_file(tmp_path).read_text() == _NESTED_TRANSCRIPT
     assert _marker(tmp_path).exists()
+
+
+def test_fresh_root_turn_clears_stranded_permissions_marker(tmp_path: Path) -> None:
+    """A new root turn (marker absent) clears any leftover permissions_waiting so the
+    turn does not inherit a prior denied/cancelled dialog's state once active is set.
+    Second safety net alongside clear_active_marker.sh's Stop-time removal."""
+    provision_commands_dir(tmp_path, (_SCRIPT,))
+    _permissions_waiting(tmp_path).touch()
+    _run(tmp_path, _payload(_ROOT_SESSION, _ROOT_TRANSCRIPT))
+    assert _marker(tmp_path).exists()
+    assert not _permissions_waiting(tmp_path).exists()
+
+
+def test_mid_turn_invocation_does_not_clear_permissions_marker(tmp_path: Path) -> None:
+    """While the marker is present (turn in progress), a later invocation -- e.g. a
+    nested codex sharing this CODEX_HOME -- must not clear the root's
+    permissions_waiting, so it can't erase a dialog the root is genuinely blocked on.
+    Mirrors the root-session capture guard."""
+    provision_commands_dir(tmp_path, (_SCRIPT,))
+    _run(tmp_path, _payload(_ROOT_SESSION, _ROOT_TRANSCRIPT))
+    # Root is now mid-turn and blocks on an approval dialog (PermissionRequest hook).
+    _permissions_waiting(tmp_path).touch()
+    _run(tmp_path, _payload(_NESTED_SESSION, _NESTED_TRANSCRIPT))
+    assert _permissions_waiting(tmp_path).exists()
 
 
 def test_transcript_path_with_spaces_and_slashes_is_captured(tmp_path: Path) -> None:
