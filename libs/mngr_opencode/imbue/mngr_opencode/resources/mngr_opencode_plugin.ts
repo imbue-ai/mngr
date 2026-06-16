@@ -280,6 +280,21 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         tool_name: part?.tool ?? "",
         input_preview: _truncate(_shortValue(part?.state?.input ?? {}), _MAX_INPUT_PREVIEW_LENGTH),
       }))
+      // Build the ordered parts[] by walking the message's parts in arrival order, so the
+      // text/tool_call interleaving is preserved (faithful -> parts_ordered: true).
+      const commonParts: Array<Record<string, unknown>> = []
+      for (const part of parts) {
+        if (part?.type === "text" && !part?.synthetic && typeof part?.text === "string" && part.text) {
+          commonParts.push({ type: "text", content: part.text })
+        } else if (part?.type === "tool") {
+          commonParts.push({
+            type: "tool_call",
+            tool_call_id: part?.callID ?? "",
+            tool_name: part?.tool ?? "",
+            input_preview: _truncate(_shortValue(part?.state?.input ?? {}), _MAX_INPUT_PREVIEW_LENGTH),
+          })
+        }
+      }
       const providerId = message?.providerID ?? ""
       const modelId = message?.modelID ?? ""
       records.push({
@@ -291,6 +306,8 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         model: providerId && modelId ? `${providerId}/${modelId}` : null,
         text,
         tool_calls: toolCalls,
+        parts: commonParts,
+        parts_ordered: true,
         finish_reason: message?.finish ?? null,
         usage: null,
         conversation_id: sessionId,

@@ -76,9 +76,10 @@ and makes a future GenAI-telemetry exporter a mapping table rather than a re-mod
 **Goals**
 
 - Rename fields to match OTel GenAI vocabulary where the semantics are identical (Tier 1).
-- Optionally carry an ordered `parts[]` that preserves text/tool-call interleaving, for the
-  agents whose native format makes that faithful (Tier 2).
-- Keep one schema that all five emitters conform to, and keep the reader tolerant.
+- Carry an ordered `parts[]` on every assistant record that preserves text/tool-call interleaving,
+  with a `parts_ordered` flag marking the one agent whose order is best-effort (Tier 2).
+- Keep one uniform schema that all five emitters fill identically, so the reader needs no
+  per-agent fallback.
 
 **Non-goals**
 
@@ -117,23 +118,21 @@ Plus the schema (`common_transcript_records.py`), the five conformance tests' go
 `common_transcript_records_test.py`. The reader does not display `stop_reason`, so Tier 1 does not
 affect rendering.
 
-**Note:** the TypeScript emitters (opencode, pi-coding) are under active rework. The Tier 1
-renames there should be coordinated with that work; the logic is unchanged by the rename.
-
 **Risk:** low. No information-model change, so no agent can lose fidelity.
 
-## Tier 2: ordered `parts[]` for capable agents
+## Tier 2: universal ordered `parts[]`
 
-OTel's structured model represents an assistant turn as an ordered `parts[]` array, so that
-`text → tool_call → text → tool_call` interleaving is preserved. Our current schema splits an
-assistant turn into a joined `text` string plus a separate `tool_calls[]` list, which loses that
-ordering.
+OTel's structured model represents an assistant turn as an ordered `parts[]` array (text/tool_call
+segments), so that `text → tool_call → text → tool_call` interleaving is preserved. The flat `text`
+string plus separate `tool_calls[]` list loses that ordering.
 
-**Design: `parts[]` is an additive, optional field — not a replacement.**
+**Design: `parts[]` is a universal field every emitter fills; `parts_ordered` marks faithfulness.**
 
-`assistant_message` keeps `text` and `tool_calls[]` as the always-present baseline (every emitter
-fills them, exactly as today). It *additionally* carries an optional ordered `parts[]` when the
-emitter can produce faithful ordering:
+Every emitter emits `parts[]` — the canonical, agent-agnostic ordered view of the turn, and the one
+the reader renders. The flat `text` / `tool_calls[]` are kept on the same record as a convenience
+baseline, but `parts[]` is authoritative for ordering, so the reader has a **single code path and no
+fallback**. A `parts_ordered: bool` flags whether the order is faithful (the agent's real emission
+order) or best-effort (synthesized because the native format does not record it).
 
 ```python
 class TextPart(_RecordModel):
@@ -150,90 +149,78 @@ class ToolCallPart(_RecordModel):
 AssistantPart = Annotated[TextPart | ToolCallPart, Field(discriminator="type")]
 
 # on AssistantMessageRecord:
-parts: tuple[AssistantPart, ...] | None = None
+parts: tuple[AssistantPart, ...] = ()
+parts_ordered: bool = True
 ```
 
-The reader prefers `parts[]` when present (rendering parts in order), and falls back to the flat
-`text` + `tool_calls[]` otherwise. Role derivation is unaffected (it already reads the explicit
-`role` field first).
+**Why universal rather than optional.** An optional `parts[]` present for only some agents would
+force *every* consumer to implement a flat fallback, and ordering could never be relied on across
+the common format — so it would not actually be *common*. Making `parts[]` universal keeps the
+format uniform (one representation, one reader path) and is the opposite of eroding commonness. The
+faithful-vs-synthesized distinction that an "only-capable-agents-emit-it" design would have encoded
+*structurally* (presence/absence) is instead carried as the `parts_ordered` **metadata** flag — so
+no information is lost, and antigravity's best-effort order stays honest in-band rather than silently
+claiming an order it cannot know.
 
-**Why additive rather than replace:**
+**Why keep the flat fields.** Dropping `text` / `tool_calls[]` for a single representation is cleaner
+still, but a larger breaking change for every consumer; keeping them as a derived convenience is
+low-cost and non-breaking. A future cleanup could drop them (see follow-ups).
 
-- One schema that **every** agent conforms to; the parity gap becomes "some agents omit an
-  optional field," exactly how `usage` / `model` already vary.
-- The gap is **visible in the data itself** — claude and pi carry `parts[]`; the others do not —
-  rather than papered over with a synthesized, fake ordering.
-- It fits the schema's existing "strict core, permissive optionals" philosophy.
-- It is non-breaking: adding codex/opencode later (if desired) just starts populating the field.
+## Per-agent ordering
 
-The alternative (replace `text`/`tool_calls[]` with a mandatory `parts[]`, lossy agents emitting a
-degenerate `[text, tool_calls…]` order) is rejected: it erases the distinction between faithful
-and synthesized ordering and is a breaking change for every emitter and the reader.
+Every emitter fills `parts[]`; they differ only in whether the order is faithful (`parts_ordered`).
 
-## Per-agent feasibility
-
-Whether an emitter can produce a *faithful* ordered `parts[]` depends entirely on whether its
-native format preserves intra-turn ordering.
-
-| Agent | Native assistant shape | Ordered `parts[]`? |
+| Agent | Native assistant shape | parts order |
 |---|---|---|
-| **claude** | `message.content[]` — ordered blocks (`text`, `tool_use`, `thinking`, …). Converter already iterates this array, then splits. | **Yes** — iterate the blocks in order instead of splitting. Easy. |
-| **pi-coding** | `content: ContentBlock[]` — ordered (`text`, `toolCall`, …). Converter filters by type. | **Yes** — preserve the array order. Easy. (Coordinate with the in-flight TS rework.) |
-| **opencode** | In-memory `partsByMessage` is ordered, but the emitter filters/joins by type and does not serialize order. | **Feasible, deferred** — order is available; iterate parts explicitly. Defer until the in-flight TS rework settles. |
-| **codex** | Assistant messages are **text-only**; `tool_calls` is always `[]` because tool use is modeled as separate stream events (`function_call` / `function_call_output`), surfaced as standalone `tool_result` records. | **Not applicable** — there is no intra-message text/tool interleaving to preserve. A `parts[]` here would be a single text part. Cross-event ordering is a different concern, out of scope. |
-| **antigravity** | `PLANNER_RESPONSE` has a scalar `content` (text) and a pre-split `tool_calls[]`; no ordering metadata, no per-call timestamps, no offsets. | **Not reconstructable** — the native format does not store where each tool call sat relative to the text. Documented as a hard limitation. |
+| **claude** | `message.content[]` — ordered blocks (`text`, `tool_use`, `thinking`, …) | **faithful** — iterate the blocks in order |
+| **pi-coding** | `content: ContentBlock[]` — ordered (`text`, `toolCall`, …) | **faithful** — iterate the array in order |
+| **opencode** | in-memory parts map, populated from `message.part.updated` in arrival order | **faithful** — iterate the parts list in order |
+| **codex** | assistant messages are **text-only** (tool use is separate `function_call`/`function_call_output` events, surfaced as standalone `tool_result` records) | **faithful (trivial)** — a single text part; there is no intra-message interleaving to get wrong |
+| **antigravity** | `PLANNER_RESPONSE` has scalar `content` (text) + pre-split `tool_calls[]`; no ordering metadata, no per-call offsets | **best-effort** — synthesize text-then-tools; `parts_ordered=False` |
 
-**Decision:** implement Tier 2 for **claude and pi-coding** only. Mark codex (N/A), opencode
-(feasible, deferred), and antigravity (not reconstructable) in the parity matrix.
+So `parts_ordered` is True for four emitters and False only for antigravity.
 
-This is reflected by adding a row to the parity matrix in
-[`../agent-plugin-parity/spec.md`](../agent-plugin-parity/spec.md):
+**Aside (pre-existing, not changed here):** codex `assistant_message` records never list their tool
+calls in `tool_calls`/`parts`; tool use surfaces only as `tool_result` records. This is a property
+of how codex models tool use.
 
-```
-| Ordered assistant parts[] | Y | N (not reconstructable) | Y | deferred | N/A (text-only messages) |
-```
-
-**Aside (pre-existing, not addressed here):** codex `assistant_message` records never list their
-tool calls (`tool_calls` is always `[]`); only the resulting `tool_result` records appear. This is
-a property of how codex models tool use, not introduced by this change, but it is worth knowing
-when reading a codex transcript.
+This is reflected by an "Ordered assistant parts[]" row in the parity matrix in
+[`../agent-plugin-parity/spec.md`](../agent-plugin-parity/spec.md).
 
 ## Compatibility and migration
 
-- **Tier 1** is a coordinated rename across the schema, five emitters, the reader, and the
-  conformance golden records, landed together. Old on-disk transcripts from already-running agents
-  keep their old field names; the reader is tolerant and still renders them (it reads `stop_reason`
-  nowhere for display, and would read the new tool-call field names with a fallback to the old).
-- **Tier 2** is purely additive (`parts[]` optional, default `None`), so it is non-breaking by
-  construction. No `schema_version` field is required: the reader's existing tolerance plus the
-  prefer-`parts[]`-else-fallback rule covers both shapes.
-
-These are live-agent logs, not long-lived archives, so a versioned-reader scheme is unnecessary;
-the additive design plus reader tolerance is sufficient.
+- Tier 1 and Tier 2 land together: the `finish_reason` rename, the universal `parts[]` /
+  `parts_ordered`, all five emitters, the reader, and the conformance/golden records.
+- The reader renders an assistant turn from `parts[]` only (single path, no fallback). Old on-disk
+  transcript lines written before this change lack `parts[]` and would render with an empty assistant
+  body (`(no content)`). This is acceptable: common transcripts are short-lived live-agent logs, not
+  archives, and are continuously re-derived from the always-on raw stream.
+- `finish_reason`: the reader never displayed the stop reason, so pre-existing lines carrying the old
+  `stop_reason` are unaffected at read time (the field simply lands in `extra`).
+- No `schema_version` field: the format is uniform going forward, so there is nothing to branch on.
 
 ## Impact
 
-- **Schema:** `common_transcript_records.py` — rename `stop_reason`→`finish_reason` (Tier 1); add
-  the `parts[]` part union (Tier 2).
-- **Emitters:** all five for Tier 1 (`finish_reason`); claude + pi-coding additionally for Tier 2.
-- **Reader:** `cli/transcript.py` — prefer `parts[]` when present, else fall back to flat
-  `text` + `tool_calls[]` (Tier 2). Tier 1 does not touch the reader.
-- **Tests:** five conformance tests + their golden records, `common_transcript_records_test.py`.
-- **Docs:** this spec; parity-matrix row in `agent-plugin-parity/spec.md`.
+- **Schema:** `common_transcript_records.py` — rename `stop_reason`→`finish_reason`; add the
+  `parts[]` part union plus the universal `parts` and `parts_ordered` fields.
+- **Emitters:** all five — `finish_reason` and `parts[]`/`parts_ordered` (claude/pi/opencode/codex
+  faithful; antigravity best-effort).
+- **Reader:** `cli/transcript.py` — render the assistant body from `parts[]` (single path).
+- **Tests:** five conformance tests + their golden records, `common_transcript_records_test.py`, and
+  the reader tests/fixtures (`cli/transcript_test.py`, `cli/testing.py`).
+- **Docs:** this spec; parity-matrix row + transcript-dimension note in `agent-plugin-parity/spec.md`.
 - **Changelog:** entries for each touched project (`mngr`, `mngr_claude`, `mngr_codex`,
-  `mngr_antigravity`, `mngr_opencode`, `mngr_pi_coding`, `dev`) when implemented.
+  `mngr_antigravity`, `mngr_opencode`, `mngr_pi_coding`, `dev`).
 
 ## Follow-ups
 
-- **`reasoning` part type.** OTel defines a `reasoning` part. No emitter captures thinking today,
-  but the source is sometimes available — notably antigravity's decoder already reads a
-  `PLANNER_THINKING` field that the converter discards, and claude's `content[]` carries
-  `thinking` blocks. Surfacing reasoning is net-new per-agent extraction and is deferred to its own
-  effort.
-- **codex / opencode `parts[]`.** Non-breaking to add later: codex would require modeling
-  cross-event ordering (a different shape than intra-message parts); opencode is already feasible
-  and just deferred behind its in-flight rework.
-- **GenAI telemetry exporter.** With Tier 1 vocabulary in place, a mapping from common-transcript
+- **`reasoning` part type.** OTel defines a `reasoning` part. No emitter surfaces thinking today, but
+  the source is sometimes available — antigravity's decoder already reads a `PLANNER_THINKING` field
+  the converter discards, and claude's `content[]` carries `thinking` blocks. Surfacing reasoning is
+  net-new per-agent extraction and is deferred to its own effort.
+- **Drop the flat `text`/`tool_calls[]`** in favor of `parts[]`-only (a single representation). Cleaner,
+  but a breaking change for any consumer reading the flat fields; deferred.
+- **GenAI telemetry exporter.** With the aligned vocabulary in place, mapping common-transcript
   records to OTel GenAI spans/log-events becomes mechanical, if we ever want telemetry export.
 
 ## References

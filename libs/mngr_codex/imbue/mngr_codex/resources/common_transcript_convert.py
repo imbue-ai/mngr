@@ -165,6 +165,10 @@ def convert(input_file: str, output_file: str) -> int:
                 if event_id in existing_ids:
                     continue
                 text = _join_content_text(payload.get("content"), "output_text")
+                # codex assistant messages are text-only (tool calls are separate
+                # response_items surfaced as tool_results), so parts is just the text and
+                # its order is trivially faithful.
+                parts = [{"type": "text", "content": text}] if text else []
                 new_events.append(
                     (
                         timestamp,
@@ -178,6 +182,8 @@ def convert(input_file: str, output_file: str) -> int:
                             "model": None,
                             "text": text,
                             "tool_calls": [],
+                            "parts": parts,
+                            "parts_ordered": True,
                             "finish_reason": None,
                             "usage": None,
                         },

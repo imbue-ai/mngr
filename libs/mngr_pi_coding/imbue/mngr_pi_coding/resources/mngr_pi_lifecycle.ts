@@ -511,6 +511,7 @@ export function toCommonRecord(
       text: textFromContent(assistant.content),
       tool_calls: toolCallsFromContent(assistant.content),
       parts: partsFromContent(assistant.content),
+      parts_ordered: true,
       finish_reason: assistant.stopReason ?? "",
       usage: {
         input_tokens: usage.input ?? null,

@@ -1,1 +1,1 @@
-The pi-coding common-transcript emitter now emits `finish_reason` (was `stop_reason`, aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records that preserves the source interleaving of text and tool-call blocks.
+The pi-coding common-transcript emitter now emits `finish_reason` (was `stop_reason`, aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records that preserves the source interleaving of text and tool-call blocks (`parts_ordered` true, since pi's native content array is ordered).

@@ -164,6 +164,8 @@ SAMPLE_TRANSCRIPT_EVENTS: list[dict[str, Any]] = [
         "role": "assistant",
         "text": "World",
         "tool_calls": [],
+        "parts": [{"type": "text", "content": "World"}],
+        "parts_ordered": True,
         "model": "test-model",
     },
     {

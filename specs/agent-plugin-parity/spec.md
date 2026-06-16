@@ -176,7 +176,7 @@ Y = implemented, partial = present but incomplete, - = absent (a gap), n/a = not
 | Onboarding NUX seed | Y | Y | n/a (no NUX) | n/a (no NUX) | Y (`.personality_migration` + `[notice]` suppressors) |
 | Raw transcript | Y | Y | Y | Y (in-process, raw-seeded) | Y (tail rollout JSONL) |
 | Common transcript | Y | Y | Y | Y (in-process, rebuilt on idle) | Y (converter, derived from raw) |
-| Ordered assistant parts[] | Y | - (not reconstructable) | Y | - (deferred; order available) | n/a (text-only messages) |
+| Ordered assistant parts[] | Y | Y (best-effort order) | Y | Y | Y (text-only) |
 | Usage tracking plugin | Y (`mngr_claude_usage`) | - (deferred; no cost/token source) | Y (`mngr_pi_coding_usage`) | Y (`mngr_opencode_usage`) | Y (`mngr_codex_usage`) |
 | Conversation resume (stop/start) | Y | Y | Y (`--session`) | Y (`attach --session`) | Y (`codex resume <id>`) |
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
@@ -829,12 +829,13 @@ layer is foundational and always-on.
 
 The common envelope's field vocabulary tracks the OpenTelemetry GenAI semantic conventions
 (e.g. `finish_reason`, not a bespoke name); the canonical schema is
-`agents/common_transcript_records.py`. An assistant record additionally carries an ordered
-`parts[]` (text/tool_call segments, modelled on the OTel message `parts`) for the emitters
-whose native format preserves intra-turn ordering -- **claude and pi-coding**. The others omit
-it: codex assistant messages are text-only (tool use is separate events), antigravity's native
-format does not record where tool calls sat relative to the text, and opencode's is feasible
-but deferred. See [`../common-transcript-standard/spec.md`](../common-transcript-standard/spec.md).
+`agents/common_transcript_records.py`. Every assistant record carries an ordered `parts[]`
+(text/tool_call segments, modelled on the OTel message `parts`) -- the agent-agnostic view the
+reader renders -- with a `parts_ordered` flag. The order is faithful for claude, pi-coding,
+opencode (all iterate their native ordered content) and trivially so for codex (text-only
+assistant messages); only antigravity is best-effort (`parts_ordered=False`), because its native
+format does not record where tool calls sat relative to the text. See
+[`../common-transcript-standard/spec.md`](../common-transcript-standard/spec.md).
 
 **pi-coding emits the two layers *independently*, not derived.** pi has no convenient
 always-current flat session file to tail (its native store is tree-structured JSONL), so the

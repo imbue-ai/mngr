@@ -1,1 +1,1 @@
-The codex common-transcript converter now emits `finish_reason` instead of `stop_reason` on assistant records, aligning with the OpenTelemetry GenAI vocabulary.
+The codex common-transcript converter now emits `finish_reason` instead of `stop_reason` on assistant records (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array. Codex assistant messages are text-only, so `parts[]` is just the text and `parts_ordered` is true.

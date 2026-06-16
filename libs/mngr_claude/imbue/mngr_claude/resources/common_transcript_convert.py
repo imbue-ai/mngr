@@ -213,6 +213,7 @@ def convert(input_file: str, output_file: str) -> int:
                     "text": "\n".join(text_parts),
                     "tool_calls": tool_calls,
                     "parts": parts,
+                    "parts_ordered": True,
                     "finish_reason": stop_reason,
                     "usage": usage,
                     "message_uuid": uuid,

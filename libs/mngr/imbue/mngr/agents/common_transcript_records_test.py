@@ -36,6 +36,7 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
             {"type": "text", "content": "hello"},
             {"type": "tool_call", "tool_call_id": "t1", "tool_name": "bash", "input_preview": "echo hi"},
         ],
+        "parts_ordered": True,
         "finish_reason": "end_turn",
         "usage": {"input_tokens": 10, "output_tokens": 5},
     },
@@ -49,7 +50,8 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "output": "hi",
         "is_error": False,
     },
-    # antigravity: model/stop_reason/usage all null, plus its conversation_id annotation.
+    # antigravity: model/finish_reason/usage all null, best-effort parts order (parts_ordered False),
+    # plus its conversation_id annotation.
     "antigravity_user": {
         "timestamp": "2026-06-09T12:00:00Z",
         "type": "user_message",
@@ -68,6 +70,8 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "model": None,
         "text": "ok",
         "tool_calls": [],
+        "parts": [{"type": "text", "content": "ok"}],
+        "parts_ordered": False,
         "finish_reason": None,
         "usage": None,
         "conversation_id": "conv-abc",
@@ -91,6 +95,8 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "model": "opencode/deepseek-v4-flash-free",
         "text": "1\n2\n3",
         "tool_calls": [],
+        "parts": [{"type": "text", "content": "1\n2\n3"}],
+        "parts_ordered": True,
         "finish_reason": None,
         "usage": None,
         "conversation_id": "ses_1",
@@ -129,6 +135,7 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
             {"type": "text", "content": "ACK"},
             {"type": "tool_call", "tool_call_id": "c1", "tool_name": "bash", "input_preview": "echo SEEDED"},
         ],
+        "parts_ordered": True,
         "usage": {
             "input_tokens": 100,
             "output_tokens": 20,
@@ -146,8 +153,8 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "output": "SEEDED",
         "is_error": False,
     },
-    # codex: shape matches antigravity -- model/finish_reason/usage all null, no
-    # conversation_id/message_id.
+    # codex: text-only assistant messages -- model/finish_reason/usage all null, parts is just
+    # the text (parts_ordered True, trivially), no conversation_id/message_id.
     "codex_user": {
         "timestamp": "2026-06-09T12:00:00Z",
         "type": "user_message",
@@ -165,6 +172,8 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "model": None,
         "text": "done",
         "tool_calls": [],
+        "parts": [{"type": "text", "content": "done"}],
+        "parts_ordered": True,
         "finish_reason": None,
         "usage": None,
     },
@@ -197,19 +206,35 @@ def test_parsed_types_match_expected_classes() -> None:
 
 
 def test_assistant_optional_fields_default_when_absent() -> None:
-    # codex omits parts entirely and reports finish_reason None; both must default rather than fail.
-    parsed = parse_common_transcript_record(_VALID_RECORDS["codex_assistant"])
+    # A record omitting the optional fields must get the defaults rather than fail: pi really
+    # omits finish_reason, and a minimal record omits parts/parts_ordered too.
+    bare = {
+        "type": "assistant_message",
+        "timestamp": "t",
+        "event_id": "e",
+        "source": "s",
+        "text": "hi",
+    }
+    parsed = parse_common_transcript_record(bare)
     assert isinstance(parsed, AssistantMessageRecord)
     assert parsed.finish_reason is None
-    assert parsed.parts is None
+    assert parsed.parts == ()
+    assert parsed.parts_ordered is True
 
 
 def test_ordered_parts_round_trip_in_order() -> None:
-    # claude/pi carry an ordered parts[] preserving text/tool_call interleaving.
+    # Every assistant record carries an ordered parts[] preserving text/tool_call interleaving.
     parsed = parse_common_transcript_record(_VALID_RECORDS["claude_assistant"])
     assert isinstance(parsed, AssistantMessageRecord)
-    assert parsed.parts is not None
     assert [p.type for p in parsed.parts] == ["text", "tool_call"]
+    assert parsed.parts_ordered is True
+
+
+def test_best_effort_order_is_flagged() -> None:
+    # antigravity can only synthesize a best-effort order, marked by parts_ordered=False.
+    parsed = parse_common_transcript_record(_VALID_RECORDS["antigravity_assistant"])
+    assert isinstance(parsed, AssistantMessageRecord)
+    assert parsed.parts_ordered is False
 
 
 def test_unknown_part_type_is_rejected() -> None:
