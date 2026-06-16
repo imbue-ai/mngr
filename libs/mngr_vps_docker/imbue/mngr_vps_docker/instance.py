@@ -1434,13 +1434,14 @@ class VpsDockerProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             with log_span("Starting container on VPS"):
                 start_container(outer, host_record.config.container_name)
-            # sshd is launched via `docker exec`, not the container's entrypoint, so a
-            # `docker start` brings the container back WITHOUT sshd (the idle watcher's
-            # container stop, a manual `mngr stop`, a VPS reboot, or an AWS instance
-            # stop/start all land here). Re-exec it before waiting, or
-            # `_wait_for_container_sshd` would block until timeout and the agent would be
-            # unrecoverable via `mngr start`/`conn`. `docker start` is a no-op on an
-            # already-running container, so this also repairs the
+            # sshd is launched via `docker exec` (see start_container_sshd), not the
+            # container's entrypoint, so a `docker start` brings the container back
+            # WITHOUT sshd (the idle watcher's container stop, a manual `mngr stop`, a
+            # VPS reboot, or a host VM stop/start that takes the container down with it
+            # -- e.g. an AWS instance stop/start -- all land here). Re-exec it before
+            # waiting, or `_wait_for_container_sshd` would block until timeout and the
+            # agent would be unrecoverable via `mngr start`/`conn`. `docker start` is a
+            # no-op on an already-running container, so this also repairs the
             # container-up-but-sshd-down state.
             with log_span("Restarting sshd in container"):
                 start_container_sshd(outer, host_record.config.container_name)
