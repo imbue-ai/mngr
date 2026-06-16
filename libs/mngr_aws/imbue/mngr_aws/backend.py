@@ -14,7 +14,6 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
@@ -24,14 +23,11 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
@@ -913,75 +909,16 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         """
         return instance.get("state") in _HOST_DOWN_STATES
 
-    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the host's persisted agent records, on-volume when reachable else from the external store.
+    def _offline_agent_dicts_for(self, host_id: HostId, instance: Mapping[str, Any] | None = None) -> list[dict]:
+        """Read a stopped host's agent records from the external store (S3 bucket or EC2 tag mirror).
 
-        For a *running* host the SSH/volume-backed base reads the authoritative
-        on-volume records (full agent data); for a *stopped* host it raises
-        ``HostNotFoundError`` (the volume is unreadable), so we fall back to the
-        external store: the S3 bucket when configured (full records), else the
-        compact records mirrored into EC2 tags. Bypasses the
-        ``OfflineCapableVpsDockerProvider`` tag fallback (which would ignore the
-        bucket) by going straight to the SSH-only ``VpsDockerProvider`` path.
+        Overrides the base tag/metadata reconstruction so a bucket-mode host --
+        whose agents live in the bucket, not in EC2 tags -- still surfaces its
+        agents offline. ``_state_store`` selects bucket vs tags; the ``instance``
+        argument is unused (the store is keyed by ``host_id``).
         """
-        try:
-            return VpsDockerProvider.list_persisted_agent_data_for_host(self, host_id)
-        except HostNotFoundError:
-            return self._state_store.list_agent_records(host_id)
-
-    def discover_hosts_and_agents(
-        self,
-        cg: ConcurrencyGroup,
-        include_destroyed: bool = False,
-    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Add STOPPED instances (which the SSH-based base discovery misses) offline.
-
-        The base discovery reaches hosts over SSH via their public IP, so a
-        stopped instance (no IP) is invisible. Here we reconstruct those hosts
-        and their agents from the external store so they still appear in
-        ``mngr list`` and resolve for ``mngr start`` -- from the S3 state bucket
-        when configured (full records), else from EC2 tags. Drives the offline
-        loop off ``self._state_store`` rather than the
-        ``OfflineCapableVpsDockerProvider`` tag-only loop, so the SSH-only base
-        sweep is invoked directly.
-        """
-        result = VpsDockerProvider.discover_hosts_and_agents(self, cg, include_destroyed=include_destroyed)
-        online_host_ids = {ref.host_id for ref in result}
-        for instance in self._list_instances_cached():
-            try:
-                host_ref = self._offline_discovered_host_from_instance(instance)
-            except ValueError as e:
-                # A corrupted / externally-edited mngr-host-id or Name tag yields an
-                # invalid HostId/HostName (both ValueError subclasses). Skip just
-                # this instance rather than letting one bad tag abort offline
-                # discovery for every other stopped host in the account.
-                logger.opt(exception=e).warning(
-                    "Skipping instance {} in offline discovery: malformed mngr host identity",
-                    instance.get("id"),
-                )
-                continue
-            # Drop non-mngr instances and ones already surfaced live before the
-            # offline check. Reconstruct only hosts whose instance is stopping or
-            # fully stopped (OS down, so the SSH-based sweep above can't reach
-            # them); a genuinely-reachable host lands in online_host_ids and is
-            # deduped here, so a running host is never double-listed.
-            if host_ref is None or host_ref.host_id in online_host_ids:
-                continue
-            if not self._is_instance_offline(instance):
-                continue
-            # An operational store/lookup failure (transient S3 error, or duplicate
-            # mngr-host-id tags) propagates: the api/list discovery wrapper attributes
-            # it to this provider and honors the caller's --on-error (ABORT/CONTINUE)
-            # plus the AgentObserver UNKNOWN convention. Only the malformed-tag data
-            # error above is skipped per-host (it is unrecoverable for that instance).
-            agent_dicts = self._state_store.list_agent_records(host_ref.host_id)
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_data in agent_dicts:
-                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
-                if ref is not None:
-                    agent_refs.append(ref)
-            result[host_ref] = agent_refs
-        return result
+        del instance
+        return self._state_store.list_agent_records(host_id)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Return an offline host, reconstructing a STOPPED instance's record offline.

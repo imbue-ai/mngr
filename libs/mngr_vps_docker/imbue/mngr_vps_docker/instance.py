@@ -2487,6 +2487,24 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         """Reconstruct a minimal STOPPED offline host from a stopped instance's tags/metadata."""
         ...
 
+    def _offline_agent_dicts_for(self, host_id: HostId, instance: Mapping[str, Any] | None = None) -> list[dict]:
+        """Return a stopped host's mirrored agent records, for offline discovery / listing.
+
+        Default: reassemble them from the instance's own tags/metadata, resolving
+        the instance from the cached listing when one is not already in hand
+        (``list``-style callers pass only a ``host_id``; the discovery loop passes
+        the instance it is already iterating, avoiding a redundant lookup). A
+        provider with a separate external store (e.g. an object-storage bucket)
+        overrides this to read from that store keyed by ``host_id``, so bucket-mode
+        agents -- which are NOT mirrored into tags -- are still surfaced, and the
+        ``instance`` argument is ignored.
+        """
+        if instance is None:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                return []
+        return self._persisted_agent_dicts_from_instance(instance)
+
     def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
@@ -2522,8 +2540,13 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
                 continue
             if not self._is_instance_offline(instance):
                 continue
+            # An external-store provider reads agents from its store here (keyed by
+            # host_id); an operational store failure propagates so the api/list
+            # discovery wrapper attributes it to this provider and honors the
+            # caller's --on-error (the malformed-identity data error above is the
+            # only thing skipped per-instance).
             agent_refs: list[DiscoveredAgent] = []
-            for agent_data in self._persisted_agent_dicts_from_instance(instance):
+            for agent_data in self._offline_agent_dicts_for(host_ref.host_id, instance):
                 ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
                 if ref is not None:
                     agent_refs.append(ref)
@@ -2570,14 +2593,17 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
             return []
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the host's persisted agent records, on-volume when reachable else from instance data."""
+        """Return the host's persisted agent records, on-volume when reachable else offline.
+
+        For a running host the SSH/volume-backed base reads the authoritative
+        on-volume records; for a stopped host it raises ``HostNotFoundError`` and
+        we fall back to the offline source (instance tags/metadata, or an external
+        store for providers that have one).
+        """
         try:
             return super().list_persisted_agent_data_for_host(host_id)
         except HostNotFoundError:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return []
-            return self._persisted_agent_dicts_from_instance(instance)
+            return self._offline_agent_dicts_for(host_id)
 
 
 # Per-agent records are mirrored into instance tags as up to three tags per agent,
