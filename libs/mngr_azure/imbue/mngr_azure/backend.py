@@ -659,6 +659,10 @@ class AzureProvider(TagMirrorVpsProvider):
                 to_update(record.field_ref().certified_host_data, updated_data),
             )
             host_store.write_host_record(updated_record)
+            # Mirror the resumed record to the external store (Blob bucket) so the
+            # offline view reflects the cleared stop_reason -- without this, offline
+            # reads report the just-resumed VM as STOPPED until the next mirror.
+            self._persist_host_record_externally(updated_record)
         self._evict_cached_host(host_id)
         self._host_record_cache[host_id] = updated_record
         return super().start_host(host_id, snapshot_id)

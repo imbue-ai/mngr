@@ -19,3 +19,7 @@ the self-deallocate role assignment and skipping the host-side sentinel watcher.
 Added bare-placement (`isolation=NONE`) release tests, and fixed a resume bug they
 caught: `start_host` read the host record via the Docker volume, which a bare host
 does not have, so it now resolves the store through the realizer.
+
+Bugfix: `mngr start` of a deallocated Azure host now re-mirrors the resumed host
+record to the external (Blob bucket) store, so offline / `mngr list` reads no
+longer report a just-resumed Azure VM as STOPPED until the next mirroring write.
