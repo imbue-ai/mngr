@@ -67,7 +67,7 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
-from imbue.mngr.api.preservation import get_preserved_agents_root_dir
+from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -77,7 +77,6 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import get_agent_state_dir_path
-from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
@@ -100,6 +99,7 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_DB_RELPATH
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENABLED_VALUE
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
@@ -489,9 +489,8 @@ class OpenCodeAgent(
         adopt_arg = adopt_args[-1]
         with log_span("Adopting OpenCode session from {}", adopt_arg):
             local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-            search_db_paths = collect_adopt_search_db_paths(
-                get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)
-            )
+            agent_db_paths = iter_agent_session_paths(local_host_dir, AGENT_OPENCODE_DB_RELPATH)
+            search_db_paths = collect_adopt_search_db_paths(agent_db_paths)
             session_id, source_db = resolve_adopt_session_db(adopt_arg, search_db_paths)
             self._adopt_session_into_agent(host, session_id, source_db)
 

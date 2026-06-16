@@ -112,14 +112,13 @@ from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
-from imbue.mngr.api.preservation import get_preserved_agents_root_dir
+from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import copy_on_host
-from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -286,15 +285,7 @@ def _mngr_agent_conversations_dirs(mngr_ctx: MngrContext) -> list[Path]:
     source, so remote agents' conversation dirs are not searched here.
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-    conversations_dirs: list[Path] = []
-    for parent in (get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)):
-        if not parent.is_dir():
-            continue
-        for agent_dir in sorted(parent.iterdir()):
-            conversations_dir = agent_dir / _AGENT_CONVERSATIONS_RELPATH
-            if conversations_dir.is_dir():
-                conversations_dirs.append(conversations_dir)
-    return conversations_dirs
+    return iter_agent_session_paths(local_host_dir, _AGENT_CONVERSATIONS_RELPATH)
 
 
 def _resolve_adopt_session(adopt_arg: str, mngr_ctx: MngrContext) -> tuple[str, Path]:

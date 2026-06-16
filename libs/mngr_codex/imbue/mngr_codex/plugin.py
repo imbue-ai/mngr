@@ -96,7 +96,7 @@ from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
-from imbue.mngr.api.preservation import get_preserved_agents_root_dir
+from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -104,7 +104,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
-from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -1026,15 +1025,7 @@ def _mngr_session_dirs(mngr_ctx: MngrContext) -> list[Path]:
     remote agents' session dirs are not searched here (mirrors the claude plugin).
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-    sessions_dirs: list[Path] = []
-    for parent in (get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)):
-        if not parent.is_dir():
-            continue
-        for agent_dir in sorted(parent.iterdir()):
-            sessions_dir = agent_dir / _AGENT_SESSIONS_RELPATH
-            if sessions_dir.is_dir():
-                sessions_dirs.append(sessions_dir)
-    return sessions_dirs
+    return iter_agent_session_paths(local_host_dir, _AGENT_SESSIONS_RELPATH)
 
 
 def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, user_codex_home: Path) -> tuple[str, Path]:

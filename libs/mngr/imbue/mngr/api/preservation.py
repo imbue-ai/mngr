@@ -33,6 +33,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileType
@@ -65,6 +66,28 @@ def get_preserved_agents_root_dir(host_dir: Path) -> Path:
     live on the local machine so they survive remote host destruction.
     """
     return host_dir / "preserved"
+
+
+def iter_agent_session_paths(local_host_dir: Path, relpath: Path) -> list[Path]:
+    """Return ``<agent_dir>/relpath`` for every live and preserved local agent where it exists.
+
+    Scans both the live agents root (``<host_dir>/agents/``) and the preserved-agents root
+    (``<host_dir>/preserved/``); each agent stores its per-agent files under the same
+    ``relpath``. Session adoption uses this to find a session id across every local agent's
+    native store. The returned paths may be files or directories (``exists()`` is the test),
+    so it serves both directory stores (e.g. claude's ``projects/``) and single-file stores
+    (e.g. opencode's ``opencode.db``). Local host only: an adopted store is copied onto the
+    destination from a path that must already be reachable locally.
+    """
+    paths: list[Path] = []
+    for parent in (get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)):
+        if not parent.is_dir():
+            continue
+        for agent_dir in sorted(parent.iterdir()):
+            candidate = agent_dir / relpath
+            if candidate.exists():
+                paths.append(candidate)
+    return paths
 
 
 def get_preserved_agent_dir(host_dir: Path, agent_name: AgentName, agent_id: AgentId) -> Path:

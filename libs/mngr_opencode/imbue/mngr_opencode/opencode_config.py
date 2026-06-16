@@ -283,6 +283,12 @@ def serialize_opencode_config(config: Mapping[str, Any]) -> str:
 # scanning live/preserved mngr agents for a session to adopt.
 _AGENT_DATA_HOME_PARTS: Final[tuple[str, ...]] = _DATA_HOME_RELATIVE_PATH
 
+# The agent's native ``opencode.db`` relative to its state dir. The plugin passes this to
+# the shared live/preserved agent scanner (``iter_agent_session_paths``) to find every
+# local agent's db; kept here so the path layout stays defined alongside the other
+# opencode-data constants.
+AGENT_OPENCODE_DB_RELPATH: Final[Path] = Path(*_AGENT_DATA_HOME_PARTS, _OPENCODE_APP_DIR_NAME, _DB_FILENAME)
+
 # Where a user-native (plain-CLI) OpenCode install keeps its data, relative to the data
 # home root resolved from ``$XDG_DATA_HOME`` (or ``~/.local/share``).
 _USER_DATA_HOME_PARTS: Final[tuple[str, ...]] = (".local", "share")
@@ -300,30 +306,15 @@ def get_user_native_opencode_db_path() -> Path:
     return get_opencode_db_path_for_data_home(data_home)
 
 
-def _agent_opencode_db_paths(agents_root: Path) -> list[Path]:
-    """Return every per-agent ``opencode.db`` under an agents root (live or preserved)."""
-    if not agents_root.is_dir():
-        return []
-    db_paths: list[Path] = []
-    for agent_dir in sorted(agents_root.iterdir()):
-        db_path = agent_dir.joinpath(*_AGENT_DATA_HOME_PARTS, _OPENCODE_APP_DIR_NAME, _DB_FILENAME)
-        if db_path.is_file():
-            db_paths.append(db_path)
-    return db_paths
-
-
-def collect_adopt_search_db_paths(local_agents_root: Path, local_preserved_root: Path) -> list[Path]:
+def collect_adopt_search_db_paths(agent_db_paths: Sequence[Path]) -> list[Path]:
     """Return the ``opencode.db`` paths an adopt session id is searched across (local only).
 
-    The user-native db plus every live local mngr agent and every preserved agent (each stores
-    its db at ``plugin/opencode/data/opencode/opencode.db``). Local sources only: the resolved
-    db is copied onto the destination host from a path reachable as a local source.
+    The user-native db (plain-CLI install) plus ``agent_db_paths`` -- every live local mngr
+    agent's and preserved agent's db, which the plugin gathers via the shared
+    ``iter_agent_session_paths`` scanner. Local sources only: the resolved db is copied onto
+    the destination host from a path reachable as a local source.
     """
-    return [
-        get_user_native_opencode_db_path(),
-        *_agent_opencode_db_paths(local_agents_root),
-        *_agent_opencode_db_paths(local_preserved_root),
-    ]
+    return [get_user_native_opencode_db_path(), *agent_db_paths]
 
 
 def _db_has_session(db_path: Path, session_id: str) -> bool:

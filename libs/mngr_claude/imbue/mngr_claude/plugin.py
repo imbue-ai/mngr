@@ -40,7 +40,7 @@ from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
-from imbue.mngr.api.preservation import get_preserved_agents_root_dir
+from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
@@ -53,7 +53,6 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
-from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -74,7 +73,6 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
-from imbue.mngr.plugins.hookspecs import OptionStackItem
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -163,15 +161,7 @@ def _mngr_session_projects_dirs(mngr_ctx: MngrContext) -> list[Path]:
     local source, so remote agents' session dirs are not searched here.
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-    projects_dirs: list[Path] = []
-    for parent in (get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)):
-        if not parent.is_dir():
-            continue
-        for agent_dir in sorted(parent.iterdir()):
-            projects_dir = agent_dir / _AGENT_CLAUDE_PROJECTS_RELPATH
-            if projects_dir.is_dir():
-                projects_dirs.append(projects_dir)
-    return projects_dirs
+    return iter_agent_session_paths(local_host_dir, _AGENT_CLAUDE_PROJECTS_RELPATH)
 
 
 def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tuple[str, Path]:
@@ -2658,76 +2648,25 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 
 @hookimpl
-def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem]] | None:
-    """Register the --adopt-session CLI option for the create command.
-
-    Registered here (the claude plugin) but agent-agnostic: it applies to any agent
-    type that supports session adoption (``HasSessionAdoptionMixin``). The
-    per-agent-type validation/handling lives in each such plugin's
-    ``on_before_create``/``adopt_session``; this hookimpl only declares the option.
-    """
-    if command_name == "create":
-        return {
-            "Behavior": [
-                OptionStackItem(
-                    param_decls=("--adopt-session",),
-                    multiple=True,
-                    help="Adopt an existing session into this newly created agent so it resumes "
-                    "that conversation. The agent type must support session adoption. Accepts a "
-                    "session id or a path to the session file; a session id is searched across the "
-                    "relevant user/config store, every live local mngr agent, and preserved "
-                    "sessions from destroyed agents. Repeatable: the last named session is the one "
-                    "resumed on startup.",
-                ),
-            ]
-        }
-    return None
-
-
-@hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Validate ``--adopt-session`` at the agent-agnostic level, then claude's specifics.
+    """Claude-specific fail-fast pre-resolution of ``--adopt-session`` session ids.
 
-    Agent-agnostic (applies to any adoption-capable agent type): the type must support
-    session adoption (``HasSessionAdoptionMixin``), and the option is incompatible with
-    cloning via ``--from <agent>`` (both adopt a session into the new agent). The
-    claude-specific fail-fast pre-resolution below runs only for ``ClaudeAgent`` types;
-    other adoption-capable plugins validate their own session in their own
-    ``on_before_create`` (or at provisioning).
+    The agent-agnostic gate (the type must support session adoption; mutual exclusion with
+    cloning via ``--from``) and the ``--adopt-session`` option declaration both live in the
+    core ``builtin_adopt_session`` hookimpl. This runs only for claude agents and resolves
+    every named session *now* -- before any host or worktree is created -- so a bad id is a
+    clean user error rather than a ConcurrencyExceptionGroup traceback out of
+    ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
+    source is always local, so the result matches the resolution done later.
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
         return None
-
-    # Session adoption resumes a live session, so it is gated to interactive,
-    # adoption-capable agents. ``headless_claude`` (which runs ``claude --print`` and
-    # never resumes) does not carry the mixin and is correctly rejected here.
     resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, HasSessionAdoptionMixin):
-        raise UserInputError(
-            f"--adopt-session can only be used with an agent type that supports session adoption, "
-            f"not '{args.agent_options.agent_type}'."
-        )
-
-    if args.agent_options.source_agent_state_location is not None:
-        raise UserInputError(
-            "--adopt-session is incompatible with cloning via --from <agent>: both "
-            "adopt a session into the new agent. Pick one."
-        )
-
-    # Claude-specific fail-fast resolution: validate that every named session resolves
-    # *now* -- before any host or worktree is created. The real resolution happens again
-    # later in on_after_provisioning, but that runs inside provision_agent's
-    # ConcurrencyGroup, whose __exit__ would re-wrap a bad-ID UserInputError in a
-    # ConcurrencyExceptionGroup and surface it as an "Unexpected error" with a traceback.
-    # Resolving here (the session source is always local, so the result matches) makes a
-    # bad ID a clean, fail-fast user error. Other adoption-capable agents resolve against
-    # their own native stores, so claude's resolver does not apply to them.
     if not issubclass(resolved.agent_class, ClaudeAgent):
         return None
     for session_arg in adopt_session:
         _resolve_adopt_session(session_arg, mngr_ctx)
-
     return None
 
 
