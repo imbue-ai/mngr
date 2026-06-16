@@ -627,13 +627,14 @@ jobs:
           FCT_REF:      ${{ inputs.template_ref || 'main' }}
         run: |
           set -euo pipefail
-          # `git ls-remote` returns "<sha>\t<full-ref>"; first line for
-          # branch / tag refs, the literal SHA itself when FCT_REF is
-          # already a 40-char SHA.
+          # Resolve FCT_REF to its commit. Peel annotated tags (`^{}`) to the
+          # commit they point at (not the tag object); else take the ref
+          # directly (branch / lightweight tag), or the literal 40-char SHA.
           if [[ "$FCT_REF" =~ ^[a-f0-9]{40}$ ]]; then
             FCT_SHA="$FCT_REF"
           else
-            FCT_SHA=$(git ls-remote --refs "$FCT_REPO_URL" "$FCT_REF" "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" 2>/dev/null | awk '{print $1; exit}')
+            FCT_SHA=$(git ls-remote "$FCT_REPO_URL" "refs/tags/$FCT_REF^{}" 2>/dev/null | awk '{print $1; exit}')
+            [[ -z "$FCT_SHA" ]] && FCT_SHA=$(git ls-remote "$FCT_REPO_URL" "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" 2>/dev/null | awk '{print $1; exit}')
             if [[ -z "$FCT_SHA" ]]; then
               echo "::error::could not resolve FCT ref '$FCT_REF' against $FCT_REPO_URL"
               exit 1
