@@ -479,9 +479,10 @@
         // tick (a liveness flip or rename in any workspace) doesn't
         // repaint the previous workspace's accent over the preview
         // while the user is still on the create form. The next
-        // navigation event (``current-workspace-changed`` for the new
-        // workspace on submit, or the last-workspace re-query on
-        // cancel) re-establishes the regular accent path.
+        // navigation re-establishes the regular accent path: main
+        // pushes ``accent-changed`` off ``parseAccentSourceAgentId(url)``
+        // (the new workspace on submit, or null -> neutral chrome on
+        // cancel back to a general screen).
         if (data.accent) {
           lastRequestedAccentAgentId = null;
           document.documentElement.style.setProperty('--workspace-accent', data.accent);
@@ -506,11 +507,13 @@
         // in this window. Main has already validated the agent-id +
         // hex shape and only fires this for the *sending bundle's*
         // chrome view, so a stray sender can't paint someone else's
-        // titlebar. Do not gate this on ``lastRequestedAccentAgentId``:
-        // /workspace/<id>/settings doesn't fire
-        // ``current-workspace-changed``, so the persisted last-workspace
-        // id may point at a different workspace than the one whose
-        // settings page is open.
+        // titlebar. Paint unconditionally rather than gating on
+        // ``lastRequestedAccentAgentId``: even though /workspace/<id>/settings
+        // is itself an accent source (main already pushed this agent id over
+        // ``accent-changed``), this optimistic event carries the JUST-PICKED
+        // hex, which the ``accentByAgentId`` cache won't hold until the
+        // settings POST -> mngr label -> SSE round-trip lands -- so we update
+        // the cache entry here and repaint immediately.
         if (data.agent_id && data.accent) {
           accentByAgentId[data.agent_id] = {
             accent: data.accent,
@@ -526,15 +529,17 @@
         renderWorkspaces(lastWorkspaces);
         // Replay the most recent ``applyTitleAccent`` call now that the
         // cache has fresh data. Catches two cases:
-        //   1. Cold start: bootstrap set ``lastRequestedAccentAgentId``
-        //      before any SSE tick; this tick fills the cache and paints.
+        //   1. Cold start / freshly-created workspace: the ``accent-changed``
+        //      IPC (or, in browser mode, the URL poll) set
+        //      ``lastRequestedAccentAgentId`` before any SSE tick populated the
+        //      cache; this tick fills the cache and paints.
         //   2. Settings-page color save: the settings POST updated the
         //      resolver snapshot which triggered this tick; the cached
         //      hex is now the newly-picked one, so the chrome repaints.
-        // Independent of ``currentTitleAgentId`` because the settings
-        // page (and ``lastWorkspace``-driven Home views) don't update
-        // it -- the persisted last-opened workspace is what drives the
-        // accent.
+        // Independent of ``currentTitleAgentId`` because the accent source
+        // (a workspace-scoped screen, which includes settings / sharing) is
+        // wider than the displayed workspace -- the accent rides
+        // ``lastRequestedAccentAgentId``, not the recovery-redirect lock.
         if (lastRequestedAccentAgentId) applyTitleAccent(lastRequestedAccentAgentId);
       }
       if (data.type === 'auth_status') updateAuthUI(data);
