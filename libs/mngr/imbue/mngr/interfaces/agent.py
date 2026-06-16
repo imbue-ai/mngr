@@ -159,7 +159,15 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
 
     @abstractmethod
     def send_message(self, message: str) -> None:
-        """Send a message to the running agent via its stdin."""
+        """Send a message to the running agent.
+
+        Messages are delivered via a mechanism like "tmux send-keys".
+
+        Not all agents accept messages while they are running.
+
+        Raises SendMessageError if the message fails to send for some reason
+        (including "the agent cannot send messages").
+        """
         ...
 
     @abstractmethod

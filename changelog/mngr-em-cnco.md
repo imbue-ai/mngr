@@ -1,0 +1,1 @@
+Fix documentation that incorrectly claimed `mngr message` writes to the agent's stdin. The actual transport is `tmux send-keys` for interactive agents (with paste-detection synchronization for agents like Claude Code), and pre-staged files for headless agents (which do not accept live messages). Updated `docs/concepts/agents.md` and the `AgentInterface.send_message` docstring.

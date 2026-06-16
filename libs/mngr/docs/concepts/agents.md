@@ -50,7 +50,7 @@ Many (most) programs that you want to run as agents will support additional "cap
 - Agents can put their "status" in a special file that `mngr` reads to show in `mngr list` (for example, "Thinking...", "Waiting for input", etc.)
 - Agents can self-report when they are active (which enables automatic shutdown of "idle" hosts), see [idle detection](./idle_detection.md) for details
 - Agents can expose URLs for web interfaces (and the default plugins automatically create a secure web terminal via ttyd for CLI agents [future])
-- Agents can be sent messages via `mngr message` (for example, to provide user input or commands). This applies to all unix process (since we're just writing to stdin).
+- Agents can be sent messages via `mngr message` (for example, to provide user input or commands). For interactive agents the message is delivered into the agent's tmux pane via `tmux send-keys` (with paste-detection synchronization for agents like Claude Code that echo input back). Headless agents do not support live messages: their initial prompt is staged on disk before launch and read at startup, and calling `mngr message` on a headless agent raises an error. Any program running in the agent's tmux pane is reachable from `mngr message` -- no special protocol is required of the agent itself.
 - Agents can be created recursively (and, with the `recursive_mngr` plugin, understand their "parent" agents and create remote child agents as well).
 - Agents can define custom properties for any additional functionality (e.g., providing a stream of events, exposing a REST API, etc.)
 
