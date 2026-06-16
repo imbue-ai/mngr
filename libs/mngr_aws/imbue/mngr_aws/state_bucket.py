@@ -24,9 +24,10 @@ from imbue.mngr_vps_docker import state_keys
 
 # Trust policy + inline policy name for the per-bucket host identity (Decision 3).
 # The trust policy lets EC2 assume the role; the inline policy grants ONLY the
-# object actions the on-box sync daemon needs, scoped to this bucket's
-# ``hosts/*`` prefix (least privilege -- the operator's credentials, not this
-# role, write host/agent records).
+# object actions the on-box sync daemon needs (Put/Get/Delete) scoped to this
+# bucket's ``hosts/*`` prefix, plus ``s3:ListBucket`` on the bucket (required by
+# ``aws s3 sync --delete`` to enumerate the destination) -- least privilege: the
+# operator's credentials, not this role, write host/agent records.
 _HOST_IDENTITY_INLINE_POLICY_NAME: Final[str] = "mngr-host-dir-sync"
 _EC2_TRUST_POLICY: Final[str] = json.dumps(
     {
