@@ -337,6 +337,56 @@ def test_read_last_complete_assistant_id_missing_file(tmp_path: Path) -> None:
     assert stream_snapshot._read_last_complete_assistant_id(tmp_path / "nope.jsonl") == ""
 
 
+def test_read_last_complete_assistant_id_empty_and_no_assistant(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert stream_snapshot._read_last_complete_assistant_id(empty) == ""
+
+    no_assistant = tmp_path / "no_assistant.jsonl"
+    no_assistant.write_text(
+        '{"type": "user", "uuid": "u1"}\n{"type": "tool_result", "uuid": "t1"}\n',
+        encoding="utf-8",
+    )
+    assert stream_snapshot._read_last_complete_assistant_id(no_assistant) == ""
+
+
+def test_read_last_complete_assistant_id_trailing_non_assistant_events(tmp_path: Path) -> None:
+    # The newest assistant entry is not the last line: tool-result events follow
+    # it. The tail scan must still return that assistant uuid, not "".
+    transcript = tmp_path / "events.jsonl"
+    lines = ['{"type": "assistant", "uuid": "a_last"}']
+    lines += [f'{{"type": "tool_result", "uuid": "t{i}"}}' for i in range(50)]
+    transcript.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert stream_snapshot._read_last_complete_assistant_id(transcript) == "a_last"
+
+
+def test_read_last_complete_assistant_id_large_transcript_is_tailed(tmp_path: Path) -> None:
+    # A transcript far larger than the tail window: the newest assistant entry
+    # near the end must be found from a bounded read, without parsing the whole
+    # file. The result must match the newest assistant uuid.
+    transcript = tmp_path / "events.jsonl"
+    rows = []
+    for i in range(20000):
+        rows.append(f'{{"type": "user", "uuid": "u{i}", "content": "{"x" * 40}"}}')
+        rows.append(f'{{"type": "assistant", "uuid": "a{i}", "content": "{"y" * 40}"}}')
+    transcript.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert transcript.stat().st_size > stream_snapshot._TRANSCRIPT_TAIL_READ_BYTES
+    assert stream_snapshot._read_last_complete_assistant_id(transcript) == "a19999"
+
+
+def test_read_last_complete_assistant_id_oversized_final_line_widens(tmp_path: Path) -> None:
+    # The most recent assistant entry is a single line larger than the initial
+    # tail window, so the first read captures only a fragment of it; the window
+    # must widen until the whole record is in view.
+    transcript = tmp_path / "events.jsonl"
+    oversized = "z" * (stream_snapshot._TRANSCRIPT_TAIL_READ_BYTES * 3)
+    transcript.write_text(
+        '{"type": "user", "uuid": "u1"}\n' f'{{"type": "assistant", "uuid": "a_huge", "content": "{oversized}"}}\n',
+        encoding="utf-8",
+    )
+    assert stream_snapshot._read_last_complete_assistant_id(transcript) == "a_huge"
+
+
 def test_run_one_poll_idle_from_idle_does_no_work(tmp_path: Path) -> None:
     # An idle agent that was already idle on the previous poll: no transcript
     # read, no capture, no buffer write. The buffer file is never touched.

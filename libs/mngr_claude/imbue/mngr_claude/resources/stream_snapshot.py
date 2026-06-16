@@ -759,14 +759,29 @@ def _log(message: str) -> None:
     print(f"stream_snapshot: {message}", file=sys.stderr, flush=True)
 
 
-def _read_last_complete_assistant_id(transcript_path: Path) -> str:
-    """Return the uuid of the last assistant entry in the raw transcript, or ''."""
-    try:
-        content = transcript_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    last_uuid = ""
-    for line in content.splitlines():
+# How many bytes to read from the end of the transcript when looking up the last
+# complete assistant id. The transcript is append-only JSONL that grows for the
+# whole session, and the newest assistant entry sits at (or near) the end, so a
+# bounded tail read of this size almost always contains it; only when it does not
+# do we fall back to a full read. The common-case per-poll cost is therefore
+# bounded by the tail size rather than the (unbounded) transcript length.
+_TRANSCRIPT_TAIL_READ_BYTES: int = 65536
+
+
+def _last_assistant_uuid(chunk: bytes, drop_leading_partial: bool) -> str:
+    """Return the uuid of the last assistant entry in a transcript tail ``chunk``.
+
+    Lines are scanned from the end so the first assistant entry found is the most
+    recent. When ``drop_leading_partial`` is set the chunk began mid-record (the
+    read did not reach the start of the file), so its first line is a fragment
+    split by the read boundary and is discarded -- the newest assistant entry is
+    at the end, never in this leading fragment, so dropping it can never lose the
+    answer.
+    """
+    lines = chunk.decode("utf-8", errors="replace").split("\n")
+    if drop_leading_partial and lines:
+        lines = lines[1:]
+    for line in reversed(lines):
         stripped = line.strip()
         if stripped == "":
             continue
@@ -777,8 +792,39 @@ def _read_last_complete_assistant_id(transcript_path: Path) -> str:
         if isinstance(event, dict) and event.get("type") == "assistant":
             uuid = event.get("uuid")
             if isinstance(uuid, str) and uuid != "":
-                last_uuid = uuid
-    return last_uuid
+                return uuid
+    return ""
+
+
+def _read_last_complete_assistant_id(transcript_path: Path) -> str:
+    """Return the uuid of the last assistant entry in the raw transcript, or ''.
+
+    The transcript is append-only JSONL and grows for the whole session, so it is
+    read from the end in a bounded tail rather than parsed in full on every poll
+    (which would be O(transcript size), unbounded over a long session). The newest
+    assistant entry sits at (or near) the end, so the tail read almost always
+    contains it. Only when it does not -- a most-recent assistant entry further
+    from the end than the tail window (e.g. a record larger than the window, or a
+    long run of trailing non-assistant events) -- do we fall back to a full read,
+    which is correct and still bounded by the transcript size. Behaviour is
+    otherwise identical to a whole-file scan.
+    """
+    try:
+        with transcript_path.open("rb") as handle:
+            file_size = handle.seek(0, os.SEEK_END)
+            read_size = min(_TRANSCRIPT_TAIL_READ_BYTES, file_size)
+            handle.seek(file_size - read_size)
+            chunk = handle.read(read_size)
+            reached_start = read_size >= file_size
+            uuid = _last_assistant_uuid(chunk, drop_leading_partial=not reached_start)
+            if uuid != "" or reached_start:
+                return uuid
+            # The tail did not reach the start of the file and held no assistant
+            # entry: fall back to scanning the whole transcript.
+            handle.seek(0)
+            return _last_assistant_uuid(handle.read(), drop_leading_partial=False)
+    except OSError:
+        return ""
 
 
 def _capture_pane(session_name: str) -> str | None:
