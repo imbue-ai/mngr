@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+Fixed a flake where looking up a Modal function immediately after deploying it could fail with `NotFoundError`. The post-deploy lookup (`DirectFunction.get_web_url`) now retries with backoff on `NotFoundError`, riding through the brief deploy-then-lookup propagation delay instead of failing immediately.
+
 ## 2026-06-10
 
 Strengthened the modal_proxy test suite so it catches regressions in the Modal error-translation and retry boundary that previously went untested:
