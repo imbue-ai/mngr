@@ -164,16 +164,44 @@ def choose_raid_level(disk_count: int) -> str:
     )
 
 
+# Lima instance-name prefix for slices (embeds the mngr host id). Used both to
+# derive a slice's deterministic instance name and to recognize slice VMs on the
+# box when reaping orphans, so reconciliation never touches a non-slice lima VM.
+SLICE_LIMA_INSTANCE_PREFIX: Final[str] = "mngr-slice-"
+
+
 @pure
 def slice_lima_instance_name(host_id: HostId) -> str:
     """Deterministic lima instance name for a slice, embedding the mngr host id."""
-    return f"mngr-slice-{host_id.get_uuid().hex}"
+    return f"{SLICE_LIMA_INSTANCE_PREFIX}{host_id.get_uuid().hex}"
 
 
 @pure
 def slice_lima_disk_name(host_id: HostId) -> str:
     """Deterministic lima additional-disk name (the slice's btrfs data disk)."""
-    return f"mngr-slice-{host_id.get_uuid().hex}-data"
+    return f"{SLICE_LIMA_INSTANCE_PREFIX}{host_id.get_uuid().hex}-data"
+
+
+@pure
+def compute_orphan_slice_instance_names(
+    box_instance_names: AbstractSet[str],
+    tracked_instance_names: AbstractSet[str],
+) -> set[str]:
+    """Slice VMs present on the box but absent from the pool DB -- safe to reap.
+
+    Filters to slice-owned instances (the ``mngr-slice-`` prefix) so reconciliation
+    never touches an unrelated lima VM, then subtracts the tracked set (every
+    instance that has a pool_hosts row, any status). A ``mngr create`` killed by its
+    own timeout after carving the VM but before the row insert leaves exactly such
+    an orphan -- the provider's rollback never ran. Assumes no other bake invocation
+    is concurrently mid-carve against the same box (an in-flight VM not yet inserted
+    would otherwise look like an orphan).
+    """
+    return {
+        name
+        for name in box_instance_names
+        if name.startswith(SLICE_LIMA_INSTANCE_PREFIX) and name not in tracked_instance_names
+    }
 
 
 @pure

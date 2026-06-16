@@ -1,3 +1,7 @@
 `mngr imbue_cloud admin server prep` now pre-installs the pinned Docker Engine (the same version the OVH VPS path pins) and inotify-tools into the staged golden slice image via `virt-customize` (adds a `libguestfs-tools` box dependency).
 
 Because each slice VM's first-boot provisioning guards on presence (`command -v docker` / `command -v inotifywait`), baking these into the golden image makes those steps skip entirely — so slice carves no longer download/install Docker per VM. This speeds up baking (especially in parallel) and removes a per-slice network dependency. To re-stage an already-prepped box with the new image, delete the staged image and re-run `prep` (the step is idempotent and re-customizes on a fresh download).
+
+`mngr imbue_cloud admin pool create --backend slice` now bounds parallelism with `--max-concurrency` (default 4): it bakes at most that many slices at once and queues the rest, reporting progress as each completes. This keeps box contention low enough that each `mngr create` finishes within its per-create timeout (raised to 45 minutes for slices). The timeout is per single create, so one slice timing out no longer aborts the others.
+
+After the bakes finish, the slice backend reconciles the box's lima VMs against the pool DB and reaps any orphan — a VM with no `pool_hosts` row, e.g. one left by a create that was killed by its own timeout after carving but before the row insert (the provider's rollback can't run on a hard kill). Only slice-prefixed VMs absent from the DB are deleted; tracked slices (any status) are kept.

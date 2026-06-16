@@ -125,6 +125,7 @@ def build_create_admin_args(
     is_recycle_enabled: bool,
     is_dry_run: bool,
     is_deferred_install_wait_skipped: bool,
+    max_concurrency: int | None = None,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
 
@@ -148,7 +149,8 @@ def build_create_admin_args(
     activated minds env's ``secrets.toml`` (which the deploy wrote).
 
     ``--no-recycle`` (when ``is_recycle_enabled`` is False) is ovh_vps-only;
-    ``--dry-run`` (when ``is_dry_run`` is True) is slice-only.
+    ``--dry-run`` (when ``is_dry_run`` is True) and ``--max-concurrency`` (when
+    non-None) are slice-only; both are forwarded only when set.
     """
     args = [
         "create",
@@ -181,6 +183,8 @@ def build_create_admin_args(
         args.append("--no-recycle")
     if backend == _BACKEND_SLICE and is_dry_run:
         args.append("--dry-run")
+    if backend == _BACKEND_SLICE and max_concurrency is not None:
+        args.extend(["--max-concurrency", str(max_concurrency)])
     if is_deferred_install_wait_skipped:
         args.append("--skip-deferred-install-wait")
     return args
@@ -568,6 +572,7 @@ def _run_slice_pool_create(
     is_recycle_enabled: bool,
     is_dry_run: bool,
     is_deferred_install_wait_skipped: bool,
+    max_concurrency: int | None,
 ) -> None:
     """Resolve the pool private key from Vault, then bake bare-metal slice pool hosts.
 
@@ -605,6 +610,7 @@ def _run_slice_pool_create(
         is_recycle_enabled=is_recycle_enabled,
         is_dry_run=is_dry_run,
         is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+        max_concurrency=max_concurrency,
     )
     _raise_on_failure("create", _run_admin_command(args, extra_env={_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}))
 
@@ -718,6 +724,16 @@ def pool() -> None:
     help="[slice only] Report the chosen server + per-slice sizing; do not bake.",
 )
 @click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=None,
+    help=(
+        "[slice only] Max slices baked at once; the rest queue. Bounds box contention so each "
+        "`mngr create` stays under its timeout. Omitted: the admin CLI's default applies."
+    ),
+)
+@click.option(
     "--skip-deferred-install-wait",
     "is_deferred_install_wait_skipped",
     is_flag=True,
@@ -742,6 +758,7 @@ def pool_create(
     mngr_source: str | None,
     is_recycle_enabled: bool,
     is_dry_run: bool,
+    max_concurrency: int | None,
     is_deferred_install_wait_skipped: bool,
 ) -> None:
     """Create pool hosts for the activated minds env (OVH VPS or bare-metal slice).
@@ -757,6 +774,8 @@ def pool_create(
     env_name = require_activated_env_name()
     if backend == _BACKEND_OVH_VPS and is_dry_run:
         raise click.UsageError("--dry-run is only supported for --backend slice")
+    if backend == _BACKEND_OVH_VPS and max_concurrency is not None:
+        raise click.UsageError("--max-concurrency is only supported for --backend slice")
     effective_database_url = resolve_host_pool_dsn(env_name, database_url)
     if backend == _BACKEND_SLICE:
         _run_slice_pool_create(
@@ -774,6 +793,7 @@ def pool_create(
             is_recycle_enabled=is_recycle_enabled,
             is_dry_run=is_dry_run,
             is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+            max_concurrency=max_concurrency,
         )
     else:
         _run_ovh_vps_pool_create(

@@ -319,6 +319,88 @@ def test_build_create_admin_args_omits_no_recycle_for_slice_backend() -> None:
     assert "--no-recycle" not in args
 
 
+def test_build_create_admin_args_slice_forwards_max_concurrency() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_SLICE,
+        count=8,
+        region="US-EAST-VA",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+        max_concurrency=4,
+    )
+    assert args[args.index("--max-concurrency") + 1] == "4"
+
+
+def test_build_create_admin_args_omits_max_concurrency_when_none() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_SLICE,
+        count=8,
+        region="US-EAST-VA",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+        max_concurrency=None,
+    )
+    assert "--max-concurrency" not in args
+
+
+def test_build_create_admin_args_omits_max_concurrency_for_ovh_backend() -> None:
+    # --max-concurrency is slice-only; the ovh_vps path must never forward it.
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_OVH_VPS,
+        count=2,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+        max_concurrency=4,
+    )
+    assert "--max-concurrency" not in args
+
+
+def test_pool_create_ovh_rejects_max_concurrency(
+    _isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--max-concurrency is slice-only; the ovh_vps backend must reject it up front."""
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
+    runner = CliRunner()
+    result = runner.invoke(
+        pool,
+        ["create", "--count", "1", "--region", "US-EAST-VA", "--max-concurrency", "4"],
+    )
+    assert result.exit_code != 0
+    assert "--max-concurrency is only supported for --backend slice" in result.output
+
+
 def test_build_list_admin_args() -> None:
     assert build_list_admin_args(database_url="postgres://x") == [
         "list",

@@ -276,6 +276,28 @@ class LimaSliceVpsClient(VpsClientInterface):
             logger.debug("Lima disk {} already absent, skipping", disk_name)
         logger.info("Destroyed slice VM {} (disk {}) on {}", instance_name, disk_name, self.box_address)
 
+    def list_instance_names(self) -> set[str]:
+        """Return the names of all lima instances currently on the box."""
+        list_rc, list_out, list_err = self._run_on_box(
+            "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"
+        )
+        if list_rc != 0:
+            raise LimaCommandError("list", list_rc or 1, list_err)
+        names: set[str] = set()
+        for line in list_out.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                instance = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse Lima instance JSON: {}", exc)
+                continue
+            name = instance.get("name")
+            if name:
+                names.add(name)
+        return names
+
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
         list_rc, list_out, list_err = self._run_on_box(
             "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"

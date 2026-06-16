@@ -20,6 +20,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_budget_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
@@ -241,3 +242,23 @@ def test_choose_server_for_new_slice_ignores_non_ready_and_full_servers() -> Non
     full_ready = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=8)
     with pytest.raises(SliceCapacityError):
         choose_server_for_new_slice([installing, full_ready])
+
+
+def test_compute_orphan_slice_instance_names_returns_untracked_slice_vms() -> None:
+    # On-box VMs not present in the DB (and only slice-prefixed ones) are orphans.
+    box = {"mngr-slice-aaa", "mngr-slice-bbb", "mngr-slice-ccc"}
+    tracked = {"mngr-slice-aaa"}
+    assert compute_orphan_slice_instance_names(box, tracked) == {"mngr-slice-bbb", "mngr-slice-ccc"}
+
+
+def test_compute_orphan_slice_instance_names_ignores_non_slice_vms() -> None:
+    # A non-slice lima VM on the box must never be considered an orphan to reap.
+    box = {"some-other-vm", "default", "mngr-slice-bbb"}
+    tracked: set[str] = set()
+    assert compute_orphan_slice_instance_names(box, tracked) == {"mngr-slice-bbb"}
+
+
+def test_compute_orphan_slice_instance_names_empty_when_all_tracked() -> None:
+    box = {"mngr-slice-aaa", "mngr-slice-bbb"}
+    tracked = {"mngr-slice-aaa", "mngr-slice-bbb", "mngr-slice-ccc"}
+    assert compute_orphan_slice_instance_names(box, tracked) == set()
