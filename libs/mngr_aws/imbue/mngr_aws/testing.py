@@ -69,7 +69,8 @@ def aws_credentials_available() -> bool:
     """Return True iff boto3's default credential chain can resolve credentials.
 
     Used to gate release tests (skipif) and the session-end cleanup hook
-    (no-op when credentials are absent). Walks the full boto3 chain (env
+    (which, when ``MNGR_AWS_RELEASE_TESTS`` is set, fails the session if
+    credentials are absent rather than skipping). Walks the full boto3 chain (env
     vars, shared credentials file, AWS_PROFILE, EC2 IMDS), matching what
     ``AwsProviderConfig.get_session`` does at provider-construction time
     -- so the gate and the production code agree on what counts as

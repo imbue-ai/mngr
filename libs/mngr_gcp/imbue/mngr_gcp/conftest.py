@@ -119,29 +119,60 @@ def _find_orphan_test_instances(instances_client: Any, project: str, zone: str) 
     return leaked
 
 
+def _mark_session_failed(session: pytest.Session) -> None:
+    """Fail the session, but only if it was otherwise passing.
+
+    Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
+    setting ``session.exitstatus`` is the supported way to signal failure.
+    Only overwrite a successful (0) status: a non-zero status
+    (INTERRUPTED=2, INTERNAL_ERROR=3, USAGE_ERROR=4, NO_TESTS_COLLECTED=5)
+    carries strictly more diagnostic information than TESTS_FAILED=1, so
+    downgrading would hide the real reason CI failed.
+    """
+    if session.exitstatus == 0:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Detect and clean up leaked GCP resources at session end.
 
     Implemented as a pytest hook (not a fixture) so it runs after every
-    session-scoped fixture teardown. Skips silently unless release tests were
-    actually opted into (``MNGR_GCP_RELEASE_TESTS=1``) and ADC is available --
-    the same conjunction that gates the release-test ``pytestmark`` -- so the
-    cleanup hook never makes a live GCE API call from a run that did not opt
-    into GCP-using tests. If leaks are found, force-deletes them and sets
-    ``session.exitstatus`` to ``TESTS_FAILED`` -- but only when the session was
-    otherwise passing, so a more-specific failure is preserved.
+    session-scoped fixture teardown. No-ops when release tests were not opted
+    into (``MNGR_GCP_RELEASE_TESTS`` is unset) -- an ordinary run that never
+    touches GCE. When the opt-in *is* set but ADC cannot be resolved (or no
+    default project is configured, or the client cannot be built), the session
+    is *failed* rather than skipped: a release run that cannot authenticate is
+    a misconfiguration, not a benign skip, and skipping would silently green a
+    run that could not have scanned for leaks. If leaks are found they are
+    force-deleted and the session fails. All failure paths set
+    ``session.exitstatus`` only when the session was otherwise passing, so a
+    more-specific failure is preserved.
     """
     del exitstatus
-    if not (GCP_RELEASE_TESTS_OPT_IN and gcp_credentials_available()):
+    if not GCP_RELEASE_TESTS_OPT_IN:
+        return
+    if not gcp_credentials_available():
+        logger.error(
+            "MNGR_GCP_RELEASE_TESTS=1 is set but GCP Application Default Credentials could not be "
+            "resolved, so the session-end leak scan cannot run. Configure ADC, or unset "
+            "MNGR_GCP_RELEASE_TESTS to skip the GCP release tests."
+        )
+        _mark_session_failed(session)
         return
     project = get_default_project()
     if project is None:
+        logger.error(
+            "MNGR_GCP_RELEASE_TESTS=1 is set but no default GCP project could be resolved, so the "
+            "session-end leak scan cannot run. Configure a project, or unset MNGR_GCP_RELEASE_TESTS."
+        )
+        _mark_session_failed(session)
         return
 
     try:
         instances_client = compute_v1.InstancesClient()
     except google_api_exceptions.GoogleAPICallError as e:
-        logger.warning("Failed to build InstancesClient for session-end leak scan: {}", e)
+        logger.error("Failed to build InstancesClient for session-end leak scan: {}", e)
+        _mark_session_failed(session)
         return
 
     orphans = _find_orphan_test_instances(instances_client, project, GCP_DEFAULT_ZONE)
@@ -159,5 +190,4 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         + "\n\nInstances have been force-deleted, but tests should not leak.\n"
     )
     logger.error(message)
-    if session.exitstatus == 0:
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    _mark_session_failed(session)

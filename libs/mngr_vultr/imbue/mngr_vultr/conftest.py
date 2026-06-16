@@ -24,7 +24,7 @@ The mechanism is tag-based:
      ``pytest_sessionfinish`` only reaps leaks from sessions that survive
      to run it, so a session/runner killed mid-run leaves orphans that no
      future session -- each with a fresh uuid -- can match. The timestamp
-     lets the scheduled reaper find and destroy those by age, independent
+     lets the out-of-band reaper find and destroy those by age, independent
      of the random session uuid. The tag is built by
      ``build_test_created_tag`` so its format stays in lockstep with the
      reaper that parses it.
@@ -36,9 +36,15 @@ The mechanism is tag-based:
      worse: the instance stays live). Only the 404-race-with-test-
      finally case (``ALREADY_GONE``) is benign and does not fail.
 
-Skipped silently when ``VULTR_API_KEY`` is unset (unit-only runs make
-no Vultr API calls). Modeled on the leak detector in
-``libs/mngr_modal/imbue/mngr_modal/conftest.py``.
+Gated on the ``MNGR_VULTR_RELEASE_TESTS=1`` opt-in (the same flag that
+gates the release tests in ``test_release_vultr.py``): when it is unset
+this is an ordinary unit-only run that creates no Vultr instances, so the
+hooks no-op. When the opt-in *is* set but ``VULTR_API_KEY`` is missing,
+``pytest_sessionfinish`` fails the session rather than skipping silently --
+a release run with no key is a misconfiguration, not a benign skip.
+Modeled on the leak detector in
+``libs/mngr_modal/imbue/mngr_modal/conftest.py`` and the opt-in gating in
+the mngr_aws / mngr_gcp / mngr_azure conftests.
 """
 
 import os
@@ -59,6 +65,7 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vultr.cleanup import build_test_created_tag
 from imbue.mngr_vultr.client import VultrVpsClient
+from imbue.mngr_vultr.testing import VULTR_RELEASE_TESTS_OPT_IN
 
 _SESSION_TAG_KEY: Final[str] = "mngr-vultr-test-session"
 _SESSION_TAG: Final[str] = f"{_SESSION_TAG_KEY}={uuid.uuid4().hex}"
@@ -96,6 +103,20 @@ class _LeakDestroyOutcome(UpperCaseStrEnum):
 _monkeypatch: Final[pytest.MonkeyPatch] = pytest.MonkeyPatch()
 
 
+def _mark_session_failed(session: pytest.Session) -> None:
+    """Fail the session, but only if it was otherwise passing.
+
+    Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
+    setting ``session.exitstatus`` is the supported way to signal failure.
+    Only overwrite a successful (0) status: a non-zero status
+    (INTERRUPTED=2, INTERNAL_ERROR=3, USAGE_ERROR=4, NO_TESTS_COLLECTED=5)
+    carries strictly more diagnostic information than TESTS_FAILED=1, so
+    downgrading would hide the real reason CI failed.
+    """
+    if session.exitstatus == 0:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Inject the session and timestamp tags into ``MNGR_VPS_EXTRA_TAGS``.
 
@@ -106,8 +127,15 @@ def pytest_configure(config: pytest.Config) -> None:
     when a session dies before ``pytest_sessionfinish`` can run. Uses
     ``pytest.MonkeyPatch.setenv`` so the original value is restored
     when ``_monkeypatch.undo()`` is called from ``pytest_sessionfinish``.
+
+    No-ops when ``MNGR_VULTR_RELEASE_TESTS`` is unset: without the opt-in no
+    release test runs, so nothing creates a VPS and there are no tags to
+    inject. ``pytest_sessionfinish`` still calls ``_monkeypatch.undo()``
+    unconditionally, which is a harmless no-op when nothing was set here.
     """
     del config
+    if not VULTR_RELEASE_TESTS_OPT_IN:
+        return
     existing = os.environ.get("MNGR_VPS_EXTRA_TAGS", "").strip()
     session_tags = f"{_SESSION_TAG},{_CREATED_TAG}"
     new_value = f"{existing},{session_tags}" if existing else session_tags
@@ -178,9 +206,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     Implemented as a hook (not a fixture) so it runs after every fixture
     teardown -- mirrors the Modal session-end leak check in
-    ``libs/mngr_modal/imbue/mngr_modal/conftest.py``. Skipped silently
-    when ``VULTR_API_KEY`` is unset (no API key -> no instances were
-    ever created -> nothing to scan).
+    ``libs/mngr_modal/imbue/mngr_modal/conftest.py``. No-ops when
+    ``MNGR_VULTR_RELEASE_TESTS`` is unset (an ordinary unit-only run that
+    created no instances -> nothing to scan). When the opt-in *is* set but
+    ``VULTR_API_KEY`` is missing, the session is failed rather than skipped:
+    a release run with no key cannot have created or scanned for instances,
+    which is a misconfiguration worth surfacing loudly, not a benign skip.
 
     On finding a real leak -- a destroy that either succeeded on a
     still-running instance (``DESTROYED``) or itself failed
@@ -199,8 +230,16 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """
     del exitstatus
     try:
+        if not VULTR_RELEASE_TESTS_OPT_IN:
+            return
         api_key = os.environ.get("VULTR_API_KEY", "")
         if not api_key:
+            logger.error(
+                "MNGR_VULTR_RELEASE_TESTS=1 is set but VULTR_API_KEY is missing, so the "
+                "session-end leak scan cannot run. Export VULTR_API_KEY, or unset "
+                "MNGR_VULTR_RELEASE_TESTS to skip the Vultr release tests."
+            )
+            _mark_session_failed(session)
             return
         # os_id is required by the VultrVpsClient constructor but only used by
         # create_instance, which we never call from this cleanup path. The
@@ -220,7 +259,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         )
         outcomes = [_destroy_leaked_instance(client, inst) for inst in leaked]
         real_leak_count = sum(1 for outcome in outcomes if _is_real_leak(outcome))
-        if real_leak_count > 0 and session.exitstatus == 0:
-            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        if real_leak_count > 0:
+            _mark_session_failed(session)
     finally:
         _monkeypatch.undo()
