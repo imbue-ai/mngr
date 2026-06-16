@@ -1,9 +1,7 @@
 from collections.abc import Sequence
 from enum import auto
-from types import ModuleType
 from typing import Final
 from typing import assert_never
-from typing import cast
 
 import pluggy
 from pydantic import ConfigDict
@@ -11,6 +9,9 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.config.agent_class_registry import get_agent_class
+from imbue.mngr.config.agent_class_registry import list_registered_agent_class_types
+from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
@@ -25,8 +26,12 @@ from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 # The key that an agent_field_generators hookimpl uses for the waiting-reason field;
 # a plugin that exposes a *different* field (e.g. kanpan's `muted`) does not count.
 _WAITING_REASON_FIELD_KEY: Final[str] = "waiting_reason"
-# A sibling usage plugin lives in the agent plugin's package + this suffix.
-_USAGE_PACKAGE_SUFFIX: Final[str] = "_usage"
+# A sibling usage plugin registers under the agent plugin's entry-point name + this suffix
+# (e.g. the `claude` agent plugin is paired with the `claude_usage` plugin).
+_USAGE_PLUGIN_SUFFIX: Final[str] = "_usage"
+# The hookspec a usage plugin implements to claim an agent's usage source. Defined in
+# the optional `mngr_usage` package, so it may be absent when usage is not installed.
+_USAGE_SOURCE_HOOK: Final[str] = "aggregate_usage_source"
 
 
 class CapabilityDetectionKind(UpperCaseStrEnum):
@@ -71,8 +76,8 @@ class AgentClassInfo(FrozenModel):
     field_generator_agent_type_names: frozenset[str] = Field(
         description="Agent type names that have a waiting_reason field generator"
     )
-    # Hook names the agent's own plugin package implements (for PLUGIN_HOOKIMPL detection).
-    plugin_hook_names: frozenset[str] = Field(description="Hook names implemented by this agent's plugin package")
+    # Hook names that the agent's owning plugin (entry point) implements (for PLUGIN_HOOKIMPL detection).
+    plugin_hook_names: frozenset[str] = Field(description="Hook names implemented by this agent's owning plugin")
     # Whether a sibling usage plugin claims this agent's usage source.
     is_usage_source_claimed: bool = Field(description="Whether a mngr_<harness>_usage plugin covers this agent")
 
@@ -204,29 +209,30 @@ def render_capability_matrix(
     return "\n".join([header_row, separator_row, *body_rows])
 
 
-def _module_package(module: ModuleType) -> str:
-    """Return a plugin module's package (e.g. 'imbue.mngr_claude' for '...mngr_claude.plugin')."""
-    module_name = getattr(module, "__name__", "")
-    return module_name.rsplit(".", 1)[0] if "." in module_name else module_name
+def _hook_implementer_plugin_names(pm: pluggy.PluginManager, hook_name: str) -> frozenset[str]:
+    """Return the entry-point names of the plugins that implement ``hook_name``.
+
+    Returns empty if the hook is not registered at all -- the usage hookspec lives
+    in the optional ``mngr_usage`` package and may be absent.
+    """
+    hook_relay = pm.hook
+    if not hasattr(hook_relay, hook_name):
+        return frozenset()
+    hook_caller = pm.subset_hook_caller(hook_name, remove_plugins=[])
+    return frozenset(impl.plugin_name for impl in hook_caller.get_hookimpls())
 
 
 def build_agent_class_infos(
     pm: pluggy.PluginManager,
     capabilities: Sequence[AgentCapability] = AGENT_CAPABILITIES,
 ) -> tuple[AgentClassInfo, ...]:
-    """Build one AgentClassInfo per registered agent type from a loaded plugin manager."""
-    # Map each registered agent type to its class and the plugin module that registered it.
-    # pluggy types hookimpl.function() as returning `object`, so re-apply the declared shape.
-    class_and_plugin_by_type: dict[str, tuple[type, ModuleType]] = {}
-    for hookimpl in pm.hook.register_agent_type.get_hookimpls():
-        registration = cast("tuple[str, type | None, type | None] | None", hookimpl.function())
-        if registration is None:
-            continue
-        agent_type_name, agent_class, _config_class = registration
-        if agent_class is None:
-            continue
-        class_and_plugin_by_type[agent_type_name] = (agent_class, cast(ModuleType, hookimpl.plugin))
+    """Build one AgentClassInfo per registered agent type from a loaded plugin manager.
 
+    Module-level capabilities are keyed by the agent's owning plugin entry-point name
+    (e.g. ``claude``), matched against the entry-point names that implement the hook
+    (deploy) or that pair a ``<owner>_usage`` sibling plugin (usage). This stays at the
+    entry-point granularity that the matrix's columns are themselves keyed by.
+    """
     # Agent type names whose plugin exposes a waiting_reason field generator (not some other field).
     field_generator_agent_type_names = frozenset(
         result[0]
@@ -234,37 +240,28 @@ def build_agent_class_infos(
         if result is not None and _WAITING_REASON_FIELD_KEY in result[1]
     )
 
-    # For each hook referenced by a PLUGIN_HOOKIMPL capability, the plugin *packages*
-    # that implement it. Package-level (not exact-module) because a hookimpl like
-    # get_files_for_deploy is one global contribution for the whole agent package,
-    # while sibling agent subtypes register from submodules of that same package --
-    # consistent with usage-source detection below.
+    # Entry-point names implementing each PLUGIN_HOOKIMPL hook, and each usage source.
     hook_names = frozenset(c.hook_name for c in capabilities if c.hook_name is not None)
-    packages_by_hook_name: dict[str, frozenset[str]] = {}
-    for hook_name in hook_names:
-        hook_caller = getattr(pm.hook, hook_name, None)
-        impls = hook_caller.get_hookimpls() if hook_caller is not None else ()
-        packages_by_hook_name[hook_name] = frozenset(_module_package(impl.plugin) for impl in impls)
-
-    # Packages of plugins that claim a usage source (e.g. 'imbue.mngr_claude_usage').
-    usage_hook_caller = getattr(pm.hook, "aggregate_usage_source", None)
-    usage_impls = usage_hook_caller.get_hookimpls() if usage_hook_caller is not None else ()
-    usage_plugin_packages = frozenset(_module_package(impl.plugin) for impl in usage_impls)
+    plugin_names_by_hook = {name: _hook_implementer_plugin_names(pm, name) for name in hook_names}
+    usage_plugin_names = _hook_implementer_plugin_names(pm, _USAGE_SOURCE_HOOK)
 
     infos: list[AgentClassInfo] = []
-    for agent_type_name, (agent_class, plugin_module) in class_and_plugin_by_type.items():
-        plugin_package = _module_package(plugin_module)
+    for agent_type_name in list_registered_agent_class_types():
+        owner = get_agent_type_owner(agent_type_name)
+        # Only plugin-registered agent types appear in the matrix. A type registered
+        # directly (no owner) -- e.g. a test placeholder -- is not a shipped agent.
+        if owner is None:
+            continue
         plugin_hook_names = frozenset(
-            hook_name for hook_name in hook_names if plugin_package in packages_by_hook_name[hook_name]
+            hook_name for hook_name in hook_names if owner in plugin_names_by_hook[hook_name]
         )
-        usage_package = plugin_package + _USAGE_PACKAGE_SUFFIX
         infos.append(
             AgentClassInfo(
                 agent_type_name=agent_type_name,
-                agent_class=agent_class,
+                agent_class=get_agent_class(agent_type_name),
                 field_generator_agent_type_names=field_generator_agent_type_names,
                 plugin_hook_names=plugin_hook_names,
-                is_usage_source_claimed=usage_package in usage_plugin_packages,
+                is_usage_source_claimed=(owner + _USAGE_PLUGIN_SUFFIX) in usage_plugin_names,
             )
         )
     return tuple(infos)

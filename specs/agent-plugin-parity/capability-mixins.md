@@ -254,7 +254,7 @@ in the parity spec, because their content is how-not-whether.
    -> all five; unattended operation -> all five (pi degenerate, rejects explicit-off);
    per-resource policy -> agy/opencode/codex; version management -> claude/codex; pi's
    single-value `waiting_reason`; module-level `deploy_contributions` + `usage_tracking`
-   (package-level detection); and **auto-install** as a base capability (`HasAutoInstallMixin`
+   (detected by owning-plugin entry-point name); and **auto-install** as a base capability (`HasAutoInstallMixin`
    + shared `ensure_cli_installed`) added to agy/opencode/codex, pi routed through the helper,
    claude keeping its version-aware flow. One changelog entry per touched project.
 4. **(done)** `agents/test_capability_coverage.py`: the coverage forcing test (every capability

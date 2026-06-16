@@ -20,8 +20,8 @@ absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 | unattended_operation | Y | Y | Y | Y | - | Y | Y | - | Y | Y | Y |
 | permission_policy | Y | - | - | Y | - | - | - | - | - | Y | - |
 | version_management | - | Y | Y | Y | - | Y | Y | - | Y | - | - |
-| deploy_contributions | - | Y | Y | - | - | Y | Y | - | - | - | - |
-| usage_tracking | - | Y | Y | Y | - | Y | Y | - | - | Y | Y |
+| deploy_contributions | - | Y | - | - | - | - | - | - | - | - | - |
+| usage_tracking | - | Y | - | Y | - | - | - | - | - | Y | Y |
 
 ## Capabilities
 
