@@ -29,6 +29,7 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
@@ -1389,26 +1390,24 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
-class ClaudeAgent(
-    InteractiveTuiAgent[ClaudeAgentConfig],
+class ClaudeCoreAgent(
+    BaseAgent[ClaudeAgentConfig],
     CliBackedAgentMixin,
     HasCommonTranscriptMixin,
-    HasStreamingSnapshotMixin,
     HasSessionPreservationMixin,
-    HasSessionAdoptionMixin,
     HasUnattendedModeMixin,
     HasVersionManagementMixin,
     HasAutoInstallMixin,
 ):
-    """Agent implementation for Claude with session resumption support."""
+    """Shared core for Claude agents (interactive and headless).
 
-    TUI_READY_INDICATOR = "Claude Code"
-
-    # Path template for the transcript event log that the acceptance-marker
-    # probe (see _build_accept_marker_command) reads as the fallback source when
-    # the UserPromptSubmit hook misfires. The embedded $MNGR_AGENT_STATE_DIR is
-    # evaluated on the host by the env prefix the probe carries. Claude-specific.
-    _QUEUE_LOG_PATH_TEMPLATE: ClassVar[str] = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+    Holds everything not tied to the interactive TUI: config-dir setup,
+    credentials, transcript scripts, session preservation, auto-install, version
+    management, and the provisioning flow. The interactive :class:`ClaudeAgent`
+    subclass adds the TUI send/readiness pipeline, the streaming snapshot, and
+    session adoption; the headless variant inherits this core directly and so
+    does not carry those interactive-only capabilities.
+    """
 
     @property
     def is_common_transcript_enabled(self) -> bool:
@@ -1446,40 +1445,6 @@ class ClaudeAgent(
             )
         }
 
-    def _build_accept_marker_command(self) -> str:
-        """Shell snippet printing the latest enqueue timestamp from Claude's transcript log.
-
-        Claude's transcript event log records an ``enqueue`` event (an
-        ``"operation":"enqueue"`` JSONL line) the instant a message enters its
-        queue. This prints that event's ISO-8601 ``timestamp`` (empty if none
-        yet) -- the lexicographically-monotonic "message accepted" token that
-        ``send_enter_via_tmux_wait_for_hook`` baselines before Enter and watches
-        for a newer value, confirming submission the moment the message is
-        accepted rather than waiting on the (possibly slow) UserPromptSubmit
-        hook. The Claude-specific log schema lives here so ``tui_utils`` stays
-        agent-neutral; the env prefix evaluates the embedded
-        ``$MNGR_AGENT_STATE_DIR`` on the host, and the backslash-escaped quotes
-        are interpreted by the inner ``bash -c`` that runs the probe.
-        """
-        env_command_prefix = self.host.build_source_env_prefix(self)
-        return (
-            f"{env_command_prefix} cat {self._QUEUE_LOG_PATH_TEMPLATE} 2>/dev/null "
-            f'| grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp 2>/dev/null'
-        )
-
-    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
-        # on the per-session channel; wait for it. If the hook misfires
-        # (occasionally happens while another message is being processed),
-        # fall back to checking the transcript log for a fresh enqueue.
-        send_enter_via_tmux_wait_for_hook(
-            self,
-            tmux_target,
-            wait_channel=f"mngr-submit-{self.session_name}",
-            timeout_seconds=self.enter_submission_timeout_seconds,
-            accept_marker_command=self._build_accept_marker_command(),
-        )
-
     @classmethod
     def preflight_check(
         cls,
@@ -1515,16 +1480,6 @@ class ClaudeAgent(
         if self.agent_config.use_env_config_dir:
             return resolve_shared_claude_config_dir()
         return self._get_agent_dir() / _AGENT_CLAUDE_CONFIG_RELPATH
-
-    def get_stream_buffer_path(self) -> Path:
-        """Return the path to this agent's response-streaming buffer file.
-
-        Written by the stream_snapshot.py watcher when
-        streaming_snapshot_interval_seconds > 0. The first line is the uuid of
-        the last complete assistant message; the remaining lines are the
-        in-progress assistant text reverse-mapped to markdown.
-        """
-        return self._get_agent_dir() / "plugin" / "claude" / "stream_buffer"
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
@@ -1570,215 +1525,16 @@ class ClaudeAgent(
         """
         return "claude"
 
-    _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
-        TrustDialogIndicator(),
-        CustomApiKeyDialogIndicator(),
-        ThemeSelectionIndicator(),
-        EffortCalloutIndicator(),
-        CostThresholdDialogIndicator(),
-    )
-
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Check for blocking dialogs before sending a message.
-
-        Checks the permissions_waiting file (set by the PermissionRequest hook)
-        and captures the tmux pane for known dialog indicators.
-        Raises DialogDetectedError if any are found.
-        """
-        if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
-            raise DialogDetectedError(str(self.name), "permission dialog")
-
-        content = self._capture_pane_content(tmux_target)
-        if content is None:
-            return
-
-        for indicator in self._DIALOG_INDICATORS:
-            if indicator.matches(content):
-                raise DialogDetectedError(str(self.name), indicator.get_description())
-
-    def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
-    ) -> None:
-        """Wait for the agent to become ready, executing start_action then polling.
-
-        Polls for the 'session_started' file that the SessionStart hook creates.
-        This indicates Claude Code has started and is ready for input.
-
-        Raises AgentStartError if the agent doesn't signal readiness within the timeout.
-        """
-        if timeout is None:
-            timeout = _READY_SIGNAL_TIMEOUT_SECONDS
-
-        # this file is removed when we start the agent, see assemble_command, and created by the SessionStart hook when the session is ready
-        session_started_path = self._get_agent_dir() / "session_started"
-
-        with log_span("Waiting for session_started file (timeout={}s)", timeout):
-            # Run the start action (e.g., start the agent)
-            with log_span("Calling start_action..."):
-                super().wait_for_ready_signal(is_creating, start_action, timeout)
-
-            # Poll for the session_started file (created by SessionStart hook)
-            if poll_until(
-                lambda: self._check_file_exists(session_started_path),
-                timeout=timeout,
-                poll_interval=0.05,
-            ):
-                return
-
-            raise AgentStartError(
-                str(self.name),
-                f"Agent did not signal readiness within {timeout}s. "
-                "This may indicate a trust dialog appeared or Claude Code failed to start.",
-            )
-
-    def _build_background_tasks_command(self, session_name: str) -> str:
-        """Build a shell command that starts the background tasks script.
-
-        The background tasks script (provisioned to $MNGR_AGENT_STATE_DIR/commands/)
-        handles both activity tracking and transcript export. It runs in the
-        background while the tmux session is alive.
-        """
-        script_path = "$MNGR_AGENT_STATE_DIR/commands/claude_background_tasks.sh"
-        return f"( {script_path} {shlex.quote(session_name)} ) &"
-
-    def assemble_command(
-        self,
-        host: OnlineHostInterface,
-        agent_args: tuple[str, ...],
-        command_override: CommandString | None,
-        initial_message: str | None = None,
-    ) -> CommandString:
-        """Assemble command with --resume || --session-id format for session resumption.
-
-        The command format is: 'claude --resume $SID args || claude --session-id UUID args'
-        This allows users to hit 'up' and 'enter' in tmux to resume the session (--resume)
-        or create it with that ID (--session-id). The resume path uses $MAIN_CLAUDE_SESSION_ID,
-        resolved at runtime from the session tracking file (falling back to the agent UUID on
-        first run).
-
-        An activity updater is started in the background to keep the agent's activity
-        timestamp up-to-date while the tmux session is alive.
-
-        ``initial_message`` is accepted for interface compatibility; the
-        interactive ClaudeAgent delivers ``--message`` content through
-        ``send_message`` after the tmux pane is ready, not via the command
-        line, so it is ignored here.
-        """
-        if command_override is not None:
-            base = str(command_override)
-        elif self.agent_config.command is not None:
-            base = str(self.agent_config.command)
-        else:
-            raise NoCommandDefinedError(f"No command defined for agent type '{self.agent_type}'")
-
-        # Use the agent ID as the stable UUID for session identification
-        agent_uuid = str(self.id.get_uuid())
-
-        # Build the additional arguments (cli_args from config + agent_args from CLI).
-        # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
-        # before being spliced into this shell-evaluated command (see ``quote_agent_args``).
-        all_extra_args = self.agent_config.cli_args + quote_agent_args(agent_args)
-        args_str = " ".join(all_extra_args) if all_extra_args else ""
-
-        # Read the latest session ID from the tracking file written by the SessionStart hook.
-        # This handles session replacement (e.g., exit plan mode, /clear, compaction) where
-        # Claude Code creates a new session with a different UUID. Falls back to the agent UUID
-        # if the tracking file doesn't exist (first run) or is empty (crash during write).
-        sid_export = (
-            f'_MNGR_READ_SID=$(cat "$MNGR_AGENT_STATE_DIR/claude_session_id" 2>/dev/null || true);'
-            f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{agent_uuid}}}"'
-        )
-
-        # Build both command variants using the dynamic session ID.
-        # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
-        # in the per-agent config dir rather than ~/.claude/. Session files on disk
-        # are named "<session_id>.jsonl"; matching without the extension would
-        # always miss, the && would short-circuit, and the silent || fallback at
-        # the end of assemble_command would spawn a fresh `claude --session-id
-        # <agent_uuid>` without surfacing any error -- so an adopted session
-        # would appear to do nothing.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
-        create_cmd = f"{base} --session-id {agent_uuid}"
-
-        # Append additional args to both commands if present
-        if args_str:
-            resume_cmd = f"{resume_cmd} {args_str}"
-            create_cmd = f"{create_cmd} {args_str}"
-
-        # Build the environment exports
-        # IS_SANDBOX is only set for remote hosts (not local)
-        env_exports = f"export IS_SANDBOX=1 && {sid_export}" if not host.is_local else sid_export
-
-        # Build the background tasks command (activity tracking + transcript export)
-        session_name = f"{self.mngr_ctx.config.prefix}{self.name}"
-        background_cmd = self._build_background_tasks_command(session_name)
-
-        # Combine: start background tasks, export env (including session ID), then run the main command (and make sure we get rid of the session started marker on each run so that wait_for_ready_signal works correctly for both new and resumed sessions)
-        return CommandString(
-            f"{background_cmd} {env_exports} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( {resume_cmd} ) || {create_cmd}"
-        )
-
     def on_before_provisioning(
         self,
         host: OnlineHostInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Validate preconditions before provisioning (read-only).
-
-        This method performs read-only validation only. No writes to
-        disk or interactive prompts -- actual setup happens in provision().
-
-        For non-interactive local runs: validates that all known Claude
-        startup dialogs are dismissed so we fail early with a clear message.
-        Interactive and auto-approve runs skip these checks because
-        provision() will handle them.
-
-        In ``use_env_config_dir`` mode: enforce local-only, and skip the
-        dialog-dismissal validation entirely (user is responsible for their
-        own config; mngr makes no writes to it).
+        """No-op for core/headless claude: no pre-provisioning dialog or
+        credential validation. The interactive :class:`ClaudeAgent` subclass
+        overrides this to validate startup dialogs and credentials.
         """
-        config = self.agent_config
-
-        if config.use_env_config_dir:
-            if not host.is_local:
-                raise UserInputError(
-                    "use_env_config_dir=True is only supported for local hosts; "
-                    "this agent targets a non-local host. Disable use_env_config_dir "
-                    "or move the agent to a local host."
-                )
-        # Validate dialogs for non-interactive local runs so we fail early with
-        # a clear message. Skip when auto_dismiss_dialogs is True because
-        # provision() will auto-dismiss all dialogs in that case. Skip entirely
-        # in shared mode because mngr does not write to the user's config.
-        elif (
-            host.is_local
-            and not mngr_ctx.is_interactive
-            and not mngr_ctx.is_auto_approve
-            and not config.auto_dismiss_dialogs
-        ):
-            transfer_mode = options.transfer_mode
-            if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
-                source_path = self._find_git_source_path(mngr_ctx.concurrency_group)
-                trust_path = source_path if source_path is not None else self.work_dir
-            else:
-                trust_path = self.work_dir
-            check_claude_dialogs_dismissed(find_user_claude_config(), trust_path)
-        else:
-            # Remote-host non-shared, or interactive/auto-approve local, or
-            # auto_dismiss_dialogs=True: provision() handles dialog setup.
-            pass
-        if not config.check_installation:
-            logger.debug("Skipped claude installation check (check_installation=False)")
-            return
-
-        if not _has_api_credentials_available(host, options, config, mngr_ctx.concurrency_group):
-            logger.warning(
-                "No API credentials detected for Claude Code. The agent may fail to start.\n"
-                "Provide credentials via one of:\n"
-                "  - Set ANTHROPIC_API_KEY environment variable (use --pass-env ANTHROPIC_API_KEY)\n"
-                "  - Run 'claude login' to create ~/.claude/.credentials.json"
-            )
 
     def get_provision_file_transfers(
         self,
@@ -1886,46 +1642,10 @@ class ClaudeAgent(
             host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
     def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
-        """Ensure all known Claude startup dialogs are dismissed in the global config.
-
-        All dialogs that could intercept tmux input must be dismissed before
-        starting an agent, otherwise mngr message will break. Writes to the
-        global config (~/.claude.json) to record user intent; the per-agent
-        config inherits these settings.
-
-        For auto-approve mode, silently dismisses all dialogs. For interactive
-        mode, prompts the user for each undismissed dialog. For non-interactive
-        mode, raises the appropriate error.
-
-        source_path is the trusted source directory (for git-worktree/git-mirror modes).
-        When None (rsync/none mode), trust is prompted for work_dir instead.
+        """No-op for core/headless claude: there is no interactive TUI whose
+        startup dialogs could intercept input. The interactive :class:`ClaudeAgent`
+        subclass overrides this to dismiss trust / onboarding / effort dialogs.
         """
-        global_config_path = find_user_claude_config()
-        trust_path = source_path if source_path is not None else self.work_dir
-
-        if mngr_ctx.is_auto_approve:
-            auto_dismiss_claude_dialogs(global_config_path, trust_path)
-            return
-
-        if not is_source_directory_trusted(global_config_path, trust_path):
-            if not mngr_ctx.is_interactive or not _prompt_user_for_trust(trust_path):
-                raise ClaudeDirectoryNotTrustedError(str(trust_path))
-            add_claude_trust_for_path(global_config_path, trust_path)
-
-        if not is_effort_callout_dismissed(global_config_path):
-            if not mngr_ctx.is_interactive or not _prompt_user_for_effort_callout_dismissal():
-                raise ClaudeEffortCalloutNotDismissedError()
-            dismiss_effort_callout(global_config_path)
-
-        if not is_onboarding_completed(global_config_path):
-            if not mngr_ctx.is_interactive or not _prompt_user_for_onboarding_completion():
-                raise ClaudeOnboardingNotCompletedError()
-            complete_onboarding(global_config_path)
-
-        # Note: bypassPermissionsModeAccepted is NOT checked here because Claude Code
-        # periodically resets it to null in ~/.claude.json, causing repeated prompts.
-        # The bypass-permissions warning is reliably suppressed by
-        # skipDangerousModePermissionPrompt in settings.json instead.
 
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
         """Find the source repo path for the agent's work_dir, if it's a git worktree or mirror.
@@ -2201,6 +1921,438 @@ class ClaudeAgent(
             # should be done by now, just wanted to do in parallel for latency reasons
             provision_backgroun_script_thread.join(60.0)
 
+    def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
+        """Rsync the source agent's ``plugin/`` into this agent's state dir.
+        Runs before ``_setup_per_agent_config_dir`` (which overwrites
+        identity-specific files); the destination-side rewiring runs later
+        in ``on_after_provisioning`` via ``_adopt_cloned_session``.
+        """
+        source_host = source_agent_state_location.host
+        source_plugin_dir = source_agent_state_location.path / "plugin"
+        dest_plugin_dir = self._get_agent_dir() / "plugin"
+
+        if not source_host.path_exists(source_plugin_dir):
+            logger.debug("No plugin directory in source agent, skipping clone transfer")
+            return
+
+        with log_span("Transferring source plugin data"):
+            self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
+
+    def _resolve_work_dir_on_host(self) -> Path:
+        """Return ``self.work_dir`` with symlinks resolved as the destination
+        host sees it. On Modal, ``/mngr/projects/agent-<uuid>`` is a symlink
+        onto ``/__modal/volumes/<vol-id>/projects/agent-<uuid>``; claude
+        uses the resolved form for its cwd and per-project storage.
+
+        Falls back to the unresolved path on ``readlink -f`` failure, but
+        warns -- on a host where the canonical path differs, the fallback
+        will silently break clone-resume.
+        """
+        result = self.host.execute_idempotent_command(
+            f"readlink -f {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
+        )
+        if result.success and result.stdout.strip():
+            return Path(result.stdout.strip())
+        logger.warning(
+            "readlink -f {} failed (success={}, stderr={!r}); falling back to unresolved path",
+            self.work_dir,
+            result.success,
+            result.stderr.strip(),
+        )
+        return self.work_dir
+
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_claude_preserved_items(self.agent_config.use_env_config_dir), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
+
+    def get_version_policy(self) -> str:
+        # claude pins a specific version when set, otherwise follows its own auto-update.
+        return self.agent_config.version or "auto-update"
+
+    def get_install_binary_name(self) -> str:
+        return "claude"
+
+    def get_install_command(self) -> str:
+        return _build_claude_install_command(self.agent_config.version)
+
+    def on_destroy(self, host: OnlineHostInterface) -> None:
+        """Preserve session files and clean up per-agent credentials and trust entries.
+
+        When preserve_sessions_on_destroy is enabled (default), copies session JSONL
+        files, transcripts, and session history to the local mngr data directory
+        before the agent state directory is deleted. For remote agents, files are
+        pulled to the local machine so they survive host destruction.
+
+        For agents with per-agent config dirs: cleans up macOS keychain entries
+        (the config dir itself is deleted with the agent state).
+        For legacy agents without per-agent config dirs: cleans up the global
+        ~/.claude.json trust entry.
+
+        In ``use_env_config_dir`` mode: skip keychain / trust cleanup entirely.
+        ``get_claude_config_dir()`` resolves to the user's shared $CLAUDE_CONFIG_DIR,
+        which exists, so the per-agent-keychain branch would otherwise compute the
+        same label hash Claude Code itself uses and delete the user's real
+        credentials. Since provision() never wrote any per-agent keychain or
+        trust entries in this mode, there is nothing for us to clean up. Session
+        preservation also skips copying the ``projects/`` directory in this mode
+        (it lives in the user's persistent dir and contains all of their
+        cross-project session history); only transcripts and the session-id
+        history from the agent state dir are preserved.
+        """
+        # Preserve session files before the state dir is deleted
+        if self.agent_config.preserve_sessions_on_destroy:
+            self.preserve_session_state(host)
+
+        if self.agent_config.use_env_config_dir:
+            # Shared-config mode: mngr never wrote per-agent keychain entries or
+            # ~/.claude.json trust markers, so there is nothing to clean up. Any
+            # keychain delete here would target the user's own credentials.
+            return
+
+        config_dir = self.get_claude_config_dir()
+        per_agent_config_exists = host.execute_idempotent_command(
+            f"test -d {shlex.quote(str(config_dir))}", timeout_seconds=5.0
+        ).success
+
+        if per_agent_config_exists and is_macos():
+            # Clean up per-agent keychain entries
+            suffix = _compute_keychain_label_suffix(config_dir)
+            cg = self.mngr_ctx.concurrency_group
+            if _delete_macos_keychain_credential(f"Claude Code{suffix}", cg):
+                logger.debug("Removed per-agent API key keychain entry")
+            if _delete_macos_keychain_credential(f"Claude Code-credentials{suffix}", cg):
+                logger.debug("Removed per-agent OAuth credentials keychain entry")
+        elif not per_agent_config_exists:
+            # Legacy agent without per-agent config dir -- clean up global file
+            removed = remove_claude_trust_for_path(find_user_claude_config(), self.work_dir)
+            if removed:
+                logger.debug("Removed Claude trust entry for {} from global config", self.work_dir)
+        else:
+            # Per-agent config dir on non-macOS: config dir is deleted with agent state, nothing extra to clean up
+            pass
+
+
+class ClaudeAgent(
+    ClaudeCoreAgent,
+    InteractiveTuiAgent[ClaudeAgentConfig],
+    HasStreamingSnapshotMixin,
+    HasSessionAdoptionMixin,
+):
+    """Interactive (TUI-driven) Claude agent.
+
+    Adds, on top of :class:`ClaudeCoreAgent`, the keystroke send / readiness
+    pipeline, the live streaming snapshot, and session adoption
+    (``--adopt-session`` / ``--from`` carry-forward). The headless variant
+    inherits the core directly and so carries none of these interactive-only
+    capabilities.
+    """
+
+    TUI_READY_INDICATOR = "Claude Code"
+
+    # Path template for the transcript event log that the acceptance-marker
+    # probe (see _build_accept_marker_command) reads as the fallback source when
+    # the UserPromptSubmit hook misfires. The embedded $MNGR_AGENT_STATE_DIR is
+    # evaluated on the host by the env prefix the probe carries. Claude-specific.
+    _QUEUE_LOG_PATH_TEMPLATE: ClassVar[str] = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+
+    _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
+        TrustDialogIndicator(),
+        CustomApiKeyDialogIndicator(),
+        ThemeSelectionIndicator(),
+        EffortCalloutIndicator(),
+        CostThresholdDialogIndicator(),
+    )
+
+    def _build_accept_marker_command(self) -> str:
+        """Shell snippet printing the latest enqueue timestamp from Claude's transcript log.
+
+        Claude's transcript event log records an ``enqueue`` event (an
+        ``"operation":"enqueue"`` JSONL line) the instant a message enters its
+        queue. This prints that event's ISO-8601 ``timestamp`` (empty if none
+        yet) -- the lexicographically-monotonic "message accepted" token that
+        ``send_enter_via_tmux_wait_for_hook`` baselines before Enter and watches
+        for a newer value, confirming submission the moment the message is
+        accepted rather than waiting on the (possibly slow) UserPromptSubmit
+        hook. The Claude-specific log schema lives here so ``tui_utils`` stays
+        agent-neutral; the env prefix evaluates the embedded
+        ``$MNGR_AGENT_STATE_DIR`` on the host, and the backslash-escaped quotes
+        are interpreted by the inner ``bash -c`` that runs the probe.
+        """
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        return (
+            f"{env_command_prefix} cat {self._QUEUE_LOG_PATH_TEMPLATE} 2>/dev/null "
+            f'| grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp 2>/dev/null'
+        )
+
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
+        # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
+        # on the per-session channel; wait for it. If the hook misfires
+        # (occasionally happens while another message is being processed),
+        # fall back to checking the transcript log for a fresh enqueue.
+        send_enter_via_tmux_wait_for_hook(
+            self,
+            tmux_target,
+            wait_channel=f"mngr-submit-{self.session_name}",
+            timeout_seconds=self.enter_submission_timeout_seconds,
+            accept_marker_command=self._build_accept_marker_command(),
+        )
+
+    def get_stream_buffer_path(self) -> Path:
+        """Return the path to this agent's response-streaming buffer file.
+
+        Written by the stream_snapshot.py watcher when
+        streaming_snapshot_interval_seconds > 0. The first line is the uuid of
+        the last complete assistant message; the remaining lines are the
+        in-progress assistant text reverse-mapped to markdown.
+        """
+        return self._get_agent_dir() / "plugin" / "claude" / "stream_buffer"
+
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+        """Check for blocking dialogs before sending a message.
+
+        Checks the permissions_waiting file (set by the PermissionRequest hook)
+        and captures the tmux pane for known dialog indicators.
+        Raises DialogDetectedError if any are found.
+        """
+        if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
+            raise DialogDetectedError(str(self.name), "permission dialog")
+
+        content = self._capture_pane_content(tmux_target)
+        if content is None:
+            return
+
+        for indicator in self._DIALOG_INDICATORS:
+            if indicator.matches(content):
+                raise DialogDetectedError(str(self.name), indicator.get_description())
+
+    def wait_for_ready_signal(
+        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+    ) -> None:
+        """Wait for the agent to become ready, executing start_action then polling.
+
+        Polls for the 'session_started' file that the SessionStart hook creates.
+        This indicates Claude Code has started and is ready for input.
+
+        Raises AgentStartError if the agent doesn't signal readiness within the timeout.
+        """
+        if timeout is None:
+            timeout = _READY_SIGNAL_TIMEOUT_SECONDS
+
+        # this file is removed when we start the agent, see assemble_command, and created by the SessionStart hook when the session is ready
+        session_started_path = self._get_agent_dir() / "session_started"
+
+        with log_span("Waiting for session_started file (timeout={}s)", timeout):
+            # Run the start action (e.g., start the agent)
+            with log_span("Calling start_action..."):
+                super().wait_for_ready_signal(is_creating, start_action, timeout)
+
+            # Poll for the session_started file (created by SessionStart hook)
+            if poll_until(
+                lambda: self._check_file_exists(session_started_path),
+                timeout=timeout,
+                poll_interval=0.05,
+            ):
+                return
+
+            raise AgentStartError(
+                str(self.name),
+                f"Agent did not signal readiness within {timeout}s. "
+                "This may indicate a trust dialog appeared or Claude Code failed to start.",
+            )
+
+    def _build_background_tasks_command(self, session_name: str) -> str:
+        """Build a shell command that starts the background tasks script.
+
+        The background tasks script (provisioned to $MNGR_AGENT_STATE_DIR/commands/)
+        handles both activity tracking and transcript export. It runs in the
+        background while the tmux session is alive.
+        """
+        script_path = "$MNGR_AGENT_STATE_DIR/commands/claude_background_tasks.sh"
+        return f"( {script_path} {shlex.quote(session_name)} ) &"
+
+    def assemble_command(
+        self,
+        host: OnlineHostInterface,
+        agent_args: tuple[str, ...],
+        command_override: CommandString | None,
+        initial_message: str | None = None,
+    ) -> CommandString:
+        """Assemble command with --resume || --session-id format for session resumption.
+
+        The command format is: 'claude --resume $SID args || claude --session-id UUID args'
+        This allows users to hit 'up' and 'enter' in tmux to resume the session (--resume)
+        or create it with that ID (--session-id). The resume path uses $MAIN_CLAUDE_SESSION_ID,
+        resolved at runtime from the session tracking file (falling back to the agent UUID on
+        first run).
+
+        An activity updater is started in the background to keep the agent's activity
+        timestamp up-to-date while the tmux session is alive.
+
+        ``initial_message`` is accepted for interface compatibility; the
+        interactive ClaudeAgent delivers ``--message`` content through
+        ``send_message`` after the tmux pane is ready, not via the command
+        line, so it is ignored here.
+        """
+        if command_override is not None:
+            base = str(command_override)
+        elif self.agent_config.command is not None:
+            base = str(self.agent_config.command)
+        else:
+            raise NoCommandDefinedError(f"No command defined for agent type '{self.agent_type}'")
+
+        # Use the agent ID as the stable UUID for session identification
+        agent_uuid = str(self.id.get_uuid())
+
+        # Build the additional arguments (cli_args from config + agent_args from CLI).
+        # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
+        # before being spliced into this shell-evaluated command (see ``quote_agent_args``).
+        all_extra_args = self.agent_config.cli_args + quote_agent_args(agent_args)
+        args_str = " ".join(all_extra_args) if all_extra_args else ""
+
+        # Read the latest session ID from the tracking file written by the SessionStart hook.
+        # This handles session replacement (e.g., exit plan mode, /clear, compaction) where
+        # Claude Code creates a new session with a different UUID. Falls back to the agent UUID
+        # if the tracking file doesn't exist (first run) or is empty (crash during write).
+        sid_export = (
+            f'_MNGR_READ_SID=$(cat "$MNGR_AGENT_STATE_DIR/claude_session_id" 2>/dev/null || true);'
+            f' export MAIN_CLAUDE_SESSION_ID="${{_MNGR_READ_SID:-{agent_uuid}}}"'
+        )
+
+        # Build both command variants using the dynamic session ID.
+        # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
+        # in the per-agent config dir rather than ~/.claude/. Session files on disk
+        # are named "<session_id>.jsonl"; matching without the extension would
+        # always miss, the && would short-circuit, and the silent || fallback at
+        # the end of assemble_command would spawn a fresh `claude --session-id
+        # <agent_uuid>` without surfacing any error -- so an adopted session
+        # would appear to do nothing.
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        create_cmd = f"{base} --session-id {agent_uuid}"
+
+        # Append additional args to both commands if present
+        if args_str:
+            resume_cmd = f"{resume_cmd} {args_str}"
+            create_cmd = f"{create_cmd} {args_str}"
+
+        # Build the environment exports
+        # IS_SANDBOX is only set for remote hosts (not local)
+        env_exports = f"export IS_SANDBOX=1 && {sid_export}" if not host.is_local else sid_export
+
+        # Build the background tasks command (activity tracking + transcript export)
+        session_name = f"{self.mngr_ctx.config.prefix}{self.name}"
+        background_cmd = self._build_background_tasks_command(session_name)
+
+        # Combine: start background tasks, export env (including session ID), then run the main command (and make sure we get rid of the session started marker on each run so that wait_for_ready_signal works correctly for both new and resumed sessions)
+        return CommandString(
+            f"{background_cmd} {env_exports} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( {resume_cmd} ) || {create_cmd}"
+        )
+
+    def on_before_provisioning(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Validate preconditions before provisioning (read-only).
+
+        This method performs read-only validation only. No writes to
+        disk or interactive prompts -- actual setup happens in provision().
+
+        For non-interactive local runs: validates that all known Claude
+        startup dialogs are dismissed so we fail early with a clear message.
+        Interactive and auto-approve runs skip these checks because
+        provision() will handle them.
+
+        In ``use_env_config_dir`` mode: enforce local-only, and skip the
+        dialog-dismissal validation entirely (user is responsible for their
+        own config; mngr makes no writes to it).
+        """
+        config = self.agent_config
+
+        if config.use_env_config_dir:
+            if not host.is_local:
+                raise UserInputError(
+                    "use_env_config_dir=True is only supported for local hosts; "
+                    "this agent targets a non-local host. Disable use_env_config_dir "
+                    "or move the agent to a local host."
+                )
+        # Validate dialogs for non-interactive local runs so we fail early with
+        # a clear message. Skip when auto_dismiss_dialogs is True because
+        # provision() will auto-dismiss all dialogs in that case. Skip entirely
+        # in shared mode because mngr does not write to the user's config.
+        elif (
+            host.is_local
+            and not mngr_ctx.is_interactive
+            and not mngr_ctx.is_auto_approve
+            and not config.auto_dismiss_dialogs
+        ):
+            transfer_mode = options.transfer_mode
+            if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
+                source_path = self._find_git_source_path(mngr_ctx.concurrency_group)
+                trust_path = source_path if source_path is not None else self.work_dir
+            else:
+                trust_path = self.work_dir
+            check_claude_dialogs_dismissed(find_user_claude_config(), trust_path)
+        else:
+            # Remote-host non-shared, or interactive/auto-approve local, or
+            # auto_dismiss_dialogs=True: provision() handles dialog setup.
+            pass
+        if not config.check_installation:
+            logger.debug("Skipped claude installation check (check_installation=False)")
+            return
+
+        if not _has_api_credentials_available(host, options, config, mngr_ctx.concurrency_group):
+            logger.warning(
+                "No API credentials detected for Claude Code. The agent may fail to start.\n"
+                "Provide credentials via one of:\n"
+                "  - Set ANTHROPIC_API_KEY environment variable (use --pass-env ANTHROPIC_API_KEY)\n"
+                "  - Run 'claude login' to create ~/.claude/.credentials.json"
+            )
+
+    def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
+        """Ensure all known Claude startup dialogs are dismissed in the global config.
+
+        All dialogs that could intercept tmux input must be dismissed before
+        starting an agent, otherwise mngr message will break. Writes to the
+        global config (~/.claude.json) to record user intent; the per-agent
+        config inherits these settings.
+
+        For auto-approve mode, silently dismisses all dialogs. For interactive
+        mode, prompts the user for each undismissed dialog. For non-interactive
+        mode, raises the appropriate error.
+
+        source_path is the trusted source directory (for git-worktree/git-mirror modes).
+        When None (rsync/none mode), trust is prompted for work_dir instead.
+        """
+        global_config_path = find_user_claude_config()
+        trust_path = source_path if source_path is not None else self.work_dir
+
+        if mngr_ctx.is_auto_approve:
+            auto_dismiss_claude_dialogs(global_config_path, trust_path)
+            return
+
+        if not is_source_directory_trusted(global_config_path, trust_path):
+            if not mngr_ctx.is_interactive or not _prompt_user_for_trust(trust_path):
+                raise ClaudeDirectoryNotTrustedError(str(trust_path))
+            add_claude_trust_for_path(global_config_path, trust_path)
+
+        if not is_effort_callout_dismissed(global_config_path):
+            if not mngr_ctx.is_interactive or not _prompt_user_for_effort_callout_dismissal():
+                raise ClaudeEffortCalloutNotDismissedError()
+            dismiss_effort_callout(global_config_path)
+
+        if not is_onboarding_completed(global_config_path):
+            if not mngr_ctx.is_interactive or not _prompt_user_for_onboarding_completion():
+                raise ClaudeOnboardingNotCompletedError()
+            complete_onboarding(global_config_path)
+
+        # Note: bypassPermissionsModeAccepted is NOT checked here because Claude Code
+        # periodically resets it to null in ~/.claude.json, causing repeated prompts.
+        # The bypass-permissions warning is reliably suppressed by
+        # skipDangerousModePermissionPrompt in settings.json instead.
+
     def on_after_provisioning(
         self,
         host: OnlineHostInterface,
@@ -2293,46 +2445,6 @@ class ClaudeAgent(
         host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
         host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
 
-    def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
-        """Rsync the source agent's ``plugin/`` into this agent's state dir.
-        Runs before ``_setup_per_agent_config_dir`` (which overwrites
-        identity-specific files); the destination-side rewiring runs later
-        in ``on_after_provisioning`` via ``_adopt_cloned_session``.
-        """
-        source_host = source_agent_state_location.host
-        source_plugin_dir = source_agent_state_location.path / "plugin"
-        dest_plugin_dir = self._get_agent_dir() / "plugin"
-
-        if not source_host.path_exists(source_plugin_dir):
-            logger.debug("No plugin directory in source agent, skipping clone transfer")
-            return
-
-        with log_span("Transferring source plugin data"):
-            self.host.copy_directory(source_host, source_plugin_dir, dest_plugin_dir)
-
-    def _resolve_work_dir_on_host(self) -> Path:
-        """Return ``self.work_dir`` with symlinks resolved as the destination
-        host sees it. On Modal, ``/mngr/projects/agent-<uuid>`` is a symlink
-        onto ``/__modal/volumes/<vol-id>/projects/agent-<uuid>``; claude
-        uses the resolved form for its cwd and per-project storage.
-
-        Falls back to the unresolved path on ``readlink -f`` failure, but
-        warns -- on a host where the canonical path differs, the fallback
-        will silently break clone-resume.
-        """
-        result = self.host.execute_idempotent_command(
-            f"readlink -f {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
-        )
-        if result.success and result.stdout.strip():
-            return Path(result.stdout.strip())
-        logger.warning(
-            "readlink -f {} failed (success={}, stderr={!r}); falling back to unresolved path",
-            self.work_dir,
-            result.success,
-            result.stderr.strip(),
-        )
-        return self.work_dir
-
     def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
         """Rewire the rsynced plugin/ so ``claude --resume`` finds the source's session.
 
@@ -2418,78 +2530,6 @@ class ClaudeAgent(
                 return
 
         self._finalize_adopted_session(host, dest_projects_dir / dest_project_name, adopted_session_id)
-
-    def preserve_session_state(self, host: OnlineHostInterface) -> None:
-        preserve_agent_state(_claude_preserved_items(self.agent_config.use_env_config_dir), self, host)
-
-    def is_unattended_enabled(self) -> bool:
-        return self.agent_config.auto_allow_permissions
-
-    def get_version_policy(self) -> str:
-        # claude pins a specific version when set, otherwise follows its own auto-update.
-        return self.agent_config.version or "auto-update"
-
-    def get_install_binary_name(self) -> str:
-        return "claude"
-
-    def get_install_command(self) -> str:
-        return _build_claude_install_command(self.agent_config.version)
-
-    def on_destroy(self, host: OnlineHostInterface) -> None:
-        """Preserve session files and clean up per-agent credentials and trust entries.
-
-        When preserve_sessions_on_destroy is enabled (default), copies session JSONL
-        files, transcripts, and session history to the local mngr data directory
-        before the agent state directory is deleted. For remote agents, files are
-        pulled to the local machine so they survive host destruction.
-
-        For agents with per-agent config dirs: cleans up macOS keychain entries
-        (the config dir itself is deleted with the agent state).
-        For legacy agents without per-agent config dirs: cleans up the global
-        ~/.claude.json trust entry.
-
-        In ``use_env_config_dir`` mode: skip keychain / trust cleanup entirely.
-        ``get_claude_config_dir()`` resolves to the user's shared $CLAUDE_CONFIG_DIR,
-        which exists, so the per-agent-keychain branch would otherwise compute the
-        same label hash Claude Code itself uses and delete the user's real
-        credentials. Since provision() never wrote any per-agent keychain or
-        trust entries in this mode, there is nothing for us to clean up. Session
-        preservation also skips copying the ``projects/`` directory in this mode
-        (it lives in the user's persistent dir and contains all of their
-        cross-project session history); only transcripts and the session-id
-        history from the agent state dir are preserved.
-        """
-        # Preserve session files before the state dir is deleted
-        if self.agent_config.preserve_sessions_on_destroy:
-            self.preserve_session_state(host)
-
-        if self.agent_config.use_env_config_dir:
-            # Shared-config mode: mngr never wrote per-agent keychain entries or
-            # ~/.claude.json trust markers, so there is nothing to clean up. Any
-            # keychain delete here would target the user's own credentials.
-            return
-
-        config_dir = self.get_claude_config_dir()
-        per_agent_config_exists = host.execute_idempotent_command(
-            f"test -d {shlex.quote(str(config_dir))}", timeout_seconds=5.0
-        ).success
-
-        if per_agent_config_exists and is_macos():
-            # Clean up per-agent keychain entries
-            suffix = _compute_keychain_label_suffix(config_dir)
-            cg = self.mngr_ctx.concurrency_group
-            if _delete_macos_keychain_credential(f"Claude Code{suffix}", cg):
-                logger.debug("Removed per-agent API key keychain entry")
-            if _delete_macos_keychain_credential(f"Claude Code-credentials{suffix}", cg):
-                logger.debug("Removed per-agent OAuth credentials keychain entry")
-        elif not per_agent_config_exists:
-            # Legacy agent without per-agent config dir -- clean up global file
-            removed = remove_claude_trust_for_path(find_user_claude_config(), self.work_dir)
-            if removed:
-                logger.debug("Removed Claude trust entry for {} from global config", self.work_dir)
-        else:
-            # Per-agent config dir on non-macOS: config dir is deleted with agent state, nothing extra to clean up
-            pass
 
 
 def _claude_preserved_items(is_shared_config: bool) -> list[PreservedItem]:
@@ -2642,20 +2682,24 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
     """Validate create args when --adopt-session is used: the agent type must
-    be claude (or a subtype of claude), and the option is incompatible with
-    cloning via ``--from <agent>`` (both adopt a session into the new agent).
+    be an interactive Claude agent (claude or an interactive subtype of it), and
+    the option is incompatible with cloning via ``--from <agent>`` (both adopt a
+    session into the new agent).
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
         return None
 
-    # Resolve through the centralized agent-type registry so any subtype of the
-    # claude agent is accepted, not just the literal "claude" type name.
+    # Resolve through the centralized agent-type registry so any interactive
+    # subtype of the claude agent is accepted, not just the literal "claude"
+    # type name. Session adoption resumes a live session, so it is gated to the
+    # interactive ``ClaudeAgent`` -- ``headless_claude`` (which runs
+    # ``claude --print`` and never resumes) does not qualify.
     resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
     if not issubclass(resolved.agent_class, ClaudeAgent):
         raise UserInputError(
-            f"--adopt-session can only be used with a Claude agent type (claude or a subtype of it), "
-            f"not '{args.agent_options.agent_type}'."
+            f"--adopt-session can only be used with an interactive Claude agent type "
+            f"(claude or an interactive subtype of it), not '{args.agent_options.agent_type}'."
         )
 
     if args.agent_options.source_agent_state_location is not None:
