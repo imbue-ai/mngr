@@ -712,22 +712,27 @@ def test_build_start_agent_shell_command_produces_single_command(
     assert "pane_pid" in result
 
 
-def test_build_start_agent_shell_command_creates_private_tmux_dir_before_new_session(
+def test_build_start_agent_shell_command_creates_private_tmux_dir_before_guard(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """The start command pre-creates mngr's TMUX_TMPDIR before new-session.
+    """The start command pre-creates mngr's TMUX_TMPDIR before the has-session guard.
 
     tmux silently falls back to the default socket when TMUX_TMPDIR does not
-    exist, so the directory must be created first.
+    exist, so the directory must be created before any tmux command runs --
+    including the guard, which would otherwise match a same-named session on the
+    user's default server and wrongly bail.
     """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
     tmux_dir = get_mngr_tmux_tmpdir(temp_host_dir)
-    assert f"mkdir -p {shlex.quote(str(tmux_dir))}" in result
-    assert result.index("mkdir -p") < result.index("new-session")
+    mkdir_step = f"mkdir -p {shlex.quote(str(tmux_dir))}"
+    assert mkdir_step in result
+    # The private-dir mkdir must precede both the has-session guard and new-session.
+    assert result.index(mkdir_step) < result.index("has-session")
+    assert result.index(mkdir_step) < result.index("new-session")
 
 
 def test_build_start_agent_shell_command_uses_default_dimensions_when_unset(

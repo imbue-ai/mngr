@@ -3044,15 +3044,18 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
+    # Create mngr's private TMUX_TMPDIR before anything reads it: tmux silently
+    # falls back to the default socket when the directory is absent, so the guard
+    # below must run after the mkdir or it could match a same-named session on
+    # the user's default server (e.g. a pre-migration orphan) and wrongly bail.
+    mkdir_tmux_tmpdir = f"mkdir -p {shlex.quote(str(get_mngr_tmux_tmpdir(host_dir)))}"
+
     # Bail out early if the session already exists. stderr is redirected to
     # suppress the "can't find session" message when the session doesn't exist yet.
     quoted_exact_session = TmuxSessionTarget(session_name=session_name).as_shell_arg()
-    guard = f"tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
+    guard = f"{mkdir_tmux_tmpdir} && tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
 
     steps: list[str] = []
-
-    # tmux requires TMUX_TMPDIR to exist before it will create its socket there.
-    steps.append(f"mkdir -p {shlex.quote(str(get_mngr_tmux_tmpdir(host_dir)))}")
 
     # Unset environment variables
     for var_name in unset_vars:
