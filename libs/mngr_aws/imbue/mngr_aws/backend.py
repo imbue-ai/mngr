@@ -27,7 +27,6 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -58,6 +57,7 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
@@ -266,7 +266,7 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AwsProvider(VpsDockerProvider):
+class AwsProvider(OfflineCapableVpsDockerProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -969,17 +969,30 @@ class AwsProvider(VpsDockerProvider):
             logger.debug("Host {} unreachable; removing agent data from the external store only", host_id)
         self._state_store.remove_agent_record(host_id, str(agent_id))
 
+    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
+        """Whether the EC2 instance's OS is down (stopping or stopped).
+
+        EC2 power state rides along for free in the ``DescribeInstances`` listing,
+        so this needs no extra call. Gate on state, not ``main_ip`` -- a
+        ``stopping`` instance can still report a public IP while its OS is already
+        off, and gating on the IP would make the host vanish for the (seconds-long)
+        stop transition.
+        """
+        return instance.get("state") in _HOST_DOWN_STATES
+
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         """Return the host's persisted agent records, on-volume when reachable else from the external store.
 
-        For a *running* host the base reads the authoritative on-volume records
-        (full agent data); for a *stopped* host the base raises
+        For a *running* host the SSH/volume-backed base reads the authoritative
+        on-volume records (full agent data); for a *stopped* host it raises
         ``HostNotFoundError`` (the volume is unreadable), so we fall back to the
         external store: the S3 bucket when configured (full records), else the
-        compact records mirrored into EC2 tags.
+        compact records mirrored into EC2 tags. Bypasses the
+        ``OfflineCapableVpsDockerProvider`` tag fallback (which would ignore the
+        bucket) by going straight to the SSH-only ``VpsDockerProvider`` path.
         """
         try:
-            return super().list_persisted_agent_data_for_host(host_id)
+            return VpsDockerProvider.list_persisted_agent_data_for_host(self, host_id)
         except HostNotFoundError:
             return self._state_store.list_agent_records(host_id)
 
@@ -994,33 +1007,34 @@ class AwsProvider(VpsDockerProvider):
         stopped instance (no IP) is invisible. Here we reconstruct those hosts
         and their agents from the external store so they still appear in
         ``mngr list`` and resolve for ``mngr start`` -- from the S3 state bucket
-        when configured (full records), else from EC2 tags.
+        when configured (full records), else from EC2 tags. Drives the offline
+        loop off ``self._state_store`` rather than the
+        ``OfflineCapableVpsDockerProvider`` tag-only loop, so the SSH-only base
+        sweep is invoked directly.
         """
-        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
+        result = VpsDockerProvider.discover_hosts_and_agents(self, cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
         for instance in self._list_instances_cached():
-            # Reconstruct hosts whose instance is stopping or fully stopped: the OS
-            # is down, so the SSH-based sweep above can't reach them. Gate on state,
-            # not main_ip -- a `stopping` instance can still report a public IP while
-            # its OS is already off, and gating on main_ip would make the host vanish
-            # for the (seconds-long) stop transition. A genuinely-reachable host
-            # lands in online_host_ids and is deduped just below, so a running host
-            # is never double-listed here.
-            if instance.get("state") not in _HOST_DOWN_STATES:
-                continue
             try:
-                host_ref = self._discovered_host_from_tags(instance)
+                host_ref = self._offline_discovered_host_from_instance(instance)
             except ValueError as e:
                 # A corrupted / externally-edited mngr-host-id or Name tag yields an
                 # invalid HostId/HostName (both ValueError subclasses). Skip just
                 # this instance rather than letting one bad tag abort offline
                 # discovery for every other stopped host in the account.
                 logger.opt(exception=e).warning(
-                    "Skipping instance {} in offline discovery: malformed mngr host tag(s)",
+                    "Skipping instance {} in offline discovery: malformed mngr host identity",
                     instance.get("id"),
                 )
                 continue
+            # Drop non-mngr instances and ones already surfaced live before the
+            # offline check. Reconstruct only hosts whose instance is stopping or
+            # fully stopped (OS down, so the SSH-based sweep above can't reach
+            # them); a genuinely-reachable host lands in online_host_ids and is
+            # deduped here, so a running host is never double-listed.
             if host_ref is None or host_ref.host_id in online_host_ids:
+                continue
+            if not self._is_instance_offline(instance):
                 continue
             # An operational store/lookup failure (transient S3 error, or duplicate
             # mngr-host-id tags) propagates: the api/list discovery wrapper attributes
@@ -1036,39 +1050,6 @@ class AwsProvider(VpsDockerProvider):
             result[host_ref] = agent_refs
         return result
 
-    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
-        """Return [] for a stopped host instead of raising.
-
-        ``OfflineHost.get_state`` calls ``get_snapshots`` (-> ``list_snapshots``)
-        while deriving state. The base reads the snapshot list from the on-volume
-        host record, which is unreadable while the instance is stopped, so it
-        raises ``HostNotFoundError``. AWS has no EBS-snapshot lifecycle and a
-        stopped host's docker-commit snapshots (if any) live on that unreadable
-        volume, so a stopped host simply has no visible snapshots.
-        """
-        try:
-            return super().list_snapshots(host)
-        except HostNotFoundError:
-            return []
-
-    def get_host(self, host: HostId | HostName) -> HostInterface:
-        """Resolve a host, falling back to the tag-based offline host when stopped.
-
-        The base ``get_host`` reads the host record over SSH, so a stopped
-        instance (no public IP, unreachable) raises ``HostNotFoundError``.
-        ``mngr start`` calls ``get_host`` directly, so without this a paused host
-        could not be resumed by name. Recover by reconstructing the offline host
-        from EC2 tags. Only the ``HostId`` form is recovered (the resume path
-        passes a HostId); a bare ``HostName`` for a stopped host still surfaces
-        via discovery, so name resolution does not depend on this.
-        """
-        try:
-            return super().get_host(host)
-        except HostNotFoundError:
-            if isinstance(host, HostId):
-                return self.to_offline_host(host)
-            raise
-
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Return an offline host, reconstructing a STOPPED instance's record offline.
 
@@ -1077,10 +1058,13 @@ class AwsProvider(VpsDockerProvider):
         external store: the *full* ``VpsDockerHostRecord`` when the store has it
         (S3 ``host_state.json``), otherwise a minimal record rebuilt from the
         instance's own EC2 tags -- which also covers a bucket-mode host created
-        before the bucket existed (so its ``host_state.json`` is absent).
+        before the bucket existed (so its ``host_state.json`` is absent). Calls
+        the SSH-only ``VpsDockerProvider`` path directly so the
+        ``OfflineCapableVpsDockerProvider`` tag fallback does not pre-empt the
+        bucket-aware reconstruction below.
         """
         try:
-            return super().to_offline_host(host_id)
+            return VpsDockerProvider.to_offline_host(self, host_id)
         except HostNotFoundError:
             record = self._state_store.read_host_record(host_id)
             # In bucket mode, fall back to the instance's own tags for a host whose
@@ -1270,7 +1254,7 @@ class AwsProvider(VpsDockerProvider):
             return HostName(name_tag)
         return HostName(tags.get("mngr-host-id", "unknown"))
 
-    def _discovered_host_from_tags(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED-state DiscoveredHost from an instance's tags, or None if not a mngr host."""
         tags = self._tag_dict_from_normalized(instance)
         host_id_str = tags.get("mngr-host-id")
@@ -1283,19 +1267,15 @@ class AwsProvider(VpsDockerProvider):
             host_state=HostState.STOPPED,
         )
 
-    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Rebuild a minimal STOPPED host record from the instance's own ``mngr-*`` tags, or None.
+    def _host_record_from_instance(self, instance: Mapping[str, Any]) -> VpsDockerHostRecord:
+        """Build a minimal STOPPED host record from a stopped instance's own ``mngr-*`` tags.
 
         Uses only the base tags mngr writes at launch (host-id, Name, created-at),
         so it works regardless of the external-store mode -- including a bucket-mode
         host created before the bucket existed (whose ``host_state.json`` is absent).
-        Returns None when no instance carries the host's tag. Backs the tag store's
-        ``read_host_record`` and the universal fallback in ``to_offline_host``.
         """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return None
         tags = self._tag_dict_from_normalized(instance)
+        host_id = HostId(tags.get("mngr-host-id", ""))
         created_at_raw = tags.get("mngr-created-at")
         now = datetime.now(timezone.utc)
         created_at = now
@@ -1319,6 +1299,22 @@ class AwsProvider(VpsDockerProvider):
             stop_reason=HostState.STOPPED.value,
         )
         return VpsDockerHostRecord(certified_host_data=certified)
+
+    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
+        del host_id
+        return self._create_offline_host(self._host_record_from_instance(instance))
+
+    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        """Rebuild a minimal STOPPED host record from the instance's own ``mngr-*`` tags, or None.
+
+        Returns None when no instance carries the host's tag. Backs the tag store's
+        ``read_host_record`` and the universal fallback in ``to_offline_host``.
+        """
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return None
+        return self._host_record_from_instance(instance)
 
 
 class _S3BucketHostStateStore(HostStateStore):

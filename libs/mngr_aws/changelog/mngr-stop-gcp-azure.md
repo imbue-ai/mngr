@@ -1,0 +1,1 @@
+Internal: AWS's stopped-host offline discovery and resolution (listing stopped / mid-stop hosts, resolving them by id, and falling back to EC2 tags) now come from a shared `OfflineCapableVpsDockerProvider` base instead of an AWS-specific copy. No behavior change.

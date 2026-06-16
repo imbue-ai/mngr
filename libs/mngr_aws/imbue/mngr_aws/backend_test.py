@@ -598,7 +598,7 @@ def test_discover_hosts_and_agents_skips_instance_with_malformed_host_id_tag(
         stubber.deactivate()
     host_ids = {host.host_id for host in result}
     assert good_host_id in host_ids, "well-formed stopped host should still surface"
-    assert any("malformed mngr host tag" in w.lower() for w in log_warnings), log_warnings
+    assert any("malformed mngr host identity" in w.lower() for w in log_warnings), log_warnings
 
 
 def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
