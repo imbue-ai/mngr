@@ -192,7 +192,13 @@ def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeF
 
 
 def _is_transient_ssh_error(exception: BaseException) -> bool:
-    """Check if the exception is a transient SSH connection error worth retrying."""
+    """Check if the exception is a transient SSH connection error worth retrying.
+
+    The "Socket is closed" classification (here and at the other ``str(e)`` checks
+    in this module) deliberately depends on paramiko's exception *message* text:
+    paramiko surfaces a closed transport as a bare ``OSError`` with no stable errno
+    or dedicated type to key off. Revisit these substrings on paramiko upgrades.
+    """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
         return True
     if isinstance(exception, SSHException):
@@ -228,6 +234,9 @@ _retry_on_transient_ssh_error = retry(
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
     try:
+        # Only the LocalConnector legitimately lacks `.connector.client`; that is the
+        # one expected AttributeError. (pyinfra_host is typed Any, so this duck-typed
+        # access is the available check.)
         client = pyinfra_host.connector.client
     except AttributeError:
         return None
@@ -409,8 +418,9 @@ class OuterHost(OuterHostInterface):
         if client is not None:
             try:
                 client.close()
-            except (OSError, SSHException):
-                pass
+            except (OSError, SSHException) as e:
+                # Best-effort close; log so systematic close failures are visible.
+                logger.debug("Failed to close paramiko client for {}: {}", self.id, e)
 
     def disconnect(self) -> None:
         """Disconnect the pyinfra host if connected."""
@@ -937,7 +947,14 @@ class OuterHost(OuterHostInterface):
         else:
             try:
                 is_success = self._put_file(io.BytesIO(content), str(write_path))
-            except IOError:
+            except IOError as e:
+                # The retry below (mkdir -p + re-put) targets the common
+                # missing-parent-directory case. Other IOErrors (permission, disk
+                # full) will fail the retry too; log the original cause here so it
+                # is not lost behind the generic "Failed to write file" error.
+                logger.debug(
+                    "Initial put of {} on host {} failed ({}); will mkdir -p and retry", write_path, self.id, e
+                )
                 is_success = False
             if not is_success:
                 parent_dir = str(write_path.parent)
@@ -987,8 +1004,14 @@ class OuterHost(OuterHostInterface):
             try:
                 mtime = int(result.stdout.strip())
                 return datetime.fromtimestamp(mtime, tz=timezone.utc)
-            except ValueError:
-                pass
+            except ValueError as e:
+                # Unparseable stat output: should not happen, so log it rather than
+                # silently treating the file as absent.
+                logger.debug("Unparseable stat output for {} on host {}: {!r} ({})", path, self.id, result.stdout, e)
+        # NOTE: remote None conflates "file absent" with "stat failed" -- the 2>/dev/null
+        # in the command hides stderr, so we cannot distinguish them here. Callers must
+        # treat None as "mtime unknown", not strictly "file does not exist" (unlike the
+        # local branch above, which only maps FileNotFoundError to None).
         return None
 
     def get_file_mtime(self, path: Path) -> datetime | None:
@@ -1042,6 +1065,14 @@ class OuterHost(OuterHostInterface):
             return None
 
         host_data = self.connector.host.data
+        # NOTE: the "root" default is correct for provider-created hosts (Docker/Modal),
+        # which log in as root and do not set ssh_user. It is potentially wrong for
+        # user-configured ssh:// outers: create_ssh_pyinfra_host_using_user_config()
+        # deliberately leaves ssh_user unset when the user is None so OpenSSH /
+        # ~/.ssh/config resolves it, and this default then forces user=root for those
+        # hosts, overriding the user's ssh_config User directive. Fixing that cleanly
+        # means letting the returned user be "unset" (mirroring the key_path=None
+        # treatment below), which changes this method's return contract.
         user = host_data.get("ssh_user", "root")
         hostname = self.connector.host.name
         port = host_data.get("ssh_port", 22)

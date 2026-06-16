@@ -358,11 +358,17 @@ def determine_lifecycle_state(
     case, states that would otherwise be REPLACED are reported as
     RUNNING_UNKNOWN_AGENT_TYPE instead.
     """
+    # An empty tmux_info means there is no tmux session for the agent -> STOPPED.
     if not tmux_info:
         return AgentLifecycleState.STOPPED
 
+    # A non-empty value that does not split into exactly 3 parts
+    # (pane_dead|pane_current_command|pane_pid) is unexpected -- it indicates a
+    # tmux output-format change or a bug, not a real lifecycle state. Log it so a
+    # regression is noticeable, then fall back to STOPPED.
     parts = tmux_info.split("|")
     if len(parts) != 3:
+        logger.debug("Unexpected tmux_info format (expected 3 |-separated parts): {!r}", tmux_info)
         return AgentLifecycleState.STOPPED
 
     pane_dead, current_command, pane_pid = parts

@@ -49,8 +49,12 @@ def validate_and_create_discovered_agent(
     Logs warnings for malformed records.
     """
     agent_id_str = agent_data.get("id")
-    if agent_id_str is None:
-        logger.warning("Skipping malformed agent record for host {}: missing 'id': {}", host_id, agent_data)
+    # isinstance(str) covers both a missing key (None) and a non-str value (e.g. an
+    # int/dict from corrupt JSON). A non-str would otherwise raise AttributeError
+    # inside AgentId(...) (the primitive calls value.strip()) and escape this
+    # "tolerate malformed records" path, crashing discovery.
+    if not isinstance(agent_id_str, str):
+        logger.warning("Skipping malformed agent record for host {}: missing or non-str 'id': {}", host_id, agent_data)
         return None
     try:
         agent_id = AgentId(agent_id_str)
@@ -61,8 +65,10 @@ def validate_and_create_discovered_agent(
         return None
 
     agent_name_str = agent_data.get("name")
-    if agent_name_str is None:
-        logger.warning("Skipping malformed agent record for host {}: missing 'name': {}", host_id, agent_data)
+    if not isinstance(agent_name_str, str):
+        logger.warning(
+            "Skipping malformed agent record for host {}: missing or non-str 'name': {}", host_id, agent_data
+        )
         return None
     try:
         agent_name = AgentName(agent_name_str)
@@ -96,7 +102,10 @@ def apply_rename_to_agent_data(
     updated = dict(data)
     updated["name"] = str(new_name)
     if labels_to_merge:
-        current_labels = dict(updated.get("labels") or {})
+        # Default only the missing-key case to {}; a present-but-wrong-typed "labels"
+        # value should surface loudly at dict(...) rather than be silently discarded
+        # by an `or {}` that also swallows falsy values.
+        current_labels = dict(updated.get("labels", {}))
         updated["labels"] = {**current_labels, **dict(labels_to_merge)}
     return updated
 
@@ -268,6 +277,9 @@ def derive_offline_host_state(
         # None means the host crashed (no controlled shutdown recorded).
         if stop_reason is None:
             return HostState.CRASHED
+        # stop_reason holds a HostState member name (PAUSED/STOPPED/DESTROYED -- see
+        # CertifiedHostData.stop_reason). HostState(...) validates it, raising ValueError
+        # on any string that is not a HostState member rather than silently inventing a state.
         return HostState(stop_reason)
 
     # Provider does not support shutdown (e.g. Modal). stop_reason may be
@@ -281,6 +293,7 @@ def derive_offline_host_state(
     # Has snapshots -- use stop_reason if set, otherwise CRASHED.
     if stop_reason is None:
         return HostState.CRASHED
+    # See note above: stop_reason is a HostState member name; HostState(...) validates it.
     return HostState(stop_reason)
 
 

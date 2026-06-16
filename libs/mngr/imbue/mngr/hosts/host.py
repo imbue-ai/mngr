@@ -49,6 +49,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import CorruptedAgentDataError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -195,6 +196,9 @@ _retry_on_transient_ssh_error = retry(
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
     try:
+        # Only the LocalConnector legitimately lacks `.connector.client`; that is the
+        # one expected AttributeError. (pyinfra_host is typed Any, so this duck-typed
+        # access is the available check.)
         client = pyinfra_host.connector.client
     except AttributeError:
         return None
@@ -613,6 +617,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             try:
                 yield
             except BaseException:
+                # BaseException (not Exception) is intentional: the lock must be released
+                # even on KeyboardInterrupt/SystemExit so the remote host can still
+                # idle-shutdown. The original exception is always re-raised below.
                 # On error, remove the lock file so the host can idle-shutdown normally,
                 # unless the user wants to retain it for debugging
                 is_retain_lock = os.environ.get("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
@@ -694,8 +701,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         data_path = self.host_dir / "data.json"
         try:
             content = self.read_text_file(data_path)
-            data = json.loads(content)
-            return CertifiedHostData(**data)
         except FileNotFoundError:
             now = datetime.now(timezone.utc)
             # FIXME: this is suss--we should probably just explode if data.json is missing
@@ -708,6 +713,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 created_at=now,
                 updated_at=now,
             )
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            # A corrupt (non-JSON) data.json is a schema problem like an invalid one;
+            # map it to the same domain error instead of leaking a raw JSONDecodeError.
+            raise HostDataSchemaError(str(data_path), str(e)) from e
+        try:
+            return CertifiedHostData(**data)
         except ValidationError as e:
             raise HostDataSchemaError(str(data_path), str(e)) from e
 
@@ -1217,6 +1230,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if options.git and options.git.base_branch:
             base_branch_name = options.git.base_branch
         else:
+            # Default to the source repo's current branch. "main" is a deliberate
+            # convenience fallback for the rare case where the branch cannot be read
+            # (empty/failed rev-parse); callers whose source default branch differs
+            # (e.g. "master") should pass an explicit base_branch.
             base_branch_name = (
                 _git_command_stdout(source_host, "git rev-parse --abbrev-ref HEAD", source_path) or "main"
             )
@@ -2846,7 +2863,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         except FileNotFoundError as e:
             raise NoCommandDefinedError(f"No data.json file for agent {agent.name} ({agent.id})") from e
 
-        data = json.loads(content)
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise CorruptedAgentDataError(agent.id, data_path, e) from e
         try:
             return data["command"]
         except KeyError as e:
@@ -2860,18 +2880,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         except FileNotFoundError:
             return []
 
-        data = json.loads(content)
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise CorruptedAgentDataError(agent.id, data_path, e) from e
         raw_commands = data.get("additional_commands", [])
 
-        # Handle both old format (list of strings) and new format (list of dicts)
+        # Handle both old format (list of strings) and new format (list of dicts).
+        # Anything else is corrupt data.json content, not a silently-tolerable shape:
+        # raise a clear error rather than letting an opaque KeyError/TypeError escape.
         result: list[NamedCommand] = []
         for cmd in raw_commands:
             if isinstance(cmd, str):
                 # Old format: plain string
                 result.append(NamedCommand(command=cmd, window_name=None))
-            else:
+            elif isinstance(cmd, dict) and "command" in cmd:
                 # New format: dict with command and window_name
                 result.append(NamedCommand(command=cmd["command"], window_name=cmd.get("window_name")))
+            else:
+                raise CorruptedAgentDataError(
+                    agent.id, data_path, ValueError(f"Malformed additional_commands entry: {cmd!r}")
+                )
         return result
 
     def get_agent_tmux_options(self, agent: AgentInterface) -> AgentTmuxOptions:
@@ -2930,11 +2959,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         try:
             result = self.execute_idempotent_command("echo ok")
+        except (OSError, HostConnectionError) as e:
+            # Ping failed: the host is (probably) unreachable. Fall through to the
+            # offline-derived state, but log why so a transient/unexpected failure
+            # is not silently indistinguishable from a genuinely down host.
+            logger.trace("Ping of host {} failed ({}); falling back to offline state derivation", self.id, e)
+        else:
             if result.success:
                 logger.trace("Determined host {} state=RUNNING (ping successful)", self.id)
                 return HostState.RUNNING
-        except (OSError, HostConnectionError):
-            pass
 
         # otherwise use the offline logic
         return super().get_state()
@@ -3206,7 +3239,9 @@ def _parse_uptime_output(stdout: str) -> float:
             return float(uptime_str)
         else:
             return 0.0
-    except (ValueError, OSError):
+    except ValueError:
+        # Only int()/float() parsing can fail here; both raise ValueError (no I/O,
+        # so no OSError). Unparseable output means "uptime unknown" -> 0.0.
         return 0.0
 
 
