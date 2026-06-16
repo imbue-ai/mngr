@@ -205,8 +205,10 @@ size has no capacity in the region right now; pick another size with
   gets a role assignment scoped to itself. **Graceful fallback:** if the operator
   lacks `Microsoft.Authorization/roleAssignments`/`roleDefinitions` write (Owner /
   User Access Administrator), the role steps are skipped with a clear warning and
-  the in-VM script falls back to `shutdown -P now` (unreachable but still billing)
-  — `mngr stop`/`start` still deallocate normally.
+  idle self-deallocate is disabled; on a refused deallocate the in-VM script just
+  logs and exits (it does not poweroff — an Azure OS shutdown would only strand the
+  VM unreachable while it keeps billing). `mngr stop`/`start` still deallocate
+  normally, and remain the only way to halt billing on such a host.
 
 ## Auto-shutdown and cost safety
 
@@ -215,8 +217,8 @@ Two independent mechanisms:
 - **Idle self-deallocate** (the primary, cost-parity path): an idle agent
   deallocates its own VM via its managed identity (see "How it works"), genuinely
   halting compute billing — even if the orchestrating `mngr` process is gone.
-  Requires the operator to have granted the role assignment (otherwise it degrades
-  to an unreachable-but-billing `shutdown -P now`).
+  Requires the operator to have granted the role assignment (otherwise it is
+  disabled and only `mngr stop` halts billing — an in-VM OS shutdown does not).
 - **`auto_shutdown_seconds`** schedules cloud-init `shutdown -P +N` as a coarse
   time cap. **Caveat (Azure specific):** this OS-level shutdown alone leaves the VM
   "Stopped (not deallocated)", which still bills for compute. For test isolation

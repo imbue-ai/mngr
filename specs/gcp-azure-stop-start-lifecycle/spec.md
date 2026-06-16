@@ -110,9 +110,9 @@ Azure is the divergent one: an OS-level shutdown does **not** stop compute billi
      `roleDefinitions/write` and the role assignment needs `roleAssignments/write`
      (Owner / User Access Admin). If the operator lacks these, the authorization
      error is caught, a single clear WARNING is logged ("idle self-deallocate
-     disabled; `mngr stop`/`start` and the existing `shutdown -P` circuit-breaker
-     still work"), and create proceeds. This preserves the low-privilege flow that
-     works today while giving privileged operators true cost parity. See
+     disabled; only `mngr stop`/`start` halt billing -- an in-VM OS shutdown does
+     not, on Azure"), and create proceeds. This preserves the low-privilege flow
+     that works today while giving privileged operators true cost parity. See
      `questions.local.md` Q2/Q2b for the decision record.
 
 4. **Offline discovery via Azure tags.** Azure resource tags are permissive (256-char
