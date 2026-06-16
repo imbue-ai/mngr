@@ -816,10 +816,10 @@ class VpsDockerProvider(BaseProviderInstance):
         rebuilds the container on a leased pool VPS) call it directly with
         their own ``outer``. It makes no VPS-client (ordering) calls.
 
-        The unified host volume is provisioned at the top of
-        ``_setup_container_on_vps`` -- that runs before the (potentially slow
-        and failure-prone) image pull/build so the volume still exists by the
-        time ``_finalize_host_creation`` writes ``host_state.json``.
+        The realizer provisions the unified host volume at the top of
+        ``realize_placement`` -- before the (potentially slow and failure-prone)
+        image pull/build -- so the volume still exists by the time
+        ``_finalize_host_creation`` writes ``host_state.json``.
         """
         base_image = str(image) if image else self.config.default_image
         # Prepend `--runtime <value>` (e.g. 'runsc' for gVisor) when configured; absent by default.
