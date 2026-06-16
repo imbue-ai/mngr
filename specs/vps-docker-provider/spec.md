@@ -141,21 +141,6 @@ class VpsClientInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        """Create a snapshot of the instance's disk."""
-        ...
-
-    @abstractmethod
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        """Delete a snapshot."""
-        ...
-
-    @abstractmethod
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        """List all snapshots owned by this account."""
-        ...
-
-    @abstractmethod
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         """Upload an SSH public key. Returns the key ID."""
         ...
