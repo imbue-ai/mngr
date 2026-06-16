@@ -46,7 +46,6 @@ first-run dialog (verified live), so nothing needs seeding.
 from __future__ import annotations
 
 import importlib.resources
-import os
 import shlex
 import urllib.parse
 from collections.abc import Callable
@@ -85,6 +84,7 @@ from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileType
@@ -100,7 +100,6 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
-from imbue.mngr_opencode.opencode_config import ADOPT_SESSION_ENV_VAR
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENABLED_VALUE
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
@@ -245,6 +244,7 @@ class OpenCodeAgent(
     CliBackedAgentMixin,
     HasCommonTranscriptMixin,
     HasSessionPreservationMixin,
+    HasSessionAdoptionMixin,
     HasUnattendedModeMixin,
     HasPermissionPolicyMixin,
     HasAutoInstallMixin,
@@ -465,19 +465,28 @@ class OpenCodeAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
+        """Adopt a session after provisioning so the agent's opencode resumes existing context."""
+        self.adopt_session(host, options, mngr_ctx)
+
+    def adopt_session(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
         """Adopt an existing OpenCode session so the new agent resumes that conversation.
 
-        Triggered by ``plugin_data["adopt_session"]`` once the central ``--adopt-session``
-        flag exists, with the ``MNGR_ADOPT_SESSION`` env var as the interim fallback (the
-        ordering makes the future flag a one-line swap). The argument is a ``ses_...`` id
-        (resolved across the user-native db and every live/preserved mngr agent's db) or an
-        absolute path to a source ``opencode.db``; resolving, copying, rebinding, and writing
-        the resume pointer happen here -- the same create-time seam where the launch script
-        first records ``root_session_id``.
+        Triggered by ``--adopt-session`` (``plugin_data["adopt_session"]``, a tuple since the
+        option is ``multiple=True``). Each argument is a ``ses_...`` id (resolved across the
+        user-native db and every live/preserved mngr agent's db) or an absolute path to a source
+        ``opencode.db``. OpenCode resumes a single root conversation, so the last entry wins;
+        resolving, copying, rebinding, and writing the resume pointer happen here -- the same
+        create-time seam where the launch script first records ``root_session_id``.
         """
-        adopt_arg = options.plugin_data.get("adopt_session") or os.environ.get(ADOPT_SESSION_ENV_VAR)
-        if not adopt_arg:
+        adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        if not adopt_args:
             return
+        adopt_arg = adopt_args[-1]
         with log_span("Adopting OpenCode session from {}", adopt_arg):
             local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
             search_db_paths = collect_adopt_search_db_paths(

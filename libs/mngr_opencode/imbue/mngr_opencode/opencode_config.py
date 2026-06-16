@@ -278,15 +278,6 @@ def serialize_opencode_config(config: Mapping[str, Any]) -> str:
     return json.dumps(dict(config), indent=2)
 
 
-# Interim trigger seam for session adoption, until the central ``--adopt-session`` flag
-# mixin lands. When this env var is set on a ``mngr create``, the opencode plugin resolves
-# its value (a ``ses_...`` session id, or an absolute path to a source ``opencode.db``)
-# against its preserved / live-agent / user-native session stores and rebinds it into the
-# new agent so its first launch resumes that session. Hardcoded here (not imported from the
-# release-test harness, which imports pytest); the future flag reads
-# ``plugin_data["adopt_session"]`` with this env var as a fallback.
-ADOPT_SESSION_ENV_VAR: Final[str] = "MNGR_ADOPT_SESSION"
-
 # Per-agent OpenCode data root relative to the agent state dir (the ``XDG_DATA_HOME``
 # value), as POSIX path parts -- used to locate an agent's native ``opencode.db`` when
 # scanning live/preserved mngr agents for a session to adopt.
