@@ -3,7 +3,7 @@
 ## Overview
 
 * One new package, `libs/mngr_azure/`, that adds an `azure` provider backend. It is a thin adapter over the existing `VpsDockerProvider` base in `mngr_vps_docker` -- the same pattern as `mngr_aws`, `mngr_gcp`, and `mngr_vultr`. Agents run in a Docker container on an Azure Linux VM; the VM stays up, the container is the mngr "host".
-* The only substantial new code is `AzureVpsClient` (implements the ~11-method `VpsClientInterface` against the Azure management SDK) plus a ~150-line `AzureProvider`/`AzureProviderBackend` and config/cli. Everything else (host lifecycle, SSH, cloud-init, discovery, listing, container snapshots, stop/start) is inherited unchanged.
+* The only substantial new code is `AzureVpsClient` (implements the ~7-method `VpsClientInterface` against the Azure management SDK) plus a ~150-line `AzureProvider`/`AzureProviderBackend` and config/cli. Everything else (host lifecycle, SSH, cloud-init, discovery, listing, container snapshots, stop/start) is inherited unchanged.
 * Auth via `azure-identity`'s `DefaultAzureCredential`, which transparently uses the developer's `az login` session locally and a service principal (`AZURE_*` env vars) in CI. Subscription id is the only required identifier in config; credentials are never stored in mngr config (matches the AWS/GCP convention).
 * SDK packages: `azure-mgmt-compute`, `azure-mgmt-network`, `azure-mgmt-resource`, `azure-identity`. The first three are not yet vendored; `azure-identity`/`azure-core` already are.
 
@@ -36,12 +36,11 @@ Mirrors the new `mngr aws cleanup` (safe inverse of prepare). It tears down the 
 * **Image:** Ubuntu 24.04 LTS gen2 (Canonical) by default -- Ubuntu runs cloud-init with the Azure datasource, so the shared `mngr_vps_docker` cloud-init flow works unchanged. Configurable via publisher/offer/sku/version fields.
 * **Default VM size:** `Standard_B2s` (burstable, 2 vCPU / 4 GB), chosen because B-series is the family most likely to have nonzero quota on a fresh pay-as-you-go subscription.
 
-### Status / IP / listing / snapshots / spot
+### Status / IP / listing / spot
 
 * `get_instance_status`: VM instance-view power state -> `VpsInstanceStatus` (running->ACTIVE, deallocating/deallocated/stopped->HALTED, etc.); 404 -> UNKNOWN.
 * `get_instance_ip`: read the VM's public-IP resource `ip_address`; raise `VpsProvisioningError` until assigned (drives `wait_for_instance_active`).
 * `list_instances(provider_tag)`: list VMs in the RG, filter client-side on the `mngr-provider` tag (Azure has no server-side tag filter on VM list within an RG). Normalized to the same `{id, main_ip, state, tags}` dict shape the other providers return.
-* **Snapshots:** managed-disk snapshots. `create_snapshot` makes a `Snapshot` with `creation_data.create_option=Copy`, `source_resource_id=<VM OS managed disk id>`; `list`/`delete` via the snapshots client. Same disk-snapshot model as GCP/AWS.
 * **Spot (`--azure-spot`):** VM `priority=Spot`, `eviction_policy=Delete`, `billing.max_price=-1` (pay up to on-demand; evicted only on capacity, and *deleted* not stopped on eviction -- matching AWS spot's terminate-on-reclaim semantics). Presence-only build arg, plumbed via an `AzureProvider`-specific `ParsedAzureBuildOptions` + `_create_vps_instance` override, exactly like `--aws-spot`.
 
 ### Auto-shutdown: best-effort `shutdown -P`, matching Vultr (billing caveat documented)
