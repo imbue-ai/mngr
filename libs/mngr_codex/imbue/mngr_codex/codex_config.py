@@ -70,6 +70,11 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 # the codex process).
 CODEX_HOME_RELATIVE_PATH: tuple[str, ...] = ("plugin", "codex", "home")
 
+# Codex's native resumable rollout store (the dir ``codex resume`` reads), as a
+# POSIX rel-path under the agent state dir. Preserved on destroy; it is a sibling
+# of the auth symlink and config, so targeting it specifically excludes those.
+SESSIONS_RELATIVE_PATH: str = Path(*CODEX_HOME_RELATIVE_PATH, "sessions").as_posix()
+
 _CONFIG_FILENAME: str = "config.toml"
 _AUTH_FILENAME: str = "auth.json"
 _HOOKS_FILENAME: str = "hooks.json"

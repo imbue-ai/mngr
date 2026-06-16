@@ -84,6 +84,16 @@ _SESSION_STARTED_SENTINEL_NAME: str = "pi_session_started"
 # in sync with ``SESSION_FILE_NAME`` in mngr_pi_lifecycle.ts.
 _SESSION_FILE_NAME: str = "pi_session_file"
 
+# The per-agent pi config dir, relative to the agent state dir (POSIX). Replaces
+# ~/.pi/agent/ for this agent via ``PI_CODING_AGENT_DIR`` (see ``get_pi_config_dir``).
+_PI_CONFIG_DIR_RELPATH: str = "plugin/pi_coding"
+
+# pi's native resumable session store, relative to the agent state dir (POSIX):
+# pi writes its session JSONLs under ``<PI_CODING_AGENT_DIR>/sessions``. Preserved
+# on destroy so the conversation content survives (not just the dangling pointer).
+# ``auth.json`` (a sibling under the config dir) is path-separate and excluded.
+_PI_SESSIONS_DIR_RELPATH: str = f"{_PI_CONFIG_DIR_RELPATH}/sessions"
+
 # How long to wait for the readiness sentinel at create time. Matches the
 # TUI-ready budget in ``tui_utils`` -- startup can be slow on remote hosts that
 # must render the TUI before the session loads.
@@ -214,13 +224,8 @@ class PiCodingAgentConfig(AgentTypeConfig):
     )
     preserve_on_destroy: bool = Field(
         default=True,
-        description=(
-            "Preserve this agent's transcripts locally before its state directory is deleted on "
-            "destroy. When enabled, the raw and common transcripts and the recorded session-file "
-            "pointer are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring "
-            "the agent's state-directory layout. For remote agents, files are pulled to the local "
-            "machine so they survive host destruction. Set to False to discard transcript data on destroy."
-        ),
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
 
 
@@ -375,7 +380,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         This directory replaces ~/.pi/agent/ for this agent when PI_CODING_AGENT_DIR
         is set. Located at $MNGR_AGENT_STATE_DIR/plugin/pi_coding/.
         """
-        return self._get_agent_dir() / "plugin" / "pi_coding"
+        return self._get_agent_dir() / _PI_CONFIG_DIR_RELPATH
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Isolate pi's config per-agent and hand the lifecycle extension its knobs.
@@ -772,12 +777,16 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
 def _pi_coding_preserved_items() -> list[PreservedItem]:
     """Return the files to preserve from a pi-coding agent's state directory.
 
-    The raw and common transcripts plus the recorded session-file pointer (which
-    records where pi stored the conversation, used to resume it).
+    The raw and common transcripts, the recorded session-file pointer (which
+    records where pi stored the conversation, used to resume it), and pi's native
+    resumable session store directory. Preserving the store keeps the conversation
+    content itself, not just the (post-destroy dangling) pointer. ``auth.json`` is a
+    path-separate sibling of the store and is excluded (and absent under env-var auth).
     """
     return [
         *build_transcript_preserved_items(_PI_AGENT_TYPE),
         PreservedItem(rel_path=_SESSION_FILE_NAME, kind=FileType.FILE),
+        PreservedItem(rel_path=_PI_SESSIONS_DIR_RELPATH, kind=FileType.DIRECTORY),
     ]
 
 

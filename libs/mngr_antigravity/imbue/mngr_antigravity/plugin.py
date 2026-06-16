@@ -131,6 +131,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CONVERSATIONS_DIR_RELATIVE_TO_HOME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
@@ -350,11 +351,8 @@ class AntigravityAgentConfig(AgentTypeConfig):
     )
     preserve_on_destroy: bool = Field(
         default=True,
-        description="Preserve this agent's transcripts locally before its state directory is "
-        "deleted on destroy. When enabled, the raw and common transcripts and the conversation-id "
-        "history are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the "
-        "agent's state-directory layout. For remote agents, files are pulled to the local machine "
-        "so they survive host destruction. Set to False to discard transcript data on destroy.",
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
 
 
@@ -1062,13 +1060,26 @@ def _antigravity_preserved_items() -> list[PreservedItem]:
 
     The raw and common transcripts plus the conversation-id history: the root
     conversation (for resume) and the full conversation-ids list (root plus
-    subagents). The per-agent ``home`` dir is not preserved -- it also holds the
-    agy oauth token and config.
+    subagents).
+
+    Also agy's native resumable conversation store -- the per-conversation
+    SQLite ``<conv_id>.db`` files that ``agy --conversation`` resumes from. We
+    preserve the ``conversations/`` subdir specifically, which excludes the agy
+    oauth token, ``settings.json``, and the macOS keychain symlink (all siblings
+    elsewhere in the per-agent ``home`` tree, which is otherwise not preserved).
+
+    Known limitation: on macOS the ``.db`` is encrypted by Chromium os_crypt
+    with the "Antigravity Safe Storage" key in the login keychain, so a
+    macOS-created store is not portable to a different machine/user (it is
+    readable when preserved on the same machine, and Linux uses a portable
+    file-based store).
     """
+    conversations_relpath = (Path(*_AGY_HOME_RELATIVE_PATH) / CONVERSATIONS_DIR_RELATIVE_TO_HOME).as_posix()
     return [
         *build_transcript_preserved_items("antigravity"),
         PreservedItem(rel_path=ROOT_CONVERSATION_FILENAME, kind=FileType.FILE),
         PreservedItem(rel_path=CONVERSATION_IDS_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=conversations_relpath, kind=FileType.DIRECTORY),
     ]
 
 

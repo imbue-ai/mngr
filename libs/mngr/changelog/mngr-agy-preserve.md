@@ -9,3 +9,5 @@ Added shared agent-preservation wiring so any plugin can mirror the claude/usage
 - `flag_gated_items(ref, flag_name, items)` is the shared offline selector helper: it returns `items` only when the discovered agent's persisted `agent_config[flag_name]` is truthy (else `None`), so plugins no longer hand-roll the same opt-in dict-walk for `on_before_host_destroy`.
 
 - The shared agent release lifecycle (`run_agent_release_lifecycle`) now asserts preservation: its destroy step verifies the agent's raw and common transcripts actually landed in `<local_host_dir>/preserved/<agent-name>--<agent-id>/` (keyed on the seeded secret), so a swallowed preservation failure can no longer pass silently. Every plugin built on the shared lifecycle inherits the check.
+
+- Profiles can declare `native_session_preserved_relpaths` so the lifecycle also asserts the agent's native resumable session store was preserved on destroy (not just the transcripts). A FIXME marks where this should grow into an actual resume-from-preserved-store check once `--adopt-session` lands for these agents.
