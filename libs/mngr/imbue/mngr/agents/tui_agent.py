@@ -21,10 +21,9 @@ from imbue.mngr.agents.tui_utils import wait_for_paste_visible
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
-from imbue.mngr.interfaces.agent import InteractiveTuiMixin
 
 
-class InteractiveTuiAgent(InteractiveTuiMixin, BaseAgent[AgentConfigT]):
+class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
     """Base for interactive TUI agents that echo input back to the terminal.
 
     Subclasses declare:

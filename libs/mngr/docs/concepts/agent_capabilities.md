@@ -14,7 +14,7 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 | raw_transcript | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | common_transcript | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | waiting_reason_field | Y | n/a | - | Y | Y | Y | n/a | n/a |
-| streaming_snapshot | Y | n/a | - | - | n/a | n/a | n/a | n/a |
+| live_output | Y | Y | - | - | - | - | - | Y |
 | session_preservation | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | auto_install | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | unattended_operation | Y | Y | Y | Y | Y | Y | Y | Y |
@@ -22,15 +22,14 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 | version_management | Y | Y | - | Y | - | - | n/a | n/a |
 | deploy_contributions | Y | - | - | - | - | - | - | - |
 | usage_tracking | Y | - | - | Y | Y | Y | n/a | n/a |
-| headless_output | - | Y | - | - | - | - | - | Y |
-| streaming_headless_output | - | Y | - | - | - | - | - | Y |
+| headless_output | n/a | Y | n/a | n/a | n/a | n/a | n/a | Y |
 
 ## Capabilities
 
 - **raw_transcript** -- Copies the agent's native session JSONL verbatim into the agent state dir. Baseline; every port wants it.
 - **common_transcript** -- Emits the agent-agnostic common transcript that `mngr transcript` renders. Baseline; every port wants it.
 - **waiting_reason_field** -- Surfaces why a WAITING agent is blocked (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.
-- **streaming_snapshot** -- Publishes a live, in-progress view of the agent's assistant text. Lowest-priority; only needed if a consuming UI wants live streaming.
+- **live_output** -- Publishes a live, in-progress view of the agent's output before a turn completes -- a streaming snapshot of the rendered pane for TUI agents, or incremental stdout chunks for headless agents. Lowest-priority; only needed if a consuming UI wants live streaming.
 - **session_preservation** -- Preserves session/transcript files when the agent is destroyed, so the conversation is not lost. Baseline; every port wants it.
 - **auto_install** -- Installs its CLI binary at provision time if missing (gated by consent locally, a config flag remotely). Baseline; every real agent wants it.
 - **unattended_operation** -- Can complete a run with no human by auto-allowing in-run tool prompts. The load-bearing capability for remote / scheduled / headless agents.
@@ -39,4 +38,3 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 - **deploy_contributions** -- Bakes config/cred files + env vars into a `mngr schedule` image (via the get_files_for_deploy hookimpl). Only needed if the agent runs under `mngr schedule`.
 - **usage_tracking** -- Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.
 - **headless_output** -- Runs non-interactively and exposes its output via output(). Only for headless agent variants.
-- **streaming_headless_output** -- A headless agent that also streams output incrementally. Only for headless agent variants.

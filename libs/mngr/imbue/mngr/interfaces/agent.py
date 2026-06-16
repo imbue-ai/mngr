@@ -535,6 +535,17 @@ class HasCommonTranscriptMixin(HasTranscriptMixin):
         ...
 
 
+class SupportsLiveOutputMixin:
+    """Marker for agents that publish a live, in-progress view of their output before a turn completes.
+
+    A bare marker with no contract of its own -- the concrete surface differs by agent kind:
+    a TUI agent exposes a streaming snapshot file (``HasStreamingSnapshotMixin``), while a
+    headless agent yields incremental stdout chunks (``StreamingHeadlessAgentMixin``). Both
+    inherit this so capability detection can treat "can stream live output" as one capability
+    regardless of how the agent surfaces it.
+    """
+
+
 class HeadlessAgentMixin(ABC):
     """Mixin for agent types that run headlessly (no TUI, no interactive input).
 
@@ -550,7 +561,7 @@ class HeadlessAgentMixin(ABC):
         ...
 
 
-class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
+class StreamingHeadlessAgentMixin(SupportsLiveOutputMixin, HeadlessAgentMixin):
     """Headless agent that can also stream output incrementally."""
 
     @abstractmethod
@@ -583,20 +594,7 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
         )
 
 
-class InteractiveTuiMixin:
-    """Marker for TUI-driven agents: mngr delivers input by sending keystrokes into the
-    agent's rendered TUI pane (as opposed to a server or extension API).
-
-    A bare marker (no contract methods of its own -- the concrete send-keys pipeline lives
-    in ``InteractiveTuiAgent``, which inherits this). It is split out so capability detection
-    can key off it without importing the concrete base class. Capabilities that work by
-    scraping the rendered pane -- notably the streaming snapshot -- are only meaningful for
-    these agents; a server- or extension-driven agent (e.g. opencode, pi) exposes the same
-    information through its API instead, so it does not need (or want) pane scraping.
-    """
-
-
-class HasStreamingSnapshotMixin(InteractiveTuiMixin, ABC):
+class HasStreamingSnapshotMixin(SupportsLiveOutputMixin, ABC):
     """Mixin for agent types that publish a live, in-progress view of assistant text.
 
     A consuming UI can read the buffer file to show output before a message
@@ -604,8 +602,8 @@ class HasStreamingSnapshotMixin(InteractiveTuiMixin, ABC):
     periodically captures the rendered pane); this contract exposes where it
     lives. Lowest-priority capability -- only needed if a UI wants live streaming.
 
-    The snapshot is produced by scraping the rendered TUI pane, so this is a
-    TUI-driven-only capability (hence the ``InteractiveTuiMixin`` base).
+    This is the TUI agent's form of :class:`SupportsLiveOutputMixin`; a headless
+    agent streams the same kind of live output via ``StreamingHeadlessAgentMixin``.
     """
 
     @abstractmethod

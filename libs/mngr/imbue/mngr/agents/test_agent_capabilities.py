@@ -52,9 +52,9 @@ def test_builder_detects_known_capabilities(plugin_manager: pluggy.PluginManager
     assert "waiting_reason_field" in _present_keys(infos, "pi-coding")
     assert "waiting_reason_field" not in _present_keys(infos, "antigravity")
 
-    # Class-mixin capabilities wired in phase 3.
-    assert "streaming_snapshot" in _present_keys(infos, "claude")
-    assert "streaming_snapshot" not in _present_keys(infos, "codex")
+    # live_output: claude publishes a streaming snapshot; codex does not.
+    assert "live_output" in _present_keys(infos, "claude")
+    assert "live_output" not in _present_keys(infos, "codex")
     for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
         assert "session_preservation" in _present_keys(infos, agent_type_name)
         assert "unattended_operation" in _present_keys(infos, agent_type_name)

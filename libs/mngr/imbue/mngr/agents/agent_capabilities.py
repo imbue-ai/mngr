@@ -18,13 +18,11 @@ from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
-from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
-from imbue.mngr.interfaces.agent import InteractiveTuiMixin
-from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
 
 # The key that an agent_field_generators hookimpl uses for the waiting-reason field;
 # a plugin that exposes a *different* field (e.g. kanpan's `muted`) does not count.
@@ -93,11 +91,9 @@ class CapabilityScope(UpperCaseStrEnum):
     # command runners. CLI-specific concerns (install, version, usage, per-tool policy,
     # an agent-native transcript) do not apply to a generic shell command.
     CLI_BACKED_ONLY = auto()
-    # Applies only to TUI-driven agents that are not headless -- i.e. agents mngr drives by
-    # sending keystrokes into a rendered TUI pane. Pane-scraping capabilities (the streaming
-    # snapshot) are only meaningful here; server/extension-driven agents read the same info
-    # from their API, and headless agents have no pane.
-    TUI_DRIVEN_ONLY = auto()
+    # Applies only to headless agents (HeadlessAgentMixin). Headless-specific concerns
+    # (exposing output() non-interactively) are meaningless for an interactive agent.
+    HEADLESS_ONLY = auto()
 
 
 class AgentCapability(FrozenModel):
@@ -148,9 +144,6 @@ class AgentClassInfo(FrozenModel):
     # Whether this is a bare command runner (GenericCommandAgentMixin) rather than a
     # CLI-backed agent. Drives CLI_BACKED_ONLY applicability.
     is_generic_command: bool = Field(description="Whether the agent is a bare command runner, not CLI-backed")
-    # Whether mngr drives this agent by sending keystrokes into a rendered TUI pane
-    # (InteractiveTuiMixin), vs. a server/extension API. Drives TUI_DRIVEN_ONLY applicability.
-    is_tui_driven: bool = Field(description="Whether the agent is driven by keystrokes into a TUI pane")
 
 
 def is_capability_applicable(capability: AgentCapability, info: AgentClassInfo) -> bool:
@@ -163,9 +156,8 @@ def is_capability_applicable(capability: AgentCapability, info: AgentClassInfo) 
             return not info.is_generic_command and not info.is_headless
         case CapabilityScope.CLI_BACKED_ONLY:
             return not info.is_generic_command
-        case CapabilityScope.TUI_DRIVEN_ONLY:
-            # Pane scraping = a keystroke-driven TUI agent that is not headless.
-            return info.is_tui_driven and not info.is_headless
+        case CapabilityScope.HEADLESS_ONLY:
+            return info.is_headless
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -196,8 +188,8 @@ class AgentCapabilityError(Exception):
 
 
 # The ordered capability registry, in the row order the generated matrix uses. New
-# capabilities are appended here, except that the two headless-output rows are kept last
-# (they apply only to headless agent variants). The generated matrix and its drift guard
+# capabilities are appended here, except that the headless-output row is kept last
+# (it applies only to headless agent variants). The generated matrix and its drift guard
 # read directly from this list, so the matrix can never silently disagree with the code.
 AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
     AgentCapability(
@@ -221,11 +213,10 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         scope=CapabilityScope.INTERACTIVE_ONLY,
     ),
     AgentCapability(
-        key="streaming_snapshot",
-        description="Publishes a live, in-progress view of the agent's assistant text. Lowest-priority; only needed if a consuming UI wants live streaming.",
+        key="live_output",
+        description="Publishes a live, in-progress view of the agent's output before a turn completes -- a streaming snapshot of the rendered pane for TUI agents, or incremental stdout chunks for headless agents. Lowest-priority; only needed if a consuming UI wants live streaming.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
-        scope=CapabilityScope.TUI_DRIVEN_ONLY,
-        mixin=HasStreamingSnapshotMixin,
+        mixin=SupportsLiveOutputMixin,
     ),
     AgentCapability(
         key="session_preservation",
@@ -273,18 +264,13 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         detection_kind=CapabilityDetectionKind.USAGE_SOURCE,
         scope=CapabilityScope.CLI_BACKED_ONLY,
     ),
-    # Headless-output rows are kept last: they apply only to headless agent variants.
+    # The headless-output row is kept last: it applies only to headless agent variants.
     AgentCapability(
         key="headless_output",
         description="Runs non-interactively and exposes its output via output(). Only for headless agent variants.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.HEADLESS_ONLY,
         mixin=HeadlessAgentMixin,
-    ),
-    AgentCapability(
-        key="streaming_headless_output",
-        description="A headless agent that also streams output incrementally. Only for headless agent variants.",
-        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
-        mixin=StreamingHeadlessAgentMixin,
     ),
 )
 
@@ -392,7 +378,6 @@ def build_agent_class_infos(
                 is_usage_source_claimed=(owner + _USAGE_PLUGIN_SUFFIX) in usage_plugin_names,
                 is_headless=issubclass(agent_class, HeadlessAgentMixin),
                 is_generic_command=issubclass(agent_class, GenericCommandAgentMixin),
-                is_tui_driven=issubclass(agent_class, InteractiveTuiMixin),
             )
         )
     return tuple(infos)

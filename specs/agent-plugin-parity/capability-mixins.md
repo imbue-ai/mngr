@@ -132,23 +132,19 @@ hand-maintained per agent):
 
 | Scope | Applies to | Example capabilities |
 |---|---|---|
-| `ALL` | every agent | raw/common transcript-independent rows like `unattended_operation`, `deploy_contributions`, headless output |
+| `ALL` | every agent | `unattended_operation`, `deploy_contributions`, `live_output` |
 | `CLI_BACKED_ONLY` | not the bare command runners | transcripts, `auto_install`, `permission_policy`, `version_management`, `usage_tracking` |
 | `INTERACTIVE_ONLY` | not headless, not a bare command runner | `waiting_reason_field` |
-| `TUI_DRIVEN_ONLY` | keystroke-driven TUI agents that aren't headless | `streaming_snapshot` |
+| `HEADLESS_ONLY` | headless agents | `headless_output` |
 
-The kind traits come from marker mixins: `HeadlessAgentMixin` (headless), `GenericCommandAgentMixin`
-(a bare `command` / `headless_command` runner, not CLI-backed and inherently unattended), and
-`InteractiveTuiMixin` (mngr drives it by sending keystrokes into the rendered pane, vs. a
-server/extension API). `streaming_snapshot` is scoped to TUI-driven because it works by scraping
-the rendered pane: server/extension-driven agents (opencode, pi) read the same information from
-their API, and headless agents have no pane. To make this structural, `HasStreamingSnapshotMixin`
-subclasses `InteractiveTuiMixin` -- the capability is, by construction, undeclarable on a
-non-TUI-driven agent.
+The kind traits come from marker mixins: `HeadlessAgentMixin` (headless) and
+`GenericCommandAgentMixin` (a bare `command` / `headless_command` runner, not CLI-backed and
+inherently unattended). `headless_output` is scoped `HEADLESS_ONLY` because exposing `output()`
+non-interactively is meaningless for an interactive agent.
 
 A cell renders `n/a` when the capability is out of scope for the agent's kind. One subtlety:
-a class mixin can be *inherited* by a kind that the scope excludes (e.g. `headless_claude`
-inherits the snapshot mixin from `ClaudeAgent` but has no pane), so an out-of-scope class-mixin
+a class mixin can be *inherited* by a kind that the scope excludes (a CLI-only transcript mixin
+could be inherited by a hypothetical command-runner subclass), so an out-of-scope class-mixin
 hit renders `n/a` rather than erroring. The deliberately-registered kinds (a field generator
 keyed by agent type, a usage source, a deploy hookimpl) cannot be inherited by accident, so an
 out-of-scope hit *there* means the scope is wrong and rendering raises -- a drift guard.
@@ -169,14 +165,13 @@ class AgentCapability(FrozenModel):
     mixin: type | None = None      # for CLASS_MIXIN detection
     hook_name: str | None = None   # for PLUGIN_HOOKIMPL detection
 
-# class-level capability, scoped to TUI-driven agents
-STREAMING_SNAPSHOT = AgentCapability(
-    key="streaming_snapshot",
-    description="Live in-progress view of the agent's assistant text. "
+# class-level capability detected by a shared marker that two contract mixins inherit
+LIVE_OUTPUT = AgentCapability(
+    key="live_output",
+    description="Live in-progress view of the agent's output before a turn completes. "
     "Lowest-priority; only needed if a consuming UI wants live streaming.",
     detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
-    scope=CapabilityScope.TUI_DRIVEN_ONLY,
-    mixin=HasStreamingSnapshotMixin,
+    mixin=SupportsLiveOutputMixin,
 )
 
 # module-level capability: detected by hookimpl presence
@@ -196,7 +191,7 @@ is prose in its `description`, not a boolean the code branches on.
 
 `AGENT_CAPABILITIES` is the ordered list. `AgentClassInfo` bundles what detection and scope
 need: the agent class, the agent-type/owner facts for the module-level kinds, and the kind
-traits (`is_headless`, `is_generic_command`, `is_tui_driven`) read from marker mixins.
+traits (`is_headless`, `is_generic_command`) read from marker mixins.
 
 ### Class-level mixins to introduce
 
@@ -213,13 +208,17 @@ the existing behavior is routed through it, so membership and implementation are
 The four existing transcript/headless mixins are folded into the registry as-is. (Names are
 bikeable -- `HasUnattendedModeMixin` could be `SupportsUnattendedRunMixin`; the suffix is fixed.)
 
-Two further mixins are **kind markers**, not capabilities -- they classify the agent so scope
-can be derived (see [Capability scope](#capability-scope-the-na-state)), and carry no matrix
-row of their own. `GenericCommandAgentMixin` marks the bare `command` / `headless_command`
-runners (not CLI-backed; also inherently unattended, so it supplies `is_unattended_enabled`).
-`InteractiveTuiMixin` is a bare marker for keystroke-driven TUI agents; `InteractiveTuiAgent`
-inherits it (no behavior moved), and `HasStreamingSnapshotMixin` subclasses it so the snapshot
-capability is undeclarable off a TUI-driven agent.
+`GenericCommandAgentMixin` is a **kind marker**, not a capability -- it classifies the agent so
+scope can be derived (see [Capability scope](#capability-scope-the-na-state)) and carries no
+matrix row of its own. It marks the bare `command` / `headless_command` runners (not CLI-backed;
+also inherently unattended, so it supplies `is_unattended_enabled`).
+
+Live output unifies what used to be two rows. A TUI agent surfaces it as a streaming-snapshot
+file (`HasStreamingSnapshotMixin`) and a headless agent as incremental stdout chunks
+(`StreamingHeadlessAgentMixin`); both inherit a shared bare marker, `SupportsLiveOutputMixin`,
+so "can stream live output before a turn completes" is one `live_output` capability regardless
+of surface. `headless_output` (plain `HeadlessAgentMixin`) stays a separate row, scoped
+`HEADLESS_ONLY`.
 
 **Auto-install is a *base* capability, not one of the optional mixins above.** Checking the
 binary is present and installing it if missing is cheap and every agent should have it, so it
@@ -319,13 +318,14 @@ in the parity spec, because their content is how-not-whether.
    claude keeping its version-aware flow. One changelog entry per touched project.
 4. **(done)** Matrix presentation and the `n/a` state: a fixed column order with the bare
    command runners last (and a guard that raises if a registered agent type is neither ordered
-   nor explicitly excluded, so none is silently dropped); the headless-output rows pinned last;
-   and the code-derived `scope` model with its `CapabilityScope` enum and the `GenericCommandAgentMixin`
-   / `InteractiveTuiMixin` kind markers, so `raw`/`common` transcript, install, version, usage,
+   nor explicitly excluded, so none is silently dropped); the `headless_output` row pinned last;
+   and the code-derived `scope` model with its `CapabilityScope` enum and the
+   `GenericCommandAgentMixin` kind marker, so `raw`/`common` transcript, install, version, usage,
    and permission are `n/a` for the bare command runners, `waiting_reason` is `n/a` for
-   headless/command, and `streaming_snapshot` is `n/a` off the TUI-driven agents. Also wired
-   `is_unattended_enabled()` through each agent's auto-allow apply-site so the contract method is
-   the single source of truth (behavior-preserving).
+   headless/command, and `headless_output` is `n/a` off the headless agents. The TUI streaming
+   snapshot and headless incremental output were unified into one `live_output` row via a shared
+   `SupportsLiveOutputMixin` marker. Also wired `is_unattended_enabled()` through each agent's
+   auto-allow apply-site so the contract method is the single source of truth (behavior-preserving).
 5. **(follow-up PR)** The registry-driven **release** harness: walk each agent's declared
    capabilities and run a real `exercise_fn` per capability against a live agent (the
    behavioral check detection cannot give). Detection itself is already covered in CI by the

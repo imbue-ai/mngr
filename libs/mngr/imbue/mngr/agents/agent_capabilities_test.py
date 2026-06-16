@@ -15,7 +15,6 @@ from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
-from imbue.mngr.interfaces.agent import InteractiveTuiMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 
 
@@ -23,22 +22,24 @@ from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 class _FakeTranscriptAgent(HasCommonTranscriptMixin): ...
 
 
-# A headless streaming agent (StreamingHeadlessAgentMixin extends HeadlessAgentMixin).
+# A headless streaming agent (StreamingHeadlessAgentMixin extends HeadlessAgentMixin and
+# SupportsLiveOutputMixin, so it is headless and has live output).
 class _FakeStreamingHeadlessAgent(StreamingHeadlessAgentMixin): ...
 
 
-# A TUI-driven agent that publishes a streaming snapshot (HasStreamingSnapshotMixin
-# extends InteractiveTuiMixin, so this is tui-driven and not headless).
+# A TUI agent that publishes a streaming snapshot (HasStreamingSnapshotMixin extends
+# SupportsLiveOutputMixin), so it has live output and is not headless.
 class _FakeTuiSnapshotAgent(HasStreamingSnapshotMixin): ...
-
-
-# A headless agent that still structurally inherits the snapshot mixin (like headless_claude
-# inheriting it from ClaudeAgent): tui-driven by inheritance, but headless, so snapshot is n/a.
-class _FakeHeadlessSnapshotAgent(HasStreamingSnapshotMixin, StreamingHeadlessAgentMixin): ...
 
 
 # A bare command runner (carries the generic-command marker, hence also unattended).
 class _FakeGenericCommandAgent(GenericCommandAgentMixin): ...
+
+
+# A command runner that also structurally inherits a CLI-only transcript mixin: used to
+# exercise that an out-of-scope CLASS_MIXIN capability renders n/a (not a raise), since a
+# mixin can legitimately be inherited by a kind the capability does not apply to.
+class _FakeCommandWithTranscript(GenericCommandAgentMixin, HasCommonTranscriptMixin): ...
 
 
 # A bare agent with none of the capability mixins.
@@ -62,7 +63,6 @@ def _info(
         is_usage_source_claimed=is_usage_source_claimed,
         is_headless=issubclass(agent_class, HeadlessAgentMixin),
         is_generic_command=issubclass(agent_class, GenericCommandAgentMixin),
-        is_tui_driven=issubclass(agent_class, InteractiveTuiMixin),
     )
 
 
@@ -142,12 +142,12 @@ def test_capability_applicability_by_scope() -> None:
         scope=CapabilityScope.CLI_BACKED_ONLY,
         mixin=HasAutoInstallMixin,
     )
-    tui_driven_only = AgentCapability(
-        key="streaming_snapshot",
+    headless_only = AgentCapability(
+        key="headless_output",
         description="x",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
-        scope=CapabilityScope.TUI_DRIVEN_ONLY,
-        mixin=HasStreamingSnapshotMixin,
+        scope=CapabilityScope.HEADLESS_ONLY,
+        mixin=HeadlessAgentMixin,
     )
     applies_to_all = AgentCapability(
         key="raw_transcript",
@@ -155,22 +155,22 @@ def test_capability_applicability_by_scope() -> None:
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasTranscriptMixin,
     )
-    tui_driven = _info("claude", _FakeTuiSnapshotAgent)
+    interactive = _info("claude", _FakeTuiSnapshotAgent)
     headless = _info("headless_claude", _FakeStreamingHeadlessAgent)
     command = _info("command", _FakeGenericCommandAgent)
 
     # INTERACTIVE_ONLY: only the non-headless, non-command agent prompts.
-    assert is_capability_applicable(interactive_only, tui_driven) is True
+    assert is_capability_applicable(interactive_only, interactive) is True
     assert is_capability_applicable(interactive_only, headless) is False
     assert is_capability_applicable(interactive_only, command) is False
     # CLI_BACKED_ONLY: applies to everything except the bare command runner.
-    assert is_capability_applicable(cli_backed_only, tui_driven) is True
+    assert is_capability_applicable(cli_backed_only, interactive) is True
     assert is_capability_applicable(cli_backed_only, headless) is True
     assert is_capability_applicable(cli_backed_only, command) is False
-    # TUI_DRIVEN_ONLY: only the keystroke-driven, non-headless TUI agent.
-    assert is_capability_applicable(tui_driven_only, tui_driven) is True
-    assert is_capability_applicable(tui_driven_only, headless) is False
-    assert is_capability_applicable(tui_driven_only, command) is False
+    # HEADLESS_ONLY: only the headless agent.
+    assert is_capability_applicable(headless_only, interactive) is False
+    assert is_capability_applicable(headless_only, headless) is True
+    assert is_capability_applicable(headless_only, command) is False
     # ALL: applies to every agent kind.
     assert is_capability_applicable(applies_to_all, command) is True
 
@@ -190,9 +190,13 @@ def test_render_capability_matrix_orders_columns_by_fixed_order() -> None:
     # claude has both transcript layers; headless_claude (a bare headless fake) has neither.
     raw_row = next(line for line in lines if line.startswith("| raw_transcript |"))
     assert raw_row == "| raw_transcript | Y | - |"
-    # headless_claude is the streaming-headless one; claude is not headless.
-    streaming_row = next(line for line in lines if line.startswith("| streaming_headless_output |"))
-    assert streaming_row == "| streaming_headless_output | - | Y |"
+    # headless_output is headless-only: present for the headless agent, n/a for claude.
+    headless_row = next(line for line in lines if line.startswith("| headless_output |"))
+    assert headless_row == "| headless_output | n/a | Y |"
+    # live_output is the unified streaming capability; the headless fake streams, the plain
+    # transcript fake (no snapshot mixin) does not.
+    live_row = next(line for line in lines if line.startswith("| live_output |"))
+    assert live_row == "| live_output | - | Y |"
     # waiting_reason_field is interactive-only, so it is n/a for the headless agent;
     # claude has the field generator and prompts, so it is present.
     waiting_row = next(line for line in lines if line.startswith("| waiting_reason_field |"))
@@ -219,18 +223,25 @@ def test_render_capability_matrix_marks_command_runner_cells_na() -> None:
 
 
 def test_render_capability_matrix_renders_na_for_inherited_out_of_scope_mixin() -> None:
-    # A headless agent that structurally inherits the tui-driven snapshot mixin (as
-    # headless_claude inherits it from ClaudeAgent) renders n/a -- not a raise -- because a
-    # CLASS_MIXIN can legitimately be inherited by a kind that cannot use it.
+    # A command runner that structurally inherits a CLI-only transcript mixin renders n/a --
+    # not a raise -- because a CLASS_MIXIN can legitimately be inherited by a kind for which
+    # the capability does not apply.
+    cli_only = AgentCapability(
+        key="common_transcript",
+        description="x",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
+        mixin=HasCommonTranscriptMixin,
+    )
     infos = [
-        _info("claude", _FakeTuiSnapshotAgent),
-        _info("headless_claude", _FakeHeadlessSnapshotAgent),
+        _info("claude", _FakeTranscriptAgent),
+        _info("command", _FakeCommandWithTranscript),
     ]
-    matrix = render_capability_matrix(AGENT_CAPABILITIES, infos)
-    snapshot_row = next(line for line in matrix.splitlines() if line.startswith("| streaming_snapshot |"))
-    # claude is tui-driven and has the mixin -> Y; headless_claude inherits the mixin but is
-    # headless, so the pane-scraping snapshot is n/a.
-    assert snapshot_row == "| streaming_snapshot | Y | n/a |"
+    matrix = render_capability_matrix([cli_only], infos)
+    row = next(line for line in matrix.splitlines() if line.startswith("| common_transcript |"))
+    # claude is CLI-backed and has the mixin -> Y; the command runner inherits the mixin but
+    # is a bare command, so the CLI-only transcript is n/a.
+    assert row == "| common_transcript | Y | n/a |"
 
 
 def test_render_capability_matrix_raises_when_genuine_capability_is_out_of_scope() -> None:

@@ -14,7 +14,7 @@ Verified opencode and antigravity auto-install end-to-end on real Modal hosts (w
 
 Architecture-review refinements: excluded the task-specialized skill variants (code-guardian, fixme-fairy) from the matrix (kept headless_claude, which runs genuinely different logic); added a dedicated `get_install_binary_name()` to `HasAutoInstallMixin` (decoupling the install check from the lifecycle-detection process name); and a construction-time validator on `AgentCapability` for the detection-kind/field invariant. The registry-driven behavioral exercise of each capability against a live agent is deferred to a follow-up release-test harness; detection is covered in CI by the drift guard and the builder integration test.
 
-Gave the capability matrix a fixed column order (claude, headless_claude, antigravity, codex, opencode, pi-coding, command, headless_command) instead of alphabetical, and excluded the internal `mngr-proxy-child` agent. Rendering now raises if a registered agent type is neither in the fixed order nor the exclusion list, so a newly added agent can never be silently dropped from the table. Moved the two headless-output rows to the bottom of the matrix.
+Gave the capability matrix a fixed column order (claude, headless_claude, antigravity, codex, opencode, pi-coding, command, headless_command) instead of alphabetical, and excluded the internal `mngr-proxy-child` agent. Rendering now raises if a registered agent type is neither in the fixed order nor the exclusion list, so a newly added agent can never be silently dropped from the table. Moved the `headless_output` row to the bottom of the matrix.
 
 Added a third matrix state, `n/a`, for capabilities that do not apply to an agent kind (distinct from `-`, which means applicable but absent). Each capability now declares a code-derived scope based on the agent's kind:
 
@@ -22,10 +22,10 @@ Added a third matrix state, `n/a`, for capabilities that do not apply to an agen
 
 - Interactive-only (`waiting_reason_field`): `n/a` for headless and bare-command agents.
 
-- TUI-driven-only (`streaming_snapshot`): `n/a` for everything except the keystroke-driven TUI agents (claude, codex, antigravity), since the snapshot works by scraping the rendered pane -- server/extension-driven agents (opencode, pi) get the same information from their API, and headless agents have no pane.
+- Headless-only (`headless_output`): `n/a` for every non-headless agent, since exposing `output()` non-interactively is meaningless for an interactive agent.
 
-A genuinely-registered capability (field generator, usage source, deploy hook) that lands out of scope raises, keeping the matrix honest; an inherited capability mixin that lands out of scope (e.g. a headless variant of a TUI agent inheriting the snapshot mixin) just renders `n/a`.
+A genuinely-registered capability (field generator, usage source, deploy hook) that lands out of scope raises, keeping the matrix honest; an inherited capability mixin that lands out of scope just renders `n/a`.
 
 Introduced `GenericCommandAgentMixin` to mark the bare command-running agent types (`command`, `headless_command`); it records that they are not CLI-backed and makes them inherently unattended (so `unattended_operation` now shows as present for them). The `command` type is now registered as a small `CommandAgent` subclass of `BaseAgent` carrying this marker.
 
-Extracted `InteractiveTuiMixin`, a bare marker for TUI-driven agents (mngr sends keystrokes into the rendered pane). `InteractiveTuiAgent` now inherits it (unchanged otherwise), and `HasStreamingSnapshotMixin` subclasses it so the streaming-snapshot capability is, by construction, only declarable on a TUI-driven agent.
+Unified the TUI streaming snapshot and headless incremental output into a single `live_output` capability via a shared bare marker, `SupportsLiveOutputMixin`, inherited by both `HasStreamingSnapshotMixin` (the TUI agent's snapshot file) and `StreamingHeadlessAgentMixin` (a headless agent's incremental stdout). `headless_output` (plain `HeadlessAgentMixin`) remains a separate row.
