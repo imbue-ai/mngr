@@ -7,21 +7,21 @@ Which agent types implement which capabilities, **derived from the code** (the a
 and their plugins), not maintained by hand. A `Y` means the capability is present; `-` means
 absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 
-| Capability | antigravity | claude | codex | command | headless_claude | headless_command | mngr-proxy-child | opencode | pi-coding |
-|---|---|---|---|---|---|---|---|---|---|
-| raw_transcript | Y | Y | Y | - | Y | - | Y | Y | Y |
-| common_transcript | Y | Y | Y | - | Y | - | Y | Y | Y |
-| headless_output | - | - | - | - | Y | Y | - | - | - |
-| streaming_headless_output | - | - | - | - | Y | Y | - | - | - |
-| waiting_reason_field | - | Y | Y | - | - | - | - | Y | Y |
-| streaming_snapshot | - | Y | - | - | Y | - | Y | - | - |
-| session_preservation | Y | Y | Y | - | Y | - | Y | Y | Y |
-| auto_install | Y | Y | Y | - | Y | - | Y | Y | Y |
-| unattended_operation | Y | Y | Y | - | Y | - | Y | Y | Y |
-| permission_policy | Y | - | Y | - | - | - | - | Y | - |
-| version_management | - | Y | Y | - | Y | - | Y | - | - |
-| deploy_contributions | - | Y | - | - | - | - | - | - | - |
-| usage_tracking | - | Y | Y | - | - | - | - | Y | Y |
+| Capability | claude | headless_claude | antigravity | codex | opencode | pi-coding | command | headless_command |
+|---|---|---|---|---|---|---|---|---|
+| raw_transcript | Y | Y | Y | Y | Y | Y | - | - |
+| common_transcript | Y | Y | Y | Y | Y | Y | - | - |
+| headless_output | - | Y | - | - | - | - | - | Y |
+| streaming_headless_output | - | Y | - | - | - | - | - | Y |
+| waiting_reason_field | Y | - | - | Y | Y | Y | - | - |
+| streaming_snapshot | Y | Y | - | - | - | - | - | - |
+| session_preservation | Y | Y | Y | Y | Y | Y | - | - |
+| auto_install | Y | Y | Y | Y | Y | Y | - | - |
+| unattended_operation | Y | Y | Y | Y | Y | Y | - | - |
+| permission_policy | - | - | Y | Y | Y | - | - | - |
+| version_management | Y | Y | - | Y | - | - | - | - |
+| deploy_contributions | Y | - | - | - | - | - | - | - |
+| usage_tracking | Y | - | - | Y | Y | Y | - | - |
 
 ## Capabilities
 

@@ -1,5 +1,8 @@
+import pytest
+
 from imbue.mngr.agents.agent_capabilities import AGENT_CAPABILITIES
 from imbue.mngr.agents.agent_capabilities import AgentCapability
+from imbue.mngr.agents.agent_capabilities import AgentCapabilityError
 from imbue.mngr.agents.agent_capabilities import AgentClassInfo
 from imbue.mngr.agents.agent_capabilities import CapabilityDetectionKind
 from imbue.mngr.agents.agent_capabilities import is_capability_present
@@ -99,25 +102,35 @@ def test_usage_source_detection_reads_claim_flag() -> None:
     )
 
 
-def test_render_capability_matrix_produces_sorted_grid() -> None:
+def test_render_capability_matrix_orders_columns_by_fixed_order() -> None:
+    # Pass the infos out of order; rendering must reorder by _MATRIX_AGENT_TYPE_ORDER,
+    # where claude precedes antigravity.
     infos = [
-        _info("zeta", _FakeStreamingHeadlessAgent),
-        _info("alpha", _FakeTranscriptAgent, field_generator_agent_type_names=frozenset({"alpha"})),
+        _info("antigravity", _FakeStreamingHeadlessAgent),
+        _info("claude", _FakeTranscriptAgent, field_generator_agent_type_names=frozenset({"claude"})),
     ]
     matrix = render_capability_matrix(AGENT_CAPABILITIES, infos)
 
     lines = matrix.splitlines()
-    # Columns are sorted by agent type name.
-    assert lines[0] == "| Capability | alpha | zeta |"
-    # alpha has both transcript layers; zeta (headless) has neither.
+    # Columns follow the fixed order (claude before antigravity), not the input order.
+    assert lines[0] == "| Capability | claude | antigravity |"
+    # claude has both transcript layers; antigravity (headless here) has neither.
     raw_row = next(line for line in lines if line.startswith("| raw_transcript |"))
     assert raw_row == "| raw_transcript | Y | - |"
-    # zeta is the streaming-headless one; alpha is not headless.
+    # antigravity is the streaming-headless one; claude is not headless.
     streaming_row = next(line for line in lines if line.startswith("| streaming_headless_output |"))
     assert streaming_row == "| streaming_headless_output | - | Y |"
-    # alpha is registered as having a field generator; zeta is not.
+    # claude is registered as having a field generator; antigravity is not.
     waiting_row = next(line for line in lines if line.startswith("| waiting_reason_field |"))
     assert waiting_row == "| waiting_reason_field | Y | - |"
+
+
+def test_render_capability_matrix_rejects_unlisted_agent_type() -> None:
+    # An agent type that is neither in the fixed order nor explicitly excluded must fail
+    # loudly rather than be silently dropped from the table.
+    infos = [_info("brand-new-agent", _FakeBareAgent)]
+    with pytest.raises(AgentCapabilityError, match="brand-new-agent"):
+        render_capability_matrix(AGENT_CAPABILITIES, infos)
 
 
 def test_registry_capabilities_are_well_formed() -> None:

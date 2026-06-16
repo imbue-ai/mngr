@@ -35,11 +35,27 @@ _USAGE_PLUGIN_SUFFIX: Final[str] = "_usage"
 _USAGE_SOURCE_HOOK: Final[str] = "aggregate_usage_source"
 
 # Agent types excluded from the matrix: task-specialized skill variants that reuse a
-# parent agent's class wholesale (only injecting a SKILL.md). They are not distinct
-# enough to warrant their own column -- a reader wants the parent's row. (headless_claude
-# is deliberately NOT here: it runs `claude --print` with genuinely different logic, so
-# its capabilities can legitimately diverge from claude's and are worth showing.)
-_NON_MATRIX_AGENT_TYPES: Final[frozenset[str]] = frozenset({"code-guardian", "fixme-fairy"})
+# parent agent's class wholesale (only injecting a SKILL.md), plus mngr-proxy-child (an
+# internal proxy, not a user-facing port). They are not distinct enough to warrant their
+# own column -- a reader wants the parent's row. (headless_claude is deliberately NOT here:
+# it runs `claude --print` with genuinely different logic, so its capabilities can
+# legitimately diverge from claude's and are worth showing.)
+_NON_MATRIX_AGENT_TYPES: Final[frozenset[str]] = frozenset({"code-guardian", "fixme-fairy", "mngr-proxy-child"})
+
+# The fixed left-to-right column order for the matrix: the primary Claude ports first,
+# then the other CLI ports, with the thin shell-command runners last. Every registered
+# agent type must appear here or in _NON_MATRIX_AGENT_TYPES, or rendering raises -- so a
+# newly added agent can never be silently dropped from the table.
+_MATRIX_AGENT_TYPE_ORDER: Final[tuple[str, ...]] = (
+    "claude",
+    "headless_claude",
+    "antigravity",
+    "codex",
+    "opencode",
+    "pi-coding",
+    "command",
+    "headless_command",
+)
 
 
 class CapabilityDetectionKind(UpperCaseStrEnum):
@@ -212,7 +228,13 @@ def render_capability_matrix(
     infos: Sequence[AgentClassInfo],
 ) -> str:
     """Render a markdown matrix of capability (rows) x agent type (columns), with Y/- cells."""
-    sorted_infos = sorted(infos, key=lambda i: i.agent_type_name)
+    unordered = sorted(i.agent_type_name for i in infos if i.agent_type_name not in _MATRIX_AGENT_TYPE_ORDER)
+    if unordered:
+        raise AgentCapabilityError(
+            f"Agent type(s) {unordered} are not in _MATRIX_AGENT_TYPE_ORDER and not excluded "
+            "via _NON_MATRIX_AGENT_TYPES; add each to one or the other."
+        )
+    sorted_infos = sorted(infos, key=lambda i: _MATRIX_AGENT_TYPE_ORDER.index(i.agent_type_name))
     agent_type_names = [info.agent_type_name for info in sorted_infos]
 
     header_row = "| Capability | " + " | ".join(agent_type_names) + " |"
