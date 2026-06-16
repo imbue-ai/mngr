@@ -162,6 +162,9 @@ def _format_event_human(event: dict[str, Any]) -> str:
                     tool_name = part.get("tool_name", "unknown")
                     preview = part.get("input_preview", "")
                     lines.append(f"  -> {tool_name}({preview})")
+                else:
+                    # Unknown part type (e.g. a future reasoning part): nothing to render here.
+                    continue
             body = "\n".join(lines) if lines else "(no content)"
             return f"[{timestamp}] assistant:\n{body}"
 
