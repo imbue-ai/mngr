@@ -79,6 +79,7 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.container_setup import CONTAINER_ENTRYPOINT_CMD
@@ -113,6 +114,7 @@ from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_f
 from imbue.mngr_vps_docker.container_setup import start_container
 from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.container_setup import stop_container
+from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -363,44 +365,50 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
     return tags
 
 
+def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | None:
+    """Return True if the ``mngr-ready`` marker exists, else None (so polling continues).
+
+    A ``HostConnectionError`` counts as "not ready yet" (None): the bootstrap runs
+    ``apt-get install`` and Docker setup which can momentarily disrupt SSH (e.g.
+    ``systemctl restart ssh`` after writing the sshd tuning).
+    """
+    try:
+        return True if check_file_exists_on_outer(outer, Path(MNGR_READY_MARKER_PATH)) else None
+    except HostConnectionError as e:
+        logger.debug("Transient SSH error during host-bootstrap poll (will retry): {}", e)
+        return None
+
+
 def _wait_for_cloud_init_marker(
     outer: OuterHostInterface,
     timeout_seconds: float,
     *,
     poll_interval_seconds: float = 5.0,
     slow_threshold_seconds: float = 30.0,
-    clock: Callable[[], float] = time.monotonic,
-    sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Poll the VPS for /var/run/mngr-ready, the cloud-init completion marker.
+    """Poll the VPS for the ``mngr-ready`` first-boot completion marker.
 
-    Returns once the marker file appears. Swallows ``HostConnectionError``
-    from each poll: cloud-init runs ``apt-get install`` and Docker setup
-    which can momentarily disrupt SSH (e.g. ``systemctl restart ssh`` after
-    writing the sshd tuning). Each poll's underlying retry budget already
-    absorbs single in-flight disruptions; a connection error that propagates
-    past that means the system is still settling. Keep polling --
-    ``timeout_seconds`` is the hard wall.
+    Returns once the marker file appears. The marker is written by whichever
+    first-boot mechanism the backend uses -- cloud-init ``runcmd`` (Vultr / AWS /
+    OVH) or the GCE ``startup-script`` (GCP). Keeps polling until ``timeout_seconds``
+    -- the hard wall (see ``_is_mngr_ready_marker_present_or_none`` for the
+    transient-error handling).
 
-    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters
-    so tests can drive this without slow real-time waits; defaults preserve
-    the production cadence (poll every 5s, warn if total > 30s).
-
-    ``clock`` and ``sleeper`` are injected so tests can run against a
-    virtual clock and avoid any real-time sleep.
+    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters so
+    tests can drive this with short intervals; defaults preserve the production
+    cadence (poll every 5s, warn if total > 30s).
     """
-    start = clock()
-    while clock() - start < timeout_seconds:
-        try:
-            if check_file_exists_on_outer(outer, Path("/var/run/mngr-ready")):
-                elapsed = clock() - start
-                if elapsed > slow_threshold_seconds:
-                    logger.warning("Cloud-init took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
-                return
-        except HostConnectionError as e:
-            logger.debug("Transient SSH error during cloud-init poll (will retry): {}", e)
-        sleeper(poll_interval_seconds)
-    raise MngrError(f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS.")
+    value, _, elapsed = poll_for_value(
+        lambda: _is_mngr_ready_marker_present_or_none(outer),
+        timeout=timeout_seconds,
+        poll_interval=poll_interval_seconds,
+    )
+    if value is None:
+        raise MngrError(
+            f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
+        )
+    if elapsed > slow_threshold_seconds:
+        logger.warning("Host bootstrap took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
 
 
 class VpsDockerProvider(BaseProviderInstance):
@@ -464,12 +472,16 @@ class VpsDockerProvider(BaseProviderInstance):
         return self._instances_cache
 
     def _validate_provider_args_for_create(self) -> None:
-        """Hook called by ``_provision_vps`` immediately before ``create_instance``.
+        """Hook called by ``create_host`` before the first provider write.
 
         Default no-op. Subclasses override to enforce provider-specific
-        pre-create invariants (e.g. AWS's pytest-only "must have
-        auto_shutdown_seconds set" guard) at the natural moment in the
-        lifecycle, instead of piggy-backing on a property accessor.
+        pre-create invariants (e.g. GCP's firewall-rule existence, AWS's
+        pytest-only "must have auto_shutdown_seconds set" guard). It runs before
+        any provider API write -- in particular before the SSH key upload and
+        instance creation -- so a failed precondition surfaces cleanly with no
+        leaked resources and no cleanup path. Keep these checks cheap (local
+        state or a single read-only API call); anything expensive runs on every
+        ``mngr create``.
         """
 
     # =========================================================================
@@ -500,6 +512,21 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _vps_known_hosts_path(self) -> Path:
         return self._key_dir() / "vps_known_hosts"
+
+    def record_outer_host_key(self, host: str, port: int, public_key: str) -> None:
+        """Pin an outer (VPS-root) sshd host key in this provider's known_hosts.
+
+        Callers operating on a VPS this provider did not itself order (e.g. the
+        imbue_cloud rebuild on a leased host) use this so the provider's own outer
+        connections -- including the certified-data sync callback -- pass strict
+        host-key checking instead of failing on a missing entry.
+        """
+        add_host_to_known_hosts(
+            known_hosts_path=self._vps_known_hosts_path(),
+            hostname=host,
+            port=port,
+            public_key=public_key,
+        )
 
     def _container_known_hosts_path(self) -> Path:
         return self._key_dir() / "container_known_hosts"
@@ -708,6 +735,14 @@ class VpsDockerProvider(BaseProviderInstance):
         if parsed.docker_build_args:
             ensure_depot_token_available(self.config.builder)
 
+        # Provider-specific pre-create checks (e.g. GCP's firewall-rule
+        # existence, AWS's pytest auto-shutdown guard). Run before the first
+        # provider write (the SSH key upload just below) so a failed
+        # precondition -- like a missing `mngr gcp prepare` firewall rule --
+        # surfaces cleanly: no instance created, no SSH key uploaded, and no
+        # "Host creation failed, attempting cleanup..." path.
+        self._validate_provider_args_for_create()
+
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
 
@@ -725,6 +760,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 vps_host_key_path=vps_host_key_path,
                 vps_host_public_key=vps_host_public_key,
                 vps_ssh_key_id=vps_ssh_key_id,
+                vps_public_key=vps_public_key,
             )
 
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -914,6 +950,37 @@ class VpsDockerProvider(BaseProviderInstance):
             tags=tags,
         )
 
+    def _generate_bootstrap_payload(
+        self,
+        *,
+        host_private_key: str,
+        host_public_key: str,
+        authorized_user_public_key: str,
+    ) -> str:
+        """Render the first-boot bootstrap payload threaded into instance creation.
+
+        Default: cloud-init ``user-data``. GCP overrides this to render a GCE
+        ``startup-script`` (stock GCE images run the google-guest-agent, not
+        cloud-init). Both render the same shared ``host_setup`` steps and write the
+        same ``mngr-ready`` marker, so the rest of provisioning is backend-agnostic.
+        """
+        return generate_cloud_init_user_data(
+            host_private_key=host_private_key,
+            host_public_key=host_public_key,
+            install_gvisor_runtime=self.config.install_gvisor_runtime,
+            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
+            authorized_user_public_key=authorized_user_public_key,
+        )
+
+    def _wait_for_expected_host_key(self, vps_ip: str, expected_host_public_key: str, timeout_seconds: float) -> None:
+        """Hook to wait until the VPS serves our SSH host key before strict-checking.
+
+        Default no-op: cloud-init backends set the host key before sshd starts.
+        Backends that set it after boot (GCP's ``startup-script``) override this to
+        poll until the live key matches, closing the mismatch window.
+        """
+        return
+
     def _provision_vps(
         self,
         host_id: HostId,
@@ -922,24 +989,29 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
+        vps_public_key: str,
     ) -> tuple[VpsInstanceId, str]:
         """Provision a VPS, wait for it to boot, and wait for Docker to install.
 
         Returns (vps_instance_id, vps_ip).
-        """
-        # Provider-specific pre-create checks (e.g. AWS's pytest-only "must
-        # have auto_shutdown_seconds set" guard). Runs before the VPS-create
-        # API call so a failed check never leaves a billable VPS behind; the
-        # SSH key uploaded by ``create_host`` above is cleaned up by that
-        # function's except block on raise.
-        self._validate_provider_args_for_create()
 
+        ``vps_public_key`` is the provider SSH public key already loaded by
+        ``create_host`` (the sole caller); it is threaded in rather than re-read
+        from disk here. The bootstrap (``_generate_bootstrap_payload``) injects it
+        straight into root (in addition to the copy-from-default-user step), which
+        removes any reliance on a cloud image's default-user key landing in root --
+        notably on GCE, where the google guest agent provisions the key
+        asynchronously and races the copy.
+
+        Provider-specific pre-create checks (``_validate_provider_args_for_create``)
+        already ran in ``create_host`` before the first provider write, so by the
+        time we get here the create preconditions are known to hold.
+        """
         vps_host_private_key = vps_host_key_path.read_text()
-        user_data = generate_cloud_init_user_data(
+        user_data = self._generate_bootstrap_payload(
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
-            install_gvisor_runtime=self.config.install_gvisor_runtime,
-            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
+            authorized_user_public_key=vps_public_key,
         )
 
         logger.log(
@@ -978,11 +1050,22 @@ class VpsDockerProvider(BaseProviderInstance):
         with log_span("Waiting for VPS SSH"):
             self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
 
-        logger.log(LogLevel.BUILD.value, "Waiting for cloud-init to complete (Docker installation)...", source="vps")
-        with log_span("Waiting for cloud-init (Docker install)"):
+        # Backends that install the host key after sshd starts (GCP's
+        # startup-script) serve a boot-generated key first; wait for our key to
+        # land before the strict-host-key-checked connection below. No-op for
+        # cloud-init backends, which set the key pre-sshd.
+        with log_span("Waiting for expected VPS host key"):
+            self._wait_for_expected_host_key(
+                vps_ip, vps_host_public_key, timeout_seconds=self.config.ssh_connect_timeout
+            )
+
+        logger.log(
+            LogLevel.BUILD.value, "Waiting for host bootstrap to complete (Docker installation)...", source="vps"
+        )
+        with log_span("Waiting for host bootstrap (Docker install)"):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 self._wait_for_cloud_init(outer, timeout_seconds=self.config.docker_install_timeout)
-        logger.log(LogLevel.BUILD.value, "Cloud-init complete, Docker is ready", source="vps")
+        logger.log(LogLevel.BUILD.value, "Host bootstrap complete, Docker is ready", source="vps")
 
         return vps_instance_id, vps_ip
 

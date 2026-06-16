@@ -45,6 +45,10 @@ CODEX_SUBAGENTS_DIR="$MNGR_AGENT_STATE_DIR/codex_subagents"
 CODEX_ROOT_SESSION_FILE="$MNGR_AGENT_STATE_DIR/codex_root_session"
 CODEX_TRANSCRIPT_PATH_FILE="$MNGR_AGENT_STATE_DIR/codex_transcript_path"
 CODEX_MARKER_LOCK_DIR="$MNGR_AGENT_STATE_DIR/codex_marker.lock"
+# Permission-waiting flag (set by the PermissionRequest hook, cleared by
+# PostToolUse). Independent of the active-marker recompute; clear_active_marker.sh
+# removes it on the root Stop as a safety net against a stranded dialog.
+CODEX_PERMISSIONS_WAITING_FILE="$MNGR_AGENT_STATE_DIR/permissions_waiting"
 
 # Acquire the marker lock by atomically creating the lock dir, retrying briefly
 # while another hook holds it. Hooks complete in well under a second, so a short

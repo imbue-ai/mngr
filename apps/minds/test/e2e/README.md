@@ -6,7 +6,7 @@ UI-driven E2E tests that launch a packaged `minds.app` Electron build and drive 
 
 | Driver | What it asserts | Needs lima? | Runs in |
 |---|---|---|---|
-| `macos-launch.spec.js` (Playwright) | App launches; chrome window renders; Python backend binds; Create/Log-in landing visible. Catches the `_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS` class of regression that Tart used to catch by hand. | no | `minds-macos-launch.yml` on `macos-latest`, every push + PR. ~5 min. |
+| `macos-launch.spec.js` (Playwright) | App launches; chrome window renders; Python backend binds; the home "Create" link or the welcome splash ("Log In" link / "Continue without an account" button) is visible. Catches the `_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS` class of regression that Tart used to catch by hand. | no | `minds-launch-to-msg.yml` `macos_launch` job on `macos-latest`, twice-daily schedule + dispatch. ~5 min. |
 | `scripts/launch_to_msg_e2e.py` (Python over CDP) | Drives the full Electron flow: launch → auth → create LIMA workspace → first agent message → assert nonce-verified reply. Also runs the slack-permission-flow sub-scenario (mock Slack via /etc/hosts + cert + socat, see below). | yes (nested virt) | `minds-launch-to-msg.yml` `verify` job on the self-hosted `minds-runner` MacBook. |
 
 ## Running locally
