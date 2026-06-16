@@ -624,9 +624,11 @@ def _emit_result(
     result_data = {
         "destroyed_agents": [str(n) for n in result.destroyed_agents],
         "stopped_agents": [str(n) for n in result.stopped_agents],
+        "already_absent_agents": [str(n) for n in result.already_absent_agents],
         "errors": result.errors,
         "destroyed_count": len(result.destroyed_agents),
         "stopped_count": len(result.stopped_agents),
+        "already_absent_count": len(result.already_absent_agents),
         "error_count": len(result.errors),
     }
 
@@ -644,11 +646,18 @@ def _emit_result(
                 write_human_line("Successfully stopped {} agent(s)", len(result.stopped_agents))
                 for name in result.stopped_agents:
                     write_human_line("  - {}", name)
+            if result.already_absent_agents:
+                write_human_line(
+                    "{} agent(s) were already absent from their host (not destroyed by this run)",
+                    len(result.already_absent_agents),
+                )
+                for name in result.already_absent_agents:
+                    write_human_line("  - {}", name)
             if result.errors:
                 logger.warning("{} error(s) occurred:", len(result.errors))
                 for error in result.errors:
                     logger.warning("  - {}", error)
-            if not result.destroyed_agents and not result.stopped_agents:
+            if not result.destroyed_agents and not result.stopped_agents and not result.already_absent_agents:
                 write_human_line("No agents were affected")
         case _ as unreachable:
             assert_never(unreachable)

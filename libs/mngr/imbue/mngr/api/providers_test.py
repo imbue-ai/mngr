@@ -101,7 +101,7 @@ def test_get_all_provider_instances_with_configured_providers(
         },
     )
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
-    providers = get_all_provider_instances(mngr_ctx)
+    providers = get_all_provider_instances(mngr_ctx).instances
 
     provider_names = [p.name for p in providers]
     assert custom_name in provider_names
@@ -109,10 +109,20 @@ def test_get_all_provider_instances_with_configured_providers(
 
 def test_get_all_provider_instances_includes_default_backends(temp_mngr_ctx: MngrContext) -> None:
     """Test get_all_provider_instances includes default backends."""
-    providers = get_all_provider_instances(temp_mngr_ctx)
+    providers = get_all_provider_instances(temp_mngr_ctx).instances
 
     provider_names = [str(p.name) for p in providers]
     assert "local" in provider_names
+
+
+def test_get_all_provider_instances_reports_no_unavailable_providers_when_all_reachable(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With only reachable backends (local/ssh), the result reports an empty unavailable set."""
+    result = get_all_provider_instances(temp_mngr_ctx)
+
+    assert len(result.instances) > 0
+    assert result.unavailable_provider_names == ()
 
 
 def test_get_all_provider_instances_excludes_disabled_providers(
@@ -131,7 +141,7 @@ def test_get_all_provider_instances_excludes_disabled_providers(
         },
     )
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
-    providers = get_all_provider_instances(mngr_ctx)
+    providers = get_all_provider_instances(mngr_ctx).instances
 
     provider_names = [p.name for p in providers]
     assert disabled_name not in provider_names
@@ -147,7 +157,7 @@ def test_get_all_provider_instances_filters_by_enabled_backends(
         enabled_backends=[ProviderBackendName("local")],
     )
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
-    providers = get_all_provider_instances(mngr_ctx)
+    providers = get_all_provider_instances(mngr_ctx).instances
 
     provider_names = [str(p.name) for p in providers]
     # local should be included
@@ -160,7 +170,7 @@ def test_get_all_provider_instances_empty_enabled_backends_allows_all(temp_mngr_
     """Test get_all_provider_instances allows all backends when enabled_backends is empty."""
     # temp_mngr_ctx has empty enabled_backends by default
     assert temp_mngr_ctx.config.enabled_backends == []
-    providers = get_all_provider_instances(temp_mngr_ctx)
+    providers = get_all_provider_instances(temp_mngr_ctx).instances
 
     # Should have at least local backend
     provider_names = [str(p.name) for p in providers]
@@ -169,7 +179,7 @@ def test_get_all_provider_instances_empty_enabled_backends_allows_all(temp_mngr_
 
 def test_get_all_provider_instances_filters_by_provider_names(temp_mngr_ctx: MngrContext) -> None:
     """Test get_all_provider_instances filters to only specified providers."""
-    providers = get_all_provider_instances(temp_mngr_ctx, provider_names=("local",))
+    providers = get_all_provider_instances(temp_mngr_ctx, provider_names=("local",)).instances
 
     assert len(providers) == 1
     assert str(providers[0].name) == "local"
@@ -177,7 +187,7 @@ def test_get_all_provider_instances_filters_by_provider_names(temp_mngr_ctx: Mng
 
 def test_get_all_provider_instances_provider_names_excludes_others(temp_mngr_ctx: MngrContext) -> None:
     """Test providers not in provider_names are excluded."""
-    providers = get_all_provider_instances(temp_mngr_ctx, provider_names=("nonexistent",))
+    providers = get_all_provider_instances(temp_mngr_ctx, provider_names=("nonexistent",)).instances
 
     assert len(providers) == 0
 
@@ -199,13 +209,13 @@ def test_get_all_provider_instances_provider_names_with_configured_provider(
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
 
     # Filter to only the custom provider
-    providers = get_all_provider_instances(mngr_ctx, provider_names=("my-filtered-local",))
+    providers = get_all_provider_instances(mngr_ctx, provider_names=("my-filtered-local",)).instances
 
     assert len(providers) == 1
     assert providers[0].name == custom_name
 
     # Filter to only local (should not include custom)
-    providers_local = get_all_provider_instances(mngr_ctx, provider_names=("local",))
+    providers_local = get_all_provider_instances(mngr_ctx, provider_names=("local",)).instances
 
     provider_names = [str(p.name) for p in providers_local]
     assert "local" in provider_names
@@ -222,14 +232,14 @@ def test_get_provider_instance_returns_cached_instance(temp_mngr_ctx: MngrContex
 def test_reset_provider_instances_clears_tracking(temp_mngr_ctx: MngrContext) -> None:
     """reset_provider_instances should clear cached instances so next call rebuilds them."""
     # Populate the cache by loading providers
-    providers_before = get_all_provider_instances(temp_mngr_ctx)
+    providers_before = get_all_provider_instances(temp_mngr_ctx).instances
     assert len(providers_before) > 0
 
     # Reset should clear the cache
     reset_provider_instances()
 
     # Loading again should succeed (rebuilds from scratch)
-    providers_after = get_all_provider_instances(temp_mngr_ctx)
+    providers_after = get_all_provider_instances(temp_mngr_ctx).instances
     assert len(providers_after) > 0
 
 
@@ -282,7 +292,7 @@ def test_get_all_provider_instances_excludes_disabled_plugins(
         disabled_plugins=frozenset(("local",)),
     )
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
-    providers = get_all_provider_instances(mngr_ctx)
+    providers = get_all_provider_instances(mngr_ctx).instances
 
     provider_names = [str(p.name) for p in providers]
     assert "local" not in provider_names

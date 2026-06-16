@@ -9,6 +9,7 @@ from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -29,9 +30,13 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
+from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
@@ -260,15 +265,20 @@ def load_base_state_from_history(
     last_state_by_id: dict[str, _TrackedState] = {}
     for agent_dict in latest_agents_data:
         agent_id = agent_dict.get("id")
-        if agent_id is not None:
-            state = agent_dict.get("state")
-            host_dict = agent_dict.get("host", {})
-            host_state = host_dict.get("state") if isinstance(host_dict, dict) else None
-            if state is not None:
-                last_state_by_id[str(agent_id)] = _TrackedState(
-                    agent_state=str(state),
-                    host_state=str(host_state) if host_state is not None else None,
-                )
+        state = agent_dict.get("state")
+        # These dicts come from AGENTS_FULL_STATE events this module wrote from AgentDetails,
+        # where id and state are required, non-optional fields. A missing key therefore means
+        # structurally corrupt history, not a benign case -- warn rather than silently dropping
+        # the record (which would leave the agent untracked for state-change detection).
+        if agent_id is None or state is None:
+            logger.warning("Skipping observe-history agent record missing required id/state: {}", agent_dict)
+            continue
+        host_dict = agent_dict.get("host", {})
+        host_state = host_dict.get("state") if isinstance(host_dict, dict) else None
+        last_state_by_id[str(agent_id)] = _TrackedState(
+            agent_state=str(state),
+            host_state=str(host_state) if host_state is not None else None,
+        )
 
     return last_state_by_id
 
@@ -361,7 +371,7 @@ class AgentObserver(MutableModel):
 
     _concurrency_group: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="agent-observer"))
     _known_hosts: dict[str, _KnownHost] = PrivateAttr(default_factory=dict)
-    _discovery_stream_process: RunningProcess = PrivateAttr(default_factory=dict)
+    _discovery_stream_process: RunningProcess | None = PrivateAttr(default=None)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _last_tracked_state_by_id: dict[str, _TrackedState] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -464,15 +474,22 @@ class AgentObserver(MutableModel):
             return
 
         event = parse_discovery_event_line(stripped)
+        if event is None:
+            return
 
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
-        elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
-        elif isinstance(event, DiscoveryErrorEvent):
-            self._handle_discovery_error_event(event)
-        else:
-            pass
+        match event:
+            case FullDiscoverySnapshotEvent():
+                self._handle_full_snapshot(event)
+            case HostDestroyedEvent():
+                self._handle_host_destroyed(event)
+            case DiscoveryErrorEvent():
+                self._handle_discovery_error_event(event)
+            case AgentDiscoveryEvent() | HostDiscoveryEvent() | AgentDestroyedEvent() | HostSSHInfoEvent():
+                # Not consumed by the observe UI's host/error tracking. Listed explicitly (rather
+                # than a catch-all else) so adding a discovery event type forces a decision here.
+                logger.trace("observe: ignoring discovery event type {}", type(event).__name__)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update known hosts and provider error state from a full discovery snapshot."""
@@ -592,7 +609,9 @@ class AgentObserver(MutableModel):
         while not self._stop_event.is_set():
             # make sure that none of our processes crashed
             with self._lock:
-                self._discovery_stream_process.check()
+                # None until run() Phase 2 starts the discovery stream; only check it once started.
+                if self._discovery_stream_process is not None:
+                    self._discovery_stream_process.check()
                 for _host_id_str, event_process in self._events_processes.items():
                     event_process.check()
 

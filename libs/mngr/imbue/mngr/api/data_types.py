@@ -80,6 +80,14 @@ class GcResult(MutableModel):
             "not present on any remote. Delete the branches (or push them) to allow future GC."
         ),
     )
+    source_dirs_kept_due_to_branch_listing_failure: list[WorkDirInfo] = Field(
+        default_factory=list,
+        description=(
+            "Source repositories left in place because their local branches could not be listed "
+            "(a git error), not because of genuine unpushed branches. Re-run GC once the repo is "
+            "readable; nothing was deleted, to avoid data loss."
+        ),
+    )
     machines_deleted: list[DiscoveredHost] = Field(
         default_factory=list,
         description="Machines that were deleted (removing records of old destroyed hosts)",
@@ -120,6 +128,15 @@ class CleanupResult(MutableModel):
     stopped_agents: list[AgentName] = Field(
         default_factory=list,
         description="Names of agents that were stopped",
+    )
+    already_absent_agents: list[AgentName] = Field(
+        default_factory=list,
+        description=(
+            "Agents that list_agents reported but that were not present on the live host when we "
+            "went to destroy them (likely already cleaned up, but possibly a discovery/identity "
+            "mismatch). Reported distinctly rather than counted as destroyed, which would have been "
+            "a false success."
+        ),
     )
     errors: list[str] = Field(
         default_factory=list,

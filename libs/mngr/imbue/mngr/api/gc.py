@@ -234,21 +234,28 @@ def _gc_single_host_work_dir(
             # Source dirs (e.g. mngr-managed clones from --source <url>) are tracked
             # separately and kept around while any worktree still points at them.
             try:
-                deletable_source_dirs, kept_source_dirs = _get_orphaned_source_dirs(
-                    host=host, provider_name=provider_instance.name
+                deletable_source_dirs, kept_unpushed_source_dirs, kept_listing_failed_source_dirs = (
+                    _get_orphaned_source_dirs(host=host, provider_name=provider_instance.name)
                 )
             except HostOfflineError:
                 logger.trace("Skipped source dir GC because host is offline", host_id=host.id)
             except HostAuthenticationError:
                 logger.trace("Skipped source dir GC because host authentication failed", host_id=host.id)
             else:
-                for info in kept_source_dirs:
+                for info in kept_unpushed_source_dirs:
                     logger.warning(
                         "Keeping source repo {} because it has local branches not on any remote. "
                         "Push or delete them to allow future gc.",
                         info.path,
                     )
-                result.source_dirs_kept_due_to_unpushed_branches.extend(kept_source_dirs)
+                for info in kept_listing_failed_source_dirs:
+                    logger.warning(
+                        "Keeping source repo {} because its local branches could not be listed "
+                        "(git error); not deleting to avoid data loss. Re-run gc once the repo is readable.",
+                        info.path,
+                    )
+                result.source_dirs_kept_due_to_unpushed_branches.extend(kept_unpushed_source_dirs)
+                result.source_dirs_kept_due_to_branch_listing_failure.extend(kept_listing_failed_source_dirs)
                 for source_dir_info in deletable_source_dirs:
                     try:
                         if not dry_run:
@@ -615,7 +622,7 @@ def gc_logs(
 
             result.logs_destroyed.append(log_file_info)
 
-        except MngrError as e:
+        except OSError as e:
             error_msg = f"Failed to delete log {log_file}: {e}"
             result.errors.append(error_msg)
             _handle_error(error_msg, error_behavior, exc=e)
@@ -679,7 +686,7 @@ def gc_build_cache(
 
                 result.build_cache_destroyed.append(build_cache_info)
 
-            except MngrError as e:
+            except OSError as e:
                 error_msg = f"Failed to delete cache entry {cache_entry}: {e}"
                 result.errors.append(error_msg)
                 _handle_error(error_msg, error_behavior, exc=e)
@@ -709,14 +716,16 @@ def _get_orphaned_work_dirs(host: OnlineHostInterface, provider_name: ProviderIn
             # If we can't get the size, use 0
             pass
 
-        # Get creation time from the directory
-        created_at = datetime.now(timezone.utc)
-        try:
-            stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(work_dir_path))}")
-            if stat_result.success and stat_result.stdout.strip():
+        # Get creation time from the directory. Leave it unknown (None) on failure rather than
+        # fabricating a 'now' timestamp, which would misrepresent a dir whose mtime we could not
+        # read as freshly created.
+        created_at: datetime | None = None
+        stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(work_dir_path))}")
+        if stat_result.success and stat_result.stdout.strip():
+            try:
                 created_at = datetime.fromtimestamp(int(stat_result.stdout.strip()), tz=timezone.utc)
-        except (ValueError, OSError):
-            pass
+            except ValueError:
+                logger.debug("Could not parse mtime {!r} for {}", stat_result.stdout, work_dir_path)
 
         work_dir_infos.append(
             WorkDirInfo(
@@ -761,19 +770,25 @@ def _remove_git_worktree(host: OnlineHostInterface, work_dir_path: Path) -> None
     Reads the .git file to find the main repo and runs the removal from there,
     which is required for git to properly unregister the worktree.
     """
-    main_repo: Path | None = None
     git_file = work_dir_path / ".git"
     try:
         content = host.read_text_file(git_file)
-        main_repo = parse_worktree_git_file(content)
-    except (FileNotFoundError, OSError):
-        pass
+    except (FileNotFoundError, OSError) as e:
+        # The .git file is gone or unreadable: we cannot locate the worktree's parent repo, and a
+        # `git worktree remove` with no -C would run from the wrong cwd and fail anyway. Remove the
+        # directory directly instead of issuing a git command that is never going to be correct.
+        logger.debug("Could not read .git file for worktree {} ({}); removing directory directly", work_dir_path, e)
+        _remove_directory(host, work_dir_path)
+        return
 
-    if main_repo is not None:
-        cmd = f"git -C {shlex.quote(str(main_repo))} worktree remove --force {shlex.quote(str(work_dir_path))}"
-    else:
-        cmd = f"git worktree remove --force {shlex.quote(str(work_dir_path))}"
+    main_repo = parse_worktree_git_file(content)
+    if main_repo is None:
+        # The .git file exists but does not have the expected `gitdir:` form. Do not paper over this
+        # by running git with no -C (which would fail to find the parent repo and silently degrade to
+        # a plain directory delete, leaving a dangling worktree registration in the source repo).
+        raise MngrError(f"Worktree .git file at {git_file} is malformed; cannot determine its source repo")
 
+    cmd = f"git -C {shlex.quote(str(main_repo))} worktree remove --force {shlex.quote(str(work_dir_path))}"
     result = host.execute_idempotent_command(cmd)
 
     if not result.success:
@@ -823,17 +838,19 @@ def _find_source_repo_of_worktree_on_host(host: OnlineHostInterface, worktree_pa
 
 def _get_orphaned_source_dirs(
     host: OnlineHostInterface, provider_name: ProviderInstanceName
-) -> tuple[list[WorkDirInfo], list[WorkDirInfo]]:
-    """Partition mngr-tracked source repos into (safe-to-delete, kept-due-to-unpushed-branches).
+) -> tuple[list[WorkDirInfo], list[WorkDirInfo], list[WorkDirInfo]]:
+    """Partition mngr-tracked source repos into (safe-to-delete, kept-unpushed, kept-listing-failed).
 
     A source repo is "in use" if a living agent's work_dir either is the source itself
     or is a git worktree backed by it. Anything else is orphan; an orphan with no local
-    branches outside every remote is safe to delete.
+    branches outside every remote is safe to delete. Orphans kept because their branches
+    could not be *listed* (a git error) are reported separately from those kept because of
+    genuine unpushed branches, so the user-facing message can be accurate.
     """
     certified_data = host.get_certified_data()
     source_dirs = set(certified_data.generated_source_dirs)
     if not source_dirs:
-        return [], []
+        return [], [], []
 
     in_use_sources: set[str] = set()
     for agent in host.get_agents():
@@ -846,17 +863,21 @@ def _get_orphaned_source_dirs(
             in_use_sources.add(str(source_of_worktree))
 
     deletable: list[WorkDirInfo] = []
-    kept: list[WorkDirInfo] = []
+    kept_unpushed: list[WorkDirInfo] = []
+    kept_listing_failed: list[WorkDirInfo] = []
     for source_dir_str in sorted(source_dirs - in_use_sources):
         source_path = Path(source_dir_str)
         info = _build_source_dir_info(host, provider_name, source_path)
         unpushed = _local_branches_not_on_any_remote_on_host(host, source_path)
-        if unpushed:
+        if unpushed == [_BRANCH_LISTING_FAILED_SENTINEL]:
+            logger.debug("Source {} kept because its branches could not be listed", source_path)
+            kept_listing_failed.append(info)
+        elif unpushed:
             logger.debug("Source {} has unpushed branches: {}", source_path, unpushed)
-            kept.append(info)
+            kept_unpushed.append(info)
         else:
             deletable.append(info)
-    return deletable, kept
+    return deletable, kept_unpushed, kept_listing_failed
 
 
 _BRANCH_LISTING_FAILED_SENTINEL: Final[str] = "<branch listing failed>"
@@ -906,13 +927,14 @@ def _build_source_dir_info(
     except (ValueError, OSError):
         pass
 
-    created_at = datetime.now(timezone.utc)
-    try:
-        stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(source_path))}")
-        if stat_result.success and stat_result.stdout.strip():
+    # Leave creation time unknown (None) on failure rather than fabricating a 'now' timestamp.
+    created_at: datetime | None = None
+    stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(source_path))}")
+    if stat_result.success and stat_result.stdout.strip():
+        try:
             created_at = datetime.fromtimestamp(int(stat_result.stdout.strip()), tz=timezone.utc)
-    except (ValueError, OSError):
-        pass
+        except ValueError:
+            logger.debug("Could not parse mtime {!r} for {}", stat_result.stdout, source_path)
 
     return WorkDirInfo(
         path=source_path,
@@ -945,18 +967,24 @@ def _remove_directory(host: OnlineHostInterface, path: Path) -> None:
     has passwordless sudo).
     """
     result = host.execute_idempotent_command(f"test -e {shlex.quote(str(path))}")
-    if result.success:
-        quoted = shlex.quote(str(path))
-        result = host.execute_idempotent_command(f"rm -rf {quoted}")
+    if not result.success:
+        # The path is already gone, so there is nothing to remove. Log it: callers always expect
+        # the path to exist, so a silent no-op can mask a partial earlier removal (e.g. a worktree
+        # whose files were deleted but whose registration was left dangling).
+        logger.debug("Directory {} did not exist; nothing to remove", path)
+        return
 
-        if not result.success:
-            logger.debug("rm -rf failed for {}, retrying with sudo: {}", path, result.stderr)
-            result = host.execute_idempotent_command(f"sudo rm -rf {quoted}")
+    quoted = shlex.quote(str(path))
+    result = host.execute_idempotent_command(f"rm -rf {quoted}")
 
-        if not result.success:
-            raise MngrError(f"Failed to remove directory {path}: {result.stderr}")
+    if not result.success:
+        logger.debug("rm -rf failed for {}, retrying with sudo: {}", path, result.stderr)
+        result = host.execute_idempotent_command(f"sudo rm -rf {quoted}")
 
-        logger.debug("Removed directory: {}", path)
+    if not result.success:
+        raise MngrError(f"Failed to remove directory {path}: {result.stderr}")
+
+    logger.debug("Removed directory: {}", path)
 
 
 def _handle_error(error_msg: str, error_behavior: ErrorBehavior, exc: Exception | None = None) -> None:

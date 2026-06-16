@@ -335,8 +335,9 @@ def connect_to_agent(
                 )
                 poll_until(lambda: False, timeout=retry_delay_seconds, poll_interval=retry_delay_seconds)
             else:
-                logger.debug(
-                    "SSH session ended with exit code {} after {} attempt(s)",
-                    exit_code,
-                    max_attempts,
+                # The connection failed on every attempt with a persistent non-zero, non-signal
+                # exit code. Returning normally here would make a never-successful connection
+                # indistinguishable from a clean disconnect (exit 0), so surface it as an error.
+                raise MngrError(
+                    f"SSH connection to agent failed after {max_attempts} attempt(s) (last exit code {exit_code})."
                 )

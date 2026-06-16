@@ -172,11 +172,14 @@ def _get_online_host_for_agents(
     result: MultiExecResult,
     on_error: Callable[[str, str], None] | None,
     error_behavior: ErrorBehavior,
-) -> OnlineHostInterface | None:
+) -> tuple[OnlineHostInterface | None, bool]:
     """Get an online host for a group of agents, starting it if needed.
 
-    Returns the online host, or None if the host could not be reached
-    (failures are recorded in result).
+    Returns ``(online_host, should_abort)``. ``online_host`` is None if the host could
+    not be reached (failures are recorded in result). ``should_abort`` is True only when
+    *this* group's failure should abort the whole run (ABORT mode), so the caller does not
+    have to re-infer that from the shared ``result.failed_agents`` (which is also truthy when
+    some unrelated earlier host failed).
     """
     provider_name = agent_list[0].provider_name
 
@@ -185,35 +188,33 @@ def _get_online_host_for_agents(
         host_interface = provider.get_host(HostId(host_id_str))
     except MngrError as e:
         for match in agent_list:
-            is_should_abort = _record_failure(
+            if _record_failure(
                 result,
                 match.agent_name,
                 f"Failed to get host for agent {match.agent_name}: {e}",
                 on_error,
                 error_behavior,
-            )
-            if is_should_abort:
-                return None
-        return None
+            ):
+                return None, True
+        return None, False
 
     # Ensure host is online (start if needed)
     try:
         started_host, _was_started = ensure_host_started(
             host_interface, is_start_desired=is_start_desired, provider=provider
         )
-        return started_host
+        return started_host, False
     except MngrError as e:
         for match in agent_list:
-            is_should_abort = _record_failure(
+            if _record_failure(
                 result,
                 match.agent_name,
                 f"Failed to start host for agent {match.agent_name}: {e}",
                 on_error,
                 error_behavior,
-            )
-            if is_should_abort:
-                return None
-        return None
+            ):
+                return None, True
+        return None, False
 
 
 def _execute_on_single_agent(
@@ -383,14 +384,15 @@ def exec_command_on_outer_hosts(
 
         with provider.outer_host_for(first.host_id) as outer:
             if outer is None:
-                # outer_host_id_for said this provider has an outer but the
-                # actual open returned None -- treat as a runtime failure.
-                err_msg = f"provider returned an outer id but outer_host_for yielded None for outer {outer_id}"
-                for match in group:
-                    is_should_abort = _record_failure(result, match.agent_name, err_msg, on_error, error_behavior)
-                    if is_should_abort:
-                        return result
-                continue
+                # This group is in by_outer only because outer_host_id_for(host_id) returned a
+                # non-None id, so outer_host_for(host_id) yielding None means the provider's two
+                # methods contractually disagree -- a provider-implementation bug, not a transient
+                # runtime condition an agent can be "failed" for. Raise rather than silently
+                # degrading these agents into failed_agents with an opaque message.
+                raise MngrError(
+                    f"Provider {first.provider_name} returned outer id {outer_id} from outer_host_id_for "
+                    f"but outer_host_for({first.host_id}) yielded None"
+                )
 
             # Default cwd = SSH user's home on the outer (None means the connector's default).
             effective_cwd = Path(cwd) if cwd is not None else None
@@ -464,11 +466,11 @@ def exec_command_on_agents(
         host_id_str, _ = host_key.split(":", 1)
 
         # Get an online host (starting it if needed)
-        online_host = _get_online_host_for_agents(
+        online_host, should_abort = _get_online_host_for_agents(
             host_id_str, agent_list, mngr_ctx, is_start_desired, result, on_error, error_behavior
         )
         if online_host is None:
-            if error_behavior == ErrorBehavior.ABORT and result.failed_agents:
+            if should_abort:
                 return result
             continue
 

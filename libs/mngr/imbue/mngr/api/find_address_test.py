@@ -160,6 +160,16 @@ def test_parse_agent_or_host_address_agent_at_host_dot_provider_is_agent() -> No
     )
 
 
+def test_parse_agent_or_host_address_invalid_agent_with_at_propagates() -> None:
+    """An ``@``-qualified address with an invalid agent name is a genuine agent error.
+
+    It must propagate, not be re-parsed as a host (which only the bare dotted-name
+    disambiguation should trigger).
+    """
+    with pytest.raises(UserInputError):
+        parse_agent_or_host_address("bad name@my-host")
+
+
 # =============================================================================
 # HostAddress.matches tests
 # =============================================================================

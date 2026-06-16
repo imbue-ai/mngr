@@ -13,6 +13,7 @@ from threading import Lock
 from typing import Annotated
 from typing import Final
 from typing import Literal
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Discriminator
@@ -544,34 +545,57 @@ def emit_discovery_events_for_host(
     agents (each DiscoveredAgent carries its provider_name).
 
     Errors are caught and logged at warning level so that event emission
-    never causes the parent command to fail.
+    never causes the parent command to fail. Each emit is guarded independently
+    so that one failing event (e.g. a single agent) does not drop the rest, and
+    so a failure is attributable to the specific step rather than the whole batch.
     """
+    # Read agent data once and reuse for both provider_name inference and event emission.
     try:
-        # Read agent data once and reuse for both provider_name inference and event emission
         discovered_agents = host.discover_agents()
+    except (MngrError, OSError, ValueError) as e:
+        logger.warning("Failed to read agents from host {} for discovery emit: {}", host.id, e)
+        return
 
-        # Infer provider_name from the host's agents if not provided
-        if provider_name is None:
-            if discovered_agents:
-                provider_name = discovered_agents[0].provider_name
-            else:
-                provider_name = ProviderInstanceName("unknown")
-                logger.debug("Could not infer provider_name for host {} (no agents), using 'unknown'", host.id)
+    # Infer provider_name from the host's agents if not provided
+    if provider_name is None:
+        if discovered_agents:
+            provider_name = discovered_agents[0].provider_name
+        else:
+            # We cannot determine which provider owns this host (none was passed and there
+            # are no agents to infer from). Emitting a host event with a fabricated provider
+            # name would poison the authoritative stream: downstream resolution keys off
+            # provider_name and would resolve this host to a non-existent provider. Skip the
+            # host emit -- the next full discovery snapshot records the host under its real
+            # provider. There are no agents to emit either, so nothing else is lost here.
+            logger.warning(
+                "Skipping discovery host event for {}: provider could not be determined "
+                "(no provider passed and host has no agents)",
+                host.id,
+            )
+            return
 
-        # Emit host event
+    # Emit host event
+    try:
         discovered_host = discovered_host_from_online_host(host, provider_name)
         emit_host_discovered(config, discovered_host)
+    except (MngrError, OSError, ValueError) as e:
+        logger.warning("Failed to emit host discovery event for {}: {}", host.id, e)
 
-        # Emit SSH info event if this is a remote host
+    # Emit SSH info event if this is a remote host
+    try:
         ssh_info = _build_ssh_info_from_host(host)
         if ssh_info is not None:
             emit_host_ssh_info(config, host.id, ssh_info)
-
-        # Emit agent events with full certified_data from the host's filesystem
-        for discovered_agent in discovered_agents:
-            emit_agent_discovered(config, discovered_agent)
     except (MngrError, OSError, ValueError) as e:
-        logger.warning("Failed to emit discovery events: {}", e)
+        logger.warning("Failed to emit host SSH info event for {}: {}", host.id, e)
+
+    # Emit agent events with full certified_data from the host's filesystem. Each agent is
+    # emitted independently so one bad agent does not drop the others.
+    for discovered_agent in discovered_agents:
+        try:
+            emit_agent_discovered(config, discovered_agent)
+        except (MngrError, OSError, ValueError) as e:
+            logger.warning("Failed to emit agent discovery event for {}: {}", discovered_agent.agent_name, e)
 
 
 def write_full_discovery_snapshot(
@@ -623,18 +647,22 @@ def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
         raise DiscoverySchemaChangedError(str(event_type), str(e)) from e
 
 
-def find_latest_full_snapshot_offset(events_path: Path) -> int:
+def find_latest_full_snapshot_offset(events_path: Path) -> int | None:
     """Scan the events file to find the byte offset of the latest DISCOVERY_FULL event.
 
-    Returns 0 if no full snapshot event is found (meaning the entire file should be read).
+    Returns the byte offset of the latest full snapshot, or ``None`` if no full
+    snapshot event is found. ``None`` is distinct from an offset of ``0``: a
+    snapshot can legitimately sit at offset 0 (e.g. when it is the first line
+    after a truncation/rotation), and returning ``0`` for "no snapshot" would
+    misclassify that valid snapshot as absent.
     """
     if not events_path.exists():
-        return 0
+        return None
 
     # Read all lines and find the last DISCOVERY_FULL line byte offset.
     # Use f.tell() to track byte positions rather than len(line) which counts
     # characters and would be wrong for multi-byte UTF-8 content.
-    last_full_offset = 0
+    last_full_offset: int | None = None
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path, "rb") as f:
         for raw_line in f:
@@ -705,28 +733,40 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
 
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path) as f:
-        f.seek(offset)
+        # No snapshot found -> replay the whole file from the start.
+        f.seek(offset if offset is not None else 0)
         for line in f:
             parsed = warner.parse(line)
             if parsed is None:
                 continue
             _data, stripped_line = parsed
             event = parse_discovery_event_line(stripped_line)
-            if isinstance(event, FullDiscoverySnapshotEvent):
-                # Reset maps -- this snapshot supersedes everything before it
-                maps.reset()
-                for agent in event.agents:
-                    _record_agent(maps, agent)
-            elif isinstance(event, AgentDiscoveryEvent):
-                _record_agent(maps, event.agent)
-            elif isinstance(event, AgentDestroyedEvent):
-                maps.destroyed_agent_ids.add(str(event.agent_id))
-            else:
-                # Host, SSH info, and error events are not relevant for
-                # resolution. A host's continued existence (and its name) come
-                # from provider.get_host when the caller fetches the host to
-                # stop it, so there is no need to replay host events here.
-                pass
+            if event is None:
+                # Empty / whitespace-only line (the warner already filtered these, but the
+                # return type permits None); nothing to replay.
+                continue
+            match event:
+                case FullDiscoverySnapshotEvent():
+                    # Reset maps -- this snapshot supersedes everything before it
+                    maps.reset()
+                    for agent in event.agents:
+                        _record_agent(maps, agent)
+                case AgentDiscoveryEvent():
+                    _record_agent(maps, event.agent)
+                case AgentDestroyedEvent():
+                    maps.destroyed_agent_ids.add(str(event.agent_id))
+                case HostDiscoveryEvent() | HostDestroyedEvent() | HostSSHInfoEvent() | DiscoveryErrorEvent():
+                    # Host, SSH info, and error events are not relevant for agent->host
+                    # resolution. A host's continued existence (and its name) come from
+                    # provider.get_host when the caller fetches the host to stop it, so there
+                    # is no need to replay host events here. HostDestroyedEvent is intentionally
+                    # a no-op: any stale agent->host entries for a destroyed host are harmless
+                    # because the caller re-fetches the host before acting on it. Listing each
+                    # irrelevant type explicitly forces a typecheck decision if a new discovery
+                    # event is added to the union.
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
 
     return maps
 
@@ -972,6 +1012,10 @@ def _discovery_stream_tail_events_file(
     """Poll the events file for new content written by other mngr processes."""
     current_offset = initial_offset
     while not stop_event.is_set():
+        new_lines: list[str] = []
+        # Only the filesystem access is treated as transient and retryable. A read failure
+        # (file briefly missing, interrupted read) is logged and retried on the next poll;
+        # the offset is left unchanged so nothing is skipped.
         try:
             if events_path.exists():
                 file_size = events_path.stat().st_size
@@ -998,12 +1042,21 @@ def _discovery_stream_tail_events_file(
                         bytes_consumed,
                         len(new_lines),
                     )
-                    for file_line in new_lines:
-                        if stop_event.is_set():
-                            break
-                        _discovery_stream_emit_line(file_line, warner, emitted_event_ids, emit_lock, on_line)
+        except OSError as e:
+            logger.debug("Transient I/O error while tailing discovery events file: {}", e)
+            new_lines = []
+
+        # Emit outside the I/O guard. A failure here is not a transient I/O hiccup but a real
+        # bug (or a dead output stream); log it once and stop the tail rather than swallowing it
+        # and re-running every second forever (the broad retry the previous structure had).
+        try:
+            for file_line in new_lines:
+                if stop_event.is_set():
+                    break
+                _discovery_stream_emit_line(file_line, warner, emitted_event_ids, emit_lock, on_line)
         except Exception as e:
-            logger.opt(exception=e).error("Error while tailing discovery events file")
+            logger.opt(exception=e).error("Unrecoverable error emitting tailed discovery events; stopping tail")
+            return
         stop_event.wait(timeout=1.0)
 
 
@@ -1055,7 +1108,7 @@ def _emit_latest_cached_snapshot(
     if not events_path.exists():
         return 0, False
     snapshot_offset = find_latest_full_snapshot_offset(events_path)
-    if snapshot_offset <= 0:
+    if snapshot_offset is None:
         return events_path.stat().st_size, False
     consumed_offset = _emit_lines_from_offset(
         events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
@@ -1085,15 +1138,21 @@ def tail_discovery_events_file(
     emit_lock = Lock()
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     # Emit from the latest full snapshot on disk so a consumer attaching mid-stream
-    # is populated immediately. ``find_latest_full_snapshot_offset`` returns 0 when
-    # the file is absent or holds no snapshot yet *and* when the snapshot is the very
-    # first line; reading from that offset covers all three (the dedup set keeps a
-    # later real snapshot from double-emitting), so unlike ``run_discovery_stream``'s
+    # is populated immediately. ``find_latest_full_snapshot_offset`` returns ``None``
+    # when the file is absent or holds no snapshot yet, and a real byte offset (which
+    # may be 0 when the snapshot is the very first line) otherwise; reading from offset
+    # 0 in the ``None`` case covers reading the whole file (the dedup set keeps a later
+    # real snapshot from double-emitting), so unlike ``run_discovery_stream``'s
     # writer-side fast path we never skip an offset-0 snapshot.
     if events_path.exists():
         snapshot_offset = find_latest_full_snapshot_offset(events_path)
         initial_offset = _emit_lines_from_offset(
-            events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line
+            events_path,
+            snapshot_offset if snapshot_offset is not None else 0,
+            warner,
+            emitted_event_ids,
+            emit_lock,
+            on_line,
         )
     else:
         initial_offset = 0
@@ -1146,8 +1205,10 @@ def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext) -> None:
                 source_name="discovery_poll",
                 provider_name=provider_name,
             )
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as emit_error:
+            # The error event is the only structured record of the original failure for the
+            # event-stream consumer (minds); if even that write fails, do not swallow it silently.
+            logger.opt(exception=emit_error).warning("Failed to emit discovery error event")
 
 
 def run_discovery_stream(
@@ -1216,7 +1277,16 @@ def run_discovery_stream(
         # and tracking its own offset, and dedup via emitted_event_ids covers any overlap.
         if events_path.exists():
             snapshot_offset = find_latest_full_snapshot_offset(events_path)
-            _emit_lines_from_offset(events_path, snapshot_offset, warner, emitted_event_ids, emit_lock, on_line)
+            # The sync just wrote a snapshot, so one normally exists; fall back to the
+            # file start if for some reason it does not.
+            _emit_lines_from_offset(
+                events_path,
+                snapshot_offset if snapshot_offset is not None else 0,
+                warner,
+                emitted_event_ids,
+                emit_lock,
+                on_line,
+            )
 
     # Phase 4: periodically re-poll (unfiltered) and write full snapshots
     try:

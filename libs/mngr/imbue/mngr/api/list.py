@@ -519,7 +519,7 @@ def _list_agents_batch(
                 continue
 
             provider = provider_map.get(host_ref.provider_name)
-            if not provider:
+            if provider is None:
                 exception = ProviderInstanceNotFoundError(host_ref.provider_name)
                 if params.error_behavior == ErrorBehavior.ABORT:
                     raise exception

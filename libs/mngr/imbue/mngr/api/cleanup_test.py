@@ -372,14 +372,13 @@ def test_execute_cleanup_stop_on_online_host(
 # --- Error path tests ---
 
 
-def test_execute_cleanup_destroy_agent_not_found_on_host_treated_as_destroyed(
+@pytest.mark.allow_warnings(match=r"was reported by discovery but is absent from host")
+def test_execute_cleanup_destroy_agent_not_found_on_host_recorded_as_already_absent(
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """When the agent is not found on the host during destroy, it is treated as already destroyed.
-
-    Covers the case where the agent has already been removed from the host.
-    """
+    """An agent that list_agents reported but that is absent from the live host is recorded as
+    already-absent, not counted as a successful destroy (which would be a false success)."""
     # Create an AgentDetails that references the real local host but with a
     # non-existent agent ID so the host won't find it during destroy.
     agent_details = make_test_agent_details(
@@ -396,8 +395,8 @@ def test_execute_cleanup_destroy_agent_not_found_on_host_treated_as_destroyed(
         error_behavior=ErrorBehavior.CONTINUE,
     )
 
-    # Agent is treated as already destroyed (graceful degradation).
-    assert AgentName("cleanup-not-found-agent") in result.destroyed_agents
+    assert AgentName("cleanup-not-found-agent") in result.already_absent_agents
+    assert result.destroyed_agents == []
     assert result.stopped_agents == []
     assert result.errors == []
 

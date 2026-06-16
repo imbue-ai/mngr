@@ -18,6 +18,7 @@ from imbue.mngr.api.testing import FakeAgent
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.api.testing import SyncTestContext
 from imbue.mngr.api.testing import has_uncommitted_changes
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -456,13 +457,13 @@ def remote_pull_ctx(tmp_path: Path) -> SyncTestContext:
     )
 
 
-def test_rsync_from_remote_without_ssh_info_raises_assertion(
+def test_rsync_from_remote_without_ssh_info_raises_host_connection_error(
     remote_pull_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
 ) -> None:
     (remote_pull_ctx.agent_dir / "file.txt").write_text("agent content")
 
-    with pytest.raises(AssertionError, match="SSH connection info"):
+    with pytest.raises(HostConnectionError, match="SSH connection info"):
         rsync_from_remote(
             remote_host=remote_pull_ctx.host,
             remote_path=_agent_src(remote_pull_ctx),

@@ -270,6 +270,27 @@ def test_load_base_state_from_history_handles_malformed_lines(temp_host_dir: Pat
     assert "Skipped corrupt JSONL line" in log_output.getvalue()
 
 
+def test_load_base_state_from_history_warns_and_skips_record_missing_state(temp_host_dir: Path) -> None:
+    """A full-state agent record missing required id/state is corrupt history: warn and skip it."""
+    events_path = get_observe_events_path(temp_host_dir)
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    valid_agent = make_test_agent_details(name="valid", state=AgentLifecycleState.RUNNING)
+    event = make_full_agent_state_event([valid_agent])
+    event_dict = event.model_dump(mode="json")
+    # Inject a structurally corrupt agent record (missing the required 'state' field).
+    event_dict["agents"] = list(event_dict["agents"]) + [{"id": "agent-corrupt"}]
+    with open(events_path, "w") as f:
+        f.write(json.dumps(event_dict, separators=(",", ":")) + "\n")
+
+    with capture_loguru(level="WARNING") as log_output:
+        tracked = load_base_state_from_history(temp_host_dir)
+
+    assert str(valid_agent.id) in tracked
+    assert "agent-corrupt" not in tracked
+    assert "missing required id/state" in log_output.getvalue()
+
+
 def test_load_base_state_from_history_silent_on_partial_last_line(temp_host_dir: Path) -> None:
     events_path = get_observe_events_path(temp_host_dir)
     events_path.parent.mkdir(parents=True, exist_ok=True)

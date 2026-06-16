@@ -345,6 +345,17 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
     emit_event("summary", event, OutputFormat.JSONL)
 
 
+def _get_all_provider_instances_with_warning(mngr_ctx: MngrContext) -> list[ProviderInstanceInterface]:
+    provider_result = get_all_provider_instances(mngr_ctx)
+    if provider_result.unavailable_provider_names:
+        logger.warning(
+            "Garbage collection is degraded: could not reach providers {}; their resources are not collected. "
+            "Re-run once those backends are reachable to avoid leaving orphaned resources.",
+            ", ".join(str(name) for name in provider_result.unavailable_provider_names),
+        )
+    return list(provider_result.instances)
+
+
 def _get_selected_providers(
     mngr_ctx: MngrContext, opts: GcCliOptions
 ) -> tuple[list[ProviderInstanceInterface], list[str]]:
@@ -357,7 +368,7 @@ def _get_selected_providers(
     their explicit request was not fully honored.
     """
     if opts.all_providers:
-        return list(get_all_provider_instances(mngr_ctx)), []
+        return _get_all_provider_instances_with_warning(mngr_ctx), []
 
     if opts.provider:
         providers = []
@@ -378,7 +389,7 @@ def _get_selected_providers(
                 skipped_errors.append(f"provider {name} is unavailable: {e}")
         return providers, skipped_errors
 
-    return list(get_all_provider_instances(mngr_ctx)), []
+    return _get_all_provider_instances_with_warning(mngr_ctx), []
 
 
 # Register help metadata for git-style help formatting

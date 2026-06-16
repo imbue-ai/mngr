@@ -385,6 +385,8 @@ class _ConnectTestResult:
     def __init__(self) -> None:
         self.execvp_calls: list[tuple[str, list[str]]] = []
         self.subprocess_call_args: list[list[str]] = []
+        # Set when connect_to_agent raised (e.g. a persistent connection failure after retries).
+        self.raised_error: MngrError | None = None
 
 
 def _run_connect_with_retries(
@@ -423,7 +425,10 @@ def _run_connect_with_retries(
         lambda cmd, args: result.execvp_calls.append((cmd, list(args))),
     )
 
-    connect_to_agent(agent, host, mngr_ctx, opts)
+    try:
+        connect_to_agent(agent, host, mngr_ctx, opts)
+    except MngrError as e:
+        result.raised_error = e
 
     return result
 
@@ -483,15 +488,18 @@ def test_connect_to_agent_remote_normal_exit_no_action(
     assert len(result.execvp_calls) == 0
 
 
-def test_connect_to_agent_remote_unknown_exit_code_no_action(
+@pytest.mark.allow_warnings(match=r"^SSH connection failed")
+def test_connect_to_agent_remote_unknown_exit_code_raises_after_exhaustion(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that connect_to_agent does not exec into anything on unexpected SSH exit codes."""
+    """A persistent non-zero, non-signal SSH exit takes no destroy/stop action and, once retries are
+    exhausted, raises rather than returning silently (which would look like a clean disconnect)."""
     result = _run_connect_to_agent(local_provider, temp_mngr_ctx, monkeypatch, ssh_exit_code=255)
 
     assert len(result.execvp_calls) == 0
+    assert result.raised_error is not None
 
 
 # =========================================================================
@@ -517,6 +525,8 @@ def test_connect_to_agent_retries_on_ssh_failure(
     # 1 initial attempt + 2 retries = 3 total calls
     assert len(result.subprocess_call_args) == 3
     assert len(result.execvp_calls) == 0
+    # All attempts failed with a non-signal exit code, so the call ultimately raises.
+    assert result.raised_error is not None
 
 
 def test_connect_to_agent_no_retry_on_normal_exit(

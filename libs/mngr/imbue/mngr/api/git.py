@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from enum import auto
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -34,6 +35,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
 from imbue.mngr.hosts.common import build_ssh_transport_command
@@ -375,7 +377,8 @@ def _handle_uncommitted_changes(
             logger.debug("Clobbering uncommitted changes")
             git_ctx.git_reset_hard(path)
             return False
-    raise MngrError(f"Unhandled UncommittedChangesMode: {uncommitted_changes}")
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @contextmanager
@@ -448,7 +451,8 @@ def _build_git_url_and_env(
     # GIT_SSH_COMMAND); ssh is optional, so surface a clear error if it's absent.
     SSH.require()
     ssh_info = remote_host.get_ssh_connection_info()
-    assert ssh_info is not None, "Remote host must provide SSH connection info"
+    if ssh_info is None:
+        raise HostConnectionError(f"Remote host {remote_host.id} did not provide SSH connection info")
     known_hosts_file = get_ssh_known_hosts_file(remote_host)
     url = _build_ssh_git_url(ssh_info, remote_path)
     env: dict[str, str] = {**os.environ, "GIT_SSH_COMMAND": _build_ssh_transport_args(ssh_info, known_hosts_file)}

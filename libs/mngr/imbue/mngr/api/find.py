@@ -638,8 +638,8 @@ def resolve_to_started_host_and_running_agent(
 
     Raises :class:`UserInputError` when the host is offline or the agent
     is stopped and ``allow_auto_start`` is False. Raises
-    :class:`RuntimeError` if the agent was found during discovery but is
-    missing on the live host.
+    :class:`AgentStateInconsistencyError` if the agent was found during discovery
+    but is missing on the live host.
     """
     agent, online_host = resolve_to_started_host_and_agent(host_ref, agent_ref, allow_auto_start, mngr_ctx)
     ensure_agent_started(agent, online_host, is_start_desired=allow_auto_start)

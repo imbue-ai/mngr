@@ -40,7 +40,7 @@ def main() -> None:
         print(f"Baseline FDs: {base}")
 
         print("\n--- Test 1: Reuse same providers (no leak expected) ---")
-        providers = get_all_provider_instances(mngr_ctx, None)
+        providers = get_all_provider_instances(mngr_ctx, None).instances
         test_base = count_real_fds()
         for i in range(1, 6):
             for p in providers:
@@ -52,7 +52,7 @@ def main() -> None:
         print("\n--- Test 2: Create new providers each time (leak expected) ---")
         test_base = count_real_fds()
         for i in range(1, 6):
-            fresh_providers = get_all_provider_instances(mngr_ctx, None)
+            fresh_providers = get_all_provider_instances(mngr_ctx, None).instances
             for p in fresh_providers:
                 p.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
             gc.collect()
@@ -62,7 +62,7 @@ def main() -> None:
         print("\n--- Test 3: Create new providers each time but DON'T discover ---")
         test_base = count_real_fds()
         for i in range(1, 6):
-            _fresh = get_all_provider_instances(mngr_ctx, None)
+            _fresh = get_all_provider_instances(mngr_ctx, None).instances
             gc.collect()
             current = count_real_fds()
             print(f"[{i}] FDs: {current} (delta: {current - test_base:+d})")

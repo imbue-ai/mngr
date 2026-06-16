@@ -1,7 +1,9 @@
 import atexit
 
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
@@ -170,18 +172,41 @@ def list_provider_names_to_load(
     return names
 
 
+class ProviderInstancesResult(FrozenModel):
+    """The provider instances that loaded, plus any that were skipped as unavailable.
+
+    ``instances`` holds every provider that constructed successfully.
+    ``unavailable_provider_names`` holds providers that raised
+    ``ProviderUnavailableError`` (backend unreachable, state UNKNOWN -- agents
+    managed by them may still exist). Because this means the instance set is
+    *incomplete*, callers that operate on it as if it were authoritative (e.g.
+    ``mngr gc``) should surface the names so the user knows the run was degraded
+    against an unreachable backend. Providers skipped as ``ProviderEmptyError``
+    (provably empty -- nothing there) are NOT reported here, since dropping them
+    loses nothing.
+    """
+
+    instances: tuple[BaseProviderInstance, ...] = Field(
+        default=(), description="Provider instances that constructed successfully"
+    )
+    unavailable_provider_names: tuple[ProviderInstanceName, ...] = Field(
+        default=(),
+        description="Providers skipped because they were unreachable (ProviderUnavailableError); the set is degraded",
+    )
+
+
 def get_all_provider_instances(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None = None,
     reset_caches: bool = False,
-) -> list[BaseProviderInstance]:
+) -> ProviderInstancesResult:
     """Get all available provider instances.
 
     If provider_names is provided, only returns providers matching those names,
     allowing skipping expensive initialization of providers that won't be used.
 
-    Returns configured providers plus default instances for all registered backends,
-    excluding:
+    Returns a :class:`ProviderInstancesResult` carrying the configured providers
+    plus default instances for all registered backends, excluding:
     - Backends disabled via --disable-plugin
     - Provider instances with is_enabled=False in their config
     - Backends not in enabled_backends list (if the list is non-empty)
@@ -194,27 +219,36 @@ def get_all_provider_instances(
     - Provider instances that declare themselves unreachable at construction
       time (by raising ``ProviderUnavailableError``). The backend's state is
       unknown in this case, but for ``mngr gc`` we still want to keep going
-      against the providers we *can* reach.
+      against the providers we *can* reach. Unlike the empty case, these are
+      reported in ``unavailable_provider_names`` so callers can surface that
+      the result is incomplete rather than treating a partial set as complete.
 
     Raises MngrError if ANY provider fails to instantiate for a reason other
     than ``ProviderEmptyError`` / ``ProviderUnavailableError``. Callers that want
     to tolerate per-provider instantiation errors should use
     ``list_provider_names_to_load``.
     """
-    providers: list[BaseProviderInstance] = []
+    instances: list[BaseProviderInstance] = []
+    unavailable_provider_names: list[ProviderInstanceName] = []
     for name in list_provider_names_to_load(mngr_ctx, provider_names):
         try:
-            providers.append(get_provider_instance(name, mngr_ctx))
+            instances.append(get_provider_instance(name, mngr_ctx))
         except ProviderEmptyError as e:
             logger.debug("Skipping provider {} (empty -- nothing to list): {}", name, e)
             continue
         except ProviderUnavailableError as e:
             logger.debug("Skipping provider {} (unavailable): {}", name, e)
+            unavailable_provider_names.append(name)
             continue
 
     if reset_caches:
-        for provider in providers:
+        for provider in instances:
             provider.reset_caches()
 
-    logger.trace("Loaded {} total provider instances", len(providers))
-    return providers
+    logger.trace(
+        "Loaded {} total provider instances ({} unavailable)", len(instances), len(unavailable_provider_names)
+    )
+    return ProviderInstancesResult(
+        instances=tuple(instances),
+        unavailable_provider_names=tuple(unavailable_provider_names),
+    )

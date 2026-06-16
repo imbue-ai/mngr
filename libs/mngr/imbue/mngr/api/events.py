@@ -1,4 +1,3 @@
-import hashlib
 import json
 import queue
 import tempfile
@@ -333,8 +332,7 @@ def _record_from_event_data(data: Mapping[str, Any], stripped_line: str, source_
 
     event_id = data.get("event_id", "")
     if not event_id:
-        # Generate deterministic fallback from line content
-        event_id = "hash-" + hashlib.sha256(stripped_line.encode()).hexdigest()[:24]
+        raise MalformedJsonlLineError(f"Missing required 'event_id' field in event JSON: {stripped_line[:200]!r}")
 
     # The source_hint (derived from the file path) is always authoritative.
     # If the event JSON contains a different source, we correct it and record

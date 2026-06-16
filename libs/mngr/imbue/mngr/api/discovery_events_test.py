@@ -30,6 +30,7 @@ from imbue.mngr.api.discovery_events import discovered_host_from_agent_details
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_agent_discovered
 from imbue.mngr.api.discovery_events import emit_discovery_error_event
+from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.api.discovery_events import emit_host_discovered
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
@@ -272,6 +273,29 @@ def test_build_ssh_info_from_host_returns_none_for_local_host() -> None:
     assert result is None
 
 
+class _FakeHostNoAgents:
+    """Online-host stub that reports no agents, so its provider cannot be inferred."""
+
+    def __init__(self) -> None:
+        self.id = HostId.generate()
+
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        return []
+
+
+def test_emit_discovery_events_for_host_skips_when_provider_unknown(temp_config: MngrConfig) -> None:
+    """With no provider passed and no agents to infer from, skip emitting rather than fabricating 'unknown'."""
+    host = cast(OnlineHostInterface, _FakeHostNoAgents())
+
+    with capture_loguru(level="WARNING") as log_output:
+        emit_discovery_events_for_host(temp_config, host)
+
+    # No host event should have been written -- a fabricated 'unknown' provider would poison the stream.
+    events_path = get_discovery_events_path(temp_config)
+    assert not events_path.exists() or "HOST_DISCOVERED" not in events_path.read_text()
+    assert "provider could not be determined" in log_output.getvalue()
+
+
 def test_extract_agents_and_hosts_deduplicates_hosts() -> None:
     host_id = HostId.generate()
     provider_name = ProviderInstanceName("local")
@@ -509,17 +533,36 @@ def test_resolve_provider_names_recovers_after_schema_mismatch(temp_mngr_ctx: Mn
 # === find_latest_full_snapshot_offset Tests ===
 
 
-def test_find_latest_full_snapshot_offset_returns_zero_when_no_file(tmp_path: Path) -> None:
-    assert find_latest_full_snapshot_offset(tmp_path / "nonexistent.jsonl") == 0
+def test_find_latest_full_snapshot_offset_returns_none_when_no_file(tmp_path: Path) -> None:
+    assert find_latest_full_snapshot_offset(tmp_path / "nonexistent.jsonl") is None
 
 
-def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_config: MngrConfig) -> None:
+def test_find_latest_full_snapshot_offset_returns_none_when_no_full_events(temp_config: MngrConfig) -> None:
     # Write only agent events
     emit_agent_discovered(temp_config, make_test_discovered_agent())
     emit_agent_discovered(temp_config, make_test_discovered_agent())
 
     events_path = get_discovery_events_path(temp_config)
-    assert find_latest_full_snapshot_offset(events_path) == 0
+    # None (not 0) distinguishes "no snapshot" from "snapshot at offset 0".
+    assert find_latest_full_snapshot_offset(events_path) is None
+
+
+def test_find_latest_full_snapshot_offset_returns_zero_for_snapshot_at_start(tmp_path: Path) -> None:
+    """A snapshot that is the first line sits at offset 0; that is a real snapshot, not 'absent'."""
+    events_path = tmp_path / "events.jsonl"
+    full_first = (
+        '{"timestamp":"2026-01-01T00:00:00Z","type":"DISCOVERY_FULL","event_id":"evt-x",'
+        '"source":"mngr/discovery","agents":[],"hosts":[]}'
+    )
+    agent_after = (
+        '{"timestamp":"2026-01-02T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-y",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    events_path.write_text(f"{full_first}\n{agent_after}\n")
+
+    offset = find_latest_full_snapshot_offset(events_path)
+
+    assert offset == 0
 
 
 def test_find_latest_full_snapshot_offset_warns_on_mid_file_corruption(tmp_path: Path) -> None:
@@ -563,6 +606,7 @@ def test_find_latest_full_snapshot_offset_finds_last_full_event(temp_config: Mng
 
     events_path = get_discovery_events_path(temp_config)
     offset = find_latest_full_snapshot_offset(events_path)
+    assert offset is not None
 
     # Read from the offset -- should get the second full event and the last agent event
     with open(events_path) as f:

@@ -371,12 +371,16 @@ def test_parse_event_line_valid_json_with_all_fields() -> None:
     assert record.original_source is None
 
 
-def test_parse_event_line_missing_event_id_generates_hash() -> None:
+def test_parse_event_line_missing_event_id_raises() -> None:
+    """A missing event_id is treated as upstream corruption, symmetric with timestamp.
+
+    Backfilling a content hash made dedup unreliable: two reads of the same logical
+    line whose whitespace differs would hash differently (double-emit), while two
+    distinct events that serialize identically would collapse into one (drop).
+    """
     line = '{"timestamp":"2026-03-01T12:00:00Z","type":"test","source":"messages"}'
-    record = parse_event_line(line, source_hint="messages")
-    assert record is not None
-    assert record.event_id.startswith("hash-")
-    assert len(record.event_id) > 10
+    with pytest.raises(MalformedJsonlLineError, match="event_id"):
+        parse_event_line(line, source_hint="messages")
 
 
 def test_parse_event_line_missing_source_uses_hint() -> None:
