@@ -1,5 +1,7 @@
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
+from imbue.mngr.plugin_catalog import RequiredPackagesGate
 from imbue.mngr.plugin_catalog import SignalCheck
+from imbue.mngr.plugin_catalog import SignalGate
 from imbue.mngr.plugin_catalog import UNPUBLISHED_PACKAGES
 from imbue.mngr.plugin_catalog import check_signal
 from imbue.mngr.plugin_catalog import get_all_cataloged_entry_point_names
@@ -26,11 +28,13 @@ def test_catalog_contains_expected_basic_entry_points() -> None:
 
 
 def test_catalog_entries_sharing_signal_use_same_instance() -> None:
-    """Entries that share a signal should reference the exact same object."""
+    """Entries that share a signal should reference the exact same SignalCheck object."""
     claude_entry = get_catalog_entry("claude")
     fixme_entry = get_catalog_entry("fixme_fairy")
     assert claude_entry is not None and fixme_entry is not None
-    assert claude_entry.signal is fixme_entry.signal
+    assert isinstance(claude_entry.gate, SignalGate)
+    assert isinstance(fixme_entry.gate, SignalGate)
+    assert claude_entry.gate.signal is fixme_entry.gate.signal
 
 
 def test_base_usage_plugin_is_recommended_independent() -> None:
@@ -54,7 +58,8 @@ def test_agent_usage_providers_require_agent_and_base_usage() -> None:
         entry = get_catalog_entry(entry_point)
         assert entry is not None, entry_point
         assert entry.tier == PluginTier.DEPENDENT
-        assert set(entry.requires_packages) == {agent_package, "imbue-mngr-usage"}
+        assert isinstance(entry.gate, RequiredPackagesGate), entry_point
+        assert set(entry.gate.packages) == {agent_package, "imbue-mngr-usage"}
 
 
 # =============================================================================

@@ -199,6 +199,17 @@ def test_build_source_cel_context_no_sessions_has_empty_list_and_all_none_aggreg
     assert ctx["api_cost"]["total_cost_usd"] is None
 
 
+def test_build_source_cel_context_raises_when_window_key_collides_with_reserved_field() -> None:
+    """A writer-chosen window key that shadows a reserved source-level field must error, not clobber."""
+    snapshot = UsageSnapshot(
+        source_name="claude",
+        updated_at=900,
+        windows={"api_cost": WindowSnapshot(used_percentage=42.0, resets_at=15400, window_seconds=18000)},
+    )
+    with pytest.raises(MngrError, match="api_cost"):
+        build_source_cel_context(snapshot, now=1000)
+
+
 # =============================================================================
 # wait_for_usage
 # =============================================================================

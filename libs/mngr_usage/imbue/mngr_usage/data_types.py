@@ -7,6 +7,7 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import PluginConfig
 
 # Discovery convention shared by the reader (``api``) and the destroy-time
@@ -260,6 +261,33 @@ class SessionCostRecord(FrozenModel):
     last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
 
 
+class UsageEvent(FrozenModel):
+    """One raw event dict parsed and validated into the shape the walkers consume.
+
+    Produced by ``_parse_usage_event`` (in ``api``); a parsed event always has a
+    usable ``timestamp_unix`` and non-empty ``session_id`` (both are drop
+    conditions in the parser). The walkers read every other field off this typed
+    surface instead of re-doing ``event.get(...)`` + ``isinstance`` guards, which
+    keeps the cross-strategy invariant intact: windows can only be read off a
+    parsed event, so the session_id requirement filters windows exactly as it
+    filters sessions.
+    """
+
+    timestamp_unix: int = Field(description="Event timestamp as a Unix timestamp.")
+    session_id: str = Field(description="Writer-supplied session id (always non-empty on a parsed event).")
+    event_id: str | None = Field(default=None, description="Per-event id, when the writer emitted one.")
+    message_id: str | None = Field(default=None, description="Per-message id for session-incremental sources.")
+    cost: CostSnapshot | None = Field(default=None, description="Parsed cost block, or None when absent/malformed.")
+    tokens: TokenSnapshot | None = Field(
+        default=None, description="Parsed tokens block, or None when absent/malformed."
+    )
+    windows: dict[str, WindowSnapshot] = Field(
+        default_factory=dict, description="Parsed rate_limits payload (empty when absent)."
+    )
+    model: str | None = Field(default=None, description="Canonical '<provider>/<model>', or None.")
+    cost_mode_hint: CostMode | None = Field(default=None, description="Writer-declared cost_mode hint, or None.")
+
+
 @overload
 def _sum_optional(values: list[int | None]) -> int | None: ...
 
@@ -283,6 +311,54 @@ def _sum_optional(values: list[int | None] | list[float | None]) -> int | float 
     """
     present = [v for v in values if v is not None]
     return sum(present) if present else None
+
+
+@overload
+def add_optional(left: int | None, right: int | None) -> int | None: ...
+
+
+@overload
+def add_optional(left: float | None, right: float | None) -> float | None: ...
+
+
+@pure
+def add_optional(left: int | float | None, right: int | float | None) -> int | float | None:
+    """Add two optional numbers, treating None as 'missing' (None + None stays None).
+
+    A present value on either side wins (a None on the other side counts as
+    zero), matching ``_sum_optional``'s 'how much have I spent' stance where a
+    single missing sub-field doesn't black-hole the whole sum.
+    """
+    if left is None and right is None:
+        return None
+    return (left or 0) + (right or 0)
+
+
+@overload
+def sub_optional(current: int | None, baseline: int | None) -> int | None: ...
+
+
+@overload
+def sub_optional(current: float | None, baseline: float | None) -> float | None: ...
+
+
+@pure
+def sub_optional(current: int | float | None, baseline: int | float | None) -> int | float | None:
+    """Single-field clamped subtraction for cost-delta computation.
+
+    Treats a missing baseline as zero so the first reading in a series just
+    gets its own value. A missing current field stays None (no delta to
+    report). Negative deltas are clamped to zero defensively -- they shouldn't
+    occur within a cumulative series but if a writer ever emits an out-of-order
+    pair we'd rather show 0 than a misleading negative spend.
+
+    Distinct from ``add_optional`` because subtraction clamps at zero and treats
+    a None ``current`` as 'no delta', not as a zero operand.
+    """
+    if current is None:
+        return None
+    delta = current - (baseline if baseline is not None else 0)
+    return delta if delta >= 0 else type(current)(0)
 
 
 def _aggregate_cost(records: tuple[SessionCostRecord, ...]) -> CostSnapshot:

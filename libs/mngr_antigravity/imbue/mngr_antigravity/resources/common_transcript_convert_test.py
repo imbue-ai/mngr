@@ -116,6 +116,36 @@ def test_code_action_error_status_sets_is_error(tmp_path: Path) -> None:
     assert result["is_error"] is True
 
 
+def test_code_action_with_non_string_content_is_dropped(tmp_path: Path) -> None:
+    # A CODE_ACTION whose content is JSON null (key present, value null) carries no
+    # usable output and would crash _truncate; it is dropped rather than emitted as
+    # an empty tool_result.
+    in_f, out_f = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(
+        in_f,
+        [
+            _event(
+                conv_id="c1",
+                step_index=1,
+                source="MODEL",
+                type_="PLANNER_RESPONSE",
+                tool_calls=[{"name": "run_command", "args": {}}],
+            ),
+            {
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "CODE_ACTION",
+                "status": "DONE",
+                "created_at": "2026-05-21T07:00:00Z",
+                "_mngr_conv_id": "c1",
+                "content": None,
+            },
+        ],
+    )
+    common_transcript_convert.convert(str(in_f), str(out_f))
+    assert [e for e in _events(out_f) if e["type"] == "tool_result"] == []
+
+
 def test_code_action_without_preceding_tool_call_is_dropped(tmp_path: Path) -> None:
     in_f, out_f = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     _write(in_f, [_event(conv_id="c1", step_index=2, source="MODEL", type_="CODE_ACTION", content="orphan")])

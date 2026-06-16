@@ -530,7 +530,10 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     if sub_latest is not None:
         subscription_line = _format_cost_line(
             mode_label="subscription cost",
-            mode_suffix=" (imputed)",
+            # "imputed" already marks it informational; add "estimated" when the
+            # dollars were token-derived rather than harness-reported (mirrors the
+            # api line and the JSON/CEL is_estimated flag).
+            mode_suffix=" (imputed, estimated)" if model.is_subscription_cost_estimated else " (imputed)",
             aggregate_cost=model.subscription_cost,
             session_count=model.subscription_session_count,
             since_seconds=model.since_seconds,
@@ -980,6 +983,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
         result = wait_for_usage(
             poll_fn=lambda: gather_usage_snapshots(
                 mngr_ctx,
+                now=int(time.time()),
                 include_filters=include_filters,
                 exclude_filters=exclude_filters,
                 provider_names=provider_names,
@@ -989,6 +993,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
             until_filters=until_programs,
             timeout_seconds=timeout_seconds,
             interval_seconds=interval_seconds,
+            now_fn=lambda: int(time.time()),
         )
     except KeyboardInterrupt:
         logger.debug("Received keyboard interrupt")

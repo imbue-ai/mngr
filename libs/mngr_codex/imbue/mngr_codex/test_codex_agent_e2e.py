@@ -73,6 +73,7 @@ class _CodexReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = False
     asserts_usage = False
+    native_session_preserved_relpaths = ("plugin/codex/home/sessions",)
 
     def unavailable_reason(self) -> str | None:
         if _CODEX_BIN is None or _MNGR_BIN is None or not _REAL_AUTH.exists():
@@ -124,11 +125,7 @@ class _CodexReleaseProfile(AgentReleaseProfile):
 
 
 @pytest.mark.release
-# The agent runs in tmux; the autouse setup_test_mngr_env fixture gives the test its own
-# isolated tmux server (the resource guard requires this marker for any tmux use).
 @pytest.mark.tmux
-# The arc's destroy step preserves transcripts to the local preserved/ dir, which rsyncs
-# the transcript directories off the (local) host (the resource guard requires this marker).
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
 def test_codex_agent_full_lifecycle(tmp_path: Path) -> None:

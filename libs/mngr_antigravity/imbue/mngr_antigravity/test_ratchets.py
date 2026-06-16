@@ -61,7 +61,11 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(0))
+    # The two allowed catches are in common_transcript_convert.py, a stdlib-only
+    # resource script that converts a live-appended JSONL transcript stream: a
+    # truncated trailing line caught mid-write is expected and benign (it re-reads
+    # complete on the next poll), so it is skipped silently rather than logged.
+    rc.check_silent_decode_error_catches(_DIR, snapshot(2))
 
 
 # --- Import style ---

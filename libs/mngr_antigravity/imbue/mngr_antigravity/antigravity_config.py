@@ -73,6 +73,19 @@ _GEMINI_DIR_NAME: str = ".gemini"
 _ANTIGRAVITY_CLI_DIR_NAME: str = "antigravity-cli"
 _SETTINGS_FILENAME: str = "settings.json"
 
+# agy's native resumable conversation store: per-conversation SQLite files at
+# ``antigravity-cli/conversations/<conv_id>.db`` (the dir ``agy --conversation
+# <id>`` resumes from). Preserved on destroy so the agent can be resumed/adopted.
+_CONVERSATIONS_DIR_NAME: str = "conversations"
+
+# The conversation-store dir as a POSIX path relative to the per-agent ``$HOME`` root
+# (i.e. under ``$HOME/.gemini/antigravity-cli/``). Public so the plugin can join it with
+# the home's state-dir-relative path to form the preserved-item rel_path without importing
+# the private dir-name constants above.
+CONVERSATIONS_DIR_RELATIVE_TO_HOME: str = "/".join(
+    (_GEMINI_DIR_NAME, _ANTIGRAVITY_CLI_DIR_NAME, _CONVERSATIONS_DIR_NAME)
+)
+
 # File token agy writes at login (``ChainedAuth``: keyring-first, file-fallback;
 # on Linux -- mngr's real runtime -- the file is the native store). mngr
 # symlinks/copies this from the user's real home into each per-agent home so the
@@ -94,6 +107,11 @@ _HOOKS_CONFIG_RELATIVE: tuple[str, ...] = ("config", "hooks.json")
 def get_antigravity_cli_dir(home: Path) -> Path:
     """Return ``<home>/.gemini/antigravity-cli`` (agy's CLI-mode app-data dir)."""
     return home / _GEMINI_DIR_NAME / _ANTIGRAVITY_CLI_DIR_NAME
+
+
+def get_antigravity_conversations_dir(home: Path) -> Path:
+    """Return ``<home>/.gemini/antigravity-cli/conversations`` (agy's resumable store dir)."""
+    return get_antigravity_cli_dir(home) / _CONVERSATIONS_DIR_NAME
 
 
 def get_antigravity_settings_path(home: Path) -> Path:

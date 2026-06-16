@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr_usage.api import aggregate_session_incremental
+from imbue.mngr_usage.api import parse_usage_events
 from imbue.mngr_usage.data_types import CostProvenance
 
 _NOW = 2_800_000_000
@@ -45,7 +46,9 @@ def _event(
 
 
 def _aggregate(events: list[dict[str, Any]]):
-    return aggregate_session_incremental("opencode", {"agent-1": events}, since_seconds=_SINCE, now=_NOW)
+    return aggregate_session_incremental(
+        "opencode", {"agent-1": parse_usage_events(events, "opencode")}, since_seconds=_SINCE, now=_NOW
+    )
 
 
 def test_session_total_is_the_sum_over_its_messages() -> None:

@@ -64,16 +64,15 @@ convert_new_events() {
         return
     fi
 
-    # Count output lines before/after so we can report how many events the
-    # converter appended without it having to write anything to stdout.
-    local before_count
-    before_count=$(wc -l < "$OUTPUT_FILE" 2>/dev/null || echo 0)
-
     local convert_stderr
     convert_stderr=$(mktemp)
-    _INPUT_FILE="$INPUT_FILE" \
+    # The converter prints the count of appended events to stdout; capture it
+    # here so it never reaches this watcher's stdout (which would surface in the
+    # agent's pane). Genuine errors go to stderr.
+    local result
+    result=$(_INPUT_FILE="$INPUT_FILE" \
         _OUTPUT_FILE="$OUTPUT_FILE" \
-        python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true
+        python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
     # The read-modify-write is done; drop the lock before the (lock-free)
     # logging below so a concurrent pass can proceed immediately.
@@ -84,9 +83,7 @@ convert_new_events() {
     fi
     rm -f "$convert_stderr"
 
-    local after_count
-    after_count=$(wc -l < "$OUTPUT_FILE" 2>/dev/null || echo 0)
-    local converted=$((after_count - before_count))
+    local converted="${result:-0}"
     if [ "$converted" -gt 0 ] 2>/dev/null; then
         log_info "Converted $converted new event(s) -> events/claude/common_transcript/events.jsonl"
     fi

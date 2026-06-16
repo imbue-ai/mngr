@@ -16,8 +16,6 @@ are genuinely usage-specific:
 
 from __future__ import annotations
 
-from typing import Any
-
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
@@ -25,6 +23,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_usage.api import aggregate_session_incremental
+from imbue.mngr_usage.data_types import UsageEvent
 from imbue.mngr_usage.data_types import UsageSnapshot
 
 # Gate marker the lifecycle extension checks (existsSync) to decide whether to
@@ -53,7 +52,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
 @hookimpl
 def aggregate_usage_source(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     since_seconds: int,
     now: int,
 ) -> UsageSnapshot | None:

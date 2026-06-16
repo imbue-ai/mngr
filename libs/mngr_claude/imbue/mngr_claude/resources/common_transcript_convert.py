@@ -12,8 +12,10 @@ uuid, so re-processing the same input never produces duplicate output.
 
 Invoked as ``python3 common_transcript_convert.py`` with the input/output paths
 passed via the ``_INPUT_FILE`` / ``_OUTPUT_FILE`` environment variables that
-common_transcript.sh sets; it writes nothing to stdout (the shell reports how
-many events were appended by diffing the output file's line count). Split out of
+common_transcript.sh sets. Malformed or null lines are dropped silently; only an
+uncaught exception writes to stderr, which the shell reports as a convert error
+(the count of appended events is printed to stdout for common_transcript.sh to
+capture). Split out of
 the shell script (it used to be an inline ``python3`` heredoc) so the logic is
 lintable, type-checked, and unit-testable directly rather than only through a
 subprocess.
@@ -22,7 +24,6 @@ subprocess.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from typing import Any
 from typing import Union
@@ -100,8 +101,7 @@ def _load_existing_ids(output_file: str) -> set[str]:
                 continue
             try:
                 ids.add(json.loads(line)["event_id"])
-            except (json.JSONDecodeError, KeyError) as exc:
-                logging.warning("skipping unreadable common-transcript output line: %s", exc)
+            except (json.JSONDecodeError, KeyError):
                 continue
     return ids
 
@@ -126,8 +126,7 @@ def convert(input_file: str, output_file: str) -> int:
                 continue
             try:
                 raw = json.loads(line)
-            except json.JSONDecodeError as exc:
-                logging.warning("skipping malformed claude transcript line: %s", exc)
+            except json.JSONDecodeError:
                 continue
 
             event_type = raw.get("type", "")
@@ -144,7 +143,12 @@ def convert(input_file: str, output_file: str) -> int:
                 if event_id in existing_ids:
                     continue
 
-                message = raw.get("message", {})
+                raw_message = raw.get("message")
+                if not isinstance(raw_message, dict):
+                    # A null/missing message carries no usable content -- drop the
+                    # line rather than emit an empty event or crash.
+                    continue
+                message = raw_message
                 content_blocks = message.get("content", [])
                 model = message.get("model", "unknown")
                 stop_reason = message.get("stop_reason")
@@ -212,7 +216,12 @@ def convert(input_file: str, output_file: str) -> int:
 
             # -- user messages (may contain text, tool results, or both) --
             elif event_type == "user":
-                message = raw.get("message", {})
+                raw_message = raw.get("message")
+                if not isinstance(raw_message, dict):
+                    # A null/missing message carries no usable content -- drop the
+                    # line rather than emit an empty event or crash.
+                    continue
+                message = raw_message
                 content = message.get("content")
 
                 # Emit user text message if there is actual user text
@@ -320,6 +329,4 @@ def convert(input_file: str, output_file: str) -> int:
 
 
 if __name__ == "__main__":
-    # The caller (common_transcript.sh) tracks how many events were appended by
-    # diffing the output file's line count, so nothing is written to stdout here.
-    convert(os.environ["_INPUT_FILE"], os.environ["_OUTPUT_FILE"])
+    print(convert(os.environ["_INPUT_FILE"], os.environ["_OUTPUT_FILE"]))
