@@ -111,6 +111,7 @@ def _write_release_settings(settings_dir: Path, *, terminate_on_shutdown: bool =
         # Disable other remote providers so the create-host preflight (and
         # ``mngr list``) doesn't trip on them looking for credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
         "\n[providers.gcp]\nis_enabled = false\n"
         "\n[providers.vultr]\nis_enabled = false\n"
         "\n[providers.ovh]\nis_enabled = false\n"
