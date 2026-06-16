@@ -69,10 +69,30 @@ if [ -n "$conv_id" ]; then
     printf '%s' "$conv_id" > "$root_file"
 fi
 
+# Shared common-transcript helpers: mngr_common_transcript_flush forces a
+# synchronous pass of the raw streamer + common-transcript converter so the
+# WAITING signal can't outrun them (see below and the shared library header).
+# Sourced defensively (no set -e here): the lib is provisioned by
+# Host._ensure_shared_shell_libs, but a missing lib must never disrupt agy's
+# statusLine loop.
+if [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh" ]; then
+    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_common_transcript_lib.sh
+    source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+fi
+
 # Busy = any state that is not a known not-working state. Denylist so any
 # current/future busy state (working, ...) keeps the agent RUNNING.
 case "$agent_state" in
     idle | initializing | authenticating | "")
+        # Flush the transcript pipeline so a consumer that harvests the final
+        # message from the common transcript on the WAITING transition (e.g.
+        # Catalyst's mngr_runner) can't outrun the converter. Only on the
+        # busy->idle edge (marker still present from a prior busy sample), not
+        # on every idle/startup sample: that bounds the synchronous conversion
+        # to once per turn, right as the turn ends.
+        if [ -e "$marker_file" ] && command -v mngr_common_transcript_flush >/dev/null 2>&1; then
+            mngr_common_transcript_flush
+        fi
         rm -f "$marker_file"
         ;;
     *)

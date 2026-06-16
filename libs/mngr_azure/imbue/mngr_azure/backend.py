@@ -14,7 +14,6 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
@@ -24,15 +23,12 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
@@ -939,64 +935,16 @@ class AzureProvider(TagMirrorVpsProvider):
         """
         return self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) == VpsInstanceStatus.HALTED
 
-    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the host's persisted agent records, on-volume when reachable else from the external store.
+    def _offline_agent_dicts_for(self, host_id: HostId, instance: Mapping[str, Any] | None = None) -> list[dict]:
+        """Read a stopped host's agent records from the external store (Blob bucket or VM tag mirror).
 
-        Bypasses the ``OfflineCapableVpsProvider`` tag fallback (which would
-        ignore the bucket) by going straight to the SSH-only ``VpsProvider``
-        path, then falling back to ``_state_store`` (Blob bucket or VM tags).
+        Overrides the base tag/metadata reconstruction so a bucket-mode host --
+        whose agents live in the bucket, not in VM tags -- still surfaces its
+        agents offline. ``_state_store`` selects bucket vs tags; the ``instance``
+        argument is unused (the store is keyed by ``host_id``).
         """
-        try:
-            return VpsProvider.list_persisted_agent_data_for_host(self, host_id)
-        except HostNotFoundError:
-            return self._state_store.list_agent_records(host_id)
-
-    def discover_hosts_and_agents(
-        self,
-        cg: ConcurrencyGroup,
-        include_destroyed: bool = False,
-    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Add DEALLOCATED VMs (which the SSH-based base discovery misses) from tags.
-
-        A deallocated VM keeps its static public IP but its OS is down, so the base
-        SSH sweep can't reach it; here we reconstruct those hosts and their agents
-        from the external store (Blob bucket when configured, else VM tags). Mirrors
-        ``AwsProvider.discover_hosts_and_agents``. Drives the offline loop off
-        ``self._state_store`` rather than the ``OfflineCapableVpsProvider``
-        tag-only loop, so the SSH-only base sweep is invoked directly.
-        """
-        result = VpsProvider.discover_hosts_and_agents(self, cg, include_destroyed=include_destroyed)
-        online_host_ids = {ref.host_id for ref in result}
-        for instance in self._list_instances_cached():
-            try:
-                host_ref = self._offline_discovered_host_from_instance(instance)
-            except ValueError as e:
-                logger.opt(exception=e).warning(
-                    "Skipping VM {} in offline discovery: malformed mngr host identity",
-                    instance.get("id"),
-                )
-                continue
-            if host_ref is None or host_ref.host_id in online_host_ids:
-                continue
-            # Only reconstruct genuinely-down VMs: a not-online mngr VM that is
-            # still ``running`` (e.g. SSH transiently failed, mid-boot, firewall)
-            # must not be surfaced as STOPPED. The per-VM HALTED check covers
-            # stopped/deallocated and their in-flight transitions.
-            if not self._is_instance_offline(instance):
-                continue
-            # An operational store/lookup failure (transient Blob error, or duplicate
-            # mngr-host-id tags) propagates: the api/list discovery wrapper attributes
-            # it to this provider and honors the caller's --on-error (ABORT/CONTINUE)
-            # plus the AgentObserver UNKNOWN convention. Only the malformed-tag data
-            # error above is skipped per-VM (it is unrecoverable for that VM).
-            agent_dicts = self._state_store.list_agent_records(host_ref.host_id)
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_data in agent_dicts:
-                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
-                if ref is not None:
-                    agent_refs.append(ref)
-            result[host_ref] = agent_refs
-        return result
+        del instance
+        return self._state_store.list_agent_records(host_id)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Return an offline host, reconstructing a deallocated VM's record offline.

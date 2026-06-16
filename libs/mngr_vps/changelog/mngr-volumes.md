@@ -13,3 +13,5 @@ Unified the AWS/Azure/GCP offline-capable providers' shared machinery into `mngr
 - New intermediate `TagMirrorVpsDockerProvider` holds the tag-based host/agent reconstruction shared by AWS and Azure (the only per-provider knob is `_host_name_tag_key`); GCP keeps its metadata-based reconstruction by extending `OfflineCapableVpsDockerProvider` directly.
 
 - New `testing.seed_stopped_host_record` helper, shared by the provider test suites.
+
+Further unified the offline discovery/listing path: `OfflineCapableVpsDockerProvider.discover_hosts_and_agents` and `list_persisted_agent_data_for_host` now read a stopped host's agent records through a single `_offline_agent_dicts_for(host_id, instance=None)` hook. The default reassembles from the instance's own tags/metadata; a provider with an external store overrides it to read the store by `host_id`. This lets AWS/Azure drop their duplicated discover/list overrides while keeping bucket-aware behavior, with no change for tag/metadata-only providers (e.g. GCP).

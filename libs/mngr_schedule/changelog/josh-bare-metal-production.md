@@ -1,1 +1,0 @@
-Marked the `test_schedule_run_local_deployed_trigger` integration test `@pytest.mark.flaky` with a longer per-test timeout. The test executes a deployed trigger's `run.sh`, which shells out to `mngr`; that subprocess startup is slow and variable under CI load and intermittently exceeded the default 10s pytest-timeout. No change to `mngr_schedule` runtime behavior.

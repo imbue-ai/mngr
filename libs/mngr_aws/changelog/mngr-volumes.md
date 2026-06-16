@@ -19,3 +19,5 @@ Added a Lima-style offline `host_dir`, **on by default** (new `is_host_dir_synce
 - Offline `host_dir` reads use the operator's credentials (no instance identity needed to read). When the feature is on but a host's instance has no attached IAM profile (so it never pushed its `host_dir`), `get_volume_for_host` logs a clear warning pointing at `mngr aws prepare --use-offline-host-dir yes` rather than silently returning an empty volume.
 
 Internal refactor (no behavior change): `AwsProvider` now extends the shared `TagMirrorVpsDockerProvider` and consumes the shared `state_keys` layout, generic `BucketHostStateStore`, and hoisted instance-lookup / path helpers, rather than carrying AWS-local copies. The duplicate-`mngr-host-id` ambiguous-match error is now phrased provider-neutrally.
+
+Internal refactor (no behavior change): `AwsProvider` no longer overrides `discover_hosts_and_agents` / `list_persisted_agent_data_for_host`; it now implements only the shared `_offline_agent_dicts_for` hook (reading the S3 bucket or EC2 tag mirror via `_state_store`). Validated end-to-end on real EC2 (create / stop / list-while-stopped / start).

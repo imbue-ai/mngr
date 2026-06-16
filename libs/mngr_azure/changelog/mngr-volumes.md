@@ -13,3 +13,5 @@ Offline `host_dir` (spec part c, on by default): a deallocated VM's `host_dir` i
 Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write` + `Microsoft.Authorization/roleAssignments/write` (Owner or User Access Administrator). When offline `host_dir` is requested for a host whose VM has no attached managed identity, mngr logs a non-fatal diagnostic pointing at `mngr azure prepare --use-offline-host-dir yes` instead of returning an empty volume.
 
 Internal refactor (no behavior change): `AzureProvider` now extends the shared `TagMirrorVpsDockerProvider` and consumes the shared `state_keys` layout, generic `BucketHostStateStore`, and hoisted instance-lookup / path helpers, rather than carrying Azure-local copies.
+
+Internal refactor (no behavior change): `AzureProvider` no longer overrides `discover_hosts_and_agents` / `list_persisted_agent_data_for_host`; it now implements only the shared `_offline_agent_dicts_for` hook (reading the Blob bucket or VM tag mirror via `_state_store`). Validated end-to-end on a real Azure VM (create / stop / list-while-stopped / start).
