@@ -4,6 +4,44 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+`just bake-pool-host-dev` now passes `--skip-deferred-install-wait` so dev pool bakes don't wait the extra few minutes for the deferred Playwright/apt install before stopping the services agent.
+
+Replaced the `just bake-pool-host` recipe with `just bake-pool-host-dev` (bake from a working tree -- best-effort branch label) and `just bake-pool-host-prod` (clone an exact FCT tag -- strict), reflecting that the imbue_cloud pool bake now derives the stamped repo identity from its source rather than from hand-typed `--attributes`. The `minds-justfile` skill documents the dev-vs-production distinction and how to set the create form's repository for a fast-path match.
+
+Added a `just minds-install` recipe that installs the minds desktop client's node deps (electron, etc.) using the Node version pinned in `apps/minds/.nvmrc` (selected via `select_node_version.sh`), so the install no longer fails with `ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's default node has drifted off the pin. `just minds-start`'s "not installed yet" hint now points at `just minds-install` (instead of a raw `cd apps/minds && pnpm install`, which skipped the node selection and hit the engine check).
+
+Added a design doc (`blueprint/ovh-baremetal-slices/`) for extending the imbue_cloud pool to allocate "slices" (lima/QEMU VMs) on rented OVH bare-metal servers as an alternative to ordering OVH VPSes, including the data model, admin lifecycle, connector release fork, and a recorded pricing gotcha (catalog base price excludes RAM/storage upgrades).
+
+Added a refactor design doc (`blueprint/mngr-imbue-cloud-module-layers/`) proposing a layered sub-package structure for the `mngr_imbue_cloud` plugin (with an `import-linter` ordering contract), isolating the slice/bare-metal subsystem and the pool-bake code into their own layers and decomposing the oversized `instance.py`.
+
+Added an `import-linter` "mngr_imbue_cloud layers contract" (root `pyproject.toml`) and a `test_meta_ratchets.py` test that enforces it, as part of restructuring the `mngr_imbue_cloud` plugin into layered sub-packages.
+
+Bumped the per-test timeout on the `test_cli_docs_are_up_to_date` meta-ratchet test: the enlarged imbue_cloud CLI surface (the new `admin server` + slice commands) made full CLI-doc regeneration exceed the default 10s pytest-timeout in the slower offload sandbox.
+
+Fixed the per-PR changelog enforcement check, which was passing vacuously in CI.
+
+The check previously ran as an acceptance test (`test_pr_has_changelog_entry`) inside the offload Modal sandbox, but the sandbox does a fresh `git init` (so `main == HEAD`) and never fetches `origin`, so its base-branch diff always came back empty and the check passed no matter what. Any PR could merge without changelog entries.
+
+The enforcement now lives in a dedicated CI gate, `scripts/check_changelog_entries.py` (run via the `check-changelog` GitHub Actions job and the `just check-changelog` recipe), which computes the changed-file set against the real base branch on the orchestrator where a base ref actually exists. It refuses to run with a loud non-zero exit if it cannot resolve a diff base distinct from HEAD, so it can never again pass vacuously. The old sandbox-bound acceptance test has been removed.
+
+Expanded CLAUDE.md flaky-test guidance: first investigate why a test is flaky and make it more robust if possible; if it is correct but fundamentally needs more time, bump that test's timeout (but avoid unreasonably long timeouts -- prefer leaving it marked flaky for infrastructure-level flukes).
+
+## GCP provider support: root-level changes
+
+- Top-level coverage configuration adds `--cov=imbue.mngr_gcp` so the new package contributes coverage data.
+- `scripts/make_cli_docs.py` adds `gcp` to `SECONDARY_COMMANDS` so the `mngr gcp` operator command group gets generated docs (required by `help_formatter_test`).
+- `uv.lock` updated to add the new `imbue-mngr-gcp` workspace package and its dependencies (`google-cloud-compute`, `google-auth`, and their transitive deps).
+
+- `.mngr/settings.toml` gains a `gcp` create-template (`mngr create -t gcp`) and a shared `[providers.gcp]` block, the analogue of the existing `modal` template. Like the `aws` template it builds via the `mngr_vps_docker` backend (`--file=` + `.` context) on depot's remote builders (`builder = "DEPOT"`), so it needs `DEPOT_TOKEN` and `GH_TOKEN` at create time. The provider defaults to `us-west1`/`us-west1-a` on an `e2-standard-2` VM; per-developer `allowed_ssh_cidrs` stays in the gitignored `.mngr/settings.local.toml` and the SSH firewall is created once via `mngr gcp prepare`.
+
+Updated the agent-plugin-parity spec to record that `opencode` now implements the `waiting_reason` field generator (online), and documented that the `@opencode-ai/sdk` type stubs are out of sync with the shipped opencode binary on the permission events (the stubs say `permission.updated`/`permissionID`; the running 1.16.2 server emits `permission.asked`/`requestID`).
+
+Documented the cross-plugin `waiting_reason` parity picture and implemented it for codex: the agent-plugin-parity spec now classifies each agent type -- implemented (claude, codex), doable-but-unimplemented (opencode, whose event bus exposes `permission.asked`/`permission.replied`), blocked-on-upstream (antigravity, which prompts but emits no event while blocked), and inapplicable (pi, which has no tool-approval prompt at all) -- while codex now implements both `PERMISSIONS` and `END_OF_TURN`.
+
+Verified live against codex 0.139.0 that the `PermissionRequest` hook fires and blocks while the approval dialog is open (and clears on `PostToolUse`), and recorded two corrections: codex has no `PostToolUseFailure` event (cleanup is `PostToolUse` + `Stop` only) and `PermissionRequest` payloads carry no `tool_use_id`.
+
 ## 2026-06-14
 
 Added `scripts/extract_antigravity_proto_schema.py`, a developer tool that recovers

@@ -4,6 +4,69 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+Regenerated the bundled CLI reference docs to include the new `mngr imbue_cloud admin server pricing` command (per-slice OVH bare-metal pricing table).
+
+Regenerated the `imbue_cloud` CLI reference docs to include the new `admin server` command group (list / register / allocate-slice / set-status) added for the OVH bare-metal slices feature.
+
+- `mngr create --format json` (and `--format jsonl`) now also reports the created host's name and SSH connection (`ssh_user` / `ssh_host` / `ssh_port`), plus an `outer_ssh_port` when the provider exposes a separate outer/management sshd (e.g. an OVH-slice's VM-root port reached via a box-forwarded port). Previously only `agent_id` / `host_id` were emitted. A new `HostInterface.get_outer_ssh_port` hook (default `None`) backs this.
+
+- `VpsDockerProvider.record_outer_host_key` pins an outer (VPS-root) sshd host key in the provider's known_hosts -- used when operating on a VPS the provider did not order itself (e.g. the imbue_cloud rebuild on a leased host) so its outer connections pass strict host-key checking.
+
+- `mngr create --format json` now also reports the agent SSH endpoint's on-disk private key path (`ssh_key_path`), so pool-bake tooling can run post-bake SSH steps against the host without a second `mngr list` round-trip.
+
+Added a `--window` (`-w`) option to `mngr capture` for capturing a non-primary tmux window in the agent's session, by index (e.g. `--window 1`) or name. Without it, capture still reads the agent's primary window as before.
+
+Added a shared shell library `mngr_common_transcript_lib.sh`, provisioned to every
+agent's `commands/` dir alongside `mngr_log.sh` and `mngr_transcript_lib.sh` (via
+`Host._ensure_shared_shell_libs`). It centralizes the common-transcript converter
+primitives shared across agent plugins:
+
+- the convert lock (a coarse mkdir-based mutex serializing the converter's
+read-modify-write so the background daemon and an on-demand `--single-pass` flush
+can't append duplicate events), and
+
+- the turn-end flush (one synchronous `--single-pass` of the raw streamer + common
+converter, in pipeline order), used by agent turn-end hooks so a WAITING-signal
+consumer can't outrun the converter.
+
+Centralized the Claude Code CLI presence check. `mngr extras` status (`_claude_plugin_status`) and the `is_claude_installed` test helper now both defer to the canonical `CLAUDE.is_available()` system-dependency check instead of re-implementing `shutil.which("claude")` inline, so the binary name and lookup logic live in one place.
+
+Also removed a duplicate subprocess-error tuple: `extras.py` now imports the shared `SUBPROCESS_ERRORS` from `imbue.mngr.utils.deps` (promoted from the previously private `_SUBPROCESS_ERRORS`) rather than defining its own copy.
+
+Fixed a regression in the e2e test fixture that wrote a malformed `settings.local.toml`
+(a duplicated `type = "claude"` key under `[commands.create]`). The duplicate key made
+every `mngr` invocation in the e2e/tutorial release suite fail to parse its config and
+exit non-zero, cascading into a large block of release-test failures.
+
+Also updated two e2e tutorial tests (`test_config_set_unknown_key_fails`,
+`test_config_set_rejects_unknown_key`) that assumed the project `settings.toml` does not
+exist until a command writes it. The e2e fixture now intentionally pre-seeds that file
+with the pytest opt-in key, so these tests now verify that a rejected `config set` leaves
+the file unchanged (and never writes the bad key) rather than asserting the file is absent.
+
+All test-only changes; they do not change `mngr`'s runtime behavior.
+
+## GCP provider integration
+
+- `mngr create` CLI markdown docs regenerated to include the new `gcp` provider's build-args help (`--gcp-zone`, `--gcp-machine-type`, `--gcp-image`, `--gcp-spot`, `--git-depth`), and the `mngr gcp` operator command group docs added (`docs/commands/secondary/gcp.md`), covering both `mngr gcp prepare` and `mngr gcp cleanup`.
+- `gcp` added to `_REMOTE_BACKEND_NAMES` in `providers/registry.py` (alongside `aws`/`vultr`/`modal`/`imbue_cloud`). The GCP backend resolves Application Default Credentials at build time, and `google.auth.default()` probes the GCE metadata server as its last fallback, which blocks for seconds in non-GCE environments without credentials. Marking it remote means `load_local_backend_only` (the test default) skips it, so provider-enumerating tests no longer build a default GCP provider and hang on that probe.
+- `gcp` and `ovh` added to the install-wizard plugin catalog (`plugin_catalog.py`) as INDEPENDENT provider backends, so `mngr` offers them during plugin installation alongside `aws`/`vultr`/`modal`. (`ovh` was already published but had been missing from the catalog.)
+- New `ssh_utils.wait_for_expected_host_key` (and the `parse_openssh_public_key_blob` helper): polls a server's live SSH host key until it matches a known expected key, then returns. Used by the GCP provider, whose `startup-script` installs the host key only after sshd has already booted with a random one; waiting before the strict-checked connection avoids a host-key-mismatch abort without resorting to TOFU.
+
+CLI docs (`libs/mngr/docs/commands/secondary/usage.md`, regenerated via `scripts/make_cli_docs.py`): reflect the `mngr usage` help-output regrouping and the `--max-age` -> `--stale-after` rename in `imbue-mngr-usage`. `--stale-after` and `--detail` now appear under a `## Display` section; `--since` and `--preserved/--no-preserved` now appear under `## Filtering` alongside the agent-filter flags. The old `## Other Options` section is gone. The rendered synopsis is updated to `mngr usage [--stale-after DURATION] [--detail] [--since DURATION] [--no-preserved] [COMMAND]`.
+
+`test_synopsis_lists_all_non_optout_flags` (in `libs/mngr/imbue/mngr/cli/help_formatter_test.py`): no longer silently skips commands whose synopsis is a placeholder like `[OPTIONS]`. Such commands' custom non-Common flags are now reported as missing from the synopsis (and the author must either enumerate them or add them to `_SYNOPSIS_OPTOUT_FLAGS`). Factored out a shared `_AGENT_FILTER_FLAGS` constant covering the 11 flags injected by `add_agent_filter_options`.
+
+`mngr connect`, `mngr gc`, `mngr list`, `mngr snapshot create`, `mngr snapshot list`, `mngr snapshot destroy`: replace placeholder `[OPTIONS]` synopses with enumerated ones. For `list`, behavior/input flags (`--stdin`, `--schema`, `--ids`, `--addrs`, `--fields`, `--sort`) are pulled to the front, followed by the standard filter set, with `--limit` and `--on-error` trailing. For `connect`, `[future]` flags (`--reconnect`, `--session-command`) are omitted -- they remain unimplemented stubs.
+
+`[future]`-flag detection: extract `_check_connect_future_options` in `connect.py` (mirroring `_check_create_future_options` / `_check_list_future_options` in `snapshot.py`) and pin every `[future]` flag with parametrized tests (`test_future_flags_raise_not_implemented_error` in `connect_test.py`; `test_snapshot_create_future_flags_raise_not_implemented_error` / `test_snapshot_list_future_flags_raise_not_implemented_error` in `snapshot_test.py`) that fail when any `[future]` flag stops raising `NotImplementedError`. The failure message tells the author to add the flag to its command's synopsis and delete the corresponding test case.
+
+CLI docs regenerated: `libs/mngr/docs/commands/primary/connect.md`, `libs/mngr/docs/commands/primary/list.md`, `libs/mngr/docs/commands/secondary/gc.md`, `libs/mngr/docs/commands/secondary/kanpan.md`.
+
+Added a shared `WaitingReason` enum (`imbue.mngr.primitives`) and a shared `classify_waiting_reason` rule (`imbue.mngr.hosts.common`) so agent plugins compute the `waiting_reason` field from one source of truth instead of each defining their own. The codex and claude plugins now import these instead of duplicating the enum and the gating logic, and use the existing `OnlineHostInterface.path_exists` for marker checks rather than a private file-existence helper.
+
 ## 2026-06-14
 
 - Changed: `mngr extras` status (`_print_extras_status`) now accepts an injectable `claude_status_fn` (mirroring the existing `status_fn` seam on the `_install_*` helpers), so its test can skip shelling out to the `claude` CLI. This removes the slow, variable Node-process startup that made `test_print_extras_status_runs_without_error` flaky under the offload timeout. Internal/test-only; default behavior is unchanged.

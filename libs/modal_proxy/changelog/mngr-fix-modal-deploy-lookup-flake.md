@@ -1,1 +1,0 @@
-Fixed a flake where looking up a Modal function immediately after deploying it could fail with `NotFoundError`. The post-deploy lookup (`DirectFunction.get_web_url`) now retries with backoff on `NotFoundError`, riding through the brief deploy-then-lookup propagation delay instead of failing immediately.

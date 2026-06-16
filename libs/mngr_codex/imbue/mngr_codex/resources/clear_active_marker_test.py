@@ -10,8 +10,9 @@ the marker -- the recompute keeps it present while any per-subagent file under
 a different session id (nested codex) leaves everything untouched, the no-root
 liveness fallback, the async case (subagent in flight keeps the marker through
 the root Stop), the reverse order, two-subagent gating, a concurrency smoke
-test, the lock stale-break, stdout silence, and loud failure on a missing state
-dir.
+test, the lock stale-break, the permissions_waiting safety-net clear (and that a
+nested session leaves it alone), stdout silence, and loud failure on a missing
+state dir.
 """
 
 from __future__ import annotations
@@ -82,6 +83,10 @@ def _marker(state_dir: Path) -> Path:
 
 def _root_active(state_dir: Path) -> Path:
     return state_dir / "codex_root_active"
+
+
+def _permissions_waiting(state_dir: Path) -> Path:
+    return state_dir / "permissions_waiting"
 
 
 def _set_root(state_dir: Path, session_id: str) -> None:
@@ -241,6 +246,30 @@ def test_concurrent_root_stop_and_last_subagent_stop_clears_marker(tmp_path: Pat
         assert clear_proc.wait() == 0
         assert stop_proc.wait() == 0
         assert not _marker(state_dir).exists(), "concurrent terminal events must not strand the marker"
+
+
+def test_root_stop_clears_stranded_permissions_waiting(tmp_path: Path) -> None:
+    """Safety net: a permissions_waiting marker left behind by a cancelled/denied
+    dialog (PostToolUse never ran) is cleared on the root's Stop, so the agent
+    can't report PERMISSIONS-WAITING forever."""
+    provision_commands_dir(tmp_path, _ALL_SCRIPTS)
+    _set_root(tmp_path, _ROOT_SESSION)
+    _root_active(tmp_path).touch()
+    _marker(tmp_path).touch()
+    _permissions_waiting(tmp_path).touch()
+    _clear(tmp_path, _ROOT_SESSION)
+    assert not _permissions_waiting(tmp_path).exists()
+
+
+def test_nested_session_stop_leaves_permissions_waiting(tmp_path: Path) -> None:
+    """A nested codex's Stop (a different session id) returns before the clear, so
+    it must not remove the root's permissions_waiting marker."""
+    provision_commands_dir(tmp_path, _ALL_SCRIPTS)
+    _set_root(tmp_path, _ROOT_SESSION)
+    _root_active(tmp_path).touch()
+    _permissions_waiting(tmp_path).touch()
+    _clear(tmp_path, _NESTED_SESSION)
+    assert _permissions_waiting(tmp_path).exists()
 
 
 def test_lock_stale_break_lets_hook_proceed(tmp_path: Path) -> None:
