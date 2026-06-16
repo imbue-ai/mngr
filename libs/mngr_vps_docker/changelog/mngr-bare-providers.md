@@ -31,9 +31,16 @@ realizer methods (`find_host_record`, `read_live_listing`, `is_placement_running
 reads the record from the fixed store path and runs the listing script directly
 on the VM. Behavior-preserving for Docker.
 
+`VpsHostConfig.container_name`/`volume_name` are now nullable so a bare host
+record (which has no container or Docker volume) is representable, and the
+agent-sshd wait now targets the realizer's endpoint port (the container port
+for Docker, port 22 for bare) instead of hard-coding the container port.
+
 Selecting `isolation=NONE` is still accepted by config but currently raises
-`BareIsolationNotYetSupportedError`: the realizer is implemented and unit-tested,
-but the bare idle-shutdown script and the cloud wiring (flipping the realizer
-selection, rejecting Docker-only inputs) are not done yet, so bare is not yet
-runnable end-to-end on aws/gcp/azure. No user-visible behavior changes for
+`BareIsolationNotYetSupportedError`. The realizer is fully implemented and
+unit-tested (placement, store, discovery, listing), but the cloud wiring
+remains: the bare idle-shutdown path (the aws/gcp/azure sentinel + systemd
+poweroff watcher assumes the Docker volume layout and needs bare-awareness),
+flipping the realizer selection, and rejecting Docker-only create inputs. So
+bare is not yet runnable end-to-end. No user-visible behavior changes for
 existing aws/gcp/azure/vultr/ovh/imbue_cloud providers.

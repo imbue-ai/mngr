@@ -1015,7 +1015,8 @@ class VpsDockerProvider(BaseProviderInstance):
         """Create the Host object, configure activity watching, and persist state."""
         # The container realizer always sets these; a later step makes the
         # corresponding ``VpsHostConfig`` fields nullable for bare records.
-        assert realized.container_name is not None and realized.volume_name is not None
+        # container_name/volume_name are None for a bare placement; the host
+        # record's config fields are nullable to represent that.
         container_name = realized.container_name
         volume_name = realized.volume_name
         host = self._create_host_object(host_id, name, vps_ip)
@@ -1110,10 +1111,15 @@ class VpsDockerProvider(BaseProviderInstance):
         """
 
     def _wait_for_container_sshd(self, vps_ip: str) -> None:
-        """Wait for sshd in the container to be reachable via the VPS's exposed port."""
+        """Wait for the agent's sshd to be reachable at the realizer's endpoint port.
+
+        Container realizer: the exposed container port; bare realizer: the VM's
+        own port 22. (The imbue_cloud slice provider overrides this to wait on a
+        dynamically forwarded port instead.)
+        """
         wait_for_sshd(
             hostname=vps_ip,
-            port=self.config.container_ssh_port,
+            port=self._realizer.agent_endpoint(vps_ip).port,
             timeout_seconds=self.config.ssh_connect_timeout,
         )
 

@@ -41,8 +41,10 @@ class VpsHostConfig(HostConfig):
     plan: str = Field(description="VPS plan (CPU/RAM specification)")
     start_args: tuple[str, ...] = Field(default=(), description="Docker run arguments for replay on snapshot restore")
     image: str | None = Field(default=None, description="Docker image used for the container")
-    container_name: str = Field(description="Docker container name on the VPS")
-    volume_name: str = Field(description="Docker volume name on the VPS")
+    container_name: str | None = Field(default=None, description="Docker container name on the VPS (None for bare)")
+    volume_name: str | None = Field(
+        default=None, description="Per-host unified docker volume name on the VPS (None for bare)"
+    )
     vps_ssh_key_id: str | None = Field(default=None, description="Provider SSH key ID (for cleanup on destroy)")
 
 
