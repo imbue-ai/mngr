@@ -350,6 +350,10 @@ def _make_subclassed_agent_with_flags(
     is_auto_approve: bool = False,
 ) -> AntigravityAgent:
     """Build a subclassed agent with the requested MngrContext flags set."""
+    # Skip the binary install-check (agy is not on the test host): these tests
+    # exercise the trust/provision flow, not install. Install is covered separately.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
