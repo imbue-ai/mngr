@@ -251,13 +251,14 @@ minds-tailwind:
   bash apps/minds/scripts/fetch_tailwind.sh
 
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
-# in FCT. Default FCT path is $HOME/project/forever-claude-template; override
-# by passing a positional arg. Run from this repo on the branch you want to
-# vendor (typically main); the recipe archives HEAD, replaces vendor/mngr/
-# contents with that snapshot, and commits in FCT. Does not push. Aborts if
-# FCT has any uncommitted changes -- resolve them first. The full release
-# flow (release branches, push, merge to main) is the release-minds skill.
-sync-vendor-mngr fct="$HOME/project/forever-claude-template":
+# in FCT. Default FCT path is $HOME/Developer/imbue/forever-claude-template;
+# override by passing a positional arg. Position the mngr checkout at the
+# exact commit you want to vendor first -- your release PR branch HEAD / the
+# verified release SHA, NOT blindly `main`, which can drift past it between
+# verification and merge. The recipe archives HEAD, replaces vendor/mngr/
+# with that snapshot, and commits in FCT. Does not push. Aborts if FCT has
+# uncommitted changes. Full release flow: apps/minds/docs/release.md.
+sync-vendor-mngr fct="$HOME/Developer/imbue/forever-claude-template":
     #!/bin/bash
     set -ueo pipefail
     fct="{{fct}}"

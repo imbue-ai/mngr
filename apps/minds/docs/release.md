@@ -53,18 +53,14 @@ For an iteration of the same version, skip. To bump: set `apps/minds/package.jso
 
 ### 3. Refresh FCT `vendor/mngr` from the green mngr SHA (FCT PR)
 
-On the FCT PR branch (cut from `origin/main`):
+On the FCT PR branch (cut from `origin/main`, clean tree), with the **mngr checkout positioned at the green SHA from step 2** (i.e. on the mngr release PR branch), run the sync recipe:
 
 ```bash
-export MNGR=/Users/weishi/Developer/imbue/mngr
-GREEN_MNGR_SHA=<green mngr SHA from step 2>
-cd /Users/weishi/Developer/imbue/forever-claude-template
-rm -rf vendor/mngr && mkdir -p vendor/mngr
-(cd "$MNGR" && git archive "$GREEN_MNGR_SHA") | tar -x -C vendor/mngr
-git add -A && git commit -m "vendor/mngr: refresh from mngr $(git -C "$MNGR" rev-parse --short "$GREEN_MNGR_SHA")" && git push
+just sync-vendor-mngr /Users/weishi/Developer/imbue/forever-claude-template
+cd /Users/weishi/Developer/imbue/forever-claude-template && git push
 ```
 
-`git archive` mirrors tracked files only (keep `apps/minds/`). If the new vendor changes an mngr API a consumer calls, fix that consumer in this same PR.
+`just sync-vendor-mngr` does `git archive HEAD` → FCT `vendor/mngr` (tracked files only; keep `apps/minds/`) and commits `Sync vendor/mngr to <branch> (<short>)`; it aborts if FCT is dirty and does not push. If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`), fix that consumer in this same PR.
 
 ### 4. Prove the pair green pre-merge
 
