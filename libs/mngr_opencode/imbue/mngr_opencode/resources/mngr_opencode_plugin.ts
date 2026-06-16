@@ -291,7 +291,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         model: providerId && modelId ? `${providerId}/${modelId}` : null,
         text,
         tool_calls: toolCalls,
-        stop_reason: message?.finish ?? null,
+        finish_reason: message?.finish ?? null,
         usage: null,
         conversation_id: sessionId,
         message_id: message.id,

@@ -1,0 +1,3 @@
+Aligned the common-transcript schema with the OpenTelemetry GenAI semantic conventions: the assistant record's `stop_reason` field is now `finish_reason` (the OTel term).
+
+Added an optional ordered `parts[]` field to assistant records (text and tool_call segments, modelled on the OTel message parts) that preserves the intra-turn interleaving of text and tool calls. It is populated only by emitters whose native format preserves that order (claude, pi-coding); the flat `text` + `tool_calls` remain the baseline every emitter fills. `mngr transcript` now renders `parts[]` in order when present, falling back to the flat fields otherwise.

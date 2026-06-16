@@ -183,7 +183,7 @@ def convert(input_file: str, output_file: str) -> int:
                                 "model": None,
                                 "text": text if isinstance(text, str) else "",
                                 "tool_calls": tool_calls,
-                                "stop_reason": None,
+                                "finish_reason": None,
                                 "usage": None,
                                 "conversation_id": conv_id,
                                 "step_index": step_index,

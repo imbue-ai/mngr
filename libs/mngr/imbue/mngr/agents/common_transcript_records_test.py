@@ -22,7 +22,7 @@ from imbue.mngr.agents.common_transcript_records import validate_common_transcri
 # (usage populated vs null, model "" vs str vs null, conversation_id/message_id
 # present only on some). The schema must accept every one.
 _VALID_RECORDS: dict[str, dict[str, Any]] = {
-    # claude: full assistant payload (model, stop_reason, populated usage).
+    # claude: full assistant payload (model, finish_reason, populated usage, ordered parts).
     "claude_assistant": {
         "timestamp": "2026-06-09T12:00:00Z",
         "type": "assistant_message",
@@ -32,7 +32,11 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "model": "claude-haiku-4-5",
         "text": "hello",
         "tool_calls": [{"tool_call_id": "t1", "tool_name": "bash", "input_preview": "echo hi"}],
-        "stop_reason": "end_turn",
+        "parts": [
+            {"type": "text", "content": "hello"},
+            {"type": "tool_call", "tool_call_id": "t1", "tool_name": "bash", "input_preview": "echo hi"},
+        ],
+        "finish_reason": "end_turn",
         "usage": {"input_tokens": 10, "output_tokens": 5},
     },
     "claude_tool_result": {
@@ -64,7 +68,7 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "model": None,
         "text": "ok",
         "tool_calls": [],
-        "stop_reason": None,
+        "finish_reason": None,
         "usage": None,
         "conversation_id": "conv-abc",
     },
@@ -87,7 +91,7 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "model": "opencode/deepseek-v4-flash-free",
         "text": "1\n2\n3",
         "tool_calls": [],
-        "stop_reason": None,
+        "finish_reason": None,
         "usage": None,
         "conversation_id": "ses_1",
         "message_id": "msg2",
@@ -103,7 +107,7 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "is_error": False,
         "message_id": "msg2",
     },
-    # pi-coding: populated usage, model as a plain string, NO stop_reason field at all.
+    # pi-coding: populated usage, model as a plain string, ordered parts, NO finish_reason field at all.
     "pi_user": {
         "timestamp": "2026-06-09T12:00:00Z",
         "type": "user_message",
@@ -121,6 +125,10 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "model": "claude-haiku-4-5",
         "text": "ACK",
         "tool_calls": [{"tool_call_id": "c1", "tool_name": "bash", "input_preview": "echo SEEDED"}],
+        "parts": [
+            {"type": "text", "content": "ACK"},
+            {"type": "tool_call", "tool_call_id": "c1", "tool_name": "bash", "input_preview": "echo SEEDED"},
+        ],
         "usage": {
             "input_tokens": 100,
             "output_tokens": 20,
@@ -138,7 +146,7 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "output": "SEEDED",
         "is_error": False,
     },
-    # codex: shape matches antigravity -- model/stop_reason/usage all null, no
+    # codex: shape matches antigravity -- model/finish_reason/usage all null, no
     # conversation_id/message_id.
     "codex_user": {
         "timestamp": "2026-06-09T12:00:00Z",
@@ -157,7 +165,7 @@ _VALID_RECORDS: dict[str, dict[str, Any]] = {
         "model": None,
         "text": "done",
         "tool_calls": [],
-        "stop_reason": None,
+        "finish_reason": None,
         "usage": None,
     },
     "codex_tool_result": {
@@ -189,10 +197,27 @@ def test_parsed_types_match_expected_classes() -> None:
 
 
 def test_assistant_optional_fields_default_when_absent() -> None:
-    # pi omits stop_reason entirely; it must default rather than fail.
-    parsed = parse_common_transcript_record(_VALID_RECORDS["pi_assistant"])
+    # codex omits parts entirely and reports finish_reason None; both must default rather than fail.
+    parsed = parse_common_transcript_record(_VALID_RECORDS["codex_assistant"])
     assert isinstance(parsed, AssistantMessageRecord)
-    assert parsed.stop_reason is None
+    assert parsed.finish_reason is None
+    assert parsed.parts is None
+
+
+def test_ordered_parts_round_trip_in_order() -> None:
+    # claude/pi carry an ordered parts[] preserving text/tool_call interleaving.
+    parsed = parse_common_transcript_record(_VALID_RECORDS["claude_assistant"])
+    assert isinstance(parsed, AssistantMessageRecord)
+    assert parsed.parts is not None
+    assert [p.type for p in parsed.parts] == ["text", "tool_call"]
+
+
+def test_unknown_part_type_is_rejected() -> None:
+    record = dict(_VALID_RECORDS["claude_assistant"])
+    # A reasoning part is not modelled yet; an unknown part type must be surfaced, not accepted.
+    record["parts"] = [{"type": "reasoning", "content": "secret"}]
+    error = validate_common_transcript_record(record)
+    assert error is not None and "parts" in error
 
 
 def test_unknown_extra_fields_are_tolerated() -> None:

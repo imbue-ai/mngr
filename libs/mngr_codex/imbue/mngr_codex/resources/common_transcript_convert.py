@@ -178,7 +178,7 @@ def convert(input_file: str, output_file: str) -> int:
                             "model": None,
                             "text": text,
                             "tool_calls": [],
-                            "stop_reason": None,
+                            "finish_reason": None,
                             "usage": None,
                         },
                     )

@@ -147,16 +147,31 @@ def _format_event_human(event: dict[str, Any]) -> str:
             return f"[{timestamp}] user:\n{content}"
 
         case "assistant_message":
-            text = event.get("text", "")
-            tool_calls = event.get("tool_calls", [])
-            parts: list[str] = []
-            if text:
-                parts.append(text)
-            for tc in tool_calls:
-                tool_name = tc.get("tool_name", "unknown")
-                preview = tc.get("input_preview", "")
-                parts.append(f"  -> {tool_name}({preview})")
-            body = "\n".join(parts) if parts else "(no content)"
+            lines: list[str] = []
+            ordered_parts = event.get("parts")
+            if isinstance(ordered_parts, list) and ordered_parts:
+                # An ordered parts[] preserves text/tool_call interleaving; prefer it.
+                for part in ordered_parts:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "text":
+                        content = part.get("content", "")
+                        if content:
+                            lines.append(content)
+                    elif part.get("type") == "tool_call":
+                        tool_name = part.get("tool_name", "unknown")
+                        preview = part.get("input_preview", "")
+                        lines.append(f"  -> {tool_name}({preview})")
+            else:
+                # Fall back to the flat text + tool_calls baseline.
+                text = event.get("text", "")
+                if text:
+                    lines.append(text)
+                for tc in event.get("tool_calls", []):
+                    tool_name = tc.get("tool_name", "unknown")
+                    preview = tc.get("input_preview", "")
+                    lines.append(f"  -> {tool_name}({preview})")
+            body = "\n".join(lines) if lines else "(no content)"
             return f"[{timestamp}] assistant:\n{body}"
 
         case "tool_result":

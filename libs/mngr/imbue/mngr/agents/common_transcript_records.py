@@ -18,10 +18,12 @@ slightly-off line is still shown rather than dropped.
 The schema is deliberately strict on the core contract every record and
 record-type must satisfy, but permissive on *optional* fields that legitimately
 vary by agent: a CLI that exposes token usage populates ``usage`` while one that
-does not leaves it ``null``/absent; ``model`` may be unknown. Unknown extra
-fields are allowed, so a plugin annotating its records with its own field (e.g.
-antigravity's and opencode's ``conversation_id``, opencode's ``message_id``) is
-forward-compatible. Adding a *new record type*, by contrast, means adding it
+does not leaves it ``null``/absent; ``model`` may be unknown; an emitter whose
+native format preserves intra-turn ordering carries an ordered ``parts`` array
+(text/tool_call segments, modelled on the OpenTelemetry GenAI message parts) while
+others omit it. Unknown extra fields are allowed, so a plugin annotating its records
+with its own field (e.g. antigravity's and opencode's ``conversation_id``, opencode's
+``message_id``) is forward-compatible. Adding a *new record type*, by contrast, means adding it
 here -- that is the point of a single source of truth.
 """
 
@@ -56,6 +58,30 @@ class ToolCall(_RecordModel):
     input_preview: str
 
 
+class TextPart(_RecordModel):
+    """An ordered text segment of an assistant turn (see :class:`AssistantMessageRecord.parts`)."""
+
+    type: Literal["text"]
+    content: str
+
+
+class ToolCallPart(_RecordModel):
+    """An ordered tool invocation of an assistant turn (see :class:`AssistantMessageRecord.parts`).
+
+    Field names match :class:`ToolCall` (the flat ``tool_calls`` list) so the record carries one
+    naming scheme. ``input_preview`` is a truncated preview, not the full arguments payload.
+    """
+
+    type: Literal["tool_call"]
+    tool_call_id: str
+    tool_name: str
+    input_preview: str
+
+
+# An ordered assistant-turn segment, modelled on the OpenTelemetry GenAI message ``parts``.
+AssistantPart = Annotated[TextPart | ToolCallPart, Field(discriminator="type")]
+
+
 class UserMessageRecord(_RecordModel):
     type: Literal["user_message"]
     timestamp: str
@@ -74,11 +100,16 @@ class AssistantMessageRecord(_RecordModel):
     text: str
     tool_calls: tuple[ToolCall, ...] = ()
     # Optional: varies by agent/provider. ``model`` may be unknown ("" or null);
-    # ``usage`` is populated only by CLIs that expose token counts; ``stop_reason``
-    # is absent on agents that do not report one (e.g. pi-coding).
+    # ``usage`` is populated only by CLIs that expose token counts; ``finish_reason``
+    # (the OTel GenAI term for the stop reason) is absent on agents that do not report
+    # one (e.g. pi-coding). ``parts`` carries the ordered text/tool_call interleaving of
+    # the turn and is present only for emitters whose native format preserves that order
+    # (claude, pi-coding); the others omit it and the flat ``text``/``tool_calls`` remain
+    # the baseline every emitter fills.
     model: str | None = None
     usage: Mapping[str, Any] | None = None
-    stop_reason: str | None = None
+    finish_reason: str | None = None
+    parts: tuple[AssistantPart, ...] | None = None
 
 
 class ToolResultRecord(_RecordModel):
