@@ -35,11 +35,14 @@ Both repos release from **`main`** via **two PRs that both target `main`** (one 
 |---|---|
 | Version string | `apps/minds/package.json` `version` |
 | Baked FCT tag | `apps/minds/imbue/minds/desktop_client/templates.py` `FALLBACK_BRANCH` |
-| Local checkouts | `/Users/weishi/Developer/imbue/{mngr,forever-claude-template}` |
+| `forever-claude-template` checkout | **set `$FCT_DIR`** to its absolute path (per-user, never committed; consumed by `just sync-vendor-mngr` in step 3) |
+| `mngr` monorepo checkout | wherever you cloned it — you run `just` / `git archive` from here |
 | Build / e2e CI | `.github/workflows/minds-launch-to-msg.yml` (`workflow_dispatch`) |
 | Traditional CI | `.github/workflows/ci.yml` (auto on push) |
 
-Export the imbue-org token for the whole session: `export GH_TOKEN=$(gh auth token --user weishi-imbue)`. Pre-flight any push with `gh api user --jq .login` → must print `weishi-imbue` (the keychain "active" account drifts between parallel agents).
+Set two env vars for the whole session (do this first — later steps assume both):
+- `export GH_TOKEN=$(gh auth token --user weishi-imbue)` — the imbue-org token. Pre-flight any push with `gh api user --jq .login` → must print `weishi-imbue` (the keychain "active" account drifts between parallel agents).
+- `export FCT_DIR=/abs/path/to/forever-claude-template` — your `forever-claude-template` checkout. `just sync-vendor-mngr` (step 3) reads it; no path is baked into the justfile because everyone's checkout is elsewhere. **An agent must set this itself before step 3.**
 
 ## Procedure
 
@@ -53,11 +56,15 @@ For an iteration of the same version, skip. To bump: set `apps/minds/package.jso
 
 ### 3. Refresh FCT `vendor/mngr` from the green mngr SHA (FCT PR)
 
-On the FCT PR branch (cut from `origin/main`, clean tree), with the **mngr checkout positioned at the green SHA from step 2** (i.e. on the mngr release PR branch), run the sync recipe:
+On the FCT PR branch (cut from `origin/main`, clean tree), with the **mngr checkout positioned at the green SHA from step 2** (i.e. on the mngr release PR branch), run the sync recipe.
+
+`just sync-vendor-mngr` needs to know where your `forever-claude-template` checkout lives. **No path is baked into the justfile** — everyone's checkout is somewhere different — so the recipe takes the path from the positional arg, else from a per-user `$FCT_DIR` env var. If you're an agent running this: **set `FCT_DIR` first** (export it in this shell / your agent env) so the recipe and the later steps can find FCT; it is per-user and never committed.
 
 ```bash
-just sync-vendor-mngr /Users/weishi/Developer/imbue/forever-claude-template
-cd /Users/weishi/Developer/imbue/forever-claude-template && git push
+export FCT_DIR=/abs/path/to/your/forever-claude-template   # once; per-user, never committed
+just sync-vendor-mngr                                       # uses $FCT_DIR
+# (or pass it explicitly, ignoring $FCT_DIR: just sync-vendor-mngr /abs/path/to/forever-claude-template)
+(cd "$FCT_DIR" && git push)
 ```
 
 `just sync-vendor-mngr` does `git archive HEAD` → FCT `vendor/mngr` (tracked files only; keep `apps/minds/`) and commits `Sync vendor/mngr to <branch> (<short>)`; it aborts if FCT is dirty and does not push. If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`), fix that consumer in this same PR.
