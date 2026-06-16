@@ -80,7 +80,7 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
     asserts_usage = False
     native_session_preserved_relpaths = ("plugin/antigravity/home/.gemini/antigravity-cli/conversations",)
     # After destroy, the harness creates a fresh agent in a new worktree that adopts the
-    # just-preserved conversation (via MNGR_ADOPT_SESSION) and asserts it recalls the secret.
+    # just-preserved conversation (via --adopt-session) and asserts it recalls the secret.
     adopts_preserved_session = True
 
     def adopt_session_arg(self, preserved_dir: Path) -> str:

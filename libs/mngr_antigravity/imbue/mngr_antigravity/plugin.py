@@ -88,7 +88,6 @@ transcript`` reads.
 from __future__ import annotations
 
 import importlib.resources
-import os
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -128,6 +127,7 @@ from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileType
@@ -251,14 +251,6 @@ _DARWIN_UNAME: Final[str] = "Darwin"
 # macOS" split. Mirrors ``_provision_playwright_cache`` -- another HOME-relative,
 # machine-shared resource symlinked into the per-agent home.
 _MACOS_KEYCHAINS_SUBPATH: Final[tuple[str, ...]] = ("Library", "Keychains")
-
-# Interim trigger seam for session adoption: when set, its value (a conversation
-# id or an absolute path to a conversations store / ``<id>.db`` file) is adopted
-# into the new agent at create time so ``agy --conversation`` resumes it. A
-# central ``--adopt-session`` CLI mixin (populating ``plugin_data["adopt_session"]``)
-# is being built separately; until it lands this env var is the only trigger.
-# Hardcoded (not imported from the test harness, which pulls in pytest).
-_ADOPT_SESSION_ENV_VAR: Final[str] = "MNGR_ADOPT_SESSION"
 
 # Glob suffixes for agy's per-conversation store files keyed by conversation id.
 # ``<id>.db`` is the current SQLite store (agy >= 1.0.4); ``<id>.pb`` is the
@@ -504,6 +496,7 @@ class AntigravityAgent(
     CliBackedAgentMixin,
     HasCommonTranscriptMixin,
     HasSessionPreservationMixin,
+    HasSessionAdoptionMixin,
     HasUnattendedModeMixin,
     HasPermissionPolicyMixin,
     HasAutoInstallMixin,
@@ -698,21 +691,28 @@ class AntigravityAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt an existing agy conversation so the new agent resumes its context.
+        """Adopt an existing agy conversation after provisioning so the new agent resumes its context."""
+        self.adopt_session(host, options, mngr_ctx)
 
-        The adopt argument (a conversation id or an absolute path to a
-        conversations store / ``<id>.db`` file) comes from
-        ``plugin_data["adopt_session"]`` if the future ``--adopt-session`` mixin
-        set it, else the ``MNGR_ADOPT_SESSION`` env-var seam. When present, the
-        resolved store is copied into this agent's antigravity home and the id is
-        written into the resume pointers (``root_conversation`` /
-        ``CONVERSATION_IDS_FILENAME``); ``assemble_command`` then resumes it via
-        ``agy --conversation``.
+    def adopt_session(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Adopt the conversation named by ``--adopt-session`` into this newly provisioned agent.
+
+        ``plugin_data["adopt_session"]`` is a tuple (the option is ``multiple=True``); agy
+        resumes a single conversation, so the LAST entry wins. The adopt argument (a
+        conversation id or an absolute path to a conversations store / ``<id>.db`` file) is
+        resolved, the matching store is copied into this agent's antigravity home, and the id
+        is written into the resume pointers (``root_conversation`` / ``CONVERSATION_IDS_FILENAME``);
+        ``assemble_command`` then resumes it via ``agy --conversation``.
         """
-        adopt_arg = options.plugin_data.get("adopt_session") or os.environ.get(_ADOPT_SESSION_ENV_VAR)
-        if not adopt_arg:
+        adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        if not adopt_args:
             return
-        self._adopt_session(host, adopt_arg)
+        self._adopt_session(host, adopt_args[-1])
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
         """Resolve, copy, and finalize an adopted agy conversation.
