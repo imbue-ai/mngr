@@ -34,3 +34,20 @@ def isolate_mind_tests(
 
     with isolate_git(monkeypatch), isolate_tmux_server(monkeypatch):
         yield
+
+
+@pytest.fixture
+def isolated_activation_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Strip every activation env var so tests opt in to a specific env explicitly.
+
+    The autouse ``isolate_mind_tests`` already points HOME (and the cwd) at
+    ``tmp_path``; this fixture layers on top by clearing the activation vars
+    that leak in from the operator's shell (``MINDS_ROOT_NAME``,
+    ``MODAL_PROFILE``) plus ``MODAL_CONFIG_PATH``, which would otherwise
+    redirect deploy-mode validation away from the test's ``~/.modal.toml``.
+    Returns ``tmp_path`` (== HOME) for tests that need to drop fixture files there.
+    """
+    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MODAL_PROFILE", raising=False)
+    monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
+    return tmp_path
