@@ -46,6 +46,7 @@ class _PiReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = True
     asserts_usage = True
+    native_session_preserved_relpaths = ("plugin/pi_coding/sessions",)
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("pi") is None or not os.environ.get("ANTHROPIC_API_KEY"):
@@ -97,6 +98,7 @@ class _PiReleaseProfile(AgentReleaseProfile):
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.rsync
 @pytest.mark.timeout(1500)
 def test_pi_agent_full_lifecycle(tmp_path: Path) -> None:
     run_agent_release_lifecycle(_PiReleaseProfile(), tmp_path)
