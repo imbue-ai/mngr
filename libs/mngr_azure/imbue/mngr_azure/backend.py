@@ -1,8 +1,6 @@
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -15,7 +13,6 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostNotFoundError
@@ -29,10 +26,8 @@ from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SnapshotId
 from imbue.mngr_azure import hookimpl
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureVpsClient
@@ -579,93 +574,26 @@ class AzureProvider(TagMirrorVpsProvider):
         return vps_ips
 
     # =========================================================================
-    # Deallocate/start (idle-pause + resume)
+    # Deallocate/start (idle-pause + resume) -- the base OfflineCapableVpsProvider
+    # owns the orchestration; here we supply the Azure-specific cloud-API hooks
+    # plus the static-IP rebind no-ops.
     # =========================================================================
 
-    def stop_host(
-        self,
-        host: HostInterface | HostId,
-        create_snapshot: bool = True,
-        timeout_seconds: float = 60.0,
-        stop_reason: HostState | None = None,
-    ) -> None:
-        """Stop the agent container *and* deallocate the Azure VM, halting compute billing.
-
-        The base ``VpsProvider.stop_host`` only stops the inner Docker
-        container, leaving the VM allocated and billing. This override additionally
-        *deallocates* the VM (NOT a mere OS shutdown, which on Azure leaves the VM
-        "Stopped (not deallocated)" still billing compute), so a paused Azure agent
-        costs only OS-disk storage; the disk and all state survive for
-        ``start_host``. ``create_snapshot`` is ignored. Mirrors
-        ``AwsProvider.stop_host``.
-        """
-        del create_snapshot
-        host_id = host.id if isinstance(host, HostInterface) else host
-        host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(self.name, host_id)
-        super().stop_host(
-            host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
-        )
-        # Push host_dir one final time while the VM is still reachable, so the
-        # offline copy in the bucket is current the moment it deallocates. The
-        # container is already stopped (super() above), so host_dir is quiesced.
-        self._trigger_final_host_dir_sync(host_id, host_record.vps_ip)
+    def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
         with log_span("Deallocating Azure VM"):
-            self.azure_client.deallocate_instance(host_record.config.vps_instance_id)
+            self.azure_client.deallocate_instance(instance_id)
 
-    def start_host(
-        self,
-        host: HostInterface | HostId,
-        snapshot_id: SnapshotId | None = None,
-    ) -> Host:
-        """Resume a deallocated Azure agent: start the VM, then its container.
-
-        A deallocated VM is located by its ``mngr-host-id`` tag (it is SSH-
-        unreachable). Azure allocates the public IP ``Static``, so the IP is
-        PRESERVED across deallocate/start and the SSH host keys persist on the OS
-        disk -- so, unlike AWS/GCP, no known_hosts rebind is needed. We just start
-        the VM, clear the idle sentinel and ``stop_reason``, and delegate the
-        container start to ``super()``.
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            raise HostNotFoundError(self.name, host_id)
-        instance_id = VpsInstanceId(instance["id"])
+    def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
         with log_span("Starting Azure VM"):
-            vps_ip = self.azure_client.start_instance(instance_id)
-        # The cached instance list predates the start (stale power state); drop it.
-        self._instances_cache = None
-        with log_span("Waiting for VPS SSH after start"):
-            self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
-        with self._make_outer_for_vps_ip(vps_ip) as outer:
-            host_store = self._realizer.open_host_store(outer, host_id)
-            record = host_store.read_host_record()
-            if record is None or record.config is None:
-                raise HostNotFoundError(self.name, host_id)
-            # Clear any stale idle sentinel so the freshly-resumed VM isn't
-            # immediately re-deallocated by the systemd path unit (belt-and-
-            # suspenders; the self-deallocate script also removes it when it fires).
-            outer.execute_idempotent_command(f"rm -f {self._idle_sentinel_path_on_outer(host_id)}")
-            certified = record.certified_host_data
-            updated_data = certified.model_copy_update(
-                to_update(certified.field_ref().stop_reason, None),
-                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
-            )
-            # vps_ip is unchanged (static IP), but write it back for robustness.
-            updated_record = record.model_copy_update(
-                to_update(record.field_ref().vps_ip, vps_ip),
-                to_update(record.field_ref().certified_host_data, updated_data),
-            )
-            host_store.write_host_record(updated_record)
-            # Mirror the resumed record to the external store (Blob bucket) so the
-            # offline view reflects the cleared stop_reason -- without this, offline
-            # reads report the just-resumed VM as STOPPED until the next mirror.
-            self._persist_host_record_externally(updated_record)
-        self._evict_cached_host(host_id)
-        self._host_record_cache[host_id] = updated_record
-        return super().start_host(host_id, snapshot_id)
+            return self.azure_client.start_instance(instance_id)
+
+    def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
+        """No-op: Azure's Static public IP is unchanged across deallocate/start, so the
+        create-time known_hosts entries stay valid -- no rebind is needed."""
+
+    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+        """No-op: Azure's Static IP means the known_hosts entry is unchanged across a
+        deallocate/start, so no pre-connect rebind is needed."""
 
     # =========================================================================
     # Self-stopping idle watcher (sentinel + host-side systemd deallocate)
@@ -796,14 +724,14 @@ class AzureProvider(TagMirrorVpsProvider):
                 outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
         logger.info("Azure host_dir sync daemon installed for host {} (target {})", host_id, blob_prefix_url)
 
-    def _trigger_final_host_dir_sync(self, host_id: HostId, vps_ip: str) -> None:
+    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
         """Run the host_dir sync once (best-effort) so the offline copy is current before deallocate.
 
-        Called from ``stop_host`` while the VM is still reachable. Starts the
+        Called by the base ``stop_host`` while the VM is still reachable. Starts the
         oneshot sync service synchronously (``--wait`` blocks until it finishes).
         Best-effort: any failure is logged at WARNING and swallowed so a sync
         hiccup never blocks the stop -- the offline copy is then simply "as of the
-        last periodic sync". Mirrors ``AwsProvider._trigger_final_host_dir_sync``.
+        last periodic sync". Mirrors ``AwsProvider._sync_host_dir_before_pause``.
         """
         if not self.azure_config.is_host_dir_synced_to_bucket or self._state_bucket is None:
             return

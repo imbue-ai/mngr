@@ -18,3 +18,5 @@ so the container-only sentinel + host-side systemd watcher is skipped for bare.
 Added bare-placement (`isolation=NONE`) release tests, and fixed a resume bug they
 caught: `start_host` read the host record via the Docker volume, which a bare host
 does not have, so it now resolves the store through the realizer.
+
+``stop_host`` / ``start_host`` moved to the shared base ``OfflineCapableVpsProvider``; AWS now supplies only the EC2 ``_pause_cloud_instance`` / ``_resume_cloud_instance`` hooks (and the final host_dir-to-bucket sync before pause). Behavior-preserving.

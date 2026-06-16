@@ -2252,7 +2252,195 @@ class OfflineCapableVpsProvider(VpsProvider):
     The agent-record *write* side (``persist_agent_data`` /
     ``remove_persisted_agent_data``) stays provider-specific because the tag vs
     metadata write APIs differ too much to share.
+
+    It also owns the shared cloud stop/start lifecycle: ``stop_host`` pauses the
+    whole instance (so a paused agent costs only disk) and ``start_host`` resumes
+    it, with the record-write + external mirror in one place. Providers supply only
+    the cloud-API hooks (``_pause_cloud_instance`` / ``_resume_cloud_instance``) and
+    override ``_sync_host_dir_before_pause`` / the known_hosts rebind where their
+    behavior differs.
     """
+
+    # =========================================================================
+    # Cloud stop/start lifecycle (idle-pause + resume)
+    #
+    # The base ``VpsProvider`` stop/start act only on the inner placement (the
+    # container, for the Docker realizer). A cloud instance that keeps its disk
+    # while stopped is paused as a whole on stop -- so a paused agent costs only
+    # disk -- and resumed on start. That orchestration lives here once; providers
+    # supply the small cloud-API hooks. Keeping the record-write + external mirror
+    # in a single place means a resumed host's offline view is always refreshed, on
+    # every provider (a per-provider copy once dropped the Azure mirror).
+    # =========================================================================
+
+    def stop_host(
+        self,
+        host: HostInterface | HostId,
+        create_snapshot: bool = True,
+        timeout_seconds: float = 60.0,
+        stop_reason: HostState | None = None,
+    ) -> None:
+        """Stop the agent placement *and* pause the cloud instance, preserving its disk.
+
+        The base ``VpsProvider.stop_host`` stops only the inner placement, leaving
+        the instance running and billing. This reuses that placement-stop +
+        record-write via ``super()`` (passing ``stop_reason=STOPPED`` so the single
+        write marks the host STOPPED before its volume goes unreachable -- the
+        offline-state derivation then reports STOPPED, not CRASHED), then pauses the
+        instance via ``_pause_cloud_instance`` so a paused agent costs only disk.
+        The disk (and all on-disk state) survives, so ``start_host`` can resume it.
+        ``create_snapshot`` is ignored -- pausing preserves the whole filesystem.
+        """
+        del create_snapshot
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._find_host_record(host_id)
+        if host_record is None or host_record.config is None or host_record.vps_ip is None:
+            raise HostNotFoundError(self.name, host_id)
+        super().stop_host(
+            host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
+        )
+        # The placement is stopped (host_dir quiesced) but the instance is still
+        # reachable: flush any offline host_dir mirror now, before the pause.
+        self._sync_host_dir_before_pause(host_id, host_record.vps_ip)
+        self._pause_cloud_instance(host_record.config.vps_instance_id)
+
+    def start_host(
+        self,
+        host: HostInterface | HostId,
+        snapshot_id: SnapshotId | None = None,
+    ) -> Host:
+        """Resume a paused agent: start the cloud instance, then its placement.
+
+        A paused instance is SSH-unreachable, so it is located by its
+        ``mngr-host-id`` tag/label (not the SSH-based record lookup), resumed via
+        ``_resume_cloud_instance`` (which returns the instance's SSH address --
+        fresh for ephemeral-IP providers, unchanged for a static IP), and its
+        known_hosts re-pointed at that address. We then clear the idle sentinel +
+        ``stop_reason``, rewrite the record's ``vps_ip``, and mirror it to the
+        external store (a no-op for providers without one) before delegating the
+        placement start to ``super()`` (whose ``_find_host_record`` reads the
+        refreshed cache entry). The single mirror here keeps the offline view of a
+        resumed host correct on every provider.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            raise HostNotFoundError(self.name, host_id)
+        instance_id = VpsInstanceId(instance["id"])
+        new_ip = self._resume_cloud_instance(instance_id)
+        # The cached instance list predates the start (stale power state / IP); drop
+        # it so any later discovery sees the running instance and its address.
+        self._instances_cache = None
+        # Rebind known_hosts to the address from mngr's local host keypairs BEFORE
+        # connecting -- the instance kept its host keys across the pause (on disk),
+        # but the record (the other key source) can't be read until we can SSH in.
+        # A no-op for static-IP providers that override it.
+        self._rebind_known_hosts_pre_connect(new_ip)
+        with log_span("Waiting for VPS SSH after start"):
+            self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
+        with self._make_outer_for_vps_ip(new_ip) as outer:
+            host_store = self._realizer.open_host_store(outer, host_id)
+            record = host_store.read_host_record()
+            if record is None or record.config is None:
+                raise HostNotFoundError(self.name, host_id)
+            self._rebind_known_hosts(record, new_ip)
+            # Clear any stale idle sentinel so the freshly-resumed instance isn't
+            # immediately re-paused by the systemd path unit (belt-and-suspenders;
+            # the self-stop service also removes it when it fires).
+            outer.execute_idempotent_command(f"rm -f {self._idle_sentinel_path_on_outer(host_id)}")
+            certified = record.certified_host_data
+            updated_data = certified.model_copy_update(
+                to_update(certified.field_ref().stop_reason, None),
+                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
+            )
+            updated_record = record.model_copy_update(
+                to_update(record.field_ref().vps_ip, new_ip),
+                to_update(record.field_ref().certified_host_data, updated_data),
+            )
+            host_store.write_host_record(updated_record)
+            # Mirror the resumed record to the external store so the offline view
+            # reflects the new vps_ip and cleared stop_reason; a no-op for providers
+            # without an external store.
+            self._persist_host_record_externally(updated_record)
+        # Drop any cached Host bound to the old IP, then seed the record cache so
+        # super().start_host()'s _find_host_record returns the rebound record.
+        self._evict_cached_host(host_id)
+        self._host_record_cache[host_id] = updated_record
+        # The base start_host relaunches the in-container activity watcher and
+        # refreshes BOOT activity on resume, so auto-stop-on-idle keeps working
+        # across resumes with no provider-specific step here.
+        return super().start_host(host_id, snapshot_id)
+
+    @abstractmethod
+    def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
+        """Pause (stop / deallocate) the cloud instance -- the provider's own log span + API call."""
+        ...
+
+    @abstractmethod
+    def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
+        """Start the cloud instance and return its SSH address (a fresh IP, or the static one)."""
+        ...
+
+    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
+        """Hook: flush the host's offline ``host_dir`` mirror while still reachable, before pausing.
+
+        Runs in ``stop_host`` after the placement has stopped (host_dir quiesced)
+        and before the instance is paused (still SSH-reachable). Default no-op; a
+        provider that mirrors host_dir to an external store overrides this to push a
+        final copy so the offline view is current the moment the instance pauses.
+        """
+
+    def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
+        """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
+
+        A pause/resume keeps the instance's SSH host keys (on the disk), so only the
+        IP changes. Drop any stale entries for the old IP, then add the new IP with
+        the recorded VPS (port 22) and container host keys. Providers whose IP is
+        stable across a pause override this to a no-op.
+        """
+        old_ip = record.vps_ip
+        if old_ip is not None and old_ip != new_ip:
+            remove_host_from_known_hosts(self._vps_known_hosts_path(), old_ip, 22)
+            remove_host_from_known_hosts(self._container_known_hosts_path(), old_ip, self.config.container_ssh_port)
+        if record.ssh_host_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._vps_known_hosts_path(),
+                hostname=new_ip,
+                port=22,
+                public_key=record.ssh_host_public_key,
+            )
+        if record.container_ssh_host_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._container_known_hosts_path(),
+                hostname=new_ip,
+                port=self.config.container_ssh_port,
+                public_key=record.container_ssh_host_public_key,
+            )
+
+    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+        """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
+
+        Runs on resume *before* any SSH connection (the host record, the other key
+        source, can't be read until we can connect). The VPS/container host keypairs
+        are generated and held locally by mngr and injected at create time, so the
+        public keys here are exactly what the resumed instance presents (its host
+        keys persist on the disk across a pause). Sourcing them locally rather than
+        from account-writable instance metadata anchors host-key verification to
+        data mngr controls. Providers whose IP is stable across a pause override
+        this to a no-op.
+        """
+        add_host_to_known_hosts(
+            known_hosts_path=self._vps_known_hosts_path(),
+            hostname=new_ip,
+            port=22,
+            public_key=self._get_vps_host_keypair()[1],
+        )
+        add_host_to_known_hosts(
+            known_hosts_path=self._container_known_hosts_path(),
+            hostname=new_ip,
+            port=self.config.container_ssh_port,
+            public_key=self._get_container_host_keypair()[1],
+        )
 
     def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
         """Locate this host's instance by its ``mngr-host-id`` tag/label (works while stopped), or None.

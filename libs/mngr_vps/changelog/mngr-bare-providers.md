@@ -83,3 +83,5 @@ resolves the store through the realizer (the fixed root-disk path for bare).
 The VPS provider's host-record updates use the type-safe `model_copy_update` /
 `to_update` idiom instead of `model_copy(update={...})`, so field names are
 checked by the type system.
+
+The shared ``OfflineCapableVpsProvider`` now owns the cloud stop/start lifecycle: ``stop_host`` pauses the whole instance (so a paused agent costs only disk) and ``start_host`` resumes it, doing the resumed record's on-volume write *and* its external-store mirror together in one place. Providers supply only the cloud-API hooks (``_pause_cloud_instance`` / ``_resume_cloud_instance``) and override ``_sync_host_dir_before_pause`` / the known_hosts rebind where their behavior differs.
