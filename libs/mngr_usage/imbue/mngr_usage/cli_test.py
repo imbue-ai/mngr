@@ -36,8 +36,10 @@ from imbue.mngr_usage.cli import _format_reset_phrase
 from imbue.mngr_usage.cli import _format_session_detail_line
 from imbue.mngr_usage.cli import _parse_optional_duration
 from imbue.mngr_usage.cli import _session_mode_tag
+from imbue.mngr_usage.cli import _write_source_section
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import CostMode
+from imbue.mngr_usage.data_types import CostProvenance
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
@@ -212,6 +214,44 @@ def test_format_cost_line_multi_session_shape_uses_since_suffix() -> None:
         now=2000,
     )
     assert line == "api cost: $5.43 across 3 sessions in last 1d"
+
+
+def _estimated_subscription_snapshot(provenance: CostProvenance) -> UsageSnapshot:
+    return UsageSnapshot(
+        source_name="codex",
+        updated_at=1000,
+        windows={},
+        sessions=(
+            SessionCostRecord(
+                session_id="sub-token-session",
+                cost=CostSnapshot(total_cost_usd=0.30),
+                cost_mode=CostMode.SUBSCRIPTION,
+                cost_provenance=provenance,
+                first_event_at=950,
+                last_event_at=1000,
+            ),
+        ),
+        since_seconds=86400,
+    )
+
+
+def test_subscription_cost_line_flags_estimated_dollars(capsys: pytest.CaptureFixture[str]) -> None:
+    """A token-derived (ESTIMATED) subscription cost renders ``(imputed, estimated)``;
+    a harness-REPORTED one keeps plain ``(imputed)``. Mirrors the api line's
+    ``(estimated)`` flag and the JSON/CEL ``is_estimated`` surface."""
+    estimated_model = _build_render_model(
+        _estimated_subscription_snapshot(CostProvenance.ESTIMATED), stale_after=300, now=1000
+    )
+    _write_source_section(estimated_model, now=1000, header="[codex]", detail=False)
+    assert "subscription cost (imputed, estimated): $0.30" in capsys.readouterr().out
+
+    reported_model = _build_render_model(
+        _estimated_subscription_snapshot(CostProvenance.REPORTED), stale_after=300, now=1000
+    )
+    _write_source_section(reported_model, now=1000, header="[codex]", detail=False)
+    reported_out = capsys.readouterr().out
+    assert "subscription cost (imputed): $0.30" in reported_out
+    assert "estimated" not in reported_out
 
 
 def test_session_mode_tag_maps_each_variant() -> None:
