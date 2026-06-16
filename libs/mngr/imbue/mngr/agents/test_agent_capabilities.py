@@ -51,6 +51,29 @@ def test_builder_detects_known_capabilities(plugin_manager: pluggy.PluginManager
     assert "waiting_reason_field" not in _present_keys(infos, "pi-coding")
     assert "waiting_reason_field" not in _present_keys(infos, "antigravity")
 
+    # Class-mixin capabilities wired in phase 3.
+    assert "streaming_snapshot" in _present_keys(infos, "claude")
+    assert "streaming_snapshot" not in _present_keys(infos, "codex")
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
+        assert "session_preservation" in _present_keys(infos, agent_type_name)
+        assert "unattended_operation" in _present_keys(infos, agent_type_name)
+    # Per-resource permission policy: agy/opencode/codex yes; claude/pi no.
+    for agent_type_name in ("antigravity", "opencode", "codex"):
+        assert "permission_policy" in _present_keys(infos, agent_type_name)
+    assert "permission_policy" not in _present_keys(infos, "claude")
+    assert "permission_policy" not in _present_keys(infos, "pi-coding")
+    # Version management: claude/codex yes; the rest no.
+    assert "version_management" in _present_keys(infos, "claude")
+    assert "version_management" in _present_keys(infos, "codex")
+    assert "version_management" not in _present_keys(infos, "opencode")
+
+    # Module-level capabilities (detected by package, not class).
+    assert "deploy_contributions" in _present_keys(infos, "claude")
+    assert "deploy_contributions" not in _present_keys(infos, "codex")
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding"):
+        assert "usage_tracking" in _present_keys(infos, agent_type_name)
+    assert "usage_tracking" not in _present_keys(infos, "antigravity")
+
 
 def test_capability_matrix_doc_is_current(plugin_manager: pluggy.PluginManager) -> None:
     """The committed matrix doc must equal the matrix derived from the code (drift guard)."""

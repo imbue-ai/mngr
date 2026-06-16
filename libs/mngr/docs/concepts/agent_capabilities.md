@@ -19,6 +19,8 @@ absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 | unattended_operation | Y | Y | Y | Y | - | Y | Y | - | Y | Y | Y |
 | permission_policy | Y | - | - | Y | - | - | - | - | - | Y | - |
 | version_management | - | Y | Y | Y | - | Y | Y | - | Y | - | - |
+| deploy_contributions | - | Y | Y | - | - | Y | Y | - | - | - | - |
+| usage_tracking | - | Y | Y | Y | - | Y | Y | - | - | Y | Y |
 
 ## Capabilities
 
@@ -32,3 +34,5 @@ absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 - **unattended_operation** -- Can complete a run with no human by auto-allowing in-run tool prompts. The load-bearing capability for remote / scheduled / headless agents.
 - **permission_policy** -- Supports a per-resource allow/deny/ask permission policy (a refinement on plain auto-allow). Only some CLIs expose per-tool config.
 - **version_management** -- Controls which version of its binary runs, by pinning a version or following an update policy. Absent for CLIs that just use whatever is on PATH.
+- **deploy_contributions** -- Bakes config/cred files + env vars into a `mngr schedule` image (via the get_files_for_deploy hookimpl). Only needed if the agent runs under `mngr schedule`.
+- **usage_tracking** -- Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.

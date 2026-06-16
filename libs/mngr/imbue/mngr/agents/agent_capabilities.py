@@ -70,8 +70,8 @@ class AgentClassInfo(FrozenModel):
     field_generator_agent_type_names: frozenset[str] = Field(
         description="Agent type names that have a waiting_reason field generator"
     )
-    # Hook names the agent's own plugin module implements (for PLUGIN_HOOKIMPL detection).
-    plugin_hook_names: frozenset[str] = Field(description="Hook names implemented by this agent's plugin module")
+    # Hook names the agent's own plugin package implements (for PLUGIN_HOOKIMPL detection).
+    plugin_hook_names: frozenset[str] = Field(description="Hook names implemented by this agent's plugin package")
     # Whether a sibling usage plugin claims this agent's usage source.
     is_usage_source_claimed: bool = Field(description="Whether a mngr_<harness>_usage plugin covers this agent")
 
@@ -164,6 +164,17 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasVersionManagementMixin,
     ),
+    AgentCapability(
+        key="deploy_contributions",
+        description="Bakes config/cred files + env vars into a `mngr schedule` image (via the get_files_for_deploy hookimpl). Only needed if the agent runs under `mngr schedule`.",
+        detection_kind=CapabilityDetectionKind.PLUGIN_HOOKIMPL,
+        hook_name="get_files_for_deploy",
+    ),
+    AgentCapability(
+        key="usage_tracking",
+        description="Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.",
+        detection_kind=CapabilityDetectionKind.USAGE_SOURCE,
+    ),
 )
 
 
@@ -216,13 +227,17 @@ def build_agent_class_infos(
         if result is not None and _WAITING_REASON_FIELD_KEY in result[1]
     )
 
-    # For each hook referenced by a PLUGIN_HOOKIMPL capability, the plugin modules that implement it.
+    # For each hook referenced by a PLUGIN_HOOKIMPL capability, the plugin *packages*
+    # that implement it. Package-level (not exact-module) because a hookimpl like
+    # get_files_for_deploy is one global contribution for the whole agent package,
+    # while sibling agent subtypes register from submodules of that same package --
+    # consistent with usage-source detection below.
     hook_names = frozenset(c.hook_name for c in capabilities if c.hook_name is not None)
-    plugins_by_hook_name: dict[str, frozenset[ModuleType]] = {}
+    packages_by_hook_name: dict[str, frozenset[str]] = {}
     for hook_name in hook_names:
         hook_caller = getattr(pm.hook, hook_name, None)
         impls = hook_caller.get_hookimpls() if hook_caller is not None else ()
-        plugins_by_hook_name[hook_name] = frozenset(impl.plugin for impl in impls)
+        packages_by_hook_name[hook_name] = frozenset(_module_package(impl.plugin) for impl in impls)
 
     # Packages of plugins that claim a usage source (e.g. 'imbue.mngr_claude_usage').
     usage_hook_caller = getattr(pm.hook, "aggregate_usage_source", None)
@@ -231,10 +246,11 @@ def build_agent_class_infos(
 
     infos: list[AgentClassInfo] = []
     for agent_type_name, (agent_class, plugin_module) in class_and_plugin_by_type.items():
+        plugin_package = _module_package(plugin_module)
         plugin_hook_names = frozenset(
-            hook_name for hook_name in hook_names if plugin_module in plugins_by_hook_name[hook_name]
+            hook_name for hook_name in hook_names if plugin_package in packages_by_hook_name[hook_name]
         )
-        usage_package = _module_package(plugin_module) + _USAGE_PACKAGE_SUFFIX
+        usage_package = plugin_package + _USAGE_PACKAGE_SUFFIX
         infos.append(
             AgentClassInfo(
                 agent_type_name=agent_type_name,
