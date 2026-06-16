@@ -24,6 +24,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
@@ -47,6 +48,7 @@ class _DiscoveredCall(FrozenModel):
     """One captured ``__call__`` of the discovery handler."""
 
     agent_id: AgentId
+    host_id: HostId
     ssh_info: RemoteSSHInfo | None
     provider_name: str
 
@@ -69,12 +71,13 @@ class _RecordingHandlers:
     def on_discovered(
         self,
         agent_id: AgentId,
+        host_id: HostId,
         ssh_info: RemoteSSHInfo | None,
         provider_name: str,
     ) -> None:
         with self._lock:
             self._discovered_calls.append(
-                _DiscoveredCall(agent_id=agent_id, ssh_info=ssh_info, provider_name=provider_name)
+                _DiscoveredCall(agent_id=agent_id, host_id=host_id, ssh_info=ssh_info, provider_name=provider_name)
             )
 
     def on_destroyed(self, agent_id: AgentId) -> None:
@@ -174,6 +177,39 @@ def _full_snapshot_line(agents: Sequence[DiscoveredAgent]) -> str:
         source=DISCOVERY_EVENT_SOURCE,
         agents=tuple(agents),
         hosts=(),
+        type=DiscoveryEventType.DISCOVERY_FULL,
+    ).model_dump_json()
+
+
+def _make_agent_with_provider(host_id: HostId, agent_name: str, provider_name: str) -> DiscoveredAgent:
+    return DiscoveredAgent(
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName(agent_name),
+        provider_name=ProviderInstanceName(provider_name),
+    )
+
+
+def _full_snapshot_line_with_errors(
+    agents: Sequence[DiscoveredAgent],
+    errored_provider_names: Sequence[str],
+) -> str:
+    timestamp, event_id = _envelope_fields()
+    error_by_provider_name = {
+        ProviderInstanceName(name): DiscoveryError(
+            type_name="RuntimeError",
+            message="discovery failed",
+            provider_name=ProviderInstanceName(name),
+        )
+        for name in errored_provider_names
+    }
+    return FullDiscoverySnapshotEvent(
+        timestamp=timestamp,
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        agents=tuple(agents),
+        hosts=(),
+        error_by_provider_name=error_by_provider_name,
         type=DiscoveryEventType.DISCOVERY_FULL,
     ).model_dump_json()
 
@@ -305,6 +341,50 @@ def test_full_snapshot_resets_known_set(tmp_path: Path) -> None:
     assert handlers.destroyed_calls == (agent_two.agent_id,)
 
 
+def test_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean_snapshot(tmp_path: Path) -> None:
+    """A snapshot omitting an agent whose provider errored must not tear down its tunnel.
+
+    The reverse tunnel only goes away when the destruction callback fires, so
+    retaining the agent through the errored poll keeps its tunnel alive. A later
+    *clean* (non-errored) snapshot that still omits it does drop it.
+    """
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, handlers = _make_consumer(cg)
+        host_id = HostId.generate()
+        agent = _make_agent_with_provider(host_id, "a1", "imbue_cloud")
+        # First snapshot establishes the agent (its provider succeeded).
+        consumer._on_observe_output(_full_snapshot_line((agent,)), is_stdout=True)
+        assert handlers.destroyed_calls == ()
+        # Second snapshot omits the agent but reports its provider errored:
+        # the agent is retained, so no destruction fires.
+        consumer._on_observe_output(_full_snapshot_line_with_errors((), ("imbue_cloud",)), is_stdout=True)
+        assert handlers.destroyed_calls == ()
+        # Third snapshot is clean (no provider error) and still omits the
+        # agent: now it is genuinely gone and the destruction fires.
+        consumer._on_observe_output(_full_snapshot_line(()), is_stdout=True)
+
+    assert handlers.destroyed_calls == (agent.agent_id,)
+
+
+def test_snapshot_drops_agent_when_provider_succeeded_but_omitted_it(tmp_path: Path) -> None:
+    """A successful provider that simply returns fewer agents still drops the missing one."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, handlers = _make_consumer(cg)
+        host_id = HostId.generate()
+        agent_one = _make_agent_with_provider(host_id, "a1", "imbue_cloud")
+        agent_two = _make_agent_with_provider(host_id, "a2", "imbue_cloud")
+        consumer._on_observe_output(_full_snapshot_line((agent_one, agent_two)), is_stdout=True)
+        # A different provider errors, but agent_two's provider (imbue_cloud)
+        # succeeded and omitted it -- so agent_two is dropped, not retained.
+        consumer._on_observe_output(
+            _full_snapshot_line_with_errors((agent_one,), ("some_other_provider",)), is_stdout=True
+        )
+
+    assert handlers.destroyed_calls == (agent_two.agent_id,)
+
+
 def test_malformed_line_is_ignored(tmp_path: Path) -> None:
     """Unparseable JSON does not crash the consumer."""
     del tmp_path
@@ -314,6 +394,14 @@ def test_malformed_line_is_ignored(tmp_path: Path) -> None:
         consumer._on_observe_output("", is_stdout=True)
     assert handlers.discovered_calls == ()
     assert handlers.destroyed_calls == ()
+
+
+def test_bounce_observe_no_op_when_not_started(tmp_path: Path) -> None:
+    """``bounce_observe`` before ``start`` is a harmless no-op (no observe process to bounce)."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, _handlers = _make_consumer(cg)
+        consumer.bounce_observe()
 
 
 def test_stderr_line_is_dropped(tmp_path: Path) -> None:

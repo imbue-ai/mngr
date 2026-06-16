@@ -6,6 +6,7 @@ from pydantic import Field
 from pydantic import model_validator
 
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import DockerConfigValidationError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
@@ -53,6 +54,18 @@ class DockerProviderConfig(ProviderInstanceConfig):
     default_start_args: tuple[str, ...] = Field(
         default=(),
         description="Default docker run arguments applied to all containers (e.g., '--cpus=2', '--memory=4g')",
+    )
+    docker_runtime: str | None = Field(
+        default=None,
+        description=(
+            "Container runtime to pass to `docker run --runtime` (e.g. 'runsc' for gVisor). "
+            "When None (the default), no `--runtime` flag is added and Docker uses its configured "
+            "default (normally 'runc'). The named runtime must be installed and registered with the "
+            "Docker daemon on the host, otherwise container creation fails with Docker's native "
+            "'unknown runtime' error. Override per-invocation/environment via "
+            "MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME (e.g. set to 'runc' to force the default runtime "
+            "where gVisor is unavailable, such as CI)."
+        ),
     )
     default_idle_timeout: int = Field(
         default=800,
@@ -109,7 +122,7 @@ class DockerProviderConfig(ProviderInstanceConfig):
     @model_validator(mode="after")
     def _validate_isolation_requires_volume(self) -> "DockerProviderConfig":
         if self.isolate_host_volumes is True and not self.is_host_volume_created:
-            raise ValueError(
+            raise DockerConfigValidationError(
                 "isolate_host_volumes=True requires is_host_volume_created=True "
                 "(host-volume isolation is meaningless without a host volume)"
             )

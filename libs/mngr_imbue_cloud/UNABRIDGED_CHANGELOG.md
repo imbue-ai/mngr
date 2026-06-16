@@ -4,6 +4,306 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+Added a `--skip-deferred-install-wait` flag to `admin pool create` (slice + ovh_vps): when set, the bake does NOT wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to finish before stopping the baked services agent. Saves a few minutes per bake for dev/throwaway hosts; the tradeoff is the baked container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg), so it must never be used for production pool hosts.
+
+Added `mngr imbue_cloud admin server pricing`: an operator-only, read-only command that prints a per-slice pricing table for OVH bare-metal plans, to help decide what to buy before ordering.
+
+- Each row is a server x RAM config x region. It reports the effective slice sizing (slots, vCPUs/slice, disk/slice) computed with the same `slices/bare_metal` math used to carve real slices, and the true monthly cost per slice (month-to-month price plus the one-time setup fee amortized over a year, divided by slot count). Rows are sorted cheapest-per-slice first and printed to stdout.
+
+- Rows are split per region (vin = US-EAST-VA, hil = US-WEST-OR) because delivery time and stock differ by datacenter; each row shows the delivery-time and stock columns for its region (parsed from OVH availability). Knobs: `--region` (repeatable; default both US datacenters), `--memory-per-slice-gb` (default 8), `--cpu-overcommit` (default 2.0). Storage-upgrade options are listed at the end of each row as a marginal $/GB. A `CPU(c/t)` column shows the server's physical cores/threads so the (overcommitted) CPU/slice value is legible.
+
+- A config is only excluded when NO available storage can host a slice at the chosen size; the base columns use the cheapest storage that IS sliceable, so RAM-dense servers that need a larger disk to fit a slice still appear (on that larger disk) instead of being dropped.
+
+- The command only reads the OVH catalog and availability APIs; it never places an order. It needs `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` / `OVH_CONSUMER_KEY` in the environment (from the activated env's ovh secret).
+
+Added the bare-metal purchase + provisioning lifecycle commands under `mngr imbue_cloud admin server`:
+
+- `order` — places a real OVH eco order for a chosen `--plan-code` / `--region` (vin/hil) / `--memory-gb` / `--storage`, driving the eco cart (mandatory bandwidth/memory/storage/vrack options, `dedicated_os=none_64.en`). It assigns the cart and shows OVH's real price preview for confirmation (`--yes` to skip), places the order, and records a `bare_metal_servers` row at status `ordered` with specs derived from the catalog. THIS CHARGES the account.
+
+- `await-delivery` — polls the OVH order until the server is delivered (serviceName + public IP assigned), then advances the row to `delivered`. Resumable (no-op if already delivered); delivery can take ~1h.
+
+- `setup` — provisions a delivered box to `ready`: reinstalls our OS via `/dedicated/server/{s}/reinstall` (Debian, RAID1, pool SSH key; destructive), waits for the install, waits for SSH, then runs the existing box prep (qemu/lima/tooling/service user/stage image). Resumable via status.
+
+Together with `pricing`, this codifies the full RAM-pricing -> order -> deliver -> provision -> slice flow (previously the box was ordered and OS-installed by hand).
+
+The pool bake now waits for the FCT `deferred-install` service (heavy apt + Playwright/Chromium download, started at agent boot) to finish before stopping the services agent, on both the OVH-VPS and slice paths. Stopping mid-apt previously corrupted dpkg (a package left reinst-required), so the deferred install failed on every post-lease retry until repaired.
+
+Fixed slice pool bakes failing with "Conflicting providers: address has 'imbue_cloud_slice' but --provider is 'ovh'". The pool bake stacks a shared FCT container-build template on top of `main`; that template hardcoded `provider = "ovh"`, which is correct for an OVH VPS (whose create address is `@host.ovh`) but conflicts with a slice's `@host.imbue_cloud_slice` address. The build recipe is provider-agnostic, so the template (renamed `ovh` -> `pool_host`, in the FCT) no longer declares a provider -- the provider is selected entirely by the create address, mirroring the existing `aws` / `imbue_cloud` templates. `FCT_BAKE_TEMPLATES` is now `("main", "pool_host")`.
+
+imbue_cloud fast path now matches on the **repository** as well as the branch/tag, so it can no longer adopt a pool host running different code than the request asked for.
+
+- A new canonicalization function (`repo_identity.canonicalize_repo_source`) is the single source of truth for "the same repo": it normalizes remote URL forms (ssh/https, `.git`, trailing slash, host case) and resolves a local path to its `origin` remote, applied identically at bake time and request time. The provider canonicalizes the request's `repo_url` before the lease; `fast_mode=require` now raises `FastPathUnavailableError` (so the caller falls back to the slow rebuild) when it cannot establish a canonical `repo_url` and a `repo_branch_or_tag`, rather than matching on a subset.
+
+- `admin pool create` no longer accepts hand-typed identity in `--attributes`; instead it derives and stamps the canonical `repo_url` + `repo_branch_or_tag` from the bake source, which is now exactly one of two mutually-exclusive selectors: `--from-tag <tag>` (production -- clones `--repo-url` at the tag into a fresh temp dir and bakes from it, so the content provably equals the tag) or `--workspace-dir <dir>` (dev -- bakes from a working tree, labelling it with the folder's `origin` + current branch, overridable via `--repo-branch-or-tag`). `--attributes` is now optional and rejects the `repo_url` / `repo_branch_or_tag` keys. Applies to both the `slice` and `ovh_vps` backends. The connector match (JSONB `@>` + region) is unchanged -- no migration.
+
+Slice VMs now install `inotify-tools` during provisioning. The `host_backup` snapshot helper (the `OUTER_TRIGGER` btrfs helper that `mngr_vps_docker` runs on the slice's "outer" VM) execs `inotifywait` to watch for snapshot requests; the slice base image shipped without it, so the helper's systemd unit crash-looped (exit 127) and only serviced requests by accident of its restart cadence, leaving a spurious "snapshot path already exists" failure behind each successful snapshot. The OVH-VPS path already gets `inotify-tools` from `host_setup`'s base packages; the slice path now installs it in the lima VM provisioning alongside Docker (`jq`, the helper's other dependency, was already provided by the base lima script).
+
+Added the OVH bare-metal "slices" feature: an alternative to ordering OVH VPSes where we carve VPS-like hosts out of bare-metal servers we rent by running lima/QEMU VMs on them. A slice is indistinguishable from a baked VPS pool host to minds and the imbue_cloud provider, but with cleaner btrfs (the lima data disk, no loopback).
+
+- OVH order pricing helper (`pricing.compute_order_pricing`): true all-in month-to-month cost (base plan + every selected add-on delta + one-time setup + first payment), so the catalog's bare "base" price can't be mistaken for the real cost.
+
+- Slice data model + pure logic (`bare_metal.py`): `BareMetalServer`/`BareMetalServerCapacity` types, `BackendKind`/`BareMetalServerStatus` primitives, and helpers for slot count, slice vCPU sizing with mild CPU overcommit, RAID-level choice, lima naming, slice port allocation, server lifecycle transitions, and "most-free ready server" placement.
+
+- Lima slice creation: `build_slice_lima_yaml` produces a VPS-parity lima VM (root SSH, btrfs data disk at the host dir, Docker, two external port-forwards for the VM and inner-container sshds), and `LimaSliceVpsClient` provisions/destroys it via limactl. `SliceVpsDockerProvider` runs the shared vps_docker container bake on the VM (overriding only the per-host-port + btrfs-subvolume seams), producing a baked, reachable host. Verified end-to-end against a real lima VM.
+
+- Admin CLI (`mngr imbue_cloud admin server`): `list` (per-server + fleet slot accounting), `register` (record a delivered box), `allocate-slice` (placement + the slice's lease attributes), `set-status` (advance the resumable order->delivered->installing->ready lifecycle), backed by a Neon access layer (`bare_metal_db`) that writes `bare_metal_servers` + slice `pool_hosts` rows directly.
+
+- Made the fast/slow lease path work on slices end-to-end: the imbue_cloud provider now reaches a leased host's outer (VPS-root) sshd at the lease's `ssh_port` (a slice's box-forwarded VM-root port) instead of a hardcoded 22, so `mngr list`/discovery and destroy-time wipe target the slice VM rather than the bare-metal box's own sshd. The slice provider authorizes the pool management key on both the VM root and the inner container so the connector's lease-time key injection succeeds, and records the per-host forwarded ports so `mngr create --format json` reports them.
+
+- `admin server allocate-slice` now actually allocates: it syncs this branch's mngr + the forever-claude-template workspace onto the chosen ready box(es), bakes the slice(s) there in parallel (`--count N`), authorizes the pool key, tears down the bootstrap-created chat agent + initial-chat sentinel, and inserts an `available` slice `pool_hosts` row. Adds `--dry-run` (placement preview), `--workspace-dir`, and `--mngr-source`.
+
+- Per-slice sizing is no longer hardcoded. A bare-metal server now records its RAM-per-slice, CPU-overcommit factor, and usable disk at `admin server register`; `allocate-slice` computes each slice's vCPUs, RAM, and btrfs disk from those plus the box's specs (disk = usable space minus a reserve, split across slots). Because a box's per-slice values are fixed by its registration, `allocate-slice --count N` now targets a single server per invocation. Slices also record the server's real region (not a placeholder), and the per-box slice port-forward range was widened (~10k ports).
+
+- The imbue_cloud slow-path rebuild now pins the leased host's outer (VPS-root) SSH host key in the rebuilding provider's known_hosts, so the certified-data sync over the outer connection no longer fails strict host-key checking (applies to OVH VPSes and slices alike).
+
+- `allocate-slice` now also tears down the freshly-baked slice VM if parsing the bake's create-result JSON fails (e.g. a missing/invalid port field), closing a gap where such a failure could leave an orphaned VM holding a box slot with no `pool_hosts` row referencing it.
+
+- Fixed slice disk overcommit: each slice VM has a fixed boot disk (OS + Docker) plus a btrfs data disk whose sizes now sum to the per-slice disk budget ((usable_disk - reserve) / slots). Previously only the data disk was sized and lima defaulted the boot disk to 100 GiB unaccounted, so a box was over-provisioned on disk (thin-provisioned via qcow2 -- it would run out of space if slices filled up). The boot disk is now set explicitly and `compute_slice_disk_gib` returns budget-minus-boot.
+
+- Removed the duplicated, on-box slice bake. The slice path no longer ships the monorepo + forever-claude-template to the box and runs `mngr create` there; instead a slice is now provisioned (carved) and baked exactly like an OVH VPS, from the operator's machine. `LimaSliceVpsClient` drives `limactl` over SSH on the box (carve a bare Debian VM = the "OS reinstall" equivalent), and the shared container bake then reaches the VM's box-forwarded ports -- so `allocate-slice` just vendors mngr into the FCT workspace once and runs the bake from here. The FCT bake itself (templates, `system-services` agent, chat-agent teardown, sentinel) now lives in one provider-generic place (`pool_bake.py`) shared by both the OVH and slice paths, instead of being copy-pasted into the slice tooling. This deletes `slice_bake.py` and the box-side rsync/`uv sync`/git-init machinery; behavior for the operator is unchanged (`allocate-slice` still parallel-bakes `--count N` slices onto one ready box and inserts their rows).
+
+- Restructured the now-large `mngr_imbue_cloud` plugin from a flat module list into layered sub-packages (`plugin`, `cli`, `bake`, `providers`, `hosts`, `slices`, `connector`) plus the shared root leaf modules (`config`, `data_types`, `errors`, `primitives`), with an `import-linter` "mngr_imbue_cloud layers contract" enforcing the ordering (and a meta-ratchet test that gates it). The slice/bare-metal subsystem is isolated in `slices/`, the provider-generic pool bake in `bake/` (an extraction seam toward the minds app), and both provider backends are co-located in `plugin/backends.py`. Pure refactor: no behavior, CLI, wire-format, or schema change. Plugin entry points moved to `imbue.mngr_imbue_cloud.plugin.entrypoints` / `plugin.slice_entrypoints`.
+
+- Decomposed the oversized `providers/instance.py` (~2,000 lines): extracted the pure listing-shaping helpers into `providers/listing.py`, the pre-release data-wipe script generator into `providers/wipe.py`, and the slow-path VPS-vs-slice rebuild provider/config builders into `providers/rebuild.py` (with their unit tests co-located). `ImbueCloudProvider` and its self-bound methods stay in `instance.py`. Removed a dead helper (`_certified_host_name`). No behavior change.
+
+- Folded `admin server allocate-slice` into `admin pool create --backend [ovh_vps|slice]`, so there is now a single command to bake a leasable pool host regardless of backend (the machine-provisioning step differs; the bake + row insert are shared). `admin server` keeps only the bare-metal fleet verbs (`prep`, `list`, `register`, `set-status`). Crucially, slice rows now go through the same lease-metadata path as OVH: they carry the operator's `--attributes` (e.g. `repo_branch_or_tag`) with the derived `{memory_gb, cpus}` size stamped on top, and record the operator-supplied `--region` (the app's region code, e.g. `US-EAST-VA`) instead of the box's raw datacenter code -- so a slice can be matched by a minds fast-path lease without hand-patching. `minds pool create` is unaffected (`--backend` defaults to `ovh_vps`).
+
+- Fixed slice fast-path leases hanging at "Waiting for initial chat agent...": the slice bake now stops the `system-services` agent post-bake (inside the container), matching what the OVH bake already did via local mngr. Previously a slice was baked with the agent left running, so the fast-path lease adopted an already-bootstrapped agent whose initial chat agent had been torn down at bake finalize -- and the one-shot FCT bootstrap never recreated it. Stopping it means the lease starts it fresh, re-running the bootstrap, which recreates the chat agent under the leasing user's workspace name. (Audited the OVH vs slice bake paths for other such divergences; the remaining differences -- OVH ufw + management-key install, cancelled-VPS recycle, OVH IAM tags -- are intentionally OVH-only, and the row inserts are at parity.)
+
+Fixed `mngr imbue_cloud admin server order` failing with "expected exactly one vrack option to auto-pick, got []" on bare-metal plans that do not offer a vrack option (e.g. the cheaper SK line such as `24sk602-v1-us`).
+
+The eco-cart option selection no longer hardcodes `(bandwidth, vrack)` as the auto-picked families. Instead it derives the auto-pick set from the catalog's own `mandatory` flags: the operator chooses memory + storage, and every *other* family OVH marks mandatory (e.g. bandwidth, and vrack only where the plan offers it) is auto-picked and must have exactly one offer. Optional add-on families (mandatory=false) are never silently added to the cart.
+
+## 2026-06-12
+
+Internal: routed the agent `data.json` path constructions through the shared `get_agent_state_dir_path` helper (now in `imbue.mngr.hosts.common`). No behavior change.
+
+## AWS provider support: ProviderBackendInterface refactor
+
+`is_for_host_creation` was removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d in every other backend). Replaced with a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on the interface that Modal overrides. The imbue-cloud backend's now-unused `del`-of-`is_for_host_creation` is removed. No behavior change.
+
+`mngr imbue_cloud admin pool create` now passes `--ovh-datacenter=` instead of `--vps-datacenter=` to the inner `mngr create --provider ovh` command. The OVH provider's `--vps-*` build-arg prefix was retired in this branch and now raises a migration error; the call site here is updated to the new per-provider prefix so pool creation continues to work.
+
+`_build_delegated_vps_provider` now returns a `MinimalVpsDockerProvider` (moved into `mngr_vps_docker` itself, since it's a generally useful role for any externally-managed-VPS host-setup path -- not imbue_cloud-specific). The base `VpsDockerProvider._parse_build_args` was made abstract in this branch (each concrete provider binds its own `--<provider>-*` prefix); `MinimalVpsDockerProvider`'s override extracts `--git-depth=N` and forwards everything else to docker, which is the correct behavior for the no-provisioning path that pairs with `ExternallyManagedVpsClient`. Without this, every slow-path container rebuild would raise before any docker work happened. The corresponding parser unit tests moved alongside.
+
+## 2026-06-11
+
+Replaced direct ValueError/RuntimeError raises in build-arg parsing and host provisioning with dedicated custom exception types.
+
+## 2026-06-10
+
+Raised the stale coverage floor from 19% to 45% to match the coverage CI already measures (~50%).
+
+## 2026-06-09
+
+Offline hosts produced by this provider are now readable: the offline-host
+construction path (used by both `get_host` for stopped hosts and
+`to_offline_host`) returns an `OfflineHostWithVolume` (which implements the new
+`HostFileReadInterface`) via the shared `make_readable_offline_host` helper.
+This makes a stopped host's files readable through the same interface as an
+online host -- used by Claude session preservation when a host is destroyed
+while offline (the destroy path obtains the host via `get_host`), and available
+to other readers of offline host data. The host's volume is resolved lazily on
+first read, so this adds no per-host probe to host discovery. When no volume is
+available, reads behave as "nothing there".
+
+## 2026-06-08
+
+The imbue_cloud slow (rebuild) path now re-applies the full idempotent host
+setup on the leased VPS before rebuilding the container: it ensures the pinned
+Docker version, installs/registers gVisor `runsc` if missing, tunes sshd, and
+installs the base packages. This runs after the old container is torn down and
+before the rebuild, and a failure is fatal. The result is that a workspace
+created via the slow path -- even against a host baked with an old version, or
+one baked before runsc existed -- comes up consistent and runs its agent
+container under gVisor.
+
+`ImbueCloudProviderConfig` now extends `VpsDockerProviderConfig`, so it carries
+`docker_runtime` / `install_gvisor_runtime` / `default_start_args`; the delegated
+vps_docker provider used for the rebuild forwards these, so the rebuilt container
+runs under `--runtime runsc` with the `--workdir=/` and
+`--security-opt=no-new-privileges` hardening args. These values are written into
+the per-account `[providers.imbue_cloud_<slug>]` block by minds bootstrap.
+
+Added a `--no-recycle` flag to `mngr imbue_cloud admin pool create`. By default
+the OVH provider reclaims a cancelled (still-billable) VPS when one is available;
+`--no-recycle` forces a fresh order instead (it sets
+`MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false` on the inner `mngr create`),
+which makes it easy to exercise and test the fresh-provision path.
+
+Region-aware leasing for imbue_cloud hosts.
+
+- `mngr create` against imbue_cloud now accepts two new build-arg knobs: a hard `-b region=<datacenter>` requirement (only a host in that datacenter is leased, else the create fails) and a soft `-b preferred_region=<datacenter>` preference (a host in that datacenter is preferred, but any available host is still returned so the fast path is never blocked). Both are validated against the known OVH-US datacenters (`US-EAST-VA`, `US-WEST-OR`); an unknown value fails fast.
+- Both knobs are sent to the connector's lease endpoint as separate fields (not folded into the JSONB attribute filter) and are applied on both the fast (adopt) and slow (rebuild) create paths. A hard `region` is preserved through the slow path's attribute relaxation.
+- `mngr imbue_cloud admin pool add` now records the bake `--region` (OVH datacenter) into the new `pool_hosts.region` column so the connector can filter/order on it.
+
+- Removed the soft `preferred_region` lease knob. A lease now takes only the hard
+  `region` build arg (`-b region=<dc>`): when set, only a host in that OVH
+  datacenter is leased, otherwise the lease is region-agnostic.
+
+Tests now isolate $HOME the same way as every other mngr plugin: the project
+conftest calls `register_plugin_test_fixtures(globals())`, which brings in the
+autouse `setup_test_mngr_env` fixture. Previously this plugin's tests did not
+redirect $HOME, so running them on their own could read or write the real
+`~/.mngr` / `~/.claude.json`. Internal test-infrastructure change only; no
+user-facing behavior change.
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr imbue_cloud` provider plugin, not minds-specific). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check. No runtime behavior change.
+
+Fixed a stale reference in `UNABRIDGED_CHANGELOG.md`: the `minds-dev-iterate`
+skill was renamed to `minds-dev-workflow`. The historical entry now points at
+the current skill name (noting the former name) so readers can find it.
+
+## 2026-06-03
+
+Fixed the imbue_cloud slow (rebuild) path. When `fast_mode=prevent` leased a host
+and rebuilt its container, the rebuilt host was still marked as carrying a
+pre-baked agent, so `provision_agent` took the minimal "adopt" path (which runs a
+`python3` claude-config patch) against the freshly-rebuilt container -- failing
+with `python3: not found`. The slow path now builds the host object with
+`adopt_pre_baked_agent=False`, so `pre_baked_agent_id` is unset and mngr runs its
+standard full create + provision pipeline (matching the slow path's "fresh OVH
+host" contract). The rebuilt agent gets a fresh id; the bake's agent id was only
+bookkeeping (release keys off the lease's host db id).
+
+This pairs with the FCT `imbue_cloud` create template gaining the same build
+config as `ovh` (`--file=Dockerfile .`, `target_path=/mngr/code/`, `fct-seed`
+post-create) so the rebuild produces the FCT image rather than a bare
+`debian:bookworm-slim`; those build args are ignored on the fast/adopt path.
+
+Fixed the pool-host bake writing the wrong value into `pool_hosts.vps_instance_id`:
+the INSERT passed the mngr `host_id` where the OVH service name belongs, which
+broke every connector-side OVH teardown (they key on `vps_instance_id`). The bake
+now writes `vps_address` (the service name) via the new pure
+`build_pool_host_insert_values()`, pinned by a regression test using the real
+`host-`/`vps-` shapes.
+
+`mngr imbue_cloud admin pool destroy` (and the `minds pool destroy` wrapper) now
+do a full teardown: cancel the OVH VPS (strip per-lease tags + `deleteAtExpiration`)
+before dropping the row, so it can no longer strand a still-billing VPS. Pass
+`--skip-vps-cancel` only when the VPS is already gone. The wrapper injects the
+tier's OVH credentials from Vault, like `pool create`. Relatedly, the imbue_cloud
+provider's `destroy_host` now raises when the connector release fails instead of
+silently cleaning up local state, so a failed release no longer makes mngr
+"forget" a host whose lease/VPS is still live.
+
+Stopped masking errors in the lease/teardown paths (error-handling audit):
+- `_list_leased_hosts_cached` no longer swallows a `list_hosts` failure to an
+  empty list -- a transient connector outage / expired token now propagates
+  (the method already raised via `_require_account`, so callers tolerate it)
+  rather than making the account look like it has zero leased hosts.
+- `client.release_host` now raises `ImbueCloudConnectorError` on a transport
+  error or non-2xx (e.g. the synchronous release returning 5xx because the OVH
+  cancel failed) instead of returning a quiet `False`. `destroy_host` lets it
+  propagate (so a failed release surfaces and local state isn't cleaned up);
+  the create-rollback path (`_release_lease_quietly`) catches it explicitly to
+  stay best-effort.
+- The leased-host TOFU host-key scan now logs (debug) the cause when it can't
+  read a remote key, so the later StrictHostKeyChecking SSH failure is
+  diagnosable.
+
+Added `mngr imbue_cloud admin paid` subcommands for managing the connector's paid-user lists: `paid domain add|remove|list` and `paid email add|remove|list` (with `--paid-only` on list). These talk to the connector's `/paid/*` admin API using the fixed API key read from `$MINDS_PAID_ADMIN_KEY` (or `--api-key`). Added matching client methods and a `PaidListEntry` data type.
+
+Added a robust "slow path" to imbue_cloud host leasing. A new `fast_mode` build
+arg (`-b fast_mode=require|prevent`) selects how `mngr create` lands on a pool
+host:
+
+- `fast_mode=require`: lease a pool host whose attributes exactly match and adopt
+  its pre-baked agent (the original fast path). Raises a distinct
+  `FastPathUnavailableError` when no exact match exists.
+- `fast_mode=prevent` (the new default): lease any adequately-sized available
+  host (resource attributes only; `repo_branch_or_tag`/`repo_url` are dropped),
+  destroy its baked container, and rebuild it from the FCT Dockerfile via the
+  shared `mngr_vps_docker` setup path, then run mngr's standard full client-side
+  setup -- exactly like an OVH host.
+
+Once a host is leased, any failure during the remaining setup now releases the
+lease back to the pool before re-raising, so failed builds never leak a lease.
+Logs clearly state which path was taken (`FAST PATH` vs `SLOW PATH`).
+
+Unknown `-b` entries (e.g. `--file=Dockerfile`, `.`) are now forwarded verbatim
+to the delegated build instead of being rejected.
+
+## 2026-06-02
+
+Simplified an exception handler now that `HostError`/`HostConnectionError`/`HostNotFoundError`
+are all `MngrError` subclasses: the redundant `except (HostConnectionError, HostNotFoundError,
+MngrError)` guard is now just `except MngrError`. No behavior change.
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
+## 2026-06-01
+
+# Offline agent field generators
+
+Updated the provider's `get_host_and_agent_details` override (and its lease-only `_build_offline_details_from_lease` fallback) to accept and forward the new `offline_field_generators` parameter, so offline plugin fields (see the mngr changelog entry) are populated for leased hosts that fall back to offline/lease-only data.
+
+## 2026-05-29
+
+# Fix OAuth CLI hang after successful browser sign-in
+
+- Fixed a bug in `mngr imbue_cloud auth oauth` where the local callback listener would hang until the 300s timeout after the browser had already returned the OAuth code. The handler now only records query params when the request is for `/oauth/callback` and carries non-empty params, so secondary browser GETs (favicon, prefetches, etc.) can no longer overwrite the captured callback with `{}`.
+
+Added R2 bucket support: a new `mngr imbue_cloud bucket` command group for
+creating, listing, inspecting, and destroying R2 buckets (one per host, paid
+accounts only), plus `bucket keys create/list/destroy` for minting and revoking
+scoped S3 keys (read-only or read-write) to hand to different agents.
+
+`bucket create` returns S3-compatible credentials (access key id, secret access
+key, endpoint, bucket name) as JSON; the secret is shown only once and is never
+stored by the service. `bucket destroy` refuses a non-empty bucket and, on
+success, revokes all of that bucket's keys.
+
+`mngr destroy <agent>` against an imbue_cloud-leased pool host is now
+*terminal* rather than a soft `docker stop`. The new flow on the leased
+VPS:
+
+1. Stops + removes the workspace container, drops the per-host docker named
+   volume, deletes the per-host btrfs subvolume under `/mngr-btrfs/`, runs
+   `docker system prune -a -f --volumes`, and wipes `/root` + `/tmp`
+   (preserving only `/root/.ssh/authorized_keys` so the pool-management ssh
+   path still works through `cleanup_released_hosts.py`).
+2. Releases the lease back to the pool (the `/hosts/{id}/release` connector
+   call -- same as `mngr imbue_cloud hosts release`).
+3. Cleans up local per-host state (ssh keys, known_hosts, cached records).
+
+Privacy-first ordering: the agent's data is gone before the connector flips
+the row to `released`, so the eventual VPS-destroy by
+`cleanup_released_hosts.py` is belt-and-suspenders rather than the only
+barrier.
+
+To stop the container without releasing the lease (i.e. you intend to
+resume the workspace later on the same VPS), use `mngr stop <agent>`
+instead.
+
+`mngr delete <agent>` (the GC path) now also runs this same flow; it's a
+safe no-op for an already-released lease and acts as a recovery path if a
+prior `destroy` crashed mid-wipe.
+
+The wipe script (`build_pool_host_wipe_script`) is exposed as a pure free
+function in `mngr_imbue_cloud.instance` so the rendered shell can be unit
+tested without standing up an SSH transport.
+
+The minds app now consumes the `mngr imbue_cloud bucket` capability: when a
+workspace is created with the `imbue_cloud` backup provider, minds calls
+`mngr imbue_cloud bucket create` / `bucket keys create` to provision a
+per-workspace R2 bucket (named after the host id) and a scoped readwrite key,
+then points the workspace's restic backups at it.
+
+(This integration PR adds no code in this project; it wires the existing
+bucket commands into the minds workspace-creation flow. The bucket commands
+themselves are covered by the `mngr-cloud-bucket` changelog entry.)
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests
@@ -93,7 +393,7 @@ Swap the imbue-cloud pool bake walker from Vultr to OVH:
 ## 2026-05-06
 
 - `mngr imbue_cloud admin pool create`: post-create read-back is now scoped to `--provider <provider>` (default `vultr`) and uses `--on-error continue`, so a pre-existing stale host on the operator's machine no longer aborts the bake before the management-key install + DB INSERT. The bake still fails loudly when the just-created agent is genuinely missing from the listing output.
-- Removed the broken `just create-pool-hosts-dev` and `just create-pool-hosts` recipes. Both called `apps/remote_service_connector/scripts/create_pool_hosts.py`, which still inserted into the dropped `pool_hosts.version` column and so failed against the migrated schema. The replacement is `mngr imbue_cloud admin pool create` (with `--mngr-source` for the dev-loop's working-tree-into-vendor/mngr/ rsync). `just sync-vendor-mngr` is unchanged -- it serves a different (release) flow not covered by the plugin. Updated `just minds-start`'s "no FCT worktree" hint and the `minds-dev-iterate` skill to point at the new bake path.
+- Removed the broken `just create-pool-hosts-dev` and `just create-pool-hosts` recipes. Both called `apps/remote_service_connector/scripts/create_pool_hosts.py`, which still inserted into the dropped `pool_hosts.version` column and so failed against the migrated schema. The replacement is `mngr imbue_cloud admin pool create` (with `--mngr-source` for the dev-loop's working-tree-into-vendor/mngr/ rsync). `just sync-vendor-mngr` is unchanged -- it serves a different (release) flow not covered by the plugin. Updated `just minds-start`'s "no FCT worktree" hint and the `minds-dev-workflow` skill to point at the new bake path.
 - Deleted dead code: `apps/remote_service_connector/scripts/create_pool_hosts.py` (replaced by `mngr imbue_cloud admin pool create`).
 
 - Internal: re-baseline mngr_imbue_cloud against the standard ratchet checks. The new plugin's `test_ratchets.py` now includes the full set of `test_prevent_*` functions derived from `standard_ratchet_checks.py` (snapshots pinned to current violation counts so they can only ratchet down).

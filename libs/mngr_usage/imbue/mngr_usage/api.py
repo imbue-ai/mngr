@@ -44,6 +44,7 @@ import time
 from collections.abc import Callable
 from collections.abc import Sequence
 from datetime import datetime
+from pathlib import Path
 from threading import Lock
 from typing import Any
 from typing import overload
@@ -68,15 +69,20 @@ from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostSnapshot
+from imbue.mngr_usage.data_types import EVENTS_DIR_NAME
+from imbue.mngr_usage.data_types import EVENTS_JSONL_FILENAME
 from imbue.mngr_usage.data_types import SessionCostRecord
+from imbue.mngr_usage.data_types import USAGE_DIR_NAME
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
+from imbue.mngr_usage.preservation import discover_preserved_agents
 
 # Discovery convention: each agent's state dir holds usage events at
 #   <agent_state_dir>/events/<source>/usage/events.jsonl
 # This mirrors the common_transcript pattern used by ``mngr transcript``.
-_USAGE_SOURCE_SUFFIX = "/usage"
-_EVENTS_JSONL_FILENAME = "events.jsonl"
+# The path segments themselves are declared once in ``data_types``.
+_USAGE_SOURCE_SUFFIX = f"/{USAGE_DIR_NAME}"
+_EVENTS_JSONL_FILENAME = EVENTS_JSONL_FILENAME
 
 
 # =============================================================================
@@ -732,6 +738,62 @@ class _RawEventsCollector(MutableModel):
                 self.events_by_source.setdefault(source_name, {}).setdefault(agent_id, []).extend(events)
 
 
+def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """Read a destroyed agent's preserved usage events, grouped by source_name.
+
+    The preserved layout mirrors the live state dir: usage events live at
+    ``<preserved_dir>/events/<source>/usage/events.jsonl``. Preserved files are
+    always local, so they're read straight off local disk. Returns ``{}`` when
+    the dir holds no usage events.
+    """
+    events_root = preserved_dir / EVENTS_DIR_NAME
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    if not events_root.is_dir():
+        return by_source
+    for source_dir in sorted(events_root.iterdir()):
+        events_file = source_dir / USAGE_DIR_NAME / EVENTS_JSONL_FILENAME
+        if not events_file.is_file():
+            continue
+        try:
+            content = events_file.read_text()
+        except OSError as e:
+            logger.debug("Could not read preserved usage events {}: {}", events_file, e)
+            continue
+        events = parse_events_from_content(content, f"preserved {source_dir.name}")
+        if events:
+            by_source[source_dir.name] = events
+    return by_source
+
+
+def _merge_preserved_events(
+    mngr_ctx: MngrContext,
+    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
+    *,
+    include_filters: tuple[str, ...],
+    exclude_filters: tuple[str, ...],
+    provider_names: tuple[str, ...] | None,
+) -> None:
+    """Fold destroyed agents' preserved usage events into ``events_by_source`` in place.
+
+    Each preserved agent is filtered with the same provider + CEL predicates as
+    live agents (via its preserved data.json). An agent whose id already
+    contributed live events is skipped, so a (hypothetical) still-live agent
+    that also has a stale preserved copy is never double-counted.
+    """
+    live_agent_ids = {agent_id for agents in events_by_source.values() for agent_id in agents}
+    refs = discover_preserved_agents(
+        mngr_ctx,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
+        provider_names=provider_names,
+    )
+    for ref in refs:
+        if ref.agent_id in live_agent_ids:
+            continue
+        for source_name, events in _preserved_events_per_source(ref.preserved_dir).items():
+            events_by_source.setdefault(source_name, {}).setdefault(ref.agent_id, []).extend(events)
+
+
 def gather_usage_snapshots(
     mngr_ctx: MngrContext,
     *,
@@ -740,6 +802,7 @@ def gather_usage_snapshots(
     provider_names: tuple[str, ...] | None = None,
     since_seconds: int = 86400,
     now: int | None = None,
+    include_preserved: bool = True,
 ) -> list[UsageSnapshot]:
     """Enumerate matching agents, collect raw events, aggregate per source.
 
@@ -753,6 +816,11 @@ def gather_usage_snapshots(
     snapshot's ``sessions`` tuple. The freshest rate-limit windows are
     kept regardless of session recency, since rate limits track the
     underlying account quota's current state.
+
+    When ``include_preserved`` is True (the default), usage events preserved
+    from destroyed agents (under ``<local_host_dir>/preserved/``) are folded in
+    too, so destroyed agents' spend still counts. They are filtered by the same
+    provider / CEL predicates as live agents via their preserved data.json.
     """
     if now is None:
         now = int(time.time())
@@ -766,6 +834,14 @@ def gather_usage_snapshots(
         error_behavior=ErrorBehavior.CONTINUE,
         on_agent=collector,
     )
+    if include_preserved:
+        _merge_preserved_events(
+            mngr_ctx,
+            collector.events_by_source,
+            include_filters=include_filters,
+            exclude_filters=exclude_filters,
+            provider_names=provider_names,
+        )
     return aggregate_events_to_snapshots(collector.events_by_source, since_seconds=since_seconds, now=now)
 
 
@@ -825,23 +901,25 @@ def wait_for_usage(
     timeout_seconds: float | None,
     interval_seconds: float,
     now_fn: Callable[[], int] = lambda: int(time.time()),
-    monotonic_fn: Callable[[], float] = time.monotonic,
-    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> WaitForUsageResult:
     """Poll until any source's CEL context satisfies all ``until_filters``, or timeout.
 
-    Per tick: ``poll_fn()`` returns the snapshot list. For each source,
-    build a CEL context and evaluate against ``until_filters``. First
-    passing source wins. If no match and not timed out, sleep
-    ``interval_seconds`` and try again.
+    Per tick: ``poll_fn()`` returns the snapshot list. For each source, build a CEL
+    context and evaluate against ``until_filters``. First passing source wins. If no
+    match and not timed out, sleep ``interval_seconds`` and try again.
 
-    Clock and sleep are injected so tests can run the loop fast without
-    real time elapsing. The default callable for ``now_fn`` reads
-    wall-clock; ``monotonic_fn`` is used only for the timeout/elapsed
-    measurement so a wall-clock skew during the wait doesn't confuse
-    timeout accounting.
+    ``timeout_seconds=None`` waits indefinitely. This is a background/daemon wait,
+    expected to run until the usage predicate flips -- the deliberate exception to
+    the "every wait must set a timeout" rule. That is why this loop owns a real
+    ``time.sleep`` (the one sanctioned sleep in this package -- see
+    ``test_ratchets``) rather than going through the shared ``poll_until``, which
+    requires an explicit timeout on purpose.
+
+    ``now_fn`` supplies the wall-clock seconds fed into each CEL context (so
+    time-based filters can be evaluated deterministically in tests). ``time.monotonic``
+    drives the timeout/elapsed accounting so a wall-clock skew mid-wait can't confuse it.
     """
-    start = monotonic_fn()
+    start = time.monotonic()
     last_snapshots: list[UsageSnapshot] = []
     is_waiting = True
     while is_waiting:
@@ -859,18 +937,18 @@ def wait_for_usage(
                 is_matched=True,
                 is_timed_out=False,
                 matched_source=matched,
-                elapsed_seconds=monotonic_fn() - start,
+                elapsed_seconds=time.monotonic() - start,
                 final_snapshots=tuple(last_snapshots),
             )
-        elapsed = monotonic_fn() - start
-        if timeout_seconds is not None and elapsed >= timeout_seconds:
+        if timeout_seconds is not None and time.monotonic() - start >= timeout_seconds:
             is_waiting = False
         else:
-            sleep_fn(interval_seconds)
+            # Daemon wait: this real sleep is the deliberate per-package exception.
+            time.sleep(interval_seconds)
     return WaitForUsageResult(
         is_matched=False,
         is_timed_out=True,
         matched_source=None,
-        elapsed_seconds=monotonic_fn() - start,
+        elapsed_seconds=time.monotonic() - start,
         final_snapshots=tuple(last_snapshots),
     )

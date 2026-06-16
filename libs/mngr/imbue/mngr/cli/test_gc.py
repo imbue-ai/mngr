@@ -6,11 +6,25 @@ from datetime import timezone
 from pathlib import Path
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.cli.gc import GcCliOptions
+from imbue.mngr.cli.gc import _get_selected_providers
 from imbue.mngr.cli.gc import gc
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.provider_config_registry import _provider_config_registry
+from imbue.mngr.config.provider_config_registry import register_provider_config
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import get_or_create_local_host_id
+from imbue.mngr.providers.registry import _backend_registry
 
 
 def _write_certified_data(per_host_dir: Path, temp_host_dir: Path, generated_work_dirs: tuple[str, ...]) -> Path:
@@ -83,3 +97,153 @@ def test_gc_removes_orphaned_directory(
 
     updated_data = CertifiedHostData.model_validate_json(data_path.read_text())
     assert str(orphaned_dir) not in updated_data.generated_work_dirs, "generated_work_dirs should be updated"
+
+
+class _FakeEmptyBackend(ProviderBackendInterface):
+    """Backend whose provider construction reports the provider is empty.
+
+    Mirrors how the Modal backend signals "no per-user environment yet" so we
+    can exercise gc's provider-selection skip path without real Modal access.
+    """
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return ProviderBackendName("fake-empty-backend")
+
+    @staticmethod
+    def get_description() -> str:
+        return "Fake backend that is always empty."
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
+    ) -> ProviderInstanceInterface:
+        raise ProviderEmptyError(provider_name=name, reason="no state yet (test backend)")
+
+
+class _FakeUnavailableBackend(ProviderBackendInterface):
+    """Backend whose provider construction reports the backend is unreachable."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return ProviderBackendName("fake-unavailable-backend")
+
+    @staticmethod
+    def get_description() -> str:
+        return "Fake backend that is always unavailable."
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
+    ) -> ProviderInstanceInterface:
+        raise ProviderUnavailableError(provider_name=name, reason="backend offline (test backend)")
+
+
+def _make_gc_opts(provider: tuple[str, ...]) -> GcCliOptions:
+    """Build GcCliOptions for an explicit --provider selection (other flags defaulted)."""
+    return GcCliOptions(
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        plugin=(),
+        disable_plugin=(),
+        dry_run=True,
+        on_error="abort",
+        all_providers=False,
+        provider=provider,
+    )
+
+
+@pytest.mark.allow_warnings(match=r"^Skipping provider fake-unavailable-backend \(unavailable\)")
+def test_get_selected_providers_skips_empty_silently_and_records_unavailable(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An explicit --provider that is empty is silently skipped; unavailable is reported.
+
+    Empty providers are known to have nothing to gc, so skipping is safe and
+    not a user-visible failure. Unavailable providers, by contrast, have
+    unknown state -- the user asked us to gc them specifically and we could
+    not reach them, so they come back as an error string and gc exits non-zero.
+    """
+    backends = (_FakeEmptyBackend, _FakeUnavailableBackend)
+    for backend in backends:
+        _backend_registry[backend.get_name()] = backend
+        register_provider_config(str(backend.get_name()), ProviderInstanceConfig)
+    try:
+        selected, skipped_errors = _get_selected_providers(
+            mngr_ctx=temp_mngr_ctx,
+            opts=_make_gc_opts(("fake-empty-backend", "fake-unavailable-backend")),
+        )
+    finally:
+        for backend in backends:
+            del _backend_registry[backend.get_name()]
+            del _provider_config_registry[backend.get_name()]
+
+    assert selected == []
+    assert len(skipped_errors) == 1
+    assert "fake-unavailable-backend" in skipped_errors[0]
+    assert "unavailable" in skipped_errors[0]
+
+
+@pytest.mark.allow_warnings(match=r"^Skipping provider fake-unavailable-backend \(unavailable\)")
+def test_gc_exits_non_zero_when_explicit_provider_is_unavailable(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr gc --provider X` with X unavailable exits non-zero.
+
+    The skipped provider's error message is surfaced in the summary so the user
+    can see what was not gc'd. gc still runs against any other providers, but
+    the overall command fails so the explicit request is not silently dropped.
+    Empty providers (whose state is known to be empty) take the symmetric
+    silent-success path and are exercised by
+    test_get_selected_providers_skips_empty_silently_and_records_unavailable.
+    """
+    _backend_registry[_FakeUnavailableBackend.get_name()] = _FakeUnavailableBackend
+    register_provider_config(str(_FakeUnavailableBackend.get_name()), ProviderInstanceConfig)
+    try:
+        result = cli_runner.invoke(
+            gc,
+            ["--provider", "fake-unavailable-backend"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+    finally:
+        del _backend_registry[_FakeUnavailableBackend.get_name()]
+        del _provider_config_registry[_FakeUnavailableBackend.get_name()]
+
+    assert result.exit_code == 1, result.output
+    assert "fake-unavailable-backend" in result.output
+    assert "unavailable" in result.output

@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import pytest
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
@@ -17,7 +16,6 @@ from imbue.mngr_recursive.provisioning import _ensure_uv_available
 from imbue.mngr_recursive.provisioning import _get_installed_mngr_packages
 from imbue.mngr_recursive.provisioning import _get_mngr_repo_root
 from imbue.mngr_recursive.provisioning import _install_mngr_package_mode
-from imbue.mngr_recursive.provisioning import _resolve_remote_path
 from imbue.mngr_recursive.provisioning import _upload_deploy_files
 from imbue.mngr_recursive.provisioning import provision_mngr_for_agent
 from imbue.mngr_recursive.provisioning import provision_mngr_on_host
@@ -46,20 +44,12 @@ def _make_mock_host(is_local: bool = False, host_dir: Path | None = None) -> Mag
 
 def _make_mock_mngr_ctx(
     plugin_config: RecursivePluginConfig | None = None,
-    concurrency_group: ConcurrencyGroup | None = None,
 ) -> MagicMock:
-    """Create a mock MngrContext.
-
-    If concurrency_group is provided, it will be used for the mock's
-    concurrency_group attribute. This is required for tests that exercise
-    code paths using ConcurrencyGroupExecutor (e.g. _upload_deploy_files).
-    """
+    """Create a mock MngrContext."""
     ctx = MagicMock()
     resolved_config = plugin_config if plugin_config is not None else RecursivePluginConfig()
     ctx.get_plugin_config.return_value = resolved_config
     ctx.pm.hook.get_files_for_deploy.return_value = []
-    if concurrency_group is not None:
-        ctx.concurrency_group = concurrency_group
     return ctx
 
 
@@ -72,100 +62,50 @@ def _make_mock_agent(agent_id: str = "agent-123", mngr_ctx: MagicMock | None = N
     return agent
 
 
-# --- Path resolution tests ---
+# --- Staging / upload tests ---
 
 
-def test_resolve_remote_path_with_tilde() -> None:
-    """Paths starting with ~ should resolve relative to the remote home."""
-    result = _resolve_remote_path(Path("~/.mngr/config.toml"), "/home/testuser")
-    assert result == Path("/home/testuser/.mngr/config.toml")
+def test_upload_deploy_files_uses_single_rsync(tmp_path: Path) -> None:
+    """All deploy files are transferred via one copy_local_directory (rsync) call, not per-file writes.
 
-
-def test_resolve_remote_path_with_tilde_nested() -> None:
-    """Nested tilde paths should resolve correctly."""
-    result = _resolve_remote_path(Path("~/.mngr/profiles/abc/settings.toml"), "/home/testuser")
-    assert result == Path("/home/testuser/.mngr/profiles/abc/settings.toml")
-
-
-def test_resolve_remote_path_relative() -> None:
-    """Relative paths should pass through unchanged."""
-    result = _resolve_remote_path(Path(".mngr/settings.local.toml"), "/home/testuser")
-    assert result == Path(".mngr/settings.local.toml")
-
-
-# --- Upload tests ---
-
-
-def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
-    """Files with Path sources should be read and uploaded."""
-    host = _make_mock_host()
-    source_file = tmp_path / "config.toml"
-    source_file.write_text("key = 'value'")
-
+    This is the regression guard for the Modal "SSH connection reset / banner" bug: the old
+    implementation opened one SFTP channel per file (~0.7s/file over a Modal tunnel), so a few
+    hundred plugin files timed out or reset the connection. The fix must transfer the whole set
+    in a single rsync regardless of file count.
+    """
+    host = _make_mock_host(is_local=False)
+    source_file = tmp_path / "a.txt"
+    source_file.write_text("aaa")
     deploy_files: dict[Path, Path | str] = {
-        Path("~/.mngr/config.toml"): source_file,
+        Path("~/.claude/a.txt"): source_file,
+        Path("~/.mngr/b.toml"): "bbb",
     }
 
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_mock_mngr_ctx(concurrency_group=cg)
-        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
+    # Snapshot the staging tree at copy_local_directory time, since the temp dir is
+    # cleaned up before _upload_deploy_files returns.
+    staged_snapshot: dict[str, str] = {}
 
-    assert count == 1
-    host.execute_idempotent_command.assert_called()
-    host.write_file.assert_called_once_with(
-        path=Path("/home/testuser/.mngr/config.toml"),
-        content=source_file.read_bytes(),
-    )
+    def _record(source_path: Path, target_path: Path, extra_args: object) -> None:
+        for staged in Path(source_path).rglob("*"):
+            if staged.is_file():
+                staged_snapshot[staged.relative_to(source_path).as_posix()] = staged.read_text()
 
+    host.copy_local_directory.side_effect = _record
 
-def test_upload_deploy_files_with_string_source() -> None:
-    """Files with string sources should be uploaded directly."""
-    host = _make_mock_host()
-    deploy_files: dict[Path, Path | str] = {
-        Path("~/.mngr/config.toml"): 'key = "value"',
-    }
+    count = _upload_deploy_files(host, deploy_files, "/home/testuser")
 
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_mock_mngr_ctx(concurrency_group=cg)
-        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
-
-    assert count == 1
-    host.write_text_file.assert_called_once_with(
-        path=Path("/home/testuser/.mngr/config.toml"),
-        content='key = "value"',
-    )
-
-
-def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
-    """Missing Path source files should be skipped."""
-    host = _make_mock_host()
-    deploy_files: dict[Path, Path | str] = {
-        Path("~/.mngr/config.toml"): tmp_path / "nonexistent.toml",
-    }
-
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_mock_mngr_ctx(concurrency_group=cg)
-        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
-
-    assert count == 0
+    assert count == 2
+    host.copy_local_directory.assert_called_once()
+    # Deploy files must be transferred via a single rsync, never per-file writes.
     host.write_file.assert_not_called()
     host.write_text_file.assert_not_called()
-
-
-def test_upload_deploy_files_creates_parent_dirs() -> None:
-    """Parent directories should be created before uploading."""
-    host = _make_mock_host()
-    deploy_files: dict[Path, Path | str] = {
-        Path("~/.mngr/profiles/abc/settings.toml"): "content",
+    call_args = host.copy_local_directory.call_args.args
+    # rsync targets the tightest common ancestor of the destinations, not "/".
+    assert call_args[1] == Path("/home/testuser")
+    assert staged_snapshot == {
+        ".claude/a.txt": "aaa",
+        ".mngr/b.toml": "bbb",
     }
-
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_mock_mngr_ctx(concurrency_group=cg)
-        _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
-
-    # Check that mkdir -p was called for the parent directory
-    mkdir_calls = [call for call in host.execute_idempotent_command.call_args_list if "mkdir -p" in str(call)]
-    assert len(mkdir_calls) == 1
 
 
 # --- Host provisioning tests ---
@@ -439,15 +379,6 @@ def test_recursive_plugin_config_merge_with() -> None:
     assert merged.install_mode == MngrInstallMode.PACKAGE
 
 
-# --- _resolve_remote_path bare tilde test ---
-
-
-def test_resolve_remote_path_bare_tilde() -> None:
-    """A bare '~' should resolve to the remote home directory."""
-    result = _resolve_remote_path(Path("~"), "/home/testuser")
-    assert result == Path("/home/testuser")
-
-
 # --- _build_uv_env_prefix test ---
 
 
@@ -526,20 +457,18 @@ def test_agent_package_mode_warns_when_no_packages() -> None:
         provision_mngr_for_agent(agent=agent, host=host, mngr_ctx=ctx)
 
 
-# --- _upload_deploy_files mkdir failure ---
+# --- _upload_deploy_files rsync failure ---
 
 
-def test_upload_deploy_files_raises_on_mkdir_failure() -> None:
-    """_upload_deploy_files should raise when mkdir -p fails."""
-    host = _make_mock_host()
-    host.execute_idempotent_command.return_value = _make_command_result(False, stderr="permission denied")
+def test_upload_deploy_files_propagates_rsync_failure() -> None:
+    """_upload_deploy_files should propagate an rsync (copy_local_directory) failure."""
+    host = _make_mock_host(is_local=False)
+    host.copy_local_directory.side_effect = MngrError("rsync failed: connection reset")
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mngr/config.toml"): "content",
     }
-    with ConcurrencyGroup(name="test") as cg:
-        ctx = _make_mock_mngr_ctx(concurrency_group=cg)
-        with pytest.raises(MngrError, match="Failed to create director"):
-            _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
+    with pytest.raises(MngrError, match="rsync failed"):
+        _upload_deploy_files(host, deploy_files, "/home/testuser")
 
 
 def test_install_package_mode_raises_when_force_reinstall_also_fails() -> None:

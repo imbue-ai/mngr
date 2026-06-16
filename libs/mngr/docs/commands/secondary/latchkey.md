@@ -43,6 +43,7 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 {
   "env": {
     "LATCHKEY_GATEWAY": "...",
+    "LATCHKEY_GATEWAY_SECONDARY": "...",
     "LATCHKEY_GATEWAY_PASSWORD": "...",
     "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "...",
     "LATCHKEY_DISABLE_COUNTING": "1"
@@ -222,6 +223,9 @@ Long-running foreground process that:
    are intentional: any agents still alive when this process exits
    will lose their gateway endpoint until the next ``mngr latchkey
    forward`` is started.
+6. On SIGHUP, bounces only the ``mngr observe`` child (the gateway and
+   every reverse tunnel stay up) so a provider-set change made by an
+   embedder takes effect without a full restart.
 
 No filtering flags: every discovered agent gets a tunnel. The plugin
 emits stderr-only logs; stdout stays empty for the lifetime of the

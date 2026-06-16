@@ -2,6 +2,24 @@ import re
 
 _ENVIRONMENT_NOT_FOUND_RE = re.compile(r"^Environment '[^']+' not found\b")
 
+# Modal returns this when two operations modify the same app concurrently
+# (e.g. parallel `modal deploy` calls, or a deploy racing app creation in the
+# same app). The lock is held only for the duration of the conflicting
+# operation, so the conflict is transient and safe to retry with backoff.
+_APP_LOCKED_RE = re.compile(r"selected app is locked", re.IGNORECASE)
+
+
+def is_app_locked_error(message: str) -> bool:
+    """Check whether a Modal error message indicates a transient app lock.
+
+    Modal serializes mutations to a single app; concurrent modifications (e.g.
+    two ``modal deploy`` calls targeting the same app name, or a deploy racing
+    app creation) fail with "The selected app is locked - probably due to a
+    concurrent modification". The lock is released as soon as the conflicting
+    operation finishes, so callers should retry with backoff rather than fail.
+    """
+    return _APP_LOCKED_RE.search(message) is not None
+
 
 def is_environment_not_found_error(e: Exception) -> bool:
     """Check if a not-found exception indicates the Modal environment itself is gone.
@@ -32,17 +50,6 @@ class ModalProxyNotFoundError(ModalProxyError):
     """Raised when a Modal resource is not found."""
 
 
-class ModalProxyPermissionDeniedError(ModalProxyError):
-    """Raised when Modal denies access to a resource.
-
-    Modal's per-user permission entries are propagated asynchronously, so a
-    just-created environment (or a just-deleted volume) will report this
-    error for several seconds before the permission system catches up.
-    Callers that are in the middle of a creation/teardown flow should retry
-    this error with backoff.
-    """
-
-
 class ModalProxyInvalidError(ModalProxyError):
     """Raised when an invalid argument is passed to Modal."""
 
@@ -57,3 +64,14 @@ class ModalProxyRateLimitError(ModalProxyError):
 
 class ModalProxyRemoteError(ModalProxyError):
     """Raised on Modal remote execution errors."""
+
+
+class ModalProxyAppLockedError(ModalProxyError):
+    """Raised when a Modal app is locked due to a concurrent modification.
+
+    Modal serializes mutations to a single app, so concurrent operations on the
+    same app (e.g. parallel ``modal deploy`` calls, or a deploy racing app
+    creation) fail with "The selected app is locked". The lock is transient --
+    it is released once the conflicting operation completes -- so callers should
+    retry with backoff. See ``is_app_locked_error``.
+    """

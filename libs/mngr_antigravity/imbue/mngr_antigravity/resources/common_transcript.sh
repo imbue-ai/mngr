@@ -14,9 +14,8 @@
 #    "content":"...", "thinking":"...", "tool_calls":[{...}], ...}
 #
 # This converter emits:
-#   USER_EXPLICIT/USER_INPUT       -> user_message  (extracted from the
-#                                       <USER_REQUEST>...</USER_REQUEST>
-#                                       envelope; metadata is dropped)
+#   USER_EXPLICIT/USER_INPUT       -> user_message  (the clean typed text
+#                                       agy records in CortexStepUserInput.query)
 #   MODEL/PLANNER_RESPONSE         -> assistant_message  (any tool_calls
 #                                       attached as tool_calls[])
 #   MODEL/CODE_ACTION              -> tool_result (paired with the most
@@ -55,9 +54,20 @@ _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/common_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
+# Shared common-transcript primitives: the convert lock that serializes this
+# converter's read-modify-write against any concurrent --single-pass flush (see
+# the library header for why duplicates would result without it).
+# shellcheck source=mngr_common_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+
 convert_new_events() {
     if [ ! -f "$INPUT_FILE" ]; then
         log_debug "Input file not found: $INPUT_FILE"
+        return
+    fi
+
+    if ! mngr_common_transcript_acquire_lock; then
+        log_warn "could not acquire convert lock; skipping pass"
         return
     fi
 
@@ -67,46 +77,25 @@ convert_new_events() {
     result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" python3 << 'CONVERT_SCRIPT' 2>"$convert_stderr" || true
 import json
 import os
-import re
 import sys
 
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
-# Strip Antigravity's USER_REQUEST/ADDITIONAL_METADATA/USER_SETTINGS_CHANGE
-# envelope from the raw user content. We keep only the inner text the user
-# actually typed; metadata about local time and model selection is noise
-# for transcript consumers.
-_USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
-
-
 def _extract_user_text(content, conv_id, step_index):
-    """Return the inner <USER_REQUEST> text, or None when the envelope is missing.
+    """Return the user's typed text from a USER_INPUT record.
 
-    agy 1.0.0 always wraps USER_INPUT in
-    ``<USER_REQUEST>...</USER_REQUEST>\\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>``.
-    If the envelope is absent, a silent fall-through to the raw content would
-    bake agy's bookkeeping (local-time / model-selection metadata, future
-    fields) into the user-facing transcript without any indication that the
-    converter's contract was violated. We log loudly to stderr (the calling
-    bash surfaces this as a log_warn "convert error: ...") and return None
-    so the caller drops the event; the next agy version that changes the
-    envelope shape will produce an obvious schema-break signal instead of
-    silent garbage.
+    agy's SQLite store (the decode_agy_transcript.py source) records the clean typed text
+    directly in ``CortexStepUserInput.query``, so ``content`` is already the user's message --
+    we only strip surrounding whitespace. A non-string content is a real schema break, so we
+    log it and drop the event.
     """
     if not isinstance(content, str):
         sys.stderr.write(
             f"USER_INPUT content is not a string for conv={conv_id} step={step_index}; dropping event\n"
         )
         return None
-    match = _USER_REQUEST_RE.search(content)
-    if match is None:
-        sys.stderr.write(
-            f"USER_INPUT content missing <USER_REQUEST> envelope for conv={conv_id} step={step_index}; "
-            "dropping event so the schema break is visible upstream\n"
-        )
-        return None
-    return match.group(1)
+    return content.strip()
 
 
 def _short_value(value):
@@ -182,9 +171,9 @@ def convert():
                 if event_id in existing_ids:
                     continue
                 text = _extract_user_text(raw.get("content"), conv_id, step_index)
-                # _extract_user_text already returned None and logged when the
-                # envelope is missing or content is not a string; an empty
-                # USER_REQUEST body is also dropped as it carries no signal.
+                # _extract_user_text returns the stripped typed text, or None (already logged)
+                # when content is not a string. Empty results -- a None or otherwise empty
+                # content -- are dropped here as they carry no signal.
                 if not text:
                     continue
                 new_events.append((timestamp, {
@@ -271,6 +260,10 @@ def convert():
 convert()
 CONVERT_SCRIPT
 )
+
+    # The read-modify-write is done; drop the lock before the (lock-free)
+    # logging below so a concurrent pass can proceed immediately.
+    mngr_common_transcript_release_lock
 
     if [ -s "$convert_stderr" ]; then
         # Forward the heredoc Python's stderr to both the structured log

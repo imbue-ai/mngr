@@ -1,7 +1,13 @@
 from pathlib import Path
+from typing import Any
+from typing import IO
 
 from click import ClickException
+from click import get_text_stream
 
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
+from imbue.mngr.colors import should_use_color
 from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -14,11 +20,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 
 
-class BaseMngrError(Exception):
-    """Base exception for all mngr errors."""
-
-
-class MngrError(ClickException, BaseMngrError):
+class MngrError(ClickException):
     """Base exception for all user-facing mngr errors.
 
     All MngrError subclasses can provide a user_help_text attribute that contains
@@ -33,6 +35,22 @@ class MngrError(ClickException, BaseMngrError):
             return str(self) + "  [" + self.user_help_text + "]"
         return str(self)
 
+    def show(self, file: IO[Any] | None = None) -> None:
+        """Render the error with a bold-red ``Error:`` prefix on a color-capable terminal.
+
+        Gated on ``should_use_color`` so piped or ``NO_COLOR`` output stays plain,
+        mirroring the colored ``ERROR:`` prefix that ``logger.error`` already uses.
+        """
+        if file is None:
+            file = get_text_stream("stderr")
+        message = f"Error: {self.format_message()}"
+        if should_use_color(file):
+            message = f"{ERROR_COLOR}{message}{RESET_COLOR}"
+        # Write straight to the stream (the PREVENT_CLICK_ECHO ratchet forbids the
+        # click helper here); this matches how the loguru stderr sink writes.
+        file.write(message + "\n")
+        file.flush()
+
 
 class UserInputError(MngrError):
     """Raised when user input is invalid."""
@@ -44,6 +62,10 @@ class ParseSpecError(MngrError, ValueError):
     """Raised when parsing a specification string fails."""
 
 
+class MismatchedPreselectionError(MngrError, ValueError):
+    """Raised when a picker's preselected mask length does not match its options."""
+
+
 class InvalidRelativePathError(MngrError, ValueError):
     """Raised when a path that should be relative is actually absolute."""
 
@@ -52,8 +74,14 @@ class InvalidRelativePathError(MngrError, ValueError):
         super().__init__(f"Path must be relative, got absolute path: {path}")
 
 
-class HostError(BaseMngrError):
-    """Base class for host-related errors."""
+class HostError(MngrError):
+    """Base class for host-related errors.
+
+    As a MngrError subclass, host errors are ClickException instances: when they
+    reach the CLI they render as a clean ``Error: ...`` message (plus any
+    user_help_text) instead of a traceback, and ``except MngrError`` handlers
+    treat them as the user-facing errors they are.
+    """
 
 
 class InvalidActivityTypeError(HostError, ValueError):
@@ -113,15 +141,21 @@ class LockNotHeldError(HostError):
     """Raised when attempting to use a lock that is not held."""
 
 
-class AgentError(BaseMngrError):
-    """Base class for agent-related errors."""
+class AgentError(MngrError):
+    """Base class for agent-related errors.
+
+    As a MngrError subclass, agent errors are ClickException instances: when they
+    reach the CLI they render as a clean ``Error: ...`` message (plus any
+    user_help_text) instead of a traceback, and ``except MngrError`` handlers
+    treat them as the user-facing errors they are.
+    """
 
 
 class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 
 
-class AgentNotFoundError(AgentError, MngrError):
+class AgentNotFoundError(AgentError):
     """No agent with this ID exists."""
 
     user_help_text = "Use 'mngr list' to see available agents."
@@ -151,7 +185,7 @@ class SendMessageError(AgentError):
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
 
 
-class DuplicateAgentNameError(AgentError, MngrError):
+class DuplicateAgentNameError(AgentError):
     """An agent with this name already exists on the host."""
 
     user_help_text = (
@@ -162,6 +196,10 @@ class DuplicateAgentNameError(AgentError, MngrError):
         self.agent_name = agent_name
         self.existing_agent_id = existing_agent_id
         super().__init__(f"An agent named '{agent_name}' already exists on this host (ID: {existing_agent_id})")
+
+
+class AgentStateInconsistencyError(AgentError, RuntimeError):
+    """Raised when an agent found during discovery is no longer present on the live host."""
 
 
 class AgentStartError(AgentError):
@@ -301,6 +339,30 @@ class DockerBuildTimeoutError(HostCreationError):
         )
 
 
+class DockerRuntimeNotRegisteredError(HostCreationError):
+    """Raised when the configured `docker_runtime` is not registered with the Docker daemon.
+
+    Surfaces Docker's native "unknown or invalid runtime name" failure as a
+    clean, actionable message instead of a raw `ProcessError` traceback that
+    buries the cause inside the full `docker run` command line.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, runtime_name: str) -> None:
+        self.runtime_name = runtime_name
+        super().__init__(
+            provider_name,
+            f"Docker runtime '{runtime_name}' is not registered with the Docker daemon "
+            f"for provider '{provider_name}'.",
+        )
+        self.user_help_text = (
+            f"Install and register the '{runtime_name}' runtime with Docker (e.g. gVisor's "
+            f"runsc), or select the default runtime by setting docker_runtime to 'runc':\n"
+            f"  mngr config set --scope user providers.{provider_name}.docker_runtime runc\n"
+            f"or per-invocation:\n"
+            f"  MNGR__PROVIDERS__{provider_name.upper()}__DOCKER_RUNTIME=runc"
+        )
+
+
 class HostNameConflictError(ProviderError):
     """A host with this name already exists."""
 
@@ -381,7 +443,16 @@ class LocalHostNotDestroyableError(ProviderError):
         super().__init__(provider_name, "Cannot destroy the local host - it is your local computer")
 
 
-class PluginSpecifierError(BaseMngrError, ValueError):
+class HostShutdownNotSupportedError(ProviderError):
+    """Provider does not support stopping hosts."""
+
+    user_help_text = "Stop the agent without --stop-host, or use a provider that supports stopping hosts."
+
+    def __init__(self, provider_name: ProviderInstanceName) -> None:
+        super().__init__(provider_name, f"Provider {provider_name} does not support stopping hosts")
+
+
+class PluginSpecifierError(MngrError, ValueError):
     """Raised when a plugin specifier is invalid or cannot be resolved."""
 
 
@@ -431,6 +502,14 @@ class ConfigStructureError(ConfigError, TypeError):
     """Invalid configuration structure."""
 
 
+class InvalidKeyPathError(ConfigError, ValueError):
+    """Raised when a config key path is empty or otherwise malformed."""
+
+
+class DockerConfigValidationError(ConfigError, ValueError):
+    """Raised when Docker provider config fields are mutually inconsistent."""
+
+
 class UnknownAgentTypeError(ConfigError):
     """Unknown agent type."""
 
@@ -474,7 +553,7 @@ class BinaryNotInstalledError(MngrError):
         super().__init__(f"{binary} is required for {purpose} but was not found on PATH")
 
 
-class DiscoverySchemaChangedError(BaseMngrError, ValueError):
+class DiscoverySchemaChangedError(MngrError, ValueError):
     """Raised when a discovery event line cannot be validated against the current schema.
 
     This typically means a field was added, removed, or renamed in a discovery event
@@ -490,7 +569,7 @@ class DiscoverySchemaChangedError(BaseMngrError, ValueError):
         super().__init__(f"Discovery event of type {event_type!r} does not match current schema: {validation_error}")
 
 
-class MalformedJsonlLineError(BaseMngrError, ValueError):
+class MalformedJsonlLineError(MngrError, ValueError):
     """Raised when a JSONL line is structurally invalid (e.g. not a JSON object, missing required envelope fields).
 
     The right fix is to track down whichever process is producing the bad line and stop it

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import subprocess
 from collections.abc import Generator
 from pathlib import Path
 
@@ -8,7 +9,6 @@ import docker.errors
 import docker.models.containers
 
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
@@ -18,6 +18,7 @@ from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
 from imbue.mngr.providers.docker.volume import state_volume_name
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import worker_docker_state_prefixes
 
 
 def write_fake_docker_context(config_dir: Path, context_name: str, host_url: str) -> None:
@@ -98,6 +99,45 @@ def remove_all_containers_by_prefix(
         client.close()
 
 
+def remove_all_containers_by_prefix_via_cli(prefix: str) -> None:
+    """Force-remove all Docker containers and volumes whose name starts with *prefix* via the docker CLI.
+
+    Used by subprocess-based test fixtures whose teardown runs while the
+    resource guard is active (the guard keeps ``_PYTEST_GUARD_PHASE`` at
+    "call" through teardown). Such tests are marked ``docker`` (so the docker
+    CLI is permitted) but not ``docker_sdk``, which means the SDK-based
+    ``remove_all_containers_by_prefix`` would be blocked by the guard and
+    silently fail -- leaking the singleton state container. The docker CLI is
+    permitted, so this variant cleans up reliably. Matching is by name prefix
+    (the per-test prefix is unique), covering both host and state containers.
+
+    Errors are ignored so cleanup proceeds on a best-effort basis.
+    """
+
+    def _docker(*args: str) -> str:
+        try:
+            result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=60)
+        except (subprocess.SubprocessError, OSError):
+            return ""
+        return result.stdout if result.returncode == 0 else ""
+
+    # Remove matching containers (host + state) first so their volumes are free.
+    container_ids = [
+        line.split("\t", 1)[0]
+        for line in _docker("ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}").splitlines()
+        if "\t" in line and line.split("\t", 1)[1].startswith(prefix)
+    ]
+    if container_ids:
+        _docker("rm", "-f", *container_ids)
+
+    # The state container's backing volume shares the container's name.
+    volume_names = [
+        name for name in _docker("volume", "ls", "--format", "{{.Name}}").splitlines() if name.startswith(prefix)
+    ]
+    if volume_names:
+        _docker("volume", "rm", "-f", *volume_names)
+
+
 def make_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker") -> DockerProviderInstance:
     # Explicitly pin isolate_host_volumes=False so the autouse loguru-warning
     # guard does not trip on the deprecation warning emitted for the None
@@ -158,6 +198,10 @@ def make_docker_provider_with_cleanup(
         mngr_ctx=mngr_ctx,
         config=config,
     )
+    # Register the prefix so the session-end safety net can attribute any
+    # leaked state container (named "<prefix>docker-state-<user_id>") to this
+    # worker and fail the suite if our cleanup below fails to remove it.
+    worker_docker_state_prefixes.append(mngr_ctx.config.prefix)
     yield provider
 
     try:
@@ -170,7 +214,7 @@ def make_docker_provider_with_cleanup(
                 pass
             try:
                 provider.delete_host(provider.get_host(host.host_id))
-            except (HostNotFoundError, MngrError, docker.errors.DockerException, OSError):
+            except (MngrError, docker.errors.DockerException, OSError):
                 pass
     except (MngrError, docker.errors.DockerException, OSError):
         pass

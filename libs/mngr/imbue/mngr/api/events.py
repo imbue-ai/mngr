@@ -1,7 +1,6 @@
 import hashlib
 import json
 import queue
-import shlex
 import tempfile
 import threading
 import time
@@ -32,9 +31,12 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.data_types import VolumeFileType
+from imbue.mngr.hosts.offline_host import try_resolve_readable_host
+from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import VolumeFile
+from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentOrHostAddress
@@ -50,7 +52,6 @@ FOLLOW_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 SOURCE_SCAN_INTERVAL_SECONDS: Final[float] = 10.0
 ONLINE_CHECK_INTERVAL_SECONDS: Final[float] = 30.0
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
-_EVENTS_READ_SENTINEL: Final[str] = "__MNGR_EVENTS_READ_SENTINEL_8b2e6f31__"
 
 
 # =============================================================================
@@ -61,11 +62,13 @@ _EVENTS_READ_SENTINEL: Final[str] = "__MNGR_EVENTS_READ_SENTINEL_8b2e6f31__"
 class EventsTarget(FrozenModel):
     """Resolved target for the events command."""
 
-    volume: Volume | None = Field(default=None, description="Volume scoped to the target's events directory")
-    online_host: OnlineHostInterface | None = Field(
-        default=None, description="Online host for direct command execution"
+    host: HostFileReadInterface | None = Field(
+        default=None,
+        description="Readable host (online host, or a stopped host whose volume is reachable) for reading events",
     )
-    events_path: Path | None = Field(default=None, description="Absolute path to the events directory on the host")
+    events_path: Path | None = Field(
+        default=None, description="Absolute path to the events directory under the host's host_dir"
+    )
     display_name: str = Field(description="Human-readable name for the target (agent or host)")
     provider: BaseProviderInstance | None = Field(
         default=None, description="Provider instance for re-checking online status"
@@ -78,12 +81,12 @@ class EventsTarget(FrozenModel):
     model_config = {"arbitrary_types_allowed": True}
 
     @model_validator(mode="after")
-    def _validate_online_host_and_events_path_are_paired(self) -> "EventsTarget":
-        """Ensure online_host and events_path are either both set or both None."""
-        is_host_set = self.online_host is not None
+    def _validate_host_and_events_path_are_paired(self) -> "EventsTarget":
+        """Ensure host and events_path are either both set or both None."""
+        is_host_set = self.host is not None
         is_path_set = self.events_path is not None
         if is_host_set != is_path_set:
-            raise MngrError("online_host and events_path must both be set or both be None")
+            raise MngrError("host and events_path must both be set or both be None")
         return self
 
 
@@ -144,23 +147,17 @@ def try_build_events_target_for_agent(
     Unlike ``resolve_events_target``, this skips the agent-name discovery step
     -- it assumes the caller already has an ``AgentDetails`` (e.g. from
     ``list_agents``) and just wants the events handle. Returns ``None`` when
-    the agent's host has neither a volume nor an online interface to read
-    events from (rather than raising) so a multi-agent walker can skip the
+    the agent's host has neither a readable volume nor an online interface to
+    read events from (rather than raising) so a multi-agent walker can skip the
     agent and continue with the others.
     """
     provider = get_provider_instance(provider_name, mngr_ctx)
-    host_volume = provider.get_volume_for_host(host_id)
-    events_volume: Volume | None = None
-    if host_volume is not None:
-        agent_volume = host_volume.get_agent_volume(agent_id)
-        events_volume = agent_volume.scoped("events")
     agent_events_subpath = Path("agents") / str(agent_id) / "events"
-    online_host, events_path = _try_get_online_host_for_events(provider, host_id, agent_events_subpath)
-    if events_volume is None and online_host is None:
+    host, events_path = _try_get_readable_host_for_events(provider, host_id, agent_events_subpath)
+    if host is None:
         return None
     return EventsTarget(
-        volume=events_volume,
-        online_host=online_host,
+        host=host,
         events_path=events_path,
         display_name=f"agent '{agent_name}'",
         provider=provider,
@@ -204,9 +201,13 @@ def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -
 
 
 def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> EventsTarget:
+    # Narrow discovery to the pinned provider when the address has one, so a
+    # `@HOST.PROVIDER` target skips unrelated providers (the agent path gets
+    # the same treatment via discover_by_address).
+    provider_names: tuple[str, ...] | None = (str(address.provider),) if address.provider is not None else None
     host_agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
+        provider_names=provider_names,
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,
@@ -217,23 +218,17 @@ def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> 
     with log_span("Getting events access for host {}", host_ref.host_name):
         provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
 
-        host_volume = provider.get_volume_for_host(host_ref.host_id)
-        events_volume: Volume | None = None
-        if host_volume is not None:
-            events_volume = host_volume.volume.scoped("events")
-
         host_events_subpath = Path("events")
-        online_host, events_path = _try_get_online_host_for_events(provider, host_ref.host_id, host_events_subpath)
+        host, events_path = _try_get_readable_host_for_events(provider, host_ref.host_id, host_events_subpath)
 
-        if events_volume is None and online_host is None:
+        if host is None:
             raise MngrError(
                 f"Provider '{host_ref.provider_name}' does not support volumes and the host is not online. "
                 "Cannot read events for this host."
             )
 
     return EventsTarget(
-        volume=events_volume,
-        online_host=online_host,
+        host=host,
         events_path=events_path,
         display_name=f"host '{host_ref.host_name}'",
         provider=provider,
@@ -242,32 +237,33 @@ def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> 
     )
 
 
-def _try_get_online_host_for_events(
+def _try_get_readable_host_for_events(
     provider: BaseProviderInstance,
     host_id: HostId,
     events_subpath: Path,
-) -> tuple[OnlineHostInterface | None, Path | None]:
-    """Try to get the online host and compute the absolute events path.
+) -> tuple[HostFileReadInterface | None, Path | None]:
+    """Resolve a readable host and the absolute events path under its ``host_dir``.
 
-    Returns (online_host, events_path) if the host is online, (None, None) otherwise.
+    Prefers a live online host (so follow-mode can tail locally and remote
+    reads use SSH). When the host is not online but its persisted volume is
+    reachable, returns a readable offline host so historical events can still
+    be read from the volume. Returns ``(None, None)`` when neither is available.
+
+    Delegates the online-or-volume-backed-offline resolution rule to
+    :func:`try_resolve_readable_host`; here we only compute the absolute events
+    path under the resolved host's ``host_dir``.
     """
-    try:
-        host_interface = provider.get_host(host_id)
-    except MngrError as e:
-        logger.trace("Host {} is not available for direct event access: {}", host_id, e)
+    host_interface = try_resolve_readable_host(provider, host_id)
+    if host_interface is None:
         return None, None
 
-    if not isinstance(host_interface, OnlineHostInterface):
-        return None, None
-
+    # Every readable host resolved here is also a HostInterface (an online host
+    # or a volume-backed offline host), so it exposes a real host_dir under which
+    # the events path lives.
+    if not isinstance(host_interface, HostInterface):
+        raise MngrError(f"Resolved readable host for {host_id} does not expose a host_dir")
     events_path = host_interface.host_dir / str(events_subpath)
     return host_interface, events_path
-
-
-@pure
-def _extract_filename(path: str) -> str:
-    """Extract the filename from a volume path."""
-    return path.rsplit("/", 1)[-1] if "/" in path else path
 
 
 # =============================================================================
@@ -276,66 +272,22 @@ def _extract_filename(path: str) -> str:
 
 
 def read_event_content(target: EventsTarget, event_file_name: str) -> str:
-    """Read the full content of an event file."""
-    # Prefer host-based reading (direct access to the online host)
-    if target.online_host is not None and target.events_path is not None:
-        return _read_event_content_via_host(
-            target.online_host, target.events_path, event_file_name, target.display_name
-        )
+    """Read the full content of an event file, relative to the events directory.
 
-    # Fall back to volume-based reading
-    if target.volume is not None:
-        with log_span("Reading event file '{}' for {} via volume", event_file_name, target.display_name):
-            content_bytes = target.volume.read_file(event_file_name)
-            return content_bytes.decode("utf-8", errors="replace")
-
-    raise MngrError(f"Cannot read event file for {target.display_name}: no volume or online host available")
-
-
-def _read_event_content_via_host(
-    online_host: OnlineHostInterface,
-    events_path: Path,
-    event_file_name: str,
-    display_name: str,
-) -> str:
-    """Read event content by executing cat on the online host.
-
-    Wraps the ``cat`` invocation as ``{ cat <file> && printf '%s' <sentinel>; }``
-    so the file's true trailing-newline state survives pyinfra's
-    line-rejoin pipeline. Pyinfra's ``CommandOutput.stdout`` is constructed as
-    ``"\n".join(lines)`` after each line is ``rstrip("\n")``-ed, which means
-    a file that ends with ``\n`` and one that does not produce identical
-    ``stdout`` strings. That ambiguity makes the follow-mode tail loop's
-    ``split_complete_lines`` partial-write guard misclassify the most recent
-    line as in-flight (because there is no visible terminating ``\n`` after it)
-    and hold it back until a later line forces it out, producing a perpetual
-    one-event lag.
-
-    By appending a known sentinel after ``cat``, we force pyinfra to emit
-    the trailing newline (if any) as a real ``\n`` between the file's last
-    line and the sentinel line. Stripping the sentinel back off recovers
-    the file's exact byte tail.
+    Reads through :class:`HostFileReadInterface`, whose ``read_file`` is
+    byte-exact (local reads bytes directly, remote uses SFTP), so the file's
+    exact bytes -- including its trailing-newline state -- are preserved.
     """
-    logger.trace("Reading event file '{}' for {} via host", event_file_name, display_name)
-    file_path = events_path / event_file_name
-    result = online_host.execute_idempotent_command(
-        "{{ cat {file} && printf '%s' {sentinel}; }}".format(
-            file=shlex.quote(str(file_path)),
-            sentinel=shlex.quote(_EVENTS_READ_SENTINEL),
-        ),
-        timeout_seconds=30.0,
-    )
-    if not result.success:
-        raise MngrError(f"Failed to read event file '{event_file_name}': {result.stderr}")
-    if not result.stdout.endswith(_EVENTS_READ_SENTINEL):
-        raise MngrError(
-            "Event file {!r} read did not include the EOF sentinel; output was "
-            "truncated or pyinfra mangled the trailing line. Last 200 chars: {!r}".format(
-                event_file_name,
-                result.stdout[-200:],
-            )
-        )
-    return result.stdout.removesuffix(_EVENTS_READ_SENTINEL)
+    if target.host is None or target.events_path is None:
+        raise MngrError(f"Cannot read event file for {target.display_name}: no readable host available")
+
+    file_path = target.events_path / event_file_name
+    with log_span("Reading event file '{}' for {}", event_file_name, target.display_name):
+        try:
+            content_bytes = target.host.read_file(file_path)
+        except (FileNotFoundError, OSError) as e:
+            raise MngrError(f"Failed to read event file '{event_file_name}': {e}") from e
+        return content_bytes.decode("utf-8", errors="replace")
 
 
 # =============================================================================
@@ -521,28 +473,19 @@ def _sort_rotated_files_oldest_first(filenames: Sequence[str]) -> list[str]:
 
 
 def discover_event_sources(target: EventsTarget) -> list[EventSourceInfo]:
-    """Find all event sources (subdirectories containing events.jsonl files)."""
-    if target.online_host is not None and target.events_path is not None:
-        return _discover_event_sources_via_host(target.online_host, target.events_path)
+    """Find all event sources (subdirectories containing events.jsonl files).
 
-    if target.volume is not None:
-        return _discover_event_sources_via_volume(target.volume)
+    Lists the events directory recursively through the host's
+    :class:`HostFileReadInterface`, filters for ``events.jsonl`` and its
+    rotated variants (``events.jsonl.<timestamp>``), and groups the matches by
+    their directory relative to ``events_path``.
+    """
+    if target.host is None or target.events_path is None:
+        raise MngrError(f"Cannot discover event sources for {target.display_name}: no readable host available")
 
-    raise MngrError(f"Cannot discover event sources for {target.display_name}: no volume or online host available")
-
-
-def _discover_event_sources_via_host(
-    online_host: OnlineHostInterface,
-    events_path: Path,
-) -> list[EventSourceInfo]:
-    """Find all events.jsonl files recursively under events_path via host commands."""
-    logger.trace("Discovering event sources via host")
-    cmd = f"find {shlex.quote(str(events_path))} -name 'events.jsonl*' -type f 2>/dev/null | sort; true"
-    result = online_host.execute_idempotent_command(cmd, timeout_seconds=15.0)
-    if not result.stdout.strip():
-        return []
-
-    return _parse_discovered_files(result.stdout, str(events_path))
+    with log_span("Discovering event sources for {}", target.display_name):
+        entries = target.host.list_directory(target.events_path, recursive=True)
+        return _build_event_sources_from_listing(entries, target.events_path)
 
 
 @pure
@@ -564,88 +507,30 @@ def _build_event_sources_from_grouped_files(
     return sources
 
 
-@pure
-def _parse_discovered_files(find_output: str, events_path_str: str) -> list[EventSourceInfo]:
-    """Parse find command output into EventSourceInfo objects.
+def _build_event_sources_from_listing(
+    entries: Sequence[VolumeFile],
+    events_path: Path,
+) -> list[EventSourceInfo]:
+    """Group a recursive directory listing into EventSourceInfo objects.
 
-    Groups files by their parent directory (relative to events_path) and identifies
-    rotated files vs the current events.jsonl.
+    Keeps only regular files named ``events.jsonl`` or a rotated variant, and
+    groups them by their parent directory relative to ``events_path`` (the
+    root events file lives under the empty source path).
     """
-    # Normalize the base path for stripping
-    base = events_path_str.rstrip("/") + "/"
-
-    # Group files by their parent directory relative to events_path
     files_by_dir: dict[str, list[str]] = {}
-    for line in find_output.strip().split("\n"):
-        file_path = line.strip()
-        if not file_path:
-            continue
-
-        # Strip the base path to get the relative path
-        if file_path.startswith(base):
-            relative = file_path[len(base) :]
-        else:
-            continue
-
-        # Split into directory and filename
-        if "/" in relative:
-            dir_part = relative.rsplit("/", 1)[0]
-            file_part = relative.rsplit("/", 1)[1]
-        else:
-            dir_part = ""
-            file_part = relative
-
-        # Only include events.jsonl files (current or rotated)
-        if file_part == _EVENTS_JSONL_FILENAME or ROTATED_JSONL_PATTERN.match(file_part):
-            if dir_part not in files_by_dir:
-                files_by_dir[dir_part] = []
-            files_by_dir[dir_part].append(file_part)
-
-    return _build_event_sources_from_grouped_files(files_by_dir)
-
-
-def _discover_event_sources_via_volume(volume: Volume) -> list[EventSourceInfo]:
-    """Find all events.jsonl files recursively in the volume."""
-    with log_span("Discovering event sources via volume"):
-        all_files = _recursive_listdir_via_volume(volume, "")
-        return _group_volume_files_into_sources(all_files)
-
-
-def _recursive_listdir_via_volume(volume: Volume, path: str) -> list[tuple[str, str]]:
-    """Recursively list all files under a volume path.
-
-    Returns list of (dir_path, filename) tuples.
-    """
-    result: list[tuple[str, str]] = []
-    try:
-        entries = volume.listdir(path)
-    except (MngrError, OSError) as e:
-        logger.trace("Failed to list volume directory '{}': {}", path, e)
-        return result
-
     for entry in entries:
-        if entry.file_type == VolumeFileType.FILE:
-            filename = _extract_filename(entry.path)
-            # Only include events.jsonl files
-            if filename == _EVENTS_JSONL_FILENAME or ROTATED_JSONL_PATTERN.match(filename):
-                result.append((path, filename))
-        elif entry.file_type == VolumeFileType.DIRECTORY:
-            child_path = entry.path if entry.path else path
-            result.extend(_recursive_listdir_via_volume(volume, child_path))
-        else:
-            pass
-
-    return result
-
-
-@pure
-def _group_volume_files_into_sources(files: Sequence[tuple[str, str]]) -> list[EventSourceInfo]:
-    """Group (dir_path, filename) tuples into EventSourceInfo objects."""
-    files_by_dir: dict[str, list[str]] = {}
-    for dir_path, filename in files:
-        if dir_path not in files_by_dir:
-            files_by_dir[dir_path] = []
-        files_by_dir[dir_path].append(filename)
+        if entry.file_type != FileType.FILE:
+            continue
+        absolute = Path(entry.path)
+        file_part = absolute.name
+        if file_part != _EVENTS_JSONL_FILENAME and not ROTATED_JSONL_PATTERN.match(file_part):
+            continue
+        try:
+            relative_dir = absolute.parent.relative_to(events_path)
+        except ValueError:
+            continue
+        dir_part = "" if str(relative_dir) == "." else str(relative_dir)
+        files_by_dir.setdefault(dir_part, []).append(file_part)
 
     return _build_event_sources_from_grouped_files(files_by_dir)
 
@@ -666,12 +551,13 @@ def _read_events_from_file(
     Returns (events, byte_length) where byte_length is the size of the raw content.
 
     Note: this function intentionally does NOT hold back a trailing partial line via
-    split_complete_lines. The via-host code path reads through pyinfra, whose
-    CommandOutput.stdout strips the trailing newline (it joins lines with "\\n"),
-    so any partial-line detection here would misclassify a complete final line as
-    partial and silently drop it. The follow-tail loop in _tail_source_thread_remote
-    has its own partial-line guard (it reads bytes directly from a volume, not via
-    pyinfra), so partial-write robustness during streaming is preserved there.
+    split_complete_lines. It is used for whole-file historical reads (rotated files
+    and the current events.jsonl), where the final line is expected to be complete;
+    holding one back would misclassify a complete final line as partial and silently
+    drop it. ``read_event_content`` reads byte-exact via ``HostFileReadInterface.read_file``,
+    so a file's true trailing-newline state is preserved either way. Partial-write
+    robustness during *streaming* is handled separately by the follow-tail loop in
+    _tail_source_thread_remote, which has its own partial-line guard.
     """
     try:
         content = read_event_content(target, relative_file_path)
@@ -824,7 +710,7 @@ def stream_all_events(
 ) -> None:
     """Stream all events from all sources."""
     state = _AllEventsStreamState(
-        is_online=target.online_host is not None,
+        is_online=isinstance(target.host, OnlineHostInterface),
         last_source_scan_time=time.monotonic(),
     )
     stop_event = threading.Event()
@@ -938,7 +824,7 @@ def _start_tail_thread(
     initial_byte_offset: int,
 ) -> threading.Thread:
     """Start a daemon thread that tails a single events.jsonl and pushes events to the queue."""
-    is_local = target.online_host is not None and target.online_host.is_local
+    is_local = isinstance(target.host, OnlineHostInterface) and target.host.is_local
     if is_local and target.events_path is not None:
         # Use pygtail for local filesystem tailing
         events_file_path = target.events_path / source_path / _EVENTS_JSONL_FILENAME
@@ -1234,11 +1120,14 @@ def refresh_events_target(
     if target.provider is None or target.host_id is None or target.events_subpath is None:
         return target
 
-    online_host, events_path = _try_get_online_host_for_events(target.provider, target.host_id, target.events_subpath)
+    host, events_path = _try_get_readable_host_for_events(target.provider, target.host_id, target.events_subpath)
+    if host is None:
+        # Neither online nor a readable volume right now -- keep the previous
+        # handle rather than producing an unreadable target.
+        return target
 
     return EventsTarget(
-        volume=target.volume,
-        online_host=online_host,
+        host=host,
         events_path=events_path,
         display_name=target.display_name,
         provider=target.provider,
@@ -1271,7 +1160,7 @@ def _handle_online_offline_transition(
         return
 
     was_online = state.is_online
-    is_now_online = new_target.online_host is not None
+    is_now_online = isinstance(new_target.host, OnlineHostInterface)
 
     if was_online == is_now_online:
         return

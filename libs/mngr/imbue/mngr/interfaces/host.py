@@ -27,6 +27,7 @@ from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -39,6 +40,9 @@ from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.primitives import TransferMode
 
 
@@ -198,7 +202,90 @@ class HostInterface(MutableModel, ABC):
         """
 
 
-class OuterHostInterface(MutableModel, ABC):
+class HostFileReadInterface(MutableModel, ABC):
+    """Read-only access to a host's persistent files.
+
+    The subset of file operations that work even when a host is not online for
+    command execution, as long as its persistent storage (volume) is reachable.
+    All paths are absolute paths as seen under the host's ``host_dir``.
+
+    Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), reading the
+      live filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, reading the
+      host's persisted volume when the host itself is stopped.
+
+    Splitting these reads out of :class:`OuterHostInterface` lets callers that
+    only need to *read* files (log / transcript / session readers, session
+    preservation, ``mngr file get``/``list``) accept a stopped-but-volume-backed
+    host without it having to pretend it can execute commands or write files.
+    """
+
+    @abstractmethod
+    def read_file(self, path: Path) -> bytes:
+        """Read a file and return its contents as bytes."""
+        ...
+
+    @abstractmethod
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        """Read a file and return its contents as a string."""
+        ...
+
+    @abstractmethod
+    def path_exists(self, path: Path) -> bool:
+        """Whether ``path`` exists on this host."""
+        ...
+
+    @abstractmethod
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        """Return the modification time of a file, or None if the file doesn't exist."""
+        ...
+
+    @abstractmethod
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        """List the entries under directory ``path``.
+
+        Returns one :class:`~imbue.mngr.interfaces.data_types.VolumeFile` per
+        entry, each with an absolute ``path`` under the host's ``host_dir``.
+        When ``recursive`` is True, descends into subdirectories and returns
+        every nested entry. Returns an empty list if ``path`` does not exist or
+        is not a directory.
+        """
+        ...
+
+
+class HostFileWriteInterface(MutableModel, ABC):
+    """Write access to a host's files.
+
+    The companion to :class:`HostFileReadInterface`. Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), writing the live
+      filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, writing the
+      host's persisted volume when the host itself is stopped (so files can be
+      staged for the next time it starts). File modes are not settable on a
+      volume write, so ``mode`` is ignored there.
+
+    All paths are absolute paths as seen under the host's ``host_dir``.
+    """
+
+    @abstractmethod
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+        """Write bytes content to a file."""
+        ...
+
+    @abstractmethod
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+    ) -> None:
+        """Write string content to a file."""
+        ...
+
+
+class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
     """Minimal interface for the "outer" machine that hosts a container/sandbox.
 
     Outer hosts have a strictly smaller surface than mngr-managed hosts: just the
@@ -288,50 +375,23 @@ class OuterHostInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def read_file(
-        self,
-        path: Path,
-    ) -> bytes:
-        """Read a file and return its contents as bytes."""
-        ...
-
-    @abstractmethod
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file."""
-        ...
-
-    @abstractmethod
-    def read_text_file(
-        self,
-        path: Path,
-        encoding: str = "utf-8",
-    ) -> str:
-        """Read a file and return its contents as a string."""
-        ...
-
-    @abstractmethod
-    def write_text_file(
-        self,
-        path: Path,
-        content: str,
-        encoding: str = "utf-8",
-        mode: str | None = None,
-    ) -> None:
-        """Write string content to a file."""
-        ...
-
-    @abstractmethod
-    def get_file_mtime(self, path: Path) -> datetime | None:
-        """Return the modification time of a file, or None if the file doesn't exist."""
-        ...
-
-    @abstractmethod
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Get SSH connection info for this host if it's remote.
 
         Returns (user, hostname, port, private_key_path) if remote, None if local.
         """
         ...
+
+    def get_outer_ssh_port(self) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default. A provider whose host reaches a separate
+        outer sshd on a non-obvious port (e.g. a slice's VM-root sshd via a
+        box-forwarded port) surfaces it here so ``mngr create --format json``
+        can report it. The default is sufficient for hosts whose only SSH
+        endpoint is the one ``get_ssh_connection_info`` returns.
+        """
+        return None
 
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
@@ -603,6 +663,18 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a directory from the local machine (where mngr runs) to self:target_path.
+
+        Like ``copy_directory`` with a local source, but takes no source-host object --
+        the source is always the local filesystem. This lets the host layer push staged
+        files without resolving a local host (which would require ``mngr.api.providers``
+        and hit an import cycle). Uses rsync (additive, no ``--delete``); ``extra_args``
+        is appended to the rsync invocation (e.g. ``--include``/``--exclude`` filters).
+        """
+        ...
+
+    @abstractmethod
     def save_agent_data(self, agent_id: AgentId, agent_data: Mapping[str, object]) -> None:
         """Persist agent data to external storage.
 
@@ -825,6 +897,49 @@ class AgentDataOptions(FrozenModel):
     )
 
 
+class AgentTmuxOptions(FrozenModel):
+    """Per-agent tmux window sizing and resize behavior.
+
+    A ``None`` field means "use the host default" (the session builder falls back
+    to its built-in defaults and leaves tmux's resize policy untouched).
+    """
+
+    width: TmuxWidth | None = Field(
+        default=None,
+        description="tmux window width in columns (None = host default)",
+    )
+    height: TmuxHeight | None = Field(
+        default=None,
+        description="tmux window height in rows (None = host default)",
+    )
+    window_size: TmuxWindowSize | None = Field(
+        default=None,
+        description="tmux window-size resize mode (None = host default / today's behavior)",
+    )
+
+    def to_data_dict(self) -> dict[str, Any]:
+        """Serialize to the JSON-friendly shape persisted in the agent's data.json."""
+        return {
+            "width": int(self.width) if self.width is not None else None,
+            "height": int(self.height) if self.height is not None else None,
+            "window_size": self.window_size.value if self.window_size is not None else None,
+        }
+
+    @classmethod
+    def from_data_dict(cls, data: Mapping[str, Any] | None) -> "AgentTmuxOptions":
+        """Reconstruct from the data.json ``tmux`` block, tolerating a missing/empty block."""
+        if not data:
+            return cls()
+        raw_width = data.get("width")
+        raw_height = data.get("height")
+        raw_window_size = data.get("window_size")
+        return cls(
+            width=TmuxWidth(raw_width) if raw_width is not None else None,
+            height=TmuxHeight(raw_height) if raw_height is not None else None,
+            window_size=TmuxWindowSize(raw_window_size) if raw_window_size is not None else None,
+        )
+
+
 class CreateAgentOptions(FrozenModel):
     """Complete options for creating a new agent.
 
@@ -835,8 +950,7 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Explicit agent ID (auto-generated if not specified)",
     )
-    agent_type: AgentTypeName | None = Field(
-        default=None,
+    agent_type: AgentTypeName = Field(
         description="Type of agent to run (claude, codex, etc.)",
     )
     name: AgentName | None = Field(
@@ -908,6 +1022,10 @@ class CreateAgentOptions(FrozenModel):
         default_factory=AgentProvisioningOptions,
         description="Simple provisioning options",
     )
+    tmux: AgentTmuxOptions = Field(
+        default_factory=AgentTmuxOptions,
+        description="tmux window sizing and resize behavior for the agent's session",
+    )
     plugin_data: dict[str, Any] = Field(
         default_factory=dict,
         description="Opaque dict for plugins to pass data through the creation pipeline. "
@@ -968,6 +1086,26 @@ class HostEnvironmentOptions(FrozenModel):
     )
 
 
+class HostProvisioningOptions(FrozenModel):
+    """Simple provisioning options for a new host (post-creation hooks)."""
+
+    post_host_create_commands: tuple[CommandString, ...] = Field(
+        default=(),
+        description="Shell commands to run inside the newly-created host, "
+        "synchronously, after the host is ready but before any agent work_dir "
+        "is touched. Each command runs in order; a non-zero exit aborts the create.",
+    )
+
+
+# Mapping from raw-string config/CLI field names to HostProvisioningOptions
+# target fields and their parsers. Parallels PROVISIONING_FIELD_MAP for the
+# agent side; used so the CLI flag and template-stacking machinery stay in
+# sync.
+HOST_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
+    ("post_host_create_command", "post_host_create_commands", CommandString),
+)
+
+
 class NewHostOptions(FrozenModel):
     """Options for creating a new host."""
 
@@ -997,4 +1135,8 @@ class NewHostOptions(FrozenModel):
     lifecycle: HostLifecycleOptions = Field(
         default_factory=HostLifecycleOptions,
         description="Lifecycle and idle detection options",
+    )
+    provisioning: HostProvisioningOptions = Field(
+        default_factory=HostProvisioningOptions,
+        description="Post-create provisioning hooks",
     )

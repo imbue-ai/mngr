@@ -30,7 +30,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(4))
+    rc.check_time_sleep(_DIR, snapshot(3))
 
 
 def test_prevent_global_keyword() -> None:
@@ -246,6 +246,10 @@ def test_prevent_cast_usage() -> None:
 
 def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
 
 
 # --- Project-level checks ---

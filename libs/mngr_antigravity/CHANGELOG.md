@@ -6,6 +6,71 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-16
+
+### Changed
+
+- Changed: `statusline.sh` now flushes the transcript pipeline (synchronous `--single-pass` of the raw streamer and common-transcript converter) on the busy->idle edge before clearing the `active` marker, so consumers reading the common transcript on a WAITING transition cannot outrun the converter. The flush and the convert lock come from the shared `mngr_common_transcript_lib.sh` rather than being duplicated per agent.
+
+## [v0.1.5] - 2026-06-15
+
+### Changed
+
+- Changed: Ported the antigravity transcript streamer to agy's new SQLite conversation store (agy 1.0.4+ stopped writing the per-conversation JSONL transcript the old streamer tailed). A new self-contained `decode_agy_transcript.py` reads steps from each `.db` and emits the same record shape, so the common-transcript converter is unchanged; assistant tool calls (name + args) are now decoded too.
+
+### Fixed
+
+- Fixed: On macOS, antigravity (`agy`) agents no longer hang on a modal "A keychain cannot be found to store Antigravity Safe Storage" dialog. Provisioning now symlinks each per-agent home's `Library/Keychains` to the user's real one; Linux is unaffected (Chromium falls back to its file-based store).
+
+## [v0.1.4] - 2026-06-13
+
+### Added
+
+- Added: `agy` alias for the `antigravity` agent type (`mngr create my-agent agy` is equivalent to `mngr create my-agent antigravity`).
+
+### Changed
+
+- Changed: Agent lifecycle replaced the fragile `PreInvocation` / `Stop` marker hooks with a single mngr-owned `statusline.sh` driven by agy's `statusLine`. It maintains the RUNNING/WAITING `active` marker (busy iff `agent_state` is not idle/initializing/authenticating), records the root conversation for resume, and fires the tmux signal confirming submission. A user-provided `statusLine` is composed (mngr runs it with the same payload and emits only its output); a non-runnable command is dropped with a warning.
+- Changed: `mngr message` to an antigravity agent now returns only after the agent has started processing the submission (gated on the statusLine signal); the agent reports RUNNING for the whole turn including while subagents run.
+
+## [v0.1.3] - 2026-06-08
+
+### Fixed
+
+- Fixed: Antigravity onboarding seed now also skips agy's first-run NUX for users authenticated through an enterprise account, by marking `enterpriseOnboardingComplete` as `True` (previously `False`); enterprise-authenticated users were getting stuck in the enterprise onboarding flow on their first message.
+- Fixed: Passing a model name (or any value containing spaces or parentheses) as an `agy` argument — e.g. `--model "Gemini 3.5 Flash (Medium)"` — no longer breaks `mngr create` with a shell `syntax error near unexpected token '('`. The underlying fix is in `mngr` (`agent_args` are now shell-quoted in `BaseAgent.assemble_command`); this plugin inherits it. The supported `settings_overrides`/`model` path is unaffected.
+
+## [v0.1.2] - 2026-06-05
+
+### Added
+
+- Added: Stopped `antigravity` agents now resume their prior agy conversation on restart. A `PreInvocation` capture hook records the agent's active agy conversation ID to a per-agent file, and `mngr start` shell-evaluates the stored launch command to resume via `agy --conversation <id>`. If the conversation has been pruned, agy starts fresh on its own. Clone-resume is not yet supported because agy's conversation store is global rather than per-agent.
+- Added: Per-agent agy isolation — each `antigravity` agent now runs `agy` under its own per-agent `$HOME`, with its own permission policy, model, and isolated config/transcript/session state instead of the previous all-or-nothing `--dangerously-skip-permissions` and shared global `~/.gemini`. Three new agent-type config fields: `settings_overrides` (free-form blob merged into per-agent `settings.json`), `sync_home_settings` (base per-agent settings on a copy of the user's global one; default `true`), and `symlink_oauth_token` (symlink each agent's token to the shared `~/.gemini` token vs copy it; default `true`).
+- Added: Shared OAuth token via a write-through symlink to `~/.gemini/antigravity-cli/antigravity-oauth-token` — the first agent's login authenticates every other agent and propagates refreshes ("log in once, anywhere"), resolving the previously open "token-refresh clobbering" risk. `symlink_oauth_token = false` opts into per-agent isolation.
+
+### Changed
+
+- Changed: The transcript streamer now discovers conversation IDs from the same capture-hook file used by resume rather than grepping agy's `--log-file`. This makes the hook file the single source of truth and fixes a latent bug where resumed conversations were missed because their log line reads `Resuming conversation`, not the `Resumed conversation` the streamer matched.
+- Changed: Trust now splits by what is persisted — the durable source-repo path goes to the user's global agy settings (no re-prompt across agents/worktrees of the same repo), while the transient per-agent workspace path goes only into the per-agent settings. Consent gating is unchanged in spirit.
+- Changed: Lifecycle hooks now live at the per-agent `$HOME/.gemini/config/hooks.json` and execute directly; the previous `--add-dir` + `/tmp` hooks-symlink workaround is removed. agy's first-run NUX is skipped via a seeded `cache/onboarding.json`.
+- Changed: Path resolution is host-aware (the user's real `$HOME` and OS are resolved on the host), so token/settings/cache sharing also works on remote hosts. Heavy `ms-playwright-go` browser binaries are now shared across agents by symlinking each agent's home cache to the user's real host cache.
+
+### Fixed
+
+- Fixed: `antigravity` agents now stay RUNNING while a subagent or backgrounded task they launched is still working, instead of flipping to WAITING the moment the root agent's turn ends. The `Stop` hook now only clears the `active` lifecycle marker when the payload's conversation id matches the turn's root conversation **and** reports `"fullyIdle":true`; the root is captured by `PreInvocation` and re-recorded at each turn boundary, so `/clear`, `/fork`, `/switch`, and resume stay correct.
+- Fixed: `mngr start` on an antigravity agent now resumes the agent's *main* conversation from the captured `root_conversation` rather than the last line of the conversation-ids file, which could be a subagent's conversation. The conversation-ids file is now used only to scope transcript streaming.
+
+## [v0.1.1] - 2026-06-01
+
+### Added
+
+- Added: `antigravity` agent type now uses agy hooks to report lifecycle state. A `PreInvocation` / `Stop` hook pair maintains an `active` marker so antigravity agents now report RUNNING while working and WAITING when idle (previously they had no `active` marker and could not report RUNNING). Verified working against agy 1.0.3.
+
+### Changed
+
+- Changed: mngr now provisions a per-agent `hooks.json` and points agy at it via `--add-dir` (through a `/tmp` symlink, since agy rejects the dotted state-dir path), so the user's global `~/.gemini/config/` is untouched and each agent's state stays isolated.
+- Changed: `auto_allow_permissions = true` continues to use the `--dangerously-skip-permissions` CLI flag; agy's documented `PreToolUse` `{"decision": "allow"}` hook output does not actually gate the `run_command` confirmation dialog, so a hook can't replace the flag.
+
 ## [v0.1.0] - 2026-05-28
 
 ### Added

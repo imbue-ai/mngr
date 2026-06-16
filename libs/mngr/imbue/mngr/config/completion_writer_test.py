@@ -2,16 +2,20 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import click
 import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
 from imbue.mngr.config.completion_writer import _EXCLUDED_CONFIG_KEY_PREFIXES
+from imbue.mngr.config.completion_writer import _agent_type_schema_completions
 from imbue.mngr.config.completion_writer import _extract_config_value_choices
 from imbue.mngr.config.completion_writer import _is_excluded_config_key
+from imbue.mngr.config.completion_writer import _value_choices_for_annotation
 from imbue.mngr.config.completion_writer import flatten_dict_keys
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -62,8 +66,9 @@ def test_get_completion_cache_dir_ignores_double_underscore_form(
     assert result == tmp_path / "default_host"
 
 
+@pytest.mark.allow_warnings(match=r"Failed to write CLI completions cache")
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """write_cli_completions_cache should silently handle OSError."""
+    """write_cli_completions_cache should handle OSError without raising (logs a warning)."""
     # Monkeypatch atomic_write to simulate a write failure. We can't use chmod
     # because Modal sandboxes run as root, which bypasses permission checks.
     monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(tmp_path))
@@ -196,6 +201,56 @@ def test_write_cli_completions_cache_includes_positional_completions_for_plugin(
 
     assert data["positional_completions"]["plugin.enable"] == [["plugin_names"]]
     assert data["positional_completions"]["plugin.disable"] == [["plugin_names"]]
+    assert data["positional_completions"]["plugin.add"] == [["catalog_packages"]]
+    assert data["positional_completions"]["plugin.remove"] == [["installed_packages"]]
+
+
+def test_write_cli_completions_cache_includes_catalog_package_names(
+    completion_cache_dir: Path,
+) -> None:
+    """Cache should include installable catalog package names for `plugin add` completion."""
+    group = click.Group(name="test", commands={"list": click.Command("list")})
+
+    write_cli_completions_cache(cli_group=group)
+    data = _read_cache(completion_cache_dir)
+
+    catalog_packages = data["catalog_package_names"]
+    assert catalog_packages == sorted(set(catalog_packages))
+    # Every catalog package is an installable PyPI distribution with the shared prefix.
+    assert catalog_packages
+    assert all(name.startswith("imbue-mngr-") for name in catalog_packages)
+    # The entry-point name (e.g. "claude") is not what `plugin add` takes; the
+    # PyPI package name is, so completion must offer the latter.
+    assert "imbue-mngr-claude" in catalog_packages
+    assert "claude" not in catalog_packages
+
+
+def test_write_cli_completions_cache_includes_installed_plugin_packages(
+    completion_cache_dir: Path,
+) -> None:
+    """Cache should record the installed plugin packages passed by the caller for `plugin remove`."""
+    group = click.Group(name="test", commands={"list": click.Command("list")})
+
+    write_cli_completions_cache(
+        cli_group=group,
+        installed_plugin_packages=["imbue-mngr-modal", "imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    data = _read_cache(completion_cache_dir)
+
+    # Deduplicated and sorted.
+    assert data["installed_plugin_package_names"] == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_write_cli_completions_cache_installed_plugin_packages_defaults_empty(
+    completion_cache_dir: Path,
+) -> None:
+    """When the caller passes no installed packages, the field is empty (not an error)."""
+    group = click.Group(name="test", commands={"list": click.Command("list")})
+
+    write_cli_completions_cache(cli_group=group)
+    data = _read_cache(completion_cache_dir)
+
+    assert data["installed_plugin_package_names"] == []
 
 
 def test_write_cli_completions_cache_includes_positional_completions_for_config(
@@ -580,3 +635,57 @@ def test_excluded_config_keys_not_in_dynamic_completions(
         assert matching_choice_keys == [], (
             f"excluded prefix {prefix!r} found in config_value_choices: {matching_choice_keys}"
         )
+
+
+# =============================================================================
+# Agent-type schema completion
+# =============================================================================
+
+
+def test_value_choices_for_annotation() -> None:
+    """The shared annotation->choices helper classifies bool, enum, source, and unconstrained types."""
+    assert _value_choices_for_annotation(bool, {}) == ["true", "false"]
+    # Optional is unwrapped to the inner type.
+    assert _value_choices_for_annotation(bool | None, {}) == ["true", "false"]
+    # Free-form / scalar types have no constrained value set.
+    assert _value_choices_for_annotation(str, {}) is None
+    assert _value_choices_for_annotation(dict[str, Any], {}) is None
+    # AgentTypeName resolves to the dynamic agent-type names (or None when none are available).
+    assert _value_choices_for_annotation(AgentTypeName, {"agent_type_names": ["a", "b"]}) == ["a", "b"]
+    assert _value_choices_for_annotation(AgentTypeName, {}) is None
+
+
+class _FancyAgentConfig(AgentTypeConfig):
+    """A fake agent config subclass with a bool and a free-form dict field, for tests."""
+
+    headless: bool = False
+    config_overrides: dict[str, Any] = {}
+
+
+def test_agent_type_schema_completions_for_registered_subclass() -> None:
+    """A registered type's keys/choices come from its config class schema, incl. unset container fields.
+
+    The autouse registry-reset fixture cleans up the registration after the test.
+    """
+    register_agent_config("fancy", _FancyAgentConfig)
+    keys, choices = _agent_type_schema_completions(["fancy"], MngrConfig(), {"agent_type_names": ["fancy", "claude"]})
+
+    # Base field, subclass bool, and the free-form dict (surfaced as a leaf even though it is unset).
+    assert "agent_types.fancy.command" in keys
+    assert "agent_types.fancy.headless" in keys
+    assert "agent_types.fancy.config_overrides" in keys
+
+    # Constrained fields get value choices; the free-form dict does not.
+    assert choices["agent_types.fancy.headless"] == ["true", "false"]
+    assert choices["agent_types.fancy.parent_type"] == ["fancy", "claude"]
+    assert "agent_types.fancy.config_overrides" not in choices
+
+
+def test_agent_type_schema_completions_falls_back_to_base_config() -> None:
+    """An agent type with no registered config class still gets the base AgentTypeConfig fields."""
+    keys, choices = _agent_type_schema_completions(["plain"], MngrConfig(), {"agent_type_names": ["plain"]})
+
+    assert "agent_types.plain.command" in keys
+    assert "agent_types.plain.cli_args" in keys
+    assert "agent_types.plain.parent_type" in keys
+    assert choices["agent_types.plain.parent_type"] == ["plain"]

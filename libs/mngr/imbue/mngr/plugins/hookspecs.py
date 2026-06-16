@@ -14,11 +14,14 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 
@@ -49,7 +52,7 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type | None
     - agent_type_name: The string name for this agent type (e.g., "claude", "codex")
     - agent_class: The AgentInterface implementation class. Return ``BaseAgent``
       explicitly if all you need is a config-driven shell command (see
-      ``command_agent.py``/``codex_agent.py``). Returning ``None`` skips class
+      ``command_agent.py``). Returning ``None`` skips class
       registration entirely, which means ``resolve_agent_type`` will reject the
       name for ``mngr create``; only do this for config-only registrations that
       pair with a separate class registration elsewhere.
@@ -57,11 +60,33 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type | None
     """
 
 
+@hookspec
+def register_agent_aliases() -> Mapping[str, str] | None:
+    """Register alternate names (aliases) for agent types with mngr.
+
+    Plugins implement this hook to expose short, alternate names for the
+    agent types they register via ``register_agent_type``. For example, the
+    antigravity plugin can alias ``agy`` to ``antigravity`` so that
+    ``mngr create my-agent agy`` is equivalent to
+    ``mngr create my-agent antigravity``.
+
+    Return a mapping of ``alias_name -> canonical_agent_type_name``, or None.
+    An alias is a name-resolution entry, not a distinct agent type: it is never
+    registered into the agent class/config registries, but is resolved to its
+    canonical type before any lookup. It is therefore accepted anywhere the
+    canonical name is and shares the canonical type's class, config, and
+    disabled-plugin handling. The canonical target must be a type the same
+    plugin registers; aliases pointing at an unregistered target are skipped.
+    An alias whose name collides with an already-registered agent type or
+    another alias is skipped so plugins cannot shadow existing types.
+    """
+
+
 # --- Host lifecycle hooks ---
 
 
 @hookspec
-def on_before_host_create(name: HostName, provider_name: ProviderInstanceName) -> None:
+def on_before_host_create(name: HostName, provider_name: ProviderInstanceName, mngr_ctx: MngrContext) -> None:
     """[experimental] Called before a new host is created.
 
     This hook fires before provider.create_host() is called during `mngr create`
@@ -335,6 +360,21 @@ def register_cli_commands() -> Sequence[click.Command] | None:
 
 
 @hookspec
+def register_help_topics() -> Sequence[TopicHelpPage] | None:
+    """Register standalone help topic pages with mngr.
+
+    Plugins implement this hook to contribute topic pages (the kind mngr ships
+    for ``address``, ``filter``, etc.); when the plugin is installed they appear
+    in ``mngr help`` and are viewable via ``mngr help <topic>``.
+
+    Return a sequence of ``TopicHelpPage`` objects, or None. A topic whose key or
+    alias collides with an existing built-in topic is skipped, so plugins cannot
+    override mngr's own topics. See the plugin docs (``concepts/plugins.md``) for
+    how to author topics.
+    """
+
+
+@hookspec
 def override_command_options(
     command_name: str,
     command_class: type,
@@ -438,6 +478,33 @@ def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, O
     """
 
 
+@hookspec
+def offline_agent_field_generators() -> tuple[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] | None:
+    """[experimental] Return field generators for offline (host-unreachable) agents during listing.
+
+    This is the offline counterpart to ``agent_field_generators``. When an agent's
+    host is offline or unreachable, no live agent/host objects exist, so the online
+    generators (which receive ``(agent, host)``) cannot run. Instead, each plugin
+    returns (plugin_name, generators) where generators maps field names to callables
+    that receive the offline ``(discovered_agent, host_details)`` and return a field
+    value (or None to omit). Fields are namespaced under plugin.<plugin_name> in
+    AgentDetails, exactly like the online path.
+
+    Generators read from ``discovered_agent.certified_data``. What that contains
+    depends on how the offline agent was discovered:
+    - For an agent on a still-reachable host (e.g. stopped agent, or a host that
+      went offline mid-listing), it is the agent's persisted ``data.json``,
+      including any ``plugin`` section written via ``agent.set_plugin_data``.
+    - For a fully-unreachable host served from a persisted discovery snapshot, it
+      is a reconstruction that carries forward the ``plugin`` fields that were on
+      AgentDetails the last time the agent was listed online (see
+      ``discovered_agent_from_agent_details``).
+
+    Return None to contribute nothing. Generators must be thread-safe and fast
+    (they run per-agent in the listing hot path).
+    """
+
+
 class OnBeforeCreateArgs(FrozenModel):
     """Arguments passed to and returned from the on_before_create hook.
 
@@ -459,7 +526,7 @@ class OnBeforeCreateArgs(FrozenModel):
 
 
 @hookspec
-def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
     """Called at the start of create(), before any work is done.
 
     This hook allows plugins to inspect and modify the arguments that will be
@@ -473,7 +540,7 @@ def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
     Example plugin implementation::
 
         @hookimpl
-        def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+        def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
             if args.agent_options.agent_type == "claude":
                 # Override agent name for claude agents
                 new_options = args.agent_options.model_copy_update(

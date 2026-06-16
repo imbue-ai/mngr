@@ -30,6 +30,10 @@ class LimaVersionError(ProviderUnavailableError):
         )
 
 
+class LimaConfigError(MngrError, ValueError):
+    """Raised when a LimaProviderConfig combines mutually-incompatible options."""
+
+
 class LimaCommandError(MngrError):
     """Raised when a limactl command fails."""
 

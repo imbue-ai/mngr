@@ -43,6 +43,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -54,6 +55,9 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
@@ -656,6 +660,7 @@ def _build_command_with_defaults(
     additional_commands: list[NamedCommand] | None = None,
     unset_vars: list[str] | None = None,
     onboarding_text: str | None = None,
+    tmux_options: AgentTmuxOptions | None = None,
 ) -> str:
     """Call _build_start_agent_shell_command with standard test defaults."""
     return _build_start_agent_shell_command(
@@ -667,6 +672,7 @@ def _build_command_with_defaults(
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=unset_vars if unset_vars is not None else [],
         host_dir=host_dir,
+        tmux_options=tmux_options if tmux_options is not None else AgentTmuxOptions(),
         onboarding_text=onboarding_text,
     )
 
@@ -696,6 +702,45 @@ def test_build_start_agent_shell_command_produces_single_command(
     # Should contain the process monitor
     assert "nohup" in result
     assert "pane_pid" in result
+
+
+def test_build_start_agent_shell_command_uses_default_dimensions_when_unset(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """With default (all-None) tmux options, the historical 200x50 size is used and no resize policy is set."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=AgentTmuxOptions())
+
+    assert "-x 200 -y 50" in result
+    assert "window-size" not in result
+
+
+def test_build_start_agent_shell_command_uses_custom_dimensions(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Custom width/height are passed to new-session's -x/-y."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(width=TmuxWidth(2048), height=TmuxHeight(256))
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert "-x 2048 -y 256" in result
+
+
+def test_build_start_agent_shell_command_sets_manual_window_size_on_agent_window(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A manual window-size emits a set-option targeting the agent window (:0)."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(window_size=TmuxWindowSize.MANUAL)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert f"set-option -t =mngr-{agent.name}:0 window-size manual" in result
 
 
 def test_build_start_agent_shell_command_includes_unset_vars(
@@ -766,6 +811,7 @@ def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=[],
         host_dir=temp_host_dir,
+        tmux_options=AgentTmuxOptions(),
     )
 
     send_keys_l_lines = [line for line in result.split(" && ") if "send-keys" in line and " -l " in line]
@@ -1088,8 +1134,17 @@ def _create_host_with_fake_connector(
         (SSHException("SSH session not active"), True),
         (ChannelException(2, "open failed"), True),
         (EOFError(), True),
+        (TimeoutError("Timed out reading output"), True),
     ],
-    ids=["socket-closed", "other-os-error", "non-os-error", "ssh-exception", "channel-exception", "eof-error"],
+    ids=[
+        "socket-closed",
+        "other-os-error",
+        "non-os-error",
+        "ssh-exception",
+        "channel-exception",
+        "eof-error",
+        "timeout-error",
+    ],
 )
 def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
     assert _is_transient_ssh_error(exception) is expected
@@ -1419,6 +1474,125 @@ def test_put_file_propagates_non_socket_closed_os_error(
     host = _create_host_with_custom_sftp(local_provider, _PermissionDeniedSFTP)
 
     with pytest.raises(OSError, match="Permission denied"):
+        host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+
+def test_get_file_timeout_error_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """TimeoutError (pyinfra/paramiko read timeout) should disconnect before retrying.
+
+    ``TimeoutError`` is an ``OSError`` subclass on Python 3, so the inner
+    retry handler must branch on it BEFORE the generic OSError branch --
+    otherwise the file-not-found / socket-closed string-matches would run
+    against the timeout exception, miss, and re-raise without disconnect,
+    leaving the retry to reuse the same dead SSH channel.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError("Timed out reading output")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._get_file("/remote/file.txt", io.BytesIO())
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_put_file_timeout_error_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """TimeoutError (pyinfra/paramiko write timeout) should disconnect before retrying.
+
+    Parallel to ``test_get_file_timeout_error_disconnects_before_retry``;
+    see that docstring for the ordering rationale.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def putfo(self, fl: IO[bytes], remote_path: str) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError("Timed out writing output")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_get_file_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    Without an explicit TimeoutError branch in ``_get_file``'s outer
+    handler, the post-retry timeout would fall into the generic OSError
+    branch and re-raise as raw ``OSError`` (since "Socket is closed"
+    won't match a timeout message), leaking the underlying class to
+    callers.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _get_file_with_transient_retry(
+            self,
+            remote_filename: str,
+            filename_or_io: str | IO[bytes],
+            remote_temp_filename: str | None = None,
+        ) -> bool:
+            raise TimeoutError("Timed out reading output")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out while reading file"):
+        host._get_file("/remote/file.txt", io.BytesIO())
+
+
+def test_put_file_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    Parallel to ``test_get_file_wraps_timeout_error_in_host_connection_error``.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _put_file_with_transient_retry(
+            self,
+            filename_or_io: str | IO[str] | IO[bytes],
+            remote_filename: str,
+            remote_temp_filename: str | None = None,
+        ) -> bool:
+            raise TimeoutError("Timed out writing output")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out while writing file"):
         host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
 
 
@@ -1776,6 +1950,40 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
     )
 
     with pytest.raises(HostConnectionError, match="Could not execute command"):
+        host._run_shell_command(StringCommand("echo hello"))
+
+
+def test_run_shell_command_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After all retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    ``TimeoutError`` is an ``OSError`` subclass on Python 3, so the outer
+    handler's ordering matters: the TimeoutError branch must precede the
+    narrow "Socket is closed" OSError check, otherwise post-retry timeouts
+    leak to callers as raw ``OSError`` rather than the structured
+    ``HostConnectionError`` wrapper.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _run_shell_command_with_transient_retry(
+            self,
+            command: StringCommand,
+            pyinfra_kwargs: dict[str, Any],
+        ) -> tuple[bool, CommandOutput]:
+            raise TimeoutError("Timed out reading output")
+
+    fake = _FakePyinfraHost()
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out reading output"):
         host._run_shell_command(StringCommand("echo hello"))
 
 
@@ -3008,7 +3216,7 @@ def test_remove_tags_syncs_to_certified_data(
 def test_merge_agent_type_provisioning_returns_unchanged_when_no_fields() -> None:
     """_merge_agent_type_provisioning should return the original options when agent config has no provisioning."""
     agent_config = AgentTypeConfig()
-    options = CreateAgentOptions()
+    options = CreateAgentOptions(agent_type=AgentTypeName("generic"))
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result is options
 
@@ -3017,6 +3225,7 @@ def test_merge_agent_type_provisioning_prepends_extra_provision_commands() -> No
     """Agent type extra_provision_command should be prepended before CLI commands."""
     agent_config = AgentTypeConfig(extra_provision_command=("echo agent_type",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(extra_provision_commands=("echo cli",)),
     )
     result = _merge_agent_type_provisioning(agent_config, options)
@@ -3027,6 +3236,7 @@ def test_merge_agent_type_provisioning_prepends_upload_files() -> None:
     """Agent type upload_file specs should be parsed and prepended."""
     agent_config = AgentTypeConfig(upload_file=("local.txt:/remote.txt",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(
             upload_files=(UploadFileSpec(local_path=Path("cli.txt"), remote_path=Path("/cli.txt")),),
         ),
@@ -3042,6 +3252,7 @@ def test_merge_agent_type_provisioning_prepends_env_vars() -> None:
     """Agent type env should be parsed and prepended to environment.env_vars."""
     agent_config = AgentTypeConfig(env=("AGENT_TYPE_VAR=1",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         environment=AgentEnvironmentOptions(
             env_vars=(EnvVar(key="CLI_VAR", value="2"),),
         ),
@@ -3057,6 +3268,7 @@ def test_merge_agent_type_provisioning_prepends_env_files() -> None:
     """Agent type env_file should be parsed and prepended to environment.env_files."""
     agent_config = AgentTypeConfig(env_file=("/etc/agent.env",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         environment=AgentEnvironmentOptions(
             env_files=(Path("/etc/cli.env"),),
         ),
@@ -3069,6 +3281,7 @@ def test_merge_agent_type_provisioning_prepends_create_directories() -> None:
     """Agent type create_directory should be parsed and prepended."""
     agent_config = AgentTypeConfig(create_directory=("/tmp/mydir",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(create_directories=(Path("/tmp/existing"),)),
     )
     result = _merge_agent_type_provisioning(agent_config, options)
@@ -3081,7 +3294,7 @@ def test_merge_agent_type_provisioning_combines_provisioning_and_env() -> None:
         extra_provision_command=("echo setup",),
         env=("KEY=val",),
     )
-    options = CreateAgentOptions()
+    options = CreateAgentOptions(agent_type=AgentTypeName("generic"))
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result.provisioning.extra_provision_commands == ("echo setup",)
     assert result.environment.env_vars == (EnvVar(key="KEY", value="val"),)

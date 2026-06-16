@@ -21,7 +21,9 @@ from abc import abstractmethod
 from collections.abc import Iterator
 from collections.abc import Sequence
 from contextlib import contextmanager
+from enum import auto
 from pathlib import Path
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
@@ -29,6 +31,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
@@ -37,6 +40,7 @@ from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.git_utils import get_current_branch
 from imbue.mngr.utils.git_utils import is_git_repository
 
@@ -68,6 +72,139 @@ class GitSyncError(MngrError):
 
     def __init__(self, message: str) -> None:
         super().__init__(f"Git sync failed: {message}")
+
+
+# === Gitignore status ===
+
+
+class GitignoreStatus(UpperCaseStrEnum):
+    """Result of checking whether a path is gitignored in a repo.
+
+    Returned by ``check_path_gitignore_status`` /
+    ``check_path_repo_gitignore_status`` so callers can build their own
+    domain-specific error messages from a shared check.
+    """
+
+    # Not a git work tree, or a symlink in the path points outside the repo --
+    # git won't track the path, so there is nothing to enforce.
+    SKIP = auto()
+    # Ignored by a gitignore rule.
+    IGNORED = auto()
+    # Not ignored by any rule.
+    NOT_IGNORED = auto()
+    # Ignored, but only via the user's global excludes (no repo-level rule
+    # covers it). Returned only by ``check_path_repo_gitignore_status``; remote
+    # hosts and fresh clones have no global excludes, so such a rule won't hold
+    # there.
+    ONLY_GLOBAL = auto()
+
+
+# POSIX sh that canonicalizes ``$1`` (a path that may not fully exist yet, e.g.
+# a file about to be written): it walks up to the longest existing ancestor,
+# ``realpath``s that (resolving any symlink at any depth), then re-appends the
+# missing remainder. Emits three lines -- resolved existing prefix, missing
+# remainder (possibly empty), resolved repo root -- which the caller recombines.
+# This deliberately avoids ``realpath -m`` (canonicalize-missing): GNU coreutils
+# has it but macOS/BSD ``realpath`` does not, and mngr must run on both.
+_RESOLVE_SYMLINKS_SH: Final[str] = (
+    "p=$1; s=; "
+    'while [ ! -e "$p" ] && [ "$p" != . ] && [ "$p" != / ]; do '
+    "b=${p##*/}; "
+    'case "$p" in */*) p=${p%/*} ;; *) p=. ;; esac; '
+    "s=$b${s:+/$s}; "
+    "done; "
+    'realpath "$p"; printf "%s\\n" "$s"; realpath .'
+)
+
+
+def check_path_gitignore_status(
+    host: OnlineHostInterface,
+    repo_path: Path,
+    relative_path: Path,
+) -> tuple[GitignoreStatus, Path]:
+    """Return whether ``<repo_path>/<relative_path>`` is gitignored by any rule.
+
+    ``relative_path`` is interpreted relative to ``repo_path`` and need not
+    exist yet (the common caller checks a file it is about to write). Any
+    symlink along the path -- at any depth, e.g. ``.claude -> .agents`` -- is
+    resolved before consulting ``git check-ignore``, which otherwise fails with
+    "pathspec '...' is beyond a symbolic link". Returns a ``(status,
+    checked_relative_path)`` tuple; the second element is the repo-relative path
+    actually consulted (symlinks resolved), for use in caller error messages.
+
+    Returns ``SKIP``, ``IGNORED``, or ``NOT_IGNORED`` -- never ``ONLY_GLOBAL``;
+    use ``check_path_repo_gitignore_status`` when that distinction matters.
+    ``SKIP`` means there is nothing to enforce (``repo_path`` is not a git work
+    tree, or a symlink in the path points outside the repo). ``IGNORED`` covers
+    any rule, including the user's global excludes.
+    """
+    checked_relative = relative_path
+
+    is_git_repo = host.execute_idempotent_command(
+        "git rev-parse --is-inside-work-tree",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not is_git_repo.success:
+        return GitignoreStatus.SKIP, checked_relative
+
+    # Resolve symlinks anywhere in the path so git check-ignore doesn't fail with
+    # "pathspec is beyond a symbolic link". The repo root is resolved too (in
+    # case repo_path itself contains symlinks) so the recombined path stays
+    # repo-relative.
+    resolve_result = host.execute_idempotent_command(
+        f"sh -c {shlex.quote(_RESOLVE_SYMLINKS_SH)} sh {shlex.quote(str(relative_path))}",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if resolve_result.success:
+        lines = resolve_result.stdout.splitlines()
+        if len(lines) == 3:
+            resolved_prefix = Path(lines[0])
+            remainder = Path(lines[1]) if lines[1] else Path()
+            resolved_repo_root = Path(lines[2])
+            try:
+                checked_relative = resolved_prefix.relative_to(resolved_repo_root) / remainder
+            except ValueError:
+                # A symlink in the path points outside the repo -- git won't track it.
+                return GitignoreStatus.SKIP, checked_relative
+
+    result = host.execute_idempotent_command(
+        f"git check-ignore -q {shlex.quote(str(checked_relative))}",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not result.success:
+        return GitignoreStatus.NOT_IGNORED, checked_relative
+    return GitignoreStatus.IGNORED, checked_relative
+
+
+def check_path_repo_gitignore_status(
+    host: OnlineHostInterface,
+    repo_path: Path,
+    relative_path: Path,
+) -> tuple[GitignoreStatus, Path]:
+    """Like ``check_path_gitignore_status``, but require a *repository* rule.
+
+    A path ignored only by the user's global excludes (``core.excludesFile``)
+    returns ``ONLY_GLOBAL`` rather than ``IGNORED``. Use this for preflight
+    checks whose outcome must also hold on a remote host or fresh clone, which
+    has no global excludes. ``SKIP`` and ``NOT_IGNORED`` pass through unchanged.
+    """
+    status, checked_relative = check_path_gitignore_status(host, repo_path, relative_path)
+    if status is not GitignoreStatus.IGNORED:
+        return status, checked_relative
+
+    # The path is ignored by *some* rule; re-check with global excludes disabled
+    # to see whether a repo-level rule covers it on its own.
+    repo_only_result = host.execute_idempotent_command(
+        f"git -c core.excludesFile= check-ignore -q {shlex.quote(str(checked_relative))}",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not repo_only_result.success:
+        return GitignoreStatus.ONLY_GLOBAL, checked_relative
+    return GitignoreStatus.IGNORED, checked_relative
 
 
 # === Git context (run git here, or on a remote host) ===
@@ -307,6 +444,9 @@ def _build_git_url_and_env(
     """
     if remote_host.is_local:
         return str(remote_path), {**os.environ, "GIT_LFS_SKIP_PUSH": "1"} if is_push else None
+    # Talking to a remote host means git shells out to the ssh binary (via
+    # GIT_SSH_COMMAND); ssh is optional, so surface a clear error if it's absent.
+    SSH.require()
     ssh_info = remote_host.get_ssh_connection_info()
     assert ssh_info is not None, "Remote host must provide SSH connection info"
     known_hosts_file = get_ssh_known_hosts_file(remote_host)

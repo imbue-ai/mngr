@@ -50,14 +50,23 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME
+from imbue.minds.cli._activated_env import STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
+from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
 _POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 7200
+
+# Flags whose values are secrets and must be masked when the admin command is
+# rendered into the "Running: ..." log line. ``--database-url`` carries the
+# Neon pool DSN (username + password); leaking it into logs/terminals is the
+# exact issue this redaction closes.
+_SECRET_BEARING_FLAGS: Final[tuple[str, ...]] = ("--database-url",)
 
 # OVH provider-config env vars consumed by ``OvhProviderConfig`` (in
 # ``libs/mngr_ovh``). The three AK/AS/CK keys are required; the
@@ -77,6 +86,16 @@ _POOL_MGMT_PRIVATE_KEY_VAULT_FIELD: Final[str] = "POOL_SSH_PRIVATE_KEY"
 # small ed25519/RSA private key. Generous so a contended box doesn't
 # spuriously fail the bake at the very first step.
 _SSH_KEYGEN_DERIVE_TIMEOUT_SECONDS: Final[float] = 10.0
+# Vault field (under ``<vault_prefix>/neon``) holding the pooled host_pool DSN.
+_POOL_DSN_VAULT_FIELD: Final[str] = "DATABASE_URL"
+# Shared ``--database-url`` help text for the create / list / destroy commands.
+# Hoisted to one constant so the three subcommands' ``--help`` output can't drift.
+_DATABASE_URL_HELP: Final[str] = (
+    "Neon PostgreSQL connection string for the pool DB. Optional: for "
+    "staging/production it is read from Vault (secrets/minds/<tier>/neon); "
+    "for dev/ci it auto-resolves from the activated env's secrets.toml. "
+    "Pass explicitly only when overriding."
+)
 
 
 def build_create_admin_args(
@@ -84,11 +103,16 @@ def build_create_admin_args(
     env_name: str,
     count: int,
     region: str,
-    attributes_json: str,
-    workspace_dir: str,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
     management_public_key_file: str,
     database_url: str | None,
     mngr_source: str | None,
+    is_recycle_enabled: bool,
+    is_deferred_install_wait_skipped: bool,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
 
@@ -96,9 +120,19 @@ def build_create_admin_args(
     user-supplied flag verbatim. Split out from the click command so
     tests can exercise the wiring without faking a subprocess.
 
-    ``--database-url`` is forwarded only when explicitly supplied. When
-    omitted, the admin CLI auto-resolves the DSN from the activated
-    minds env's ``secrets.toml`` (which the deploy wrote).
+    The bake source is exactly one of ``--from-tag`` (production, clones a tag)
+    or ``--workspace-dir`` (dev, a working tree); the admin CLI derives the
+    canonical ``repo_url`` / ``repo_branch_or_tag`` from it, so ``--attributes``
+    carries only non-identity attributes (and may be omitted).
+
+    ``--database-url`` is forwarded only when ``database_url`` is non-None.
+    The caller (``pool_create`` via :func:`resolve_host_pool_dsn`) supplies a
+    Vault-resolved DSN for staging / production and None for dev / ci; when
+    None is passed through here the admin CLI auto-resolves the DSN from the
+    activated minds env's ``secrets.toml`` (which the deploy wrote).
+
+    When ``is_recycle_enabled`` is False, forwards ``--no-recycle`` so the
+    OVH provider orders a fresh VPS instead of reclaiming a cancelled one.
     """
     args = [
         "create",
@@ -108,17 +142,27 @@ def build_create_admin_args(
         region,
         "--tag",
         f"minds_env={env_name}",
-        "--attributes",
-        attributes_json,
-        "--workspace-dir",
-        workspace_dir,
         "--management-public-key-file",
         management_public_key_file,
     ]
+    if from_tag is not None:
+        args.extend(["--from-tag", from_tag])
+    if repo_url is not None:
+        args.extend(["--repo-url", repo_url])
+    if workspace_dir is not None:
+        args.extend(["--workspace-dir", workspace_dir])
+    if repo_branch_or_tag_override is not None:
+        args.extend(["--repo-branch-or-tag", repo_branch_or_tag_override])
+    if attributes_json is not None:
+        args.extend(["--attributes", attributes_json])
     if database_url is not None:
         args.extend(["--database-url", database_url])
     if mngr_source is not None:
         args.extend(["--mngr-source", mngr_source])
+    if not is_recycle_enabled:
+        args.append("--no-recycle")
+    if is_deferred_install_wait_skipped:
+        args.append("--skip-deferred-install-wait")
     return args
 
 
@@ -134,13 +178,17 @@ def build_list_admin_args(*, database_url: str | None) -> list[str]:
     return args
 
 
-def build_destroy_admin_args(*, pool_host_id: str, database_url: str | None, force: bool) -> list[str]:
+def build_destroy_admin_args(
+    *, pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool
+) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool destroy`` argv."""
     args = ["destroy", pool_host_id]
     if database_url is not None:
         args.extend(["--database-url", database_url])
     if force:
         args.append("--force")
+    if skip_vps_cancel:
+        args.append("--skip-vps-cancel")
     return args
 
 
@@ -333,6 +381,52 @@ def resolve_ovh_env_from_vault(
     return env_vars
 
 
+def resolve_host_pool_dsn(
+    env_name: str,
+    explicit_database_url: str | None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> str | None:
+    """Return the host_pool DSN to forward to the admin command, or None.
+
+    Precedence: an explicit ``--database-url`` always wins. Otherwise the shared
+    tiers (``staging`` / ``production``) keep no local ``secrets.toml``, so their
+    DSN is read from the tier's ``<vault_prefix>/neon.DATABASE_URL`` Vault entry
+    -- the same entry the connector and ``minds env deploy`` use. Per-env tiers
+    (``dev`` / ``ci``) return None so the admin CLI auto-resolves the DSN from
+    the per-env ``secrets.toml`` that ``minds env deploy`` wrote (this path never
+    touches Vault).
+
+    This mirrors :func:`resolve_ovh_env_from_vault` /
+    :func:`resolve_management_public_key_from_vault`: the wrapper resolves every
+    per-tier secret the bake needs from the same Vault prefix, so the operator
+    never hand-passes ``--database-url`` for staging / production.
+
+    Raises ``click.ClickException`` if the Vault read fails or the entry lacks
+    a non-empty ``DATABASE_URL``.
+    """
+    if explicit_database_url is not None:
+        return explicit_database_url
+    tier = tier_for_env_name(env_name)
+    if tier not in (PRODUCTION_ENV_NAME, STAGING_ENV_NAME):
+        return None
+    deploy_config = load_deploy_config(tier)
+    vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+    try:
+        secret = read_vault_kv(VaultPath(f"{vault_prefix}/neon"), parent_concurrency_group=parent_cg)
+    except VaultReadError as exc:
+        raise click.ClickException(
+            f"Could not read the host_pool DSN from Vault ({vault_prefix}/neon) for env '{env_name}': {exc}"
+        ) from exc
+    dsn = secret.get(_POOL_DSN_VAULT_FIELD, "")
+    if not dsn:
+        raise click.ClickException(
+            f"Vault entry {vault_prefix}/neon is missing {_POOL_DSN_VAULT_FIELD!r}; "
+            "see apps/minds/docs/host-pool-setup.md step 3 for the schema."
+        )
+    return dsn
+
+
 def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None = None) -> FinishedProcess:
     """Run ``mngr imbue_cloud admin pool <args>`` and return the result.
 
@@ -343,7 +437,8 @@ def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None =
     to mutate the parent process's environment.
     """
     full_command = ["mngr", "imbue_cloud", "admin", "pool"] + args
-    logger.info("Running: {}", " ".join(shlex.quote(part) for part in full_command))
+    loggable_command = redact_secret_flag_values(full_command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
+    logger.info("Running: {}", " ".join(shlex.quote(part) for part in loggable_command))
     subprocess_env: dict[str, str] | None = None
     if extra_env:
         subprocess_env = merge_ovh_env_into_subprocess_env(shell_env=os.environ, ovh_env=extra_env)
@@ -380,16 +475,39 @@ def pool() -> None:
     ),
 )
 @click.option(
-    "--attributes",
-    "attributes_json",
-    required=True,
-    help='Lease-attributes JSON for the new pool rows (e.g. \'{"version":"v1.2.3","cpus":2,"memory_gb":4}\')',
+    "--from-tag",
+    "from_tag",
+    default=None,
+    help="[production] Clone --repo-url at this tag and bake from it. Mutually exclusive with --workspace-dir.",
+)
+@click.option(
+    "--repo-url",
+    "repo_url",
+    default=None,
+    help="[--from-tag only] Canonical repo to clone the tag from (default: the FCT remote).",
 )
 @click.option(
     "--workspace-dir",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True),
-    help="Path to the template repo checkout",
+    help="[dev] Bake from this template repo working tree. Mutually exclusive with --from-tag.",
+)
+@click.option(
+    "--repo-branch-or-tag",
+    "repo_branch_or_tag_override",
+    default=None,
+    help="[--workspace-dir only] Override the stamped branch label (default: the folder's current branch).",
+)
+@click.option(
+    "--attributes",
+    "attributes_json",
+    required=False,
+    default=None,
+    help=(
+        'Optional non-identity lease-attributes JSON (e.g. \'{"cpus":2,"memory_gb":4}\'). repo_url and '
+        "repo_branch_or_tag are derived from the bake source, not passed here."
+    ),
 )
 @click.option(
     "--management-public-key-file",
@@ -409,11 +527,7 @@ def pool() -> None:
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
-        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
-        "`minds env deploy`). Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 @click.option(
     "--mngr-source",
@@ -421,14 +535,40 @@ def pool() -> None:
     default=None,
     help="Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts.",
 )
+@click.option(
+    "--no-recycle",
+    "is_recycle_enabled",
+    flag_value=False,
+    default=True,
+    help=(
+        "Force a fresh OVH VPS order instead of reclaiming a cancelled (still-billable) VPS. "
+        "Useful for testing the fresh-provision path. Forwarded to the admin command as --no-recycle."
+    ),
+)
+@click.option(
+    "--skip-deferred-install-wait",
+    "is_deferred_install_wait_skipped",
+    is_flag=True,
+    default=False,
+    help=(
+        "[dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) before "
+        "stopping the baked services agent. Faster, but the baked container's deferred-install may be "
+        "incomplete. Never use for production hosts."
+    ),
+)
 def pool_create(
     count: int,
     region: str,
-    attributes_json: str,
-    workspace_dir: str,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
     management_public_key_file: str | None,
     database_url: str | None,
     mngr_source: str | None,
+    is_recycle_enabled: bool,
+    is_deferred_install_wait_skipped: bool,
 ) -> None:
     """Create pool hosts for the activated minds env (OVH-backed via admin).
 
@@ -447,6 +587,7 @@ def pool_create(
         ovh_env = resolve_ovh_env_from_vault(env_name)
     except VaultReadError as exc:
         raise click.ClickException(f"Could not read OVH credentials from Vault for env '{env_name}': {exc}") from exc
+    effective_database_url = resolve_host_pool_dsn(env_name, database_url)
     try:
         with resolved_management_public_key_path(
             env_name, explicit_path=management_public_key_file
@@ -455,11 +596,16 @@ def pool_create(
                 env_name=env_name,
                 count=count,
                 region=region,
-                attributes_json=attributes_json,
+                from_tag=from_tag,
+                repo_url=repo_url,
                 workspace_dir=workspace_dir,
+                repo_branch_or_tag_override=repo_branch_or_tag_override,
+                attributes_json=attributes_json,
                 management_public_key_file=effective_mgmt_pub_path,
-                database_url=database_url,
+                database_url=effective_database_url,
                 mngr_source=mngr_source,
+                is_recycle_enabled=is_recycle_enabled,
+                is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
             )
             _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
     except VaultReadError as exc:
@@ -474,22 +620,17 @@ def pool_create(
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
-        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
-        "`minds env deploy`). Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 def pool_list(database_url: str | None) -> None:
     """List pool_hosts rows (forwards to ``mngr imbue_cloud admin pool list``)."""
-    # No env-name filter: the admin command does not know about minds_env
-    # today and we don't want to start parsing its JSON output here just to
-    # filter. Operators who only want rows for the active env can pipe the
-    # JSON through ``jq``. ``require_activated_env_name`` is still called
-    # for consistency -- a pool list run outside an activated env is almost
-    # always an operator mistake.
-    require_activated_env_name()
-    args = build_list_admin_args(database_url=database_url)
+    # No env-name filter on the rows: the admin command does not know about
+    # minds_env today and we don't want to start parsing its JSON output here
+    # just to filter. Operators who only want rows for the active env can pipe
+    # the JSON through ``jq``. The activated env name is still needed to resolve
+    # the staging/production host_pool DSN from Vault.
+    env_name = require_activated_env_name()
+    args = build_list_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
     _raise_on_failure("list", _run_admin_command(args))
 
 
@@ -500,15 +641,37 @@ def pool_list(database_url: str | None) -> None:
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
-        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
-        "`minds env deploy`). Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
-def pool_destroy(pool_host_id: str, database_url: str | None, force: bool) -> None:
-    """Remove a pool_hosts row by id (forwards to ``mngr imbue_cloud admin pool destroy``)."""
-    require_activated_env_name()
-    args = build_destroy_admin_args(pool_host_id=pool_host_id, database_url=database_url, force=force)
-    _raise_on_failure("destroy", _run_admin_command(args))
+@click.option(
+    "--skip-vps-cancel",
+    is_flag=True,
+    default=False,
+    help="Only drop the DB row; do NOT cancel the OVH VPS. Use only when the VPS is already gone.",
+)
+def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
+    """Full teardown of a pool host: cancel its OVH VPS, then drop the row.
+
+    Forwards to ``mngr imbue_cloud admin pool destroy``, which by default cancels
+    the underlying OVH VPS (so it can't strand a still-billing host) before
+    deleting the row. OVH credentials are read from the activated tier's Vault
+    entry and injected into the subprocess, mirroring ``pool create``. Pass
+    ``--skip-vps-cancel`` to only drop the row when the VPS is already gone.
+    """
+    env_name = require_activated_env_name()
+    extra_env: dict[str, str] | None = None
+    if not skip_vps_cancel:
+        try:
+            extra_env = resolve_ovh_env_from_vault(env_name)
+        except VaultReadError as exc:
+            raise click.ClickException(
+                f"Could not read OVH credentials from Vault for env '{env_name}': {exc}"
+            ) from exc
+    args = build_destroy_admin_args(
+        pool_host_id=pool_host_id,
+        database_url=resolve_host_pool_dsn(env_name, database_url),
+        force=force,
+        skip_vps_cancel=skip_vps_cancel,
+    )
+    _raise_on_failure("destroy", _run_admin_command(args, extra_env=extra_env))

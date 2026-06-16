@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
 from typing import Any
@@ -7,7 +8,9 @@ from typing import assert_never
 import click
 from click_option_group import optgroup
 
+from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
+from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
@@ -21,21 +24,27 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.label import apply_labels
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import HostOfflineError
+from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class StopCliOptions(CommonCliOptions):
@@ -45,10 +54,107 @@ class StopCliOptions(CommonCliOptions):
     agent_list: tuple[AgentAddress, ...]
     archive: bool
     sessions: tuple[str, ...]
+    stop_host: bool
+    dry_run: bool
     # Planned features (not yet implemented)
     snapshot_mode: str | None
     graceful: bool
     graceful_timeout: str | None
+
+
+def _ensure_providers_support_host_shutdown(providers: Sequence[BaseProviderInstance]) -> None:
+    """Raise HostShutdownNotSupportedError if any provider cannot stop hosts."""
+    for provider in providers:
+        if not provider.supports_shutdown_hosts:
+            raise HostShutdownNotSupportedError(provider.name)
+
+
+def _stop_hosts_for_addresses(
+    agent_addresses: Sequence[AgentAddress],
+    mngr_ctx: MngrContext,
+    output_opts: OutputOptions,
+) -> list[str]:
+    """Stop the entire host of each agent address, resolving the host without SSH.
+
+    ``mngr stop --stop-host`` is a daemon-level operation: stopping a host does
+    not require enumerating the agents on it (which would SSH into the host).
+    This resolves each agent identifier to its ``host_id`` via the SSH-free
+    discovery event stream, then fetches the host through the provider's own
+    (also SSH-free) ``get_host`` -- which validates that the host still exists
+    and supplies its name -- so it works even when the container is running but
+    its sshd is unreachable.
+
+    Returns the list of agent identifiers whose host was stopped (or was
+    already stopped).
+    """
+    resolved_by_identifier = resolve_hosts_for_identifiers(mngr_ctx, [str(addr.agent) for addr in agent_addresses])
+
+    # Fetch each distinct host once (SSH-free) -- this is also what validates
+    # the resolved host still exists. Honor any explicit @HOST[.PROVIDER]
+    # qualifier against the fetched host's name, mirroring the non-stop-host
+    # path.
+    hosts_to_stop: dict[HostId, tuple[ResolvedAgentHost, HostInterface]] = {}
+    for address in agent_addresses:
+        resolved = resolved_by_identifier[str(address.agent)]
+        if resolved.host_id in hosts_to_stop:
+            host = hosts_to_stop[resolved.host_id][1]
+        else:
+            host = get_provider_instance(resolved.provider_name, mngr_ctx).get_host(resolved.host_id)
+        if address.host is not None:
+            concrete = HostAddress(host=host.get_name(), provider=resolved.provider_name)
+            if not address.host.matches(concrete):
+                raise AgentNotFoundError(f"No agent found matching address: {address}")
+        hosts_to_stop[resolved.host_id] = (resolved, host)
+
+    providers = [get_provider_instance(resolved.provider_name, mngr_ctx) for resolved, _ in hosts_to_stop.values()]
+    _ensure_providers_support_host_shutdown(providers)
+
+    # Each stop_host is an independent, network-bound daemon operation, so run
+    # them concurrently rather than serializing on the slowest host. Futures are
+    # iterated in submission order so output (and any re-raised exception)
+    # remains deterministic regardless of completion order.
+    #
+    # Note this changes partial-failure behavior versus the old sequential loop:
+    # the executor's context manager joins every submitted task before exit, so
+    # *all* targeted hosts are stopped even if one raises -- only the output (and
+    # the first re-raised error) stops at the failing future. The old loop
+    # aborted on the first failure, leaving later hosts running. Stopping every
+    # targeted host is the desired end state here, so this is an improvement.
+    futures: list[Future[str]] = []
+    with mngr_executor(parent_cg=mngr_ctx.concurrency_group, name="stop_hosts", max_workers=32) as executor:
+        for resolved, host in hosts_to_stop.values():
+            futures.append(executor.submit(_stop_single_host, resolved, host, mngr_ctx))
+
+    for future in futures:
+        _output(future.result(), output_opts)
+
+    return [str(address.agent) for address in agent_addresses]
+
+
+def _stop_single_host(
+    resolved: ResolvedAgentHost,
+    host: HostInterface,
+    mngr_ctx: MngrContext,
+) -> str:
+    """Stop a single resolved host, returning the human-readable status message.
+
+    Online hosts are stopped via the provider; hosts that are already offline
+    are treated as an idempotent no-op (the desired end state is reached).
+    """
+    provider = get_provider_instance(resolved.provider_name, mngr_ctx)
+    match host:
+        case OnlineHostInterface() as online_host:
+            # No snapshot: native start_host preserves the container filesystem
+            # anyway. No discovery-event emission: the host is offline
+            # afterwards, so an online-host sweep would fail.
+            provider.stop_host(online_host, create_snapshot=False)
+            return f"Stopped host: {host.get_name()}"
+        case HostInterface():
+            # The host is already offline (stopped or destroyed) -- the desired
+            # end state is already reached, so this is an idempotent no-op.
+            return f"Host '{host.get_name()}' is already stopped"
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:
@@ -66,7 +172,7 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
     result_data = {"stopped_agents": stopped_agents, "count": len(stopped_agents)}
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("stop_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -98,6 +204,16 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
     "--archive",
     is_flag=True,
     help="Set an 'archived_at' label on each stopped agent (marks it as archived)",
+)
+@optgroup.option(
+    "--stop-host",
+    is_flag=True,
+    help="Stop the agent's entire host (all agents on it) instead of just the named agent",
+)
+@optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be stopped without actually stopping anything",
 )
 @optgroup.option(
     "--snapshot-mode",
@@ -134,6 +250,12 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
     if opts.graceful_timeout is not None:
         raise NotImplementedError("--graceful-timeout is not implemented yet")
 
+    # --archive labels individual stopped agents, which is incompatible with
+    # stopping the whole host (which takes down every agent on it, including
+    # ones not named on the command line).
+    if opts.stop_host and opts.archive:
+        raise UserInputError("Cannot use --stop-host together with --archive")
+
     # Validate input. Variadic positional is parsed here (after stdin expansion);
     # --agent is already typed by Click.
     agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
@@ -158,6 +280,18 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
             raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
         return
 
+    # --stop-host stops the agent's whole host directly, without the
+    # agent-enumeration scan (see _stop_hosts_for_addresses).
+    if opts.stop_host:
+        if opts.dry_run:
+            _output("Would stop the host(s) of:", output_opts)
+            for address in agent_addresses:
+                _output(f"  - {address.agent}", output_opts)
+            return
+        stopped_host_agents = _stop_hosts_for_addresses(agent_addresses, mngr_ctx, output_opts)
+        _output_result(stopped_host_agents, output_opts)
+        return
+
     # Find agents to stop (RUNNING agents)
     agents_to_stop = find_all_agents(
         addresses=agent_addresses,
@@ -168,6 +302,13 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 
     if not agents_to_stop:
         _output("No running agents found to stop", output_opts)
+        return
+
+    # Dry-run: report what would be stopped without touching any agent.
+    if opts.dry_run:
+        _output("Would stop:", output_opts)
+        for match in agents_to_stop:
+            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
         return
 
     # Stop each agent
@@ -188,7 +329,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         # Ensure host is online (can't stop agents on offline hosts)
         match host:
             case OnlineHostInterface() as online_host:
-                # Stop each agent on this host
+                # Stop each named agent on this host
                 agent_ids_to_stop = [m.agent_id for m in agent_list]
                 online_host.stop_agents(agent_ids_to_stop)
 
@@ -197,7 +338,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
                     stopped_matches.append(m)
                     _output(f"Stopped agent: {m.agent_name}", output_opts)
 
-                # Emit discovery events for stopped agents and host
+                # Emit discovery events for stopped agents and host.
                 emit_discovery_events_for_host(mngr_ctx.config, online_host)
             case HostInterface():
                 raise HostOfflineError(f"Host '{host_id_str}' is offline. Cannot stop agents on offline hosts.")
@@ -217,17 +358,25 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="stop",
     one_line_description="Stop running agent(s)",
-    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
+    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--stop-host] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
     description="""For remote hosts, this stops the agent's tmux session. The host remains
 running unless idle detection stops it automatically.
 
 For local agents, this stops the agent's tmux session. The local host
 itself cannot be stopped (if you want that, shut down your computer).
 
+Use --stop-host to stop the agent's entire host instead of just the
+agent. This takes down every agent on that host. For container-backed
+providers it stops the container (the underlying machine keeps running);
+it is rejected on providers that do not support stopping hosts.
+
 Use --archive to also set an 'archived_at' label on each stopped agent.
 This marks the agent as archived without destroying it, allowing it to
 be filtered out of listings while preserving its state. The 'mngr archive'
 command is a shorthand for 'mngr stop --archive'.
+
+Use --dry-run to preview which agents (or hosts, with --stop-host) would be
+stopped without actually stopping anything.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -238,6 +387,8 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Stop multiple agents", "mngr stop agent1 agent2"),
         ("Stop all running agents", "mngr list --ids | mngr stop -"),
         ("Stop and archive an agent", "mngr stop my-agent --archive"),
+        ("Stop the agent's whole host", "mngr stop my-agent --stop-host"),
+        ("Preview what would be stopped", "mngr list --ids | mngr stop - --dry-run"),
         ("Stop by tmux session name", "mngr stop --session mngr-my-agent"),
         ("Custom format template output", "mngr stop agent1 agent2 --format '{name}'"),
     ),

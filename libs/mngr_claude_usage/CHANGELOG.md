@@ -6,14 +6,29 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.4] - 2026-06-16
+
+## [v0.1.3] - 2026-06-15
+
+## [v0.1.2] - 2026-06-13
+
+## [v0.1.1] - 2026-06-08
+
+### Added
+
+- Added: Auto-discovered as a publishable package by the release tooling (the writer half of the usage split; pairs with `mngr_usage`); will be offered for first publication to PyPI on the next release.
+
+## [v0.1.0] - 2026-06-05
+
 ### Changed
 
 - Changed: Statusline writer captures `rate_limits` + per-render `session_id` + `cost.*` from Claude Code's statusline JSON into `events/claude/usage/events.jsonl` (renamed from `events/claude/rate_limits/`); no longer skips emission when only `cost` is present, so cost tracking now works for direct `ANTHROPIC_API_KEY` users.
 - Changed: Statusline shim and writer scripts now live at host-stable paths (`<host_dir>/commands/claude_statusline.sh` / `claude_usage_writer.sh`), so a work_dir's `settings.local.json` `statusLine.command` stays valid across agent lifecycles; the shim exits 0 silently when `MNGR_AGENT_STATE_DIR` is unset.
+- Changed: Added to the release tooling's publish graph (`scripts/utils.py`); will be offered for first publication to PyPI on the next release. Stale `imbue-mngr==0.2.6` / `imbue-mngr-claude==0.2.6` pins in `pyproject.toml` are realigned to the current `0.2.10`. No runtime change.
 
 ### Fixed
 
-- Fixed: Infinite-recursion bug when running successive claude agents in the same `work_dir` (as `mngr uncapped-claude` always does).
+- Fixed: Infinite-recursion bug when running successive claude agents in the same `work_dir` (as `mngr robinhood` always does).
 
 ## [v0.2.8] - 2026-05-13
 

@@ -9,12 +9,14 @@ from typing import Any
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import ActivitySource
@@ -350,6 +352,56 @@ def test_tmux_target_uses_exact_match_window_zero(
 
 
 @pytest.mark.tmux
+def test_capture_pane_content_targets_requested_window(
+    test_agent: BaseAgent,
+) -> None:
+    """capture_pane_content(window=...) should read the requested window, not window 0.
+
+    The agent runs in window 0, but sessions can hold extra windows (watchers,
+    ttyd, manually-opened terminals). Passing an explicit window must capture that
+    window's pane rather than the agent's primary one.
+    """
+    session_name = test_agent.session_name
+    window_zero_marker = "WINDOW_ZERO_MARKER"
+    window_one_marker = "WINDOW_ONE_MARKER"
+
+    test_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 'echo {window_zero_marker}; sleep 493827'",
+        timeout_seconds=5.0,
+    )
+    try:
+        session_target = TmuxSessionTarget(session_name=session_name)
+        test_agent.host.execute_idempotent_command(
+            f"tmux new-window -t {session_target.as_shell_arg()} -d 'echo {window_one_marker}; sleep 493827'",
+            timeout_seconds=5.0,
+        )
+
+        def _default_capture_shows_window_zero() -> bool:
+            content = test_agent.capture_pane_content() or ""
+            return window_zero_marker in content
+
+        wait_for(
+            _default_capture_shows_window_zero,
+            error_message=f"Expected default capture to contain {window_zero_marker!r}",
+        )
+
+        def _window_one_capture_shows_window_one() -> bool:
+            content = test_agent.capture_pane_content(window=1) or ""
+            return window_one_marker in content
+
+        wait_for(
+            _window_one_capture_shows_window_one,
+            error_message=f"Expected window-1 capture to contain {window_one_marker!r}",
+        )
+
+        # Cross-check: window 1's content is distinct from the default (window 0) content.
+        assert window_zero_marker not in (test_agent.capture_pane_content(window=1) or "")
+        assert window_one_marker not in (test_agent.capture_pane_content() or "")
+    finally:
+        cleanup_tmux_session(session_name)
+
+
+@pytest.mark.tmux
 def test_send_tmux_literal_keys_short_message_with_leading_dash(
     test_agent: BaseAgent,
 ) -> None:
@@ -504,6 +556,46 @@ def test_assemble_command_appends_agent_args(
         command_override=None,
     )
     assert result == CommandString("my-cmd --extra arg")
+
+
+def test_quote_agent_args_quotes_special_chars_and_leaves_plain_args() -> None:
+    """quote_agent_args wraps values needing escaping and leaves already-safe tokens untouched."""
+    assert quote_agent_args(()) == ()
+    assert quote_agent_args(("--flag", "value")) == ("--flag", "value")
+    assert quote_agent_args(("--model", "Gemini 3.5 Flash (Medium)")) == (
+        "--model",
+        "'Gemini 3.5 Flash (Medium)'",
+    )
+
+
+def test_assemble_command_shell_quotes_agent_args_with_special_chars(
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+) -> None:
+    """agent_args with spaces/parens are shell-quoted so the command stays valid.
+
+    Regression test: passing ``--model "Gemini 3.5 Flash (Medium)"`` used to splice
+    the raw value into the shell-evaluated command, so bash word-split it and parsed
+    ``(Medium)`` as a subshell ("syntax error near unexpected token `('").
+    """
+    config = AgentTypeConfig(command=CommandString("agy"))
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=config,
+        agent_type=None,
+        extra_data=None,
+        agent_class=BaseAgent,
+    )
+
+    result = agent.assemble_command(
+        host=agent.host,
+        agent_args=("--model", "Gemini 3.5 Flash (Medium)"),
+        command_override=None,
+    )
+    assert result == CommandString("agy --model 'Gemini 3.5 Flash (Medium)'")
+    # The model value must be a single shell token (no bare parens/spaces).
+    assert "'Gemini 3.5 Flash (Medium)'" in str(result)
 
 
 def test_assemble_command_appends_both_cli_and_agent_args(

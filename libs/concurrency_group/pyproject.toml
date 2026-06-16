@@ -1,6 +1,6 @@
 [project]
 name = "concurrency-group"
-version = "0.1.18"
+version = "0.1.20"
 description = "Utilities for managing threads and processes in a structured way"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "imbue-common==0.1.18",
+    "imbue-common==0.1.20",
     "loguru>=0.7",
     "pydantic>=2.0",
 ]
@@ -81,4 +81,4 @@ pythonVersion = "3.11"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-fail_under = 90
+fail_under = 95

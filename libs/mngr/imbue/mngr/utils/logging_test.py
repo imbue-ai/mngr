@@ -13,32 +13,33 @@ from typing import cast
 
 import paramiko.channel
 import pytest
+from inline_snapshot import snapshot
 from loguru import logger
 
 import imbue.mngr.utils.logging as mngr_logging_module
 from imbue.imbue_common.logging import _format_arg_value
 from imbue.imbue_common.logging import log_call
+from imbue.mngr.colors import BUILD_COLOR
+from imbue.mngr.colors import DEBUG_COLOR
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
+from imbue.mngr.colors import TRACE_COLOR
+from imbue.mngr.colors import WARNING_COLOR
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import LogLevel
-from imbue.mngr.utils.logging import BUILD_COLOR
 from imbue.mngr.utils.logging import BufferedMessage
-from imbue.mngr.utils.logging import DEBUG_COLOR
-from imbue.mngr.utils.logging import ERROR_COLOR
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import LoggingSuppressor
-from imbue.mngr.utils.logging import RESET_COLOR
-from imbue.mngr.utils.logging import TRACE_COLOR
-from imbue.mngr.utils.logging import WARNING_COLOR
 from imbue.mngr.utils.logging import _ParamikoToLoguruHandler
 from imbue.mngr.utils.logging import _format_user_message
 from imbue.mngr.utils.logging import _is_expected_paramiko_thread_exception
 from imbue.mngr.utils.logging import _patched_transport_log
 from imbue.mngr.utils.logging import _resolve_log_dir
-from imbue.mngr.utils.logging import _should_use_color
 from imbue.mngr.utils.logging import _threading_excepthook
 from imbue.mngr.utils.logging import remove_console_handlers
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.logging import suppress_warnings
+from imbue.mngr.utils.testing import FakeTtyStream
 
 
 def test_resolve_log_dir_uses_absolute_path(mngr_test_prefix: str) -> None:
@@ -205,11 +206,14 @@ def test_format_arg_value_truncates_long_value() -> None:
 
 
 def test_format_arg_value_handles_complex_objects() -> None:
-    """_format_arg_value should handle complex objects."""
+    """_format_arg_value should render a complex object as its full repr.
+
+    Asserting the exact repr (rather than just substring membership) catches a
+    regression that dropped the nested list, changed quoting, or reordered keys.
+    """
     complex_obj = {"key": "value", "list": [1, 2, 3]}
     result = _format_arg_value(complex_obj)
-    assert "key" in result
-    assert "value" in result
+    assert result == snapshot("{'key': 'value', 'list': [1, 2, 3]}")
 
 
 # =============================================================================
@@ -250,42 +254,12 @@ def test_log_call_handles_kwargs() -> None:
 
 
 # =============================================================================
-# Tests for _should_use_color
-# =============================================================================
-
-
-class _FakeTtyStream(io.StringIO):
-    """A StringIO that reports itself as a TTY for testing color logic."""
-
-    def isatty(self) -> bool:
-        return True
-
-
-def test_should_use_color_returns_false_when_no_color_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_should_use_color should return False when NO_COLOR is set."""
-    monkeypatch.setenv("NO_COLOR", "")
-    assert _should_use_color(_FakeTtyStream()) is False
-
-
-def test_should_use_color_returns_false_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_should_use_color should return False when the stream is not a TTY."""
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    assert _should_use_color(io.StringIO()) is False
-
-
-def test_should_use_color_returns_true_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_should_use_color should return True when the stream is a TTY and NO_COLOR is not set."""
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    assert _should_use_color(_FakeTtyStream()) is True
-
-
-# =============================================================================
 # Tests for _format_user_message
 #
-# _format_user_message calls _should_use_color() which checks sys.stderr.
+# _format_user_message calls should_use_color() which checks sys.stderr.
 # In test environments, stderr is not a TTY, so by default no colors are used.
 # To test the colored path, we temporarily replace sys.stderr with a
-# _FakeTtyStream via try/finally to ensure cleanup.
+# FakeTtyStream via try/finally to ensure cleanup.
 # =============================================================================
 
 
@@ -297,7 +271,7 @@ def _with_tty_stderr(fn: Callable[[], None], monkeypatch: pytest.MonkeyPatch) ->
     """Run fn with sys.stderr replaced by a fake TTY stream, restoring afterwards."""
     monkeypatch.delenv("NO_COLOR", raising=False)
     saved = sys.stderr
-    sys.stderr = cast(Any, _FakeTtyStream())
+    sys.stderr = cast(Any, FakeTtyStream())
     try:
         fn()
     finally:
@@ -434,7 +408,7 @@ def test_format_user_message_no_color_env_disables_colors(monkeypatch: pytest.Mo
     """_format_user_message should not include ANSI codes when NO_COLOR is set, even on TTY."""
     monkeypatch.setenv("NO_COLOR", "1")
     saved = sys.stderr
-    sys.stderr = cast(Any, _FakeTtyStream())
+    sys.stderr = cast(Any, FakeTtyStream())
     try:
         result = _format_user_message(_make_record("WARNING"))
         assert "WARNING:" in result
@@ -481,7 +455,11 @@ def test_logging_suppressor_buffers_messages() -> None:
         logger.info("Test message 1")
         logger.info("Test message 2")
 
-        # Check that messages were buffered
+        # Check that messages were buffered. The membership checks below are the
+        # real assertions; the count is `>= 2` (not `== 2`) on purpose: tests run
+        # with the autouse warning sink and other handlers attached, so the
+        # suppressor may capture incidental log records from unrelated code. Do
+        # not tighten this to `==` -- it would flake under shared logging.
         buffered = LoggingSuppressor.get_buffered_messages()
         assert len(buffered) >= 2
         assert any("Test message 1" in msg.formatted_message for msg in buffered)

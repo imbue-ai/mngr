@@ -4,6 +4,23 @@ Full, unedited changelog entries for the `mngr_ttyd` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+Internal: routed the agent state-dir path construction through the shared `get_agent_state_dir_path` helper (now in `imbue.mngr.hosts.common`). No behavior change.
+
+## 2026-06-08
+
+Tests now isolate $HOME the same way as every other mngr plugin: the project
+conftest calls `register_plugin_test_fixtures(globals())`, which brings in the
+autouse `setup_test_mngr_env` fixture. Previously this plugin's tests did not
+redirect $HOME, so running them on their own could read or write the real
+`~/.mngr` / `~/.claude.json`. Internal test-infrastructure change only; no
+user-facing behavior change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

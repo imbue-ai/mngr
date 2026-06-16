@@ -6,12 +6,12 @@ Covers:
 - ``_build_providers_state_payload``: combines resolver-tracked providers,
   errored providers, and disabled-on-disk providers into the SSE payload.
 
-The toggle endpoint also sends ``SIGHUP`` to the ``mngr forward`` plugin via
-``EnvelopeStreamConsumer.bounce_observe``. Tests deliberately do not wire a
-consumer (``create_desktop_client`` defaults the slot to ``None``); the
-handler's ``if consumer is not None`` guard makes the bounce a no-op in that
-case. The bounce side-effect itself is exercised by the forward_cli unit
-tests; this file focuses on the new routing/validation/serialization logic.
+The toggle endpoint also bounces the detached ``mngr latchkey forward``
+supervisor (the single discovery observer) via
+``bounce_latchkey_forward_supervisor``. Tests deliberately do not wire a
+supervisor (``create_desktop_client`` defaults the slot to ``None``); the
+helper's ``if supervisor is None`` guard makes the bounce a no-op in that
+case. This file focuses on the new routing/validation/serialization logic.
 """
 
 import tomllib
@@ -24,17 +24,25 @@ from starlette.testclient import TestClient
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.app import _build_providers_state_payload
+from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 
@@ -344,3 +352,109 @@ def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_
 
     assert names == ["docker"]
     assert payload["providers"][0]["status"] == "disabled"
+
+
+# -- _build_workspace_list stale marking --
+
+
+def _make_workspace_agent(provider_name: str, extra_labels: dict[str, str] | None = None) -> DiscoveredAgent:
+    """A primary workspace agent (carries the workspace + is_primary labels)."""
+    labels = {"workspace": "my-workspace", "is_primary": "true", **(extra_labels or {})}
+    return DiscoveredAgent(
+        host_id=HostId("host-" + "0" * 31 + "1"),
+        agent_id=AgentId("agent-" + "0" * 31 + "1"),
+        agent_name=AgentName("ws-agent"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={"labels": labels},
+    )
+
+
+def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() -> None:
+    """A retained workspace whose provider's last poll errored is flagged ``is_stale``; healthy ones are not."""
+    resolver = MngrCliBackendResolver()
+    provider_name = "imbue_cloud_acct"
+    agent = _make_workspace_agent(provider_name)
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    # No provider error -> the workspace is not stale.
+    healthy = _build_workspace_list(resolver)
+    assert len(healthy) == 1
+    assert "is_stale" not in healthy[0]
+
+    # Its provider's latest poll errored -> the retained workspace is stale.
+    errored = ProviderInstanceName(provider_name)
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={
+            errored: DiscoveryError(type_name="RuntimeError", message="boom", provider_name=errored)
+        },
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    stale = _build_workspace_list(resolver)
+    assert len(stale) == 1
+    assert stale[0]["is_stale"] == "true"
+
+
+def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error() -> None:
+    """An error on a different provider must not flag a healthy provider's workspace stale."""
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("imbue_cloud_acct")
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    other = ProviderInstanceName("some_other_provider")
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={other: DiscoveryError(type_name="RuntimeError", message="boom", provider_name=other)},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    workspaces = _build_workspace_list(resolver)
+    assert len(workspaces) == 1
+    assert "is_stale" not in workspaces[0]
+
+
+# -- _build_workspace_list color + accent_fg emission --
+#
+# These assert the SSE workspaces payload carries the stored color and
+# the WCAG-derived foreground triple. Pre-migration workspaces (no
+# ``color`` label) fall back to ``DEFAULT_WORKSPACE_COLOR`` so the
+# rollout doesn't visually break existing workspaces.
+
+
+def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("docker", extra_labels={"color": "#0b292b"})
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert len(workspaces) == 1
+    assert workspaces[0]["accent"] == "#0b292b"
+    # Confusion is dark -> white foreground.
+    assert workspaces[0]["accent_fg"] == "255 255 255"
+
+
+def test_build_workspace_list_emits_black_foreground_for_light_palette_entries() -> None:
+    # #fcefd4 is the "clarity" palette entry, used here because it's
+    # near the upper end of the lightness range -- exercises the
+    # > 0.179 luminance branch of pick_workspace_foreground.
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("docker", extra_labels={"color": "#fcefd4"})
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert workspaces[0]["accent"] == "#fcefd4"
+    assert workspaces[0]["accent_fg"] == "0 0 0"
+
+
+def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -> None:
+    """Workspaces without a ``color`` label (created before the picker
+    shipped, or backfilled but not yet written through ``mngr label``)
+    render as ``DEFAULT_WORKSPACE_COLOR`` -- the same value new
+    workspaces get pre-selected in the picker. ``accent_fg`` matches
+    via the same WCAG luminance computation."""
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("imbue_cloud_acct")
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert workspaces[0]["accent"] == DEFAULT_WORKSPACE_COLOR
+    assert workspaces[0]["accent_fg"] == pick_workspace_foreground(DEFAULT_WORKSPACE_COLOR)

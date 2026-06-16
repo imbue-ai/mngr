@@ -13,7 +13,6 @@ from pydantic import TypeAdapter
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.api.list import list_agents
@@ -29,7 +28,9 @@ from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
+from imbue.mngr_kanpan.data_source import PLUGIN_NAME
 from imbue.mngr_kanpan.data_source import deserialize_fields
+from imbue.mngr_kanpan.data_source import is_muted
 from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
@@ -38,8 +39,6 @@ from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
-
-PLUGIN_NAME = "kanpan"
 
 
 class FetchResult(FrozenModel):
@@ -78,9 +77,6 @@ def fetch_board_snapshot(
 
     agents = tuple(result.agents)
 
-    # Load muted state from certified data
-    muted_agents = _load_muted_agents(mngr_ctx)
-
     # Run all data sources in parallel, passing cached fields from previous cycle
     new_fields_by_source, source_errors = _run_data_sources_parallel(data_sources, agents, cached_fields, mngr_ctx)
     errors.extend(source_errors)
@@ -93,14 +89,16 @@ def fetch_board_snapshot(
                 all_fields[agent_name] = {}
             all_fields[agent_name].update(agent_fields)
 
-    # Build board entries. The muted bit is sourced from local certified data
-    # (always live), so its `created` is now.
+    # Build board entries. The muted bit rides on each AgentDetails (populated by
+    # kanpan's agent_field_generators / offline_agent_field_generators during the
+    # list_agents call above), so it is sourced as resiliently as the agent list
+    # itself and its `created` is now.
     now = now_utc()
     entries: list[AgentBoardEntry] = []
     for agent in agents:
         agent_fields = dict(all_fields.get(agent.name, {}))
-        is_muted = agent.name in muted_agents
-        agent_fields[FIELD_MUTED] = BoolField(value=is_muted, created=now)
+        is_agent_muted = is_muted(agent.plugin.get(PLUGIN_NAME, {}))
+        agent_fields[FIELD_MUTED] = BoolField(value=is_agent_muted, created=now)
 
         cells = {key: field.display() for key, field in agent_fields.items()}
         section = compute_section(agent_fields)
@@ -113,7 +111,7 @@ def fetch_board_snapshot(
                 provider_name=agent.host.provider_name,
                 branch=agent.initial_branch,
                 work_dir=work_dir,
-                is_muted=is_muted,
+                is_muted=is_agent_muted,
                 fields=agent_fields,
                 cells=cells,
                 section=section,
@@ -232,35 +230,10 @@ def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
         mngr_ctx=mngr_ctx,
     )
     plugin_data = agent.get_plugin_data(PLUGIN_NAME)
-    is_muted = not plugin_data.get("muted", False)
-    plugin_data["muted"] = is_muted
+    is_agent_muted = not plugin_data.get(FIELD_MUTED, False)
+    plugin_data[FIELD_MUTED] = is_agent_muted
     agent.set_plugin_data(PLUGIN_NAME, plugin_data)
-    return is_muted
-
-
-def _load_muted_agents(mngr_ctx: MngrContext) -> set[AgentName]:
-    """Load the set of muted agent names from certified data."""
-    muted: set[AgentName] = set()
-    try:
-        agents_by_host, _providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=None,
-            include_destroyed=False,
-            reset_caches=False,
-        )
-        for _host_ref, agent_refs in agents_by_host.items():
-            for agent_ref in agent_refs:
-                if _is_agent_muted(agent_ref.certified_data):
-                    muted.add(agent_ref.agent_name)
-    except Exception as e:
-        logger.debug("Failed to load muted agents: {}", e)
-    return muted
-
-
-def _is_agent_muted(certified_data: Any) -> bool:
-    """Check if an agent is muted based on its certified data."""
-    return certified_data.get("plugin", {}).get(PLUGIN_NAME, {}).get("muted", False)
+    return is_agent_muted
 
 
 def _cache_file_path(mngr_ctx: MngrContext) -> Path:

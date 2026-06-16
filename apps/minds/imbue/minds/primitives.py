@@ -1,10 +1,37 @@
 from enum import auto
+from typing import Final
 
 from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+
+# Canonical set of AWS regions the minds app offers for ``LaunchMode.AWS``.
+# This is the single source of truth used both to write one
+# ``[providers.aws-<region>]`` block per region into the mngr profile settings
+# at startup (``imbue.minds.bootstrap``) and to populate the create form's AWS
+# region dropdown (``imbue.minds.desktop_client.region_preference``). minds
+# deliberately exposes only the US datacenters by default: every configured
+# region adds a provider that ``mngr list`` fans out to on each discovery
+# cycle, and the non-US regions roughly doubled listing latency for little
+# benefit to the current user base. ``mngr_aws`` still ships pinned default
+# AMIs for more regions, so this set can be widened later without other
+# changes; any region added here must have an AMI in ``mngr_aws`` or it would
+# fail AMI resolution at create time. Lives in ``primitives`` (which never
+# imports ``mngr``) so the early ``bootstrap`` module can read it without
+# violating its no-mngr-on-import contract.
+CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+)
+
+# Hardcoded fallback AWS region for the create form when there is no stored
+# last-used value and IP geolocation has not (yet) resolved. Must be a member
+# of ``CONFIGURED_AWS_REGIONS``.
+DEFAULT_AWS_REGION: Final[str] = "us-east-1"
 
 
 class CreationId(RandomId):
@@ -36,9 +63,10 @@ class LaunchMode(UpperCaseStrEnum):
     """How a workspace agent should be launched."""
 
     DOCKER = auto()
-    CLOUD = auto()
+    VULTR = auto()
     LIMA = auto()
     IMBUE_CLOUD = auto()
+    AWS = auto()
 
 
 class AIProvider(UpperCaseStrEnum):
@@ -61,6 +89,68 @@ class AIProvider(UpperCaseStrEnum):
     IMBUE_CLOUD = auto()
     API_KEY = auto()
     SUBSCRIPTION = auto()
+
+
+class BackupProvider(UpperCaseStrEnum):
+    """How the workspace agent's restic backups are configured.
+
+    Decoupled from both the compute and AI providers so any combination is
+    valid. Backup setup runs asynchronously after the host is created; the
+    same code path can be re-applied to an existing host later.
+
+    - ``IMBUE_CLOUD`` -- create a per-workspace R2 bucket (named after the
+      host id) + a scoped key against the selected account, then inject a
+      ``runtime/secrets/restic.env`` pointing restic at that bucket.
+      Requires a selected account.
+    - ``API_KEY`` -- inject a user-supplied ``KEY=VALUE`` block verbatim
+      into ``restic.env``; the user owns ``RESTIC_REPOSITORY`` and any
+      backend credentials.
+    - ``CONFIGURE_LATER`` -- inject nothing now. Backups stay dormant until
+      the same provisioning path is invoked against the host later.
+    """
+
+    IMBUE_CLOUD = auto()
+    API_KEY = auto()
+    CONFIGURE_LATER = auto()
+
+
+class UserDataPreference(UpperCaseStrEnum):
+    """How much the workspace agent may learn about the user during onboarding.
+
+    Captured by the first onboarding question shown while a workspace is
+    being created. For now the only behavior gated on this is a minimal
+    local scan of the user's machine (see
+    ``imbue.minds.desktop_client.onboarding``); we will extend what each
+    level does in the future.
+
+    - ``CONVENIENCE`` -- import as much local context as possible.
+    - ``PRIVACY`` -- gather minimal data, kept on the user's machine.
+    - ``CONTROL`` -- gather nothing (the onboarding scan is skipped).
+    """
+
+    CONVENIENCE = auto()
+    PRIVACY = auto()
+    CONTROL = auto()
+
+
+class BackupEncryptionMethod(UpperCaseStrEnum):
+    """Which master/recovery key the workspace's restic repo is initialized with.
+
+    Only meaningful when a real backup provider (``IMBUE_CLOUD`` or
+    ``API_KEY``) is selected. Either way the workspace gets its own random
+    repository password; this only governs the key minds uses to ``restic
+    init`` the repo (a user-controlled recovery key), which never enters the
+    workspace.
+
+    - ``MASTER_PASSWORD`` -- init the repo with a user passphrase, established
+      once and stored in a per-user file shared across all of the user's
+      workspaces.
+    - ``NO_PASSWORD`` -- init the repo with an empty password (restic
+      ``--insecure-no-password``); no recovery passphrase to remember.
+    """
+
+    MASTER_PASSWORD = auto()
+    NO_PASSWORD = auto()
 
 
 class OneTimeCode(NonEmptyStr):

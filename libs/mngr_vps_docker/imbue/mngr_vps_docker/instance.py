@@ -1,10 +1,8 @@
 import json
 import os
-import re
 import shlex
-import shutil
-import tempfile
 import time
+from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -25,6 +23,7 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
@@ -37,6 +36,7 @@ from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -59,7 +59,6 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
-from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -72,36 +71,54 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
-from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
-from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
-from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
-from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
-from imbue.mngr_vps_docker.host_store import CONTAINER_ENTRYPOINT_CMD
+from imbue.mngr_vps_docker.container_setup import CONTAINER_ENTRYPOINT_CMD
+from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
+from imbue.mngr_vps_docker.container_setup import HOST_VOLUME_MOUNT_PATH
+from imbue.mngr_vps_docker.container_setup import LABEL_HOST_ID
+from imbue.mngr_vps_docker.container_setup import LABEL_HOST_NAME
+from imbue.mngr_vps_docker.container_setup import LABEL_PROVIDER
+from imbue.mngr_vps_docker.container_setup import LABEL_TAGS
+from imbue.mngr_vps_docker.container_setup import SNAPSHOT_READ_MOUNT_PATH
+from imbue.mngr_vps_docker.container_setup import SNAPSHOT_TRIGGER_MOUNT_PATH
+from imbue.mngr_vps_docker.container_setup import build_image_on_outer_from_build_args
+from imbue.mngr_vps_docker.container_setup import check_file_exists_on_outer
+from imbue.mngr_vps_docker.container_setup import commit_container
+from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
+from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
+from imbue.mngr_vps_docker.container_setup import docker_inspect_running
+from imbue.mngr_vps_docker.container_setup import ensure_depot_token_available
+from imbue.mngr_vps_docker.container_setup import exec_in_container
+from imbue.mngr_vps_docker.container_setup import host_volume_name_for
+from imbue.mngr_vps_docker.container_setup import prepare_btrfs_on_outer
+from imbue.mngr_vps_docker.container_setup import provision_snapshot_helper_on_outer
+from imbue.mngr_vps_docker.container_setup import pull_image
+from imbue.mngr_vps_docker.container_setup import remove_container
+from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps_docker.container_setup import remove_volume
+from imbue.mngr_vps_docker.container_setup import run_container
+from imbue.mngr_vps_docker.container_setup import run_docker
+from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_outer
+from imbue.mngr_vps_docker.container_setup import setup_container_ssh
+from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_for
+from imbue.mngr_vps_docker.container_setup import start_container
+from imbue.mngr_vps_docker.container_setup import stop_container
+from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.host_store import ensure_state_container
+from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-
-
-def _remove_host_from_known_hosts(known_hosts_path: Path, hostname: str, port: int) -> None:
-    """Remove a host entry from the known_hosts file."""
-    if not known_hosts_path.exists():
-        return
-    host_pattern = hostname if port == 22 else f"[{hostname}]:{port}"
-    lines = known_hosts_path.read_text().splitlines(keepends=True)
-    filtered = [line for line in lines if not line.startswith(f"{host_pattern} ")]
-    known_hosts_path.write_text("".join(filtered))
 
 
 class ParsedVpsBuildOptions(FrozenModel):
@@ -109,162 +126,218 @@ class ParsedVpsBuildOptions(FrozenModel):
 
     region: str = Field(description="VPS region")
     plan: str = Field(description="VPS plan")
-    os_id: int | str = Field(
-        description=(
-            "VPS OS image identifier. Most providers use an integer image id; "
-            "providers that catalog images by name (e.g. OVH classic VPS) use a string."
-        ),
-    )
     git_depth: int | None = Field(
         default=None, description="Git clone depth for build context, or None for full clone"
     )
     docker_build_args: tuple[str, ...] = Field(description="Remaining args passed to docker build")
 
 
-def _parse_build_args(
+def extract_single_value_arg(args: Sequence[str], flag: str) -> tuple[str | None, list[str]]:
+    """Pop ``--flag=VALUE`` once from ``args``. Returns ``(value or None, remaining)``.
+
+    If ``flag`` appears multiple times the last occurrence wins (matching how
+    docker's CLI treats repeated single-value flags). Composable building
+    block: each provider's ``_parse_build_args`` chains a few of these to
+    peel off its own knobs before walking the remainder for docker forwarding.
+    """
+    value: str | None = None
+    remaining: list[str] = []
+    for arg in args:
+        if arg.startswith(flag):
+            value = arg.split("=", 1)[1]
+        else:
+            remaining.append(arg)
+    return value, remaining
+
+
+def extract_git_depth(args: Sequence[str]) -> tuple[int | None, list[str]]:
+    """Pop ``--git-depth=N`` from ``args``. Shared because it's about the *local*
+    mngr build context (shallow-cloning the upload tarball), not the VPS, so
+    every provider accepts it under the same name.
+    """
+    raw, remaining = extract_single_value_arg(args, "--git-depth=")
+    return (int(raw) if raw is not None else None), remaining
+
+
+def extract_presence_flag(args: Sequence[str], flag: str) -> tuple[bool, list[str]]:
+    """Pop a presence-only flag like ``--aws-spot`` from ``args``.
+
+    Returns ``(True, remaining)`` if any element of ``args`` equals ``flag``
+    exactly, else ``(False, args_as_list)``. The flag MUST be passed with no
+    value: ``--aws-spot=true`` or ``--aws-spot=`` raises because that shape
+    suggests the caller expected a value-bearing flag (likely a typo).
+
+    Composable building block for boolean opt-in knobs (e.g. ``--aws-spot``).
+    """
+    present = False
+    remaining: list[str] = []
+    for arg in args:
+        if arg == flag:
+            present = True
+        elif arg.startswith(f"{flag}="):
+            raise MngrError(f"{flag} is a presence-only flag; pass it as bare {flag!r} (no value). Got: {arg!r}")
+        else:
+            remaining.append(arg)
+    return present, remaining
+
+
+_VPS_MIGRATION_HINT: Final[str] = (
+    "Build args are now per-provider: use --aws-region= / --aws-instance-type= / --aws-ami=, "
+    "--vultr-region= / --vultr-plan=, or --ovh-datacenter= (alias --ovh-region=) / --ovh-plan= "
+    "(matching your provider). The old --vps-os= / --vps-image= / --vps-ami= image-selection args "
+    "are also removed; image selection lives on the provider config (default_os_id for Vultr, "
+    "default_image_name for OVH, default_ami_id / default_ami_by_region for AWS)."
+)
+
+
+def raise_if_vps_migration_arg(arg: str) -> None:
+    """Raise the dedicated migration error if ``arg`` uses the dropped shared ``--vps-*`` prefix.
+
+    Called by every provider's parser (and by ``MinimalVpsDockerProvider``)
+    so callers still passing ``--vps-region=`` etc. get a clear pointer at
+    the new per-provider name rather than having the arg silently forwarded
+    to docker (which would either error opaquely or, worse, succeed for a
+    flag that happens to be a valid docker flag).
+    """
+    if arg.startswith("--vps-"):
+        raise MngrError(f"{arg.split('=', 1)[0]} is no longer supported. {_VPS_MIGRATION_HINT}")
+
+
+def raise_if_unknown_provider_arg(arg: str, provider_prefix: str, valid_args: Sequence[str]) -> None:
+    """Raise if ``arg`` starts with ``--<provider_prefix>-`` but isn't one of ``valid_args``.
+
+    Lets a provider's parser catch typos / unknown flags up front, with a
+    specific error that lists what was actually accepted. ``valid_args``
+    should be the full flag spellings (e.g. ``("--aws-region=", ...)``) so
+    the error message matches the user-facing names exactly.
+    """
+    if not arg.startswith(f"--{provider_prefix}-"):
+        return
+    raise MngrError(f"Unknown {provider_prefix} build arg: {arg}. Valid args: {', '.join(valid_args)}")
+
+
+def parse_vps_build_args(
     build_args: Sequence[str] | None,
     *,
+    provider_prefix: str,
     default_region: str,
     default_plan: str,
-    default_os_id: int | str,
+    plan_arg_name: str,
 ) -> ParsedVpsBuildOptions:
-    """Parse build args, separating VPS provisioning args from Docker build args.
+    """Convenience parser for the common provider shape (region + plan + git-depth).
 
-    VPS-specific args use the --vps- prefix (e.g., --vps-region=ewr).
-    ``--git-depth=N`` controls the git clone depth for the build context.
-    Everything else is passed through to docker build on the VPS.
-
-    ``--vps-os=`` values are cast to ``int`` only when ``default_os_id`` is
-    itself an integer (preserving Vultr's existing semantics). When the
-    default is a string the parsed value is kept as a string -- providers
-    like OVH classic VPS use string image names rather than integer ids.
+    Builds the standard four-step parse out of ``extract_single_value_arg``,
+    ``extract_git_depth``, ``raise_if_vps_migration_arg``, and
+    ``raise_if_unknown_provider_arg``. Vultr and OVH (which only have a
+    region + plan) call this directly; AWS has its own composition because
+    it also accepts ``--aws-ami=``. Custom providers with their own knobs
+    should compose the helpers directly rather than extending this function.
     """
-    region = default_region
-    plan = default_plan
-    os_id: int | str = default_os_id
-    git_depth: int | None = None
+    args = list(build_args or ())
+    region_arg = f"--{provider_prefix}-region="
+    plan_arg = f"--{provider_prefix}-{plan_arg_name}="
+    region, args = extract_single_value_arg(args, region_arg)
+    plan, args = extract_single_value_arg(args, plan_arg)
+    git_depth, args = extract_git_depth(args)
     docker_build_args: list[str] = []
-
-    if build_args:
-        for arg in build_args:
-            if arg.startswith("--vps-region="):
-                region = arg.split("=", 1)[1]
-            elif arg.startswith("--vps-plan="):
-                plan = arg.split("=", 1)[1]
-            elif arg.startswith("--vps-os="):
-                raw_os = arg.split("=", 1)[1]
-                os_id = int(raw_os) if isinstance(default_os_id, int) else raw_os
-            elif arg.startswith("--git-depth="):
-                git_depth = int(arg.split("=", 1)[1])
-            elif arg.startswith("--vps-"):
-                raise MngrError(
-                    f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --vps-os=, --git-depth="
-                )
-            else:
-                docker_build_args.append(arg)
-
+    for arg in args:
+        raise_if_vps_migration_arg(arg)
+        raise_if_unknown_provider_arg(arg, provider_prefix, (region_arg, plan_arg, "--git-depth="))
+        docker_build_args.append(arg)
     return ParsedVpsBuildOptions(
-        region=region,
-        plan=plan,
-        os_id=os_id,
+        region=region or default_region,
+        plan=plan or default_plan,
         git_depth=git_depth,
         docker_build_args=tuple(docker_build_args),
     )
 
 
-def _resolve_dockerfile_paths(
-    docker_build_args: Sequence[str],
-    remote_build_dir: str,
-) -> tuple[str, ...]:
-    """Rewrite relative --file/--dockerfile paths to absolute paths on the VPS.
+def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
+    """Return the host_id label of the (single) mngr container on this VPS, if any.
 
-    Docker resolves --file relative to the daemon's CWD, not the build context.
-    Since the build context was uploaded to remote_build_dir on the VPS, any
-    relative Dockerfile paths must be prefixed with that directory.
+    Each VPS hosts at most one mngr container (1:1 invariant), so the value
+    of the ``com.imbue.mngr.host-id`` label on any container with that label
+    set uniquely identifies the VPS's host. Returns ``None`` when no such
+    container exists yet (e.g., the VPS is still being provisioned).
 
-    Handles both ``--file=Dockerfile`` and ``-f Dockerfile`` forms.
+    Includes stopped containers so a paused host is still discoverable.
     """
-    resolved: list[str] = []
-    is_next_arg_dockerfile = False
-    for arg in docker_build_args:
-        if is_next_arg_dockerfile:
-            if not arg.startswith("/"):
-                arg = f"{remote_build_dir}/{arg}"
-            is_next_arg_dockerfile = False
-        elif arg in ("-f", "--file", "--dockerfile"):
-            is_next_arg_dockerfile = True
-        else:
-            for prefix in ("--file=", "-f=", "--dockerfile="):
-                if arg.startswith(prefix):
-                    dockerfile_path = arg[len(prefix) :]
-                    if not dockerfile_path.startswith("/"):
-                        arg = f"{prefix}{remote_build_dir}/{dockerfile_path}"
-                    break
-        resolved.append(arg)
-    return tuple(resolved)
+    fmt = "{{index .Config.Labels " + json.dumps(LABEL_HOST_ID) + "}}"
+    result = outer.execute_idempotent_command(
+        "docker ps -a -q "
+        f"--filter {shlex.quote('label=' + LABEL_HOST_ID)} | "
+        f"xargs -r docker inspect --format {shlex.quote(fmt)}",
+    )
+    if not result.success:
+        raise MngrError(
+            f"Failed to list mngr containers on VPS: stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+        )
+    for raw_line in result.stdout.splitlines():
+        value = raw_line.strip()
+        if not value:
+            continue
+        try:
+            return HostId(value)
+        except InvalidRandomIdError as e:
+            # A corrupted/manually-edited label must not crash discovery for
+            # the whole VPS; surface as MngrError so the existing fallback
+            # path in _read_records_from_vps logs and continues.
+            raise MngrError(f"Container on VPS has malformed {LABEL_HOST_ID} label {value!r}: {e}") from e
+    return None
 
 
-def _emit_docker_build_output(line: str) -> None:
-    """Log a line of docker build output at BUILD level."""
-    stripped = line.strip()
-    if stripped:
-        logger.log(LogLevel.BUILD.value, "{}", stripped, source="docker")
+def _read_live_listing_from_vps(
+    outer: OuterHostInterface,
+    host_id: HostId,
+    host_dir: str,
+    prefix: str,
+) -> dict[str, Any]:
+    """Run the outer listing script on the VPS and return the parsed live listing.
+
+    Reads agent state directly from the running container's live ``host_dir``
+    (or, for a stopped container, from a ``docker cp``-extracted copy), so
+    agents created *inside* the container -- which are never written to the
+    persisted outer store -- are discovered. This mirrors the read path
+    ``ImbueCloudProvider`` already uses.
+    """
+    script = build_outer_listing_collection_script(str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID)
+    result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
+    if not result.success:
+        raise MngrError(
+            f"Outer listing script failed on VPS for host {host_id}: "
+            f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+        )
+    return parse_listing_collection_output(result.stdout)
 
 
-# Label constants (same scheme as Docker provider)
-LABEL_PREFIX: Final[str] = "com.imbue.mngr."
-LABEL_PROVIDER: Final[str] = f"{LABEL_PREFIX}provider"
-LABEL_HOST_ID: Final[str] = f"{LABEL_PREFIX}host-id"
-LABEL_HOST_NAME: Final[str] = f"{LABEL_PREFIX}host-name"
-LABEL_TAGS: Final[str] = f"{LABEL_PREFIX}tags"
-
-# Default image when no user customization
-DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
-
-# Host volume mount path inside the container
-HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
-
-# Idempotent install: skip if depot already on PATH, otherwise download to
-# /usr/local/bin via depot.dev's official installer. Run once per build (cheap
-# no-op when already present); avoids needing a separate provisioning step.
-_DEPOT_INSTALL_CMD: Final[str] = "command -v depot >/dev/null 2>&1 || curl -fsSL https://depot.dev/install-cli.sh | sh"
-
-# Env-var assignments whose values are secrets and must be redacted before any
-# remote command string ends up in logs or exception messages.
-_SECRET_ENV_VARS: Final[tuple[str, ...]] = ("DEPOT_TOKEN",)
-_SECRET_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b(" + "|".join(_SECRET_ENV_VARS) + r")=(?:'[^']*'|\S+)")
-
-# Absolute path on the VPS where rsync stashes partial files between
-# attempts. Lives outside the build context (``/tmp/mngr-build-<id>/``) so
-# partial-transfer state never gets included in the docker build context
-# or copied back to the local repo. Persists across retries so subsequent
-# attempts can resume rather than re-uploading completed bytes.
-_RSYNC_PARTIAL_DIR_REMOTE: Final[str] = "/tmp/mngr-rsync-partial"
-
-# How many times to retry a failed rsync upload before giving up.
-_UPLOAD_MAX_ATTEMPTS: Final[int] = 3
-# Backoff between attempts (entry N is the wait *before* attempt N+1).
-_UPLOAD_RETRY_BACKOFF_SECONDS: Final[tuple[float, ...]] = (5.0, 15.0)
-
-# Substrings in rsync stderr that indicate a transient connection-class
-# failure (broken pipe, dropped TCP, fresh-VPS networking flap). Rsync's
-# own catch-all exit 255 with these messages is what fresh Vultr VPSes
-# produce in the first 30-60s of life. Other rsync errors (permission,
-# protocol mismatch, vanished source) are non-transient and we fail fast.
-_RETRYABLE_RSYNC_PATTERNS: Final[tuple[str, ...]] = (
-    "Broken pipe",
-    "Connection reset by peer",
-    "Connection refused",
-    "Connection timed out",
-    "client_loop",
-    "ssh: connect to host",
-    "kex_exchange_identification",
-    "Network is unreachable",
-)
+def _extract_live_agent_data(parsed_listing: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Pull each agent's ``data.json`` dict out of a parsed listing."""
+    agent_data: list[dict[str, Any]] = []
+    for agent_raw in parsed_listing.get("agents", []):
+        data = agent_raw.get("data")
+        if isinstance(data, dict):
+            agent_data.append(data)
+    return agent_data
 
 
-def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> list[str]:
-    """Compose the tag list passed to the VPS create call.
+class _VpsDiscoveryData(FrozenModel):
+    """Host records, live agent data, and container running state gathered during discovery.
+
+    Used both for a single VPS read and for the aggregate across all of a
+    provider's VPSes; the shapes are identical, so combining is a per-field merge.
+    """
+
+    records: tuple[VpsDockerHostRecord, ...] = Field(default=(), description="Discovered host records")
+    live_agent_data_by_host_id: dict[HostId, list[dict[str, Any]]] = Field(
+        default_factory=dict, description="Live in-container agent data.json dicts keyed by host id"
+    )
+    is_running_by_host_id: dict[HostId, bool] = Field(
+        default_factory=dict, description="Container running state keyed by host id"
+    )
+
+
+def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> dict[str, str]:
+    """Compose the tag mapping passed to the VPS create call.
 
     Always emits ``mngr-host-id=<id>`` and ``mngr-provider=<name>``. The
     ``extra_tags_raw`` string is a comma-separated list of ``key=value``
@@ -272,302 +345,69 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
     minds-side pool-bake sets ``MNGR_VPS_EXTRA_TAGS=minds_env=<name>``
     so the env's destroy can later find + delete the instance via the
     Vultr tag filter. Empty / whitespace-only entries are skipped so
-    trailing commas don't produce blank tags.
+    trailing commas don't produce blank tags. Entries without an ``=``
+    are rejected so misconfigured callers fail fast instead of silently
+    losing the tag.
 
     Pulled out to module scope so the comma-splitting behaviour is unit
     testable without standing up an entire provisioning flow.
     """
-    tags = [f"mngr-host-id={host_id}", f"mngr-provider={provider_name}"]
-    for tag in extra_tags_raw.split(","):
-        stripped = tag.strip()
-        if stripped:
-            tags.append(stripped)
+    tags: dict[str, str] = {"mngr-host-id": str(host_id), "mngr-provider": provider_name}
+    for entry in extra_tags_raw.split(","):
+        stripped = entry.strip()
+        if not stripped:
+            continue
+        if "=" not in stripped:
+            raise MngrError(f"Invalid VPS extra tag {stripped!r}: expected ``key=value``")
+        key, _, value = stripped.partition("=")
+        tags[key.strip()] = value.strip()
     return tags
 
 
-def _redact_secret_env(remote_command: str) -> str:
-    """Return remote_command with values of known-secret env-var assignments replaced."""
-    return _SECRET_ENV_PATTERN.sub(r"\1=<redacted>", remote_command)
+def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | None:
+    """Return True if the ``mngr-ready`` marker exists, else None (so polling continues).
 
-
-def _is_retryable_rsync_error(stderr: str) -> bool:
-    """Return True iff stderr looks like a connection-class rsync failure."""
-    return any(pattern in stderr for pattern in _RETRYABLE_RSYNC_PATTERNS)
-
-
-def _docker_inspect_running(outer: OuterHostInterface, container_name: str) -> bool:
-    """Return True iff a container with the given name is running on outer."""
-    result = outer.execute_idempotent_command(
-        f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)}"
-    )
-    if not result.success:
-        return False
-    return result.stdout.strip().lower() == "true"
-
-
-def _check_file_exists_on_outer(outer: OuterHostInterface, path: str) -> bool:
-    """Return True iff a file exists on outer."""
-    result = outer.execute_idempotent_command(f"test -f {shlex.quote(path)}", timeout_seconds=10.0)
-    return result.success
-
-
-def _exec_in_container(
-    outer: OuterHostInterface,
-    container_name: str,
-    command: str,
-    timeout_seconds: float = 300.0,
-) -> str:
-    """Execute a shell command inside a running container on outer. Returns stdout.
-
-    Raises MngrError if the command exits non-zero.
+    A ``HostConnectionError`` counts as "not ready yet" (None): the bootstrap runs
+    ``apt-get install`` and Docker setup which can momentarily disrupt SSH (e.g.
+    ``systemctl restart ssh`` after writing the sshd tuning).
     """
-    remote = f"docker exec {shlex.quote(container_name)} sh -c {shlex.quote(command)}"
-    result = outer.execute_idempotent_command(remote, timeout_seconds=timeout_seconds)
-    if not result.success:
-        raise MngrError(f"docker exec in {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
-    return result.stdout
+    try:
+        return True if check_file_exists_on_outer(outer, Path(MNGR_READY_MARKER_PATH)) else None
+    except HostConnectionError as e:
+        logger.debug("Transient SSH error during host-bootstrap poll (will retry): {}", e)
+        return None
 
 
-def _run_docker(
+def _wait_for_cloud_init_marker(
     outer: OuterHostInterface,
-    docker_args: Sequence[str],
-    timeout_seconds: float = 60.0,
-) -> str:
-    """Run a docker subcommand on outer and return stdout.
-
-    Raises MngrError if the command exits non-zero.
-    """
-    remote = "docker " + " ".join(shlex.quote(a) for a in docker_args)
-    result = outer.execute_idempotent_command(remote, timeout_seconds=timeout_seconds)
-    if not result.success:
-        raise MngrError(f"docker {' '.join(docker_args[:2])} failed: {result.stderr.strip() or result.stdout.strip()}")
-    return result.stdout
-
-
-def _commit_container(outer: OuterHostInterface, container_name: str, image_tag: str) -> str:
-    """Commit a container to an image. Returns the image ID."""
-    return _run_docker(outer, ["commit", container_name, image_tag]).strip()
-
-
-def _stop_container(outer: OuterHostInterface, container_name: str, timeout_seconds: int = 10) -> None:
-    """Stop a running container."""
-    _run_docker(outer, ["stop", "-t", str(timeout_seconds), container_name])
-
-
-def _start_container(outer: OuterHostInterface, container_name: str) -> None:
-    """Start a stopped container."""
-    _run_docker(outer, ["start", container_name])
-
-
-def _remove_container(outer: OuterHostInterface, container_name: str, force: bool = False) -> None:
-    """Remove a container. If force=True, kill running containers first."""
-    args: list[str] = ["rm"]
-    if force:
-        args.append("-f")
-    args.append(container_name)
-    _run_docker(outer, args)
-
-
-def _create_volume(outer: OuterHostInterface, volume_name: str) -> None:
-    """Create a Docker named volume."""
-    _run_docker(outer, ["volume", "create", volume_name])
-
-
-def _remove_volume(outer: OuterHostInterface, volume_name: str) -> None:
-    """Remove a Docker named volume (force)."""
-    _run_docker(outer, ["volume", "rm", "-f", volume_name])
-
-
-def _pull_image(outer: OuterHostInterface, image: str, timeout_seconds: float = 300.0) -> None:
-    """Pull a Docker image."""
-    _run_docker(outer, ["pull", image], timeout_seconds=timeout_seconds)
-
-
-def _run_container(
-    outer: OuterHostInterface,
-    *,
-    image: str,
-    name: str,
-    port_mappings: Mapping[str, str],
-    volumes: Sequence[str],
-    labels: Mapping[str, str],
-    extra_args: Sequence[str],
-    entrypoint_cmd: str,
-) -> str:
-    """Run a detached docker container on outer. Returns the container id."""
-    args: list[str] = ["run", "-d", "--name", name]
-    for host_bind, container_port in port_mappings.items():
-        args.extend(["-p", f"{host_bind}:{container_port}"])
-    for vol in volumes:
-        args.extend(["-v", vol])
-    for key, value in labels.items():
-        args.extend(["--label", f"{key}={value}"])
-    args.extend(extra_args)
-    args.extend(["--entrypoint", "sh", image, "-c", entrypoint_cmd])
-    output = _run_docker(outer, args, timeout_seconds=120.0)
-    container_id = output.strip()
-    logger.debug("Started container {} ({})", name, container_id[:12])
-    return container_id
-
-
-def _build_ssh_transport_for_outer(outer: OuterHostInterface) -> tuple[str, str, str, int, str]:
-    """Build the rsync ssh-transport command and key fields for the given outer.
-
-    Returns (ssh_command, ssh_user, hostname, port, ssh_key_path_str). Raises
-    MngrError if outer has no SSH connection info (i.e. is local).
-    """
-    info = outer.get_ssh_connection_info()
-    if info is None:
-        raise MngrError("Cannot upload directory to a local outer host")
-    user, hostname, port, key_path = info
-    # Mirror docker_over_ssh._SSH_BASE_OPTIONS plus the outer host's known_hosts
-    # so rsync's ssh subprocess uses the same trust store as the outer host.
-    host_data = outer.connector.host.data
-    known_hosts = host_data.get("ssh_known_hosts_file", "")
-    ssh_cmd = (
-        f"ssh -i {shlex.quote(str(key_path))} "
-        f"-o UserKnownHostsFile={shlex.quote(str(known_hosts))} "
-        f"-o StrictHostKeyChecking=yes "
-        f"-o BatchMode=yes "
-        f"-o ConnectTimeout=15 "
-        f"-o ServerAliveInterval=20 "
-        f"-o ServerAliveCountMax=10"
-    )
-    return ssh_cmd, user, hostname, port, str(key_path)
-
-
-def _upload_directory_to_outer(
-    outer: OuterHostInterface,
-    cg: ConcurrencyGroup,
-    local_path: Path,
-    remote_path: str,
-    timeout_seconds: float = 900.0,
-) -> None:
-    """Upload a local directory to outer via rsync over SSH.
-
-    Mirrors the behavior of the legacy ``DockerOverSsh.upload_directory``:
-    retries connection-class failures (broken pipe, RST, ssh-disconnect) up
-    to ``_UPLOAD_MAX_ATTEMPTS`` with backoff, since fresh Vultr VPSes
-    routinely drop the first SSH connection in their first minute of life.
-    ``--partial-dir`` lets retries resume rather than re-upload from
-    scratch; that path lives outside the build context so partial files
-    never end up baked into the docker image. Non-retryable rsync errors
-    fail fast on the first attempt.
-    """
-    ssh_cmd, user, hostname, _port, _key_path = _build_ssh_transport_for_outer(outer)
-    local_str = str(local_path).rstrip("/") + "/"
-    cmd = [
-        "rsync",
-        "-az",
-        "--delete",
-        f"--partial-dir={_RSYNC_PARTIAL_DIR_REMOTE}",
-        "--exclude=__pycache__",
-        "--exclude=.venv",
-        "--exclude=node_modules",
-        "--exclude=.mypy_cache",
-        "--exclude=.ruff_cache",
-        "--exclude=.pytest_cache",
-        "--exclude=.test_output",
-        "--exclude=htmlcov",
-        "--exclude=.test_durations",
-        "-e",
-        ssh_cmd,
-        local_str,
-        f"{user}@{hostname}:{remote_path}/",
-    ]
-    logger.debug("Uploading {} to {}@{}:{}", local_path, user, hostname, remote_path)
-
-    last_stderr = ""
-    for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
-        finished = cg.run_process_to_completion(
-            command=cmd,
-            is_checked_after=False,
-            timeout=timeout_seconds,
-        )
-        if finished.is_timed_out:
-            # Whole-process timeout: don't retry (the next attempt would
-            # just hit the same timeout again, and we'd take 3x longer
-            # to surface a real "VPS is wedged" diagnosis).
-            raise MngrError(f"Upload timed out after {timeout_seconds}s")
-        if finished.returncode == 0:
-            return
-        last_stderr = finished.stderr.strip()
-        is_last_attempt = attempt == _UPLOAD_MAX_ATTEMPTS
-        if is_last_attempt or not _is_retryable_rsync_error(last_stderr):
-            break
-        backoff_seconds = _UPLOAD_RETRY_BACKOFF_SECONDS[attempt - 1]
-        logger.warning(
-            "Upload to {} attempt {}/{} failed; retrying in {:.0f}s. stderr={!r}",
-            hostname,
-            attempt,
-            _UPLOAD_MAX_ATTEMPTS,
-            backoff_seconds,
-            last_stderr,
-        )
-        time.sleep(backoff_seconds)
-    raise MngrError(f"Upload failed: {last_stderr}")
-
-
-def _noop_line_sink(_line: str) -> None:
-    """No-op line sink for ``execute_streaming_command`` callers that don't care about output."""
-
-
-def _build_image_on_outer(
-    outer: OuterHostInterface,
-    *,
-    tag: str,
-    build_context_path: str,
-    docker_build_args: Sequence[str],
     timeout_seconds: float,
-    on_output: Callable[[str], None] | None,
-    builder: DockerBuilder,
-) -> str:
-    """Build a Docker image on outer from a remote build context. Returns the tag.
+    *,
+    poll_interval_seconds: float = 5.0,
+    slow_threshold_seconds: float = 30.0,
+) -> None:
+    """Poll the VPS for the ``mngr-ready`` first-boot completion marker.
 
-    When ``builder`` is DEPOT, ensures the depot CLI is installed on outer,
-    forwards DEPOT_TOKEN (required) from the agent's environment, optionally
-    forwards DEPOT_PROJECT_ID when set, and runs ``depot build --load``.
+    Returns once the marker file appears. The marker is written by whichever
+    first-boot mechanism the backend uses -- cloud-init ``runcmd`` (Vultr / AWS /
+    OVH) or the GCE ``startup-script`` (GCP). Keeps polling until ``timeout_seconds``
+    -- the hard wall (see ``_is_mngr_ready_marker_present_or_none`` for the
+    transient-error handling).
+
+    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters so
+    tests can drive this with short intervals; defaults preserve the production
+    cadence (poll every 5s, warn if total > 30s).
     """
-    if builder is DockerBuilder.DEPOT:
-        depot_token = os.environ.get("DEPOT_TOKEN", "")
-        depot_project_id = os.environ.get("DEPOT_PROJECT_ID", "")
-        if not depot_token:
-            raise MngrError(
-                "builder=DEPOT requires DEPOT_TOKEN in the agent's environment. "
-                "Set DEPOT_TOKEN (and DEPOT_PROJECT_ID if no depot.json is on the VPS), "
-                "or set builder=DOCKER."
-            )
-        args = ["build", "--load", "-t", tag] + list(docker_build_args) + [build_context_path]
-        quoted = " ".join(shlex.quote(a) for a in args)
-        env: dict[str, str] = {"DEPOT_TOKEN": depot_token}
-        if depot_project_id:
-            env["DEPOT_PROJECT_ID"] = depot_project_id
-        remote_cmd = f"{_DEPOT_INSTALL_CMD} && depot {quoted}"
-        run_env: Mapping[str, str] | None = env
-    else:
-        args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]
-        remote_cmd = "docker " + " ".join(shlex.quote(a) for a in args)
-        run_env = None
-
-    safe_remote_cmd = _redact_secret_env(remote_cmd)
-    logger.trace("docker build remote command: {}", safe_remote_cmd)
-
-    # Stream build output line-by-line so the user sees progress during long
-    # docker builds. execute_streaming_command treats the command as
-    # idempotent and retries transient SSH errors with backoff -- on retry
-    # on_output will be re-invoked with the new attempt's output (duplicates
-    # are expected and acceptable for docker build).
-    line_callback: Callable[[str], None] = on_output if on_output is not None else _noop_line_sink
-    result = outer.execute_streaming_command(
-        remote_cmd,
-        line_callback,
-        env=run_env,
-        timeout_seconds=timeout_seconds,
+    value, _, elapsed = poll_for_value(
+        lambda: _is_mngr_ready_marker_present_or_none(outer),
+        timeout=timeout_seconds,
+        poll_interval=poll_interval_seconds,
     )
-    if not result.success:
-        tail = "\n".join((result.stdout + "\n" + result.stderr).splitlines()[-50:])
-        raise MngrError(f"Remote docker build failed: {tail}")
-    return tag
+    if value is None:
+        raise MngrError(
+            f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
+        )
+    if elapsed > slow_threshold_seconds:
+        logger.warning("Host bootstrap took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
 
 
 class VpsDockerProvider(BaseProviderInstance):
@@ -584,7 +424,7 @@ class VpsDockerProvider(BaseProviderInstance):
     vps_client: VpsClientInterface = Field(frozen=True, description="VPS provider API client")
 
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
-    _container_running_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
+    _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -606,7 +446,42 @@ class VpsDockerProvider(BaseProviderInstance):
         for host_id in list(self._host_by_id_cache):
             self._evict_cached_host(host_id)
         self._host_record_cache.clear()
-        self._container_running_cache.clear()
+        self._instances_cache = None
+
+    def _fetch_provider_instances(self) -> list[dict[str, Any]]:
+        """Provider-specific listing hook: return the raw instance dicts from the API.
+
+        Default returns ``[]`` so subclasses without a tag-based listing API
+        (e.g. OVH, which uses ``_list_provider_vps_hostnames`` directly) can
+        opt out. Subclasses with one (currently AWS and Vultr) override to
+        call their typed client's ``list_instances``; the result is cached
+        for the duration of a single command via ``_list_instances_cached``.
+        """
+        return []
+
+    def _list_instances_cached(self) -> list[dict[str, Any]]:
+        """List instances tagged for this provider, caching for the duration of the command.
+
+        Subclasses customise *what* gets listed by overriding
+        ``_fetch_provider_instances``; the cache scaffolding lives here.
+        """
+        if self._instances_cache is not None:
+            return self._instances_cache
+        self._instances_cache = self._fetch_provider_instances()
+        return self._instances_cache
+
+    def _validate_provider_args_for_create(self) -> None:
+        """Hook called by ``create_host`` before the first provider write.
+
+        Default no-op. Subclasses override to enforce provider-specific
+        pre-create invariants (e.g. GCP's firewall-rule existence, AWS's
+        pytest-only "must have auto_shutdown_seconds set" guard). It runs before
+        any provider API write -- in particular before the SSH key upload and
+        instance creation -- so a failed precondition surfaces cleanly with no
+        leaked resources and no cleanup path. Keep these checks cheap (local
+        state or a single read-only API call); anything expensive runs on every
+        ``mngr create``.
+        """
 
     # =========================================================================
     # Key Management
@@ -636,6 +511,21 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _vps_known_hosts_path(self) -> Path:
         return self._key_dir() / "vps_known_hosts"
+
+    def record_outer_host_key(self, host: str, port: int, public_key: str) -> None:
+        """Pin an outer (VPS-root) sshd host key in this provider's known_hosts.
+
+        Callers operating on a VPS this provider did not itself order (e.g. the
+        imbue_cloud rebuild on a leased host) use this so the provider's own outer
+        connections -- including the certified-data sync callback -- pass strict
+        host-key checking instead of failing on a missing entry.
+        """
+        add_host_to_known_hosts(
+            known_hosts_path=self._vps_known_hosts_path(),
+            hostname=host,
+            port=port,
+            public_key=public_key,
+        )
 
     def _container_known_hosts_path(self) -> Path:
         return self._key_dir() / "container_known_hosts"
@@ -672,43 +562,13 @@ class VpsDockerProvider(BaseProviderInstance):
     # =========================================================================
     # Host Store
     # =========================================================================
-
-    def _state_container_name(self) -> str:
-        """Return the expected state container name for this provider/user."""
-        return f"{self.mngr_ctx.config.prefix}docker-state-{self.mngr_ctx.get_profile_user_id()}"
-
-    def _get_host_store(self, outer: OuterHostInterface) -> VpsDockerHostStore:
-        """Get or create the host store on the VPS.
-
-        Creates the state container if it does not exist. Use
-        _get_existing_host_store for read-only access that does not create
-        the container (e.g., during discovery).
-        """
-        state_container_name = ensure_state_container(
-            outer=outer,
-            prefix=self.mngr_ctx.config.prefix,
-            user_id=str(self.mngr_ctx.get_profile_user_id()),
-            provider_name=str(self.name),
-        )
-        return VpsDockerHostStore(
-            outer=outer,
-            state_container_name=state_container_name,
-        )
-
-    def _get_existing_host_store(self, outer: OuterHostInterface) -> VpsDockerHostStore | None:
-        """Get a handle to an existing host store on the VPS.
-
-        Returns None if the state container does not exist or is not running.
-        Unlike _get_host_store, this never creates the state container --
-        only _setup_container_on_vps should do that.
-        """
-        container_name = self._state_container_name()
-        if not _docker_inspect_running(outer, container_name):
-            return None
-        return VpsDockerHostStore(
-            outer=outer,
-            state_container_name=container_name,
-        )
+    # The store is opened via ``open_host_store(outer, volume_name)`` (free
+    # function in ``host_store``) which resolves the volume's bind-source path
+    # via ``docker volume inspect --format '{{.Options.device}}'`` -- the docker
+    # named volume is a bind-options entry pointing at the per-host btrfs
+    # subvolume, so ``Options.device`` (not the unused ``Mountpoint``
+    # placeholder under ``/var/lib/docker/volumes``) is the real on-disk path.
+    # This used to be the per-user state container.
 
     # =========================================================================
     # Host Object Construction
@@ -750,37 +610,39 @@ class VpsDockerProvider(BaseProviderInstance):
         self,
         host_record: VpsDockerHostRecord,
     ) -> OfflineHost:
-        """Create an OfflineHost from a host record."""
+        """Create an OfflineHost from a host record.
+
+        Wrapped so the offline host is readable (file reads served from its
+        persisted volume) whether reached via ``get_host`` or
+        ``to_offline_host``; the volume is resolved lazily, so this is free.
+        """
         host_id = HostId(host_record.certified_host_data.host_id)
         vps_ip = host_record.vps_ip or ""
-        offline = OfflineHost(
-            id=host_id,
-            certified_host_data=host_record.certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data, vps_ip
-            ),
+        offline = make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=host_record.certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+                on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
+                    callback_host_id, certified_data, vps_ip
+                ),
+            )
         )
         self._evict_cached_host(host_id, replacement=offline)
         return offline
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str) -> None:
-        """Callback when host data.json is updated -- sync to state volume."""
+        """Callback when host data.json is updated -- sync to the unified host volume."""
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                host_store = self._get_existing_host_store(outer)
-                if host_store is None:
-                    logger.warning(
-                        "State container not found on VPS {} -- cannot sync certified data for {}", vps_ip, host_id
-                    )
-                    return
-                existing = host_store.read_host_record(host_id)
+                host_store = open_host_store(outer, host_volume_name_for(host_id))
+                existing = host_store.read_host_record()
                 if existing is not None:
                     updated = existing.model_copy(update={"certified_host_data": certified_data})
                     host_store.write_host_record(updated)
-        except (HostConnectionError, MngrError) as e:
-            logger.warning("Failed to sync certified data to VPS state volume: {}", e)
+        except MngrError as e:
+            logger.warning("Failed to sync certified data to VPS host volume: {}", e)
 
     # =========================================================================
     # VPS Provisioning
@@ -788,17 +650,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
         """Wait for cloud-init to finish (Docker installed, marker file present)."""
-        start = time.monotonic()
-        while time.monotonic() - start < timeout_seconds:
-            if _check_file_exists_on_outer(outer, "/var/run/mngr-ready"):
-                elapsed = time.monotonic() - start
-                if elapsed > 30.0:
-                    logger.warning("Cloud-init took {:.1f}s (threshold: 30s)", elapsed)
-                return
-            time.sleep(5.0)
-        raise MngrError(
-            f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
-        )
+        _wait_for_cloud_init_marker(outer, timeout_seconds=timeout_seconds)
 
     def _wait_for_sshd_on_vps(self, vps_ip: str, timeout_seconds: float) -> None:
         """Wait for sshd on the VPS to be ready."""
@@ -816,51 +668,42 @@ class VpsDockerProvider(BaseProviderInstance):
         known_hosts_entries: tuple[str, ...],
         authorized_keys_entries: tuple[str, ...],
     ) -> None:
-        """Set up SSH inside the container via docker exec."""
-        container_key_path, container_public_key = self._get_container_ssh_keypair()
+        """Set up SSH inside the container via docker exec.
+
+        Delegates to the shared ``setup_container_ssh`` helper, supplying the
+        container client/host keypairs this provider manages. The container is
+        reached via <vps_ip>:<container_ssh_port> directly; the caller is
+        responsible for adding the matching known_hosts entry once the VPS IP
+        is known.
+        """
+        _container_key_path, container_public_key = self._get_container_ssh_keypair()
         container_host_key_path, container_host_public_key = self._get_container_host_keypair()
-        container_host_private_key = container_host_key_path.read_text()
+        setup_container_ssh(
+            outer,
+            container_name,
+            mngr_host_dir=str(self.host_dir),
+            host_volume_mount_path=host_volume_mount_path,
+            container_public_key=container_public_key,
+            container_host_private_key=container_host_key_path.read_text(),
+            container_host_public_key=container_host_public_key,
+            known_hosts_entries=known_hosts_entries,
+            authorized_keys_entries=authorized_keys_entries,
+        )
 
-        # Install packages and set up host_dir
-        with log_span("Installing packages in container"):
-            install_cmd = build_check_and_install_packages_command(
-                mngr_host_dir=str(self.host_dir),
-                host_volume_mount_path=host_volume_mount_path,
-            )
-            _exec_in_container(outer, container_name, install_cmd, timeout_seconds=300.0)
+    def _prepare_btrfs_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> Path:
+        """Ensure btrfs loop FS + per-host subvolume exist on the outer; return the subvolume path.
 
-        # Configure SSH keys
-        with log_span("Configuring SSH in container"):
-            ssh_cmd = build_configure_ssh_command(
-                user="root",
-                client_public_key=container_public_key,
-                host_private_key=container_host_private_key,
-                host_public_key=container_host_public_key,
-            )
-            _exec_in_container(outer, container_name, ssh_cmd)
-
-        # Add known_hosts entries
-        known_hosts_cmd = build_add_known_hosts_command("root", known_hosts_entries)
-        if known_hosts_cmd is not None:
-            _exec_in_container(outer, container_name, known_hosts_cmd)
-
-        # Add authorized_keys entries
-        auth_keys_cmd = build_add_authorized_keys_command("root", authorized_keys_entries)
-        if auth_keys_cmd is not None:
-            _exec_in_container(outer, container_name, auth_keys_cmd)
-
-        # Start sshd
-        with log_span("Starting sshd in container"):
-            _exec_in_container(
-                outer,
-                container_name,
-                "/usr/sbin/sshd -D -o MaxSessions=100 &",
-            )
-
-        # Add container host key to local known_hosts.
-        # The container is reached via <vps_ip>:<container_ssh_port> directly.
-        # We need to add the key for that endpoint. Since we don't know the
-        # VPS IP here, the caller is responsible for adding the known_hosts entry.
+        Thin wrapper around :func:`prepare_btrfs_on_outer` that pulls the
+        loop-file path, mount path, and reserved-GB knob out of
+        ``self.config``. See the free function for the full step-by-step.
+        """
+        return prepare_btrfs_on_outer(
+            outer,
+            host_id=host_id,
+            btrfs_mount_path=self.config.btrfs_mount_path,
+            loop_file_path=self.config.btrfs_loop_file_path,
+            outer_disk_reserved_gb=self.config.outer_disk_reserved_gb,
+        )
 
     # =========================================================================
     # Core Lifecycle: create_host
@@ -881,11 +724,23 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = HostId.generate()
         logger.info("Creating VPS Docker host {} ({}) ...", name, host_id)
 
-        base_image = str(image) if image else self.config.default_image
-        effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
         parsed = self._parse_build_args(build_args)
-        region, plan, os_id = parsed.region, parsed.plan, parsed.os_id
-        docker_build_args = parsed.docker_build_args
+
+        # Fail fast before provisioning a (billable) VPS: a DEPOT build needs
+        # DEPOT_TOKEN, but the build only runs after the VPS exists and
+        # cloud-init completes -- so a missing token would otherwise waste a
+        # full provision. Only an actual build (non-empty docker_build_args)
+        # needs the token; a plain image pull does not.
+        if parsed.docker_build_args:
+            ensure_depot_token_available(self.config.builder)
+
+        # Provider-specific pre-create checks (e.g. GCP's firewall-rule
+        # existence, AWS's pytest auto-shutdown guard). Run before the first
+        # provider write (the SSH key upload just below) so a failed
+        # precondition -- like a missing `mngr gcp prepare` firewall rule --
+        # surfaces cleanly: no instance created, no SSH key uploaded, and no
+        # "Host creation failed, attempting cleanup..." path.
+        self._validate_provider_args_for_create()
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
@@ -900,47 +755,31 @@ class VpsDockerProvider(BaseProviderInstance):
             vps_instance_id, vps_ip = self._provision_vps(
                 host_id=host_id,
                 name=name,
-                region=region,
-                plan=plan,
-                os_id=os_id,
+                parsed=parsed,
                 vps_host_key_path=vps_host_key_path,
                 vps_host_public_key=vps_host_public_key,
                 vps_ssh_key_id=vps_ssh_key_id,
+                vps_public_key=vps_public_key,
             )
 
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                container_name, container_id, volume_name = self._setup_container_on_vps(
+                host = self.create_host_on_existing_vps(
                     outer=outer,
                     host_id=host_id,
                     name=name,
                     vps_ip=vps_ip,
-                    base_image=base_image,
-                    effective_start_args=effective_start_args,
-                    docker_build_args=docker_build_args,
-                    git_depth=parsed.git_depth,
-                    tags=tags,
-                    known_hosts=known_hosts,
-                    authorized_keys=authorized_keys,
-                )
-
-                host = self._finalize_host_creation(
-                    host_id=host_id,
-                    name=name,
-                    vps_ip=vps_ip,
-                    outer=outer,
-                    container_name=container_name,
-                    container_id=container_id,
-                    volume_name=volume_name,
-                    base_image=base_image,
-                    effective_start_args=effective_start_args,
-                    tags=tags,
-                    lifecycle=lifecycle,
-                    region=region,
-                    plan=plan,
-                    os_id=os_id,
                     vps_instance_id=vps_instance_id,
                     vps_ssh_key_id=vps_ssh_key_id,
                     vps_host_public_key=vps_host_public_key,
+                    region=parsed.region,
+                    plan=parsed.plan,
+                    image=image,
+                    tags=tags,
+                    build_args=build_args,
+                    start_args=start_args,
+                    lifecycle=lifecycle,
+                    known_hosts=known_hosts,
+                    authorized_keys=authorized_keys,
                 )
 
             logger.info("VPS Docker host {} created successfully (VPS: {}, IP: {})", name, vps_instance_id, vps_ip)
@@ -968,35 +807,224 @@ class VpsDockerProvider(BaseProviderInstance):
                     logger.warning("Failed to clean up SSH key: {}", cleanup_err)
             raise
 
+    def create_host_on_existing_vps(
+        self,
+        *,
+        outer: OuterHostInterface,
+        host_id: HostId,
+        name: HostName,
+        vps_ip: str,
+        vps_instance_id: VpsInstanceId,
+        vps_ssh_key_id: str,
+        vps_host_public_key: str,
+        region: str,
+        plan: str,
+        image: ImageReference | None,
+        tags: Mapping[str, str] | None,
+        build_args: Sequence[str] | None,
+        start_args: Sequence[str] | None,
+        lifecycle: HostLifecycleOptions | None,
+        known_hosts: Sequence[str] | None,
+        authorized_keys: Sequence[str] | None,
+    ) -> Host:
+        """Build the container and finalize host state on an already-reachable VPS.
+
+        This is the single canonical "set up the host after the VPS exists"
+        code path. ``create_host`` calls it once it has ordered (or recycled)
+        a VPS and opened an outer; other providers that operate on a VPS they
+        did not order themselves (e.g. ``mngr_imbue_cloud``'s slow path, which
+        rebuilds the container on a leased pool VPS) call it directly with
+        their own ``outer``. It makes no VPS-client (ordering) calls.
+
+        The unified host volume is provisioned at the top of
+        ``_setup_container_on_vps`` -- that runs before the (potentially slow
+        and failure-prone) image pull/build so the volume still exists by the
+        time ``_finalize_host_creation`` writes ``host_state.json``.
+        """
+        base_image = str(image) if image else self.config.default_image
+        # Prepend `--runtime <value>` (e.g. 'runsc' for gVisor) when configured; absent by default.
+        runtime_args = ("--runtime", self.config.docker_runtime) if self.config.docker_runtime is not None else ()
+        effective_start_args = runtime_args + tuple(self.config.default_start_args) + tuple(start_args or ())
+        parsed = self._parse_build_args(build_args)
+
+        container_name, container_id, volume_name = self._setup_container_on_vps(
+            outer=outer,
+            host_id=host_id,
+            name=name,
+            vps_ip=vps_ip,
+            base_image=base_image,
+            effective_start_args=effective_start_args,
+            docker_build_args=parsed.docker_build_args,
+            git_depth=parsed.git_depth,
+            tags=tags,
+            known_hosts=known_hosts,
+            authorized_keys=authorized_keys,
+        )
+
+        return self._finalize_host_creation(
+            host_id=host_id,
+            name=name,
+            vps_ip=vps_ip,
+            outer=outer,
+            container_name=container_name,
+            container_id=container_id,
+            volume_name=volume_name,
+            base_image=base_image,
+            effective_start_args=effective_start_args,
+            tags=tags,
+            lifecycle=lifecycle,
+            region=region,
+            plan=plan,
+            vps_instance_id=vps_instance_id,
+            vps_ssh_key_id=vps_ssh_key_id,
+            vps_host_public_key=vps_host_public_key,
+        )
+
+    def teardown_container_on_existing_vps(self, outer: OuterHostInterface, host_id: HostId) -> None:
+        """Remove the container + per-host volumes/subvolume for ``host_id`` on a reachable VPS.
+
+        The VPS itself is left running (no VPS-client calls). Used to clear a
+        pre-existing container before rebuilding on the same VPS -- e.g. the
+        imbue_cloud slow path reclaiming a leased pool host whose baked
+        container must be torn down before ``create_host_on_existing_vps``
+        rebuilds it under the same ``host_id``. Each step is best-effort and
+        logged; a missing resource is a no-op.
+        """
+        # Remove every workspace container identified by its host-id label.
+        list_result = outer.execute_idempotent_command(
+            f"docker ps -aq --filter label={LABEL_HOST_ID}={shlex.quote(str(host_id))}"
+        )
+        if list_result.success:
+            for container_id in list_result.stdout.split():
+                try:
+                    remove_container(outer, container_id, force=True)
+                except (HostConnectionError, MngrError) as e:
+                    logger.warning("Failed to remove container {} for host {}: {}", container_id, host_id, e)
+        else:
+            logger.warning("Failed to list containers for host {}: {}", host_id, list_result.stderr.strip())
+
+        # Delete the per-host btrfs subvolume (the bind source for the unified
+        # volume) so the rebuild can recreate it cleanly.
+        subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
+        try:
+            delete_btrfs_subvolume_on_outer(outer, subvolume_path)
+        except (HostConnectionError, MngrError) as e:
+            logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+
+        # Remove the named docker volumes so a recreate with the same names
+        # doesn't collide.
+        for volume_name in (host_volume_name_for(host_id), snapshot_trigger_volume_name_for(host_id)):
+            try:
+                remove_volume(outer, volume_name)
+            except (HostConnectionError, MngrError) as e:
+                logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
+
+    def _create_vps_instance(
+        self,
+        parsed: ParsedVpsBuildOptions,
+        label: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+    ) -> VpsInstanceId:
+        """Provider hook that issues the cloud-API instance create.
+
+        Default implementation: call the shared ``self.vps_client.create_instance``
+        with the standard (label, region, plan, user_data, ssh_key_ids, tags)
+        shape, which is what every current backend's wire contract needs.
+
+        Providers that have per-host knobs beyond region + plan (e.g. AWS's
+        ``--aws-ami=`` override) override this hook to pass their extra kwargs
+        through their own concrete typed client (``self.aws_client`` rather
+        than the shared interface). That way the shared ``VpsClientInterface``
+        contract stays minimal and per-provider extensions don't ripple across
+        every other provider's signature.
+        """
+        return self.vps_client.create_instance(
+            label=label,
+            region=parsed.region,
+            plan=parsed.plan,
+            user_data=user_data,
+            ssh_key_ids=ssh_key_ids,
+            tags=tags,
+        )
+
+    def _generate_bootstrap_payload(
+        self,
+        *,
+        host_private_key: str,
+        host_public_key: str,
+        authorized_user_public_key: str,
+    ) -> str:
+        """Render the first-boot bootstrap payload threaded into instance creation.
+
+        Default: cloud-init ``user-data``. GCP overrides this to render a GCE
+        ``startup-script`` (stock GCE images run the google-guest-agent, not
+        cloud-init). Both render the same shared ``host_setup`` steps and write the
+        same ``mngr-ready`` marker, so the rest of provisioning is backend-agnostic.
+        """
+        return generate_cloud_init_user_data(
+            host_private_key=host_private_key,
+            host_public_key=host_public_key,
+            install_gvisor_runtime=self.config.install_gvisor_runtime,
+            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
+            authorized_user_public_key=authorized_user_public_key,
+        )
+
+    def _wait_for_expected_host_key(self, vps_ip: str, expected_host_public_key: str, timeout_seconds: float) -> None:
+        """Hook to wait until the VPS serves our SSH host key before strict-checking.
+
+        Default no-op: cloud-init backends set the host key before sshd starts.
+        Backends that set it after boot (GCP's ``startup-script``) override this to
+        poll until the live key matches, closing the mismatch window.
+        """
+        return
+
     def _provision_vps(
         self,
         host_id: HostId,
         name: HostName,
-        region: str,
-        plan: str,
-        os_id: int | str,
+        parsed: ParsedVpsBuildOptions,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
+        vps_public_key: str,
     ) -> tuple[VpsInstanceId, str]:
         """Provision a VPS, wait for it to boot, and wait for Docker to install.
 
         Returns (vps_instance_id, vps_ip).
+
+        ``vps_public_key`` is the provider SSH public key already loaded by
+        ``create_host`` (the sole caller); it is threaded in rather than re-read
+        from disk here. The bootstrap (``_generate_bootstrap_payload``) injects it
+        straight into root (in addition to the copy-from-default-user step), which
+        removes any reliance on a cloud image's default-user key landing in root --
+        notably on GCE, where the google guest agent provisions the key
+        asynchronously and races the copy.
+
+        Provider-specific pre-create checks (``_validate_provider_args_for_create``)
+        already ran in ``create_host`` before the first provider write, so by the
+        time we get here the create preconditions are known to hold.
         """
         vps_host_private_key = vps_host_key_path.read_text()
-        user_data = generate_cloud_init_user_data(
+        user_data = self._generate_bootstrap_payload(
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
+            authorized_user_public_key=vps_public_key,
         )
 
-        logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
+        logger.log(
+            LogLevel.BUILD.value,
+            "Creating VPS instance (region: {}, plan: {})...",
+            parsed.region,
+            parsed.plan,
+            source="vps",
+        )
         with log_span("Creating VPS instance"):
             vps_tags = build_vps_tags(host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
-            vps_instance_id = self.vps_client.create_instance(
+            vps_instance_id = self._create_vps_instance(
+                parsed=parsed,
                 label=f"mngr-{name}",
-                region=region,
-                plan=plan,
-                os_id=os_id,
                 user_data=user_data,
                 ssh_key_ids=[vps_ssh_key_id],
                 tags=vps_tags,
@@ -1006,7 +1034,7 @@ class VpsDockerProvider(BaseProviderInstance):
         with log_span("Waiting for VPS to become active"):
             vps_ip = self.vps_client.wait_for_instance_active(
                 vps_instance_id,
-                timeout_seconds=self.config.vps_boot_timeout,
+                timeout_seconds=self.config.instance_boot_timeout,
             )
         logger.log(LogLevel.BUILD.value, "VPS active (IP: {})", vps_ip, source="vps")
 
@@ -1021,11 +1049,22 @@ class VpsDockerProvider(BaseProviderInstance):
         with log_span("Waiting for VPS SSH"):
             self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
 
-        logger.log(LogLevel.BUILD.value, "Waiting for cloud-init to complete (Docker installation)...", source="vps")
-        with log_span("Waiting for cloud-init (Docker install)"):
+        # Backends that install the host key after sshd starts (GCP's
+        # startup-script) serve a boot-generated key first; wait for our key to
+        # land before the strict-host-key-checked connection below. No-op for
+        # cloud-init backends, which set the key pre-sshd.
+        with log_span("Waiting for expected VPS host key"):
+            self._wait_for_expected_host_key(
+                vps_ip, vps_host_public_key, timeout_seconds=self.config.ssh_connect_timeout
+            )
+
+        logger.log(
+            LogLevel.BUILD.value, "Waiting for host bootstrap to complete (Docker installation)...", source="vps"
+        )
+        with log_span("Waiting for host bootstrap (Docker install)"):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 self._wait_for_cloud_init(outer, timeout_seconds=self.config.docker_install_timeout)
-        logger.log(LogLevel.BUILD.value, "Cloud-init complete, Docker is ready", source="vps")
+        logger.log(LogLevel.BUILD.value, "Host bootstrap complete, Docker is ready", source="vps")
 
         return vps_instance_id, vps_ip
 
@@ -1049,20 +1088,45 @@ class VpsDockerProvider(BaseProviderInstance):
         and runs docker build there. Otherwise pulls the base image directly.
 
         Returns (container_name, container_id, volume_name).
-        """
-        with log_span("Setting up state container on VPS"):
-            self._get_host_store(outer)
 
-        volume_name = f"mngr-host-vol-{host_id.get_uuid().hex}"
-        with log_span("Creating host volume"):
-            _create_volume(outer, volume_name)
+        The btrfs loop FS and the per-host unified docker named volume are
+        provisioned at the top of this method, before the (slow, failure-prone)
+        image pull/build, so the bind-source path always exists by the time
+        ``_finalize_host_creation`` writes ``host_state.json`` -- even if a
+        later step in this method fails.
+        """
+        volume_name = host_volume_name_for(host_id)
+        snapshot_trigger_volume_name = snapshot_trigger_volume_name_for(host_id)
+
+        with log_span("Provisioning unified host volume on btrfs subvolume"):
+            subvolume_path = self._prepare_btrfs_on_outer(outer, host_id)
+            seed_host_volume_layout_on_outer(outer, subvolume_path)
+            create_bind_volume_on_outer(outer, volume_name=volume_name, device_path=subvolume_path)
+
+        # Snapshot helper: lets the in-container host_backup service request
+        # `btrfs subvolume snapshot` against the per-host subvolume via a
+        # request.json / result.json file protocol in a dedicated docker
+        # volume. Both the systemd unit on the outer and the docker volume
+        # mounted at /mngr-snapshot/ in the container need to exist before
+        # the agent boots. The helper provisioning is internally a 2-phase
+        # parallel pipeline (see provision_snapshot_helper_on_outer) so
+        # the ~7 SSH round-trips it would otherwise serialize collapse to
+        # the latency of 2.
+        provision_snapshot_helper_on_outer(
+            outer,
+            self.mngr_ctx.concurrency_group,
+            host_id=host_id,
+            btrfs_mount_path=self.config.btrfs_mount_path,
+            subvolume_path=subvolume_path,
+            trigger_volume_name=snapshot_trigger_volume_name,
+        )
 
         if docker_build_args:
             base_image = self._build_image_on_vps(outer, host_id, base_image, docker_build_args, git_depth)
         else:
             logger.log(LogLevel.BUILD.value, "Pulling Docker image {} on VPS...", base_image, source="vps")
             with log_span("Pulling Docker image on VPS"):
-                _pull_image(outer, base_image, timeout_seconds=300.0)
+                pull_image(outer, base_image, timeout_seconds=300.0)
 
         container_name = f"{self.mngr_ctx.config.prefix}{name}"
         labels = {
@@ -1072,13 +1136,25 @@ class VpsDockerProvider(BaseProviderInstance):
             LABEL_TAGS: json.dumps(dict(tags) if tags else {}),
         }
         logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
+        snapshots_dir_on_outer = self.config.btrfs_mount_path / "snapshots"
         with log_span("Starting Docker container"):
-            container_id = _run_container(
+            container_id = run_container(
                 outer,
                 image=base_image,
                 name=container_name,
                 port_mappings={f"0.0.0.0:{self.config.container_ssh_port}": "22"},
-                volumes=[f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw"],
+                volumes=[
+                    f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw",
+                    # Snapshot helper IPC volume (bind-shared with the outer
+                    # at OUTER_SNAPSHOT_TRIGGER_DIR via the named volume created
+                    # above; host_backup writes request.json / reads result.json).
+                    f"{snapshot_trigger_volume_name}:{SNAPSHOT_TRIGGER_MOUNT_PATH}:rw",
+                    # Read-only view of the outer's <btrfs-mount>/snapshots/
+                    # directory so restic-in-container can read the per-request
+                    # snapshots the outer helper produces at
+                    # <btrfs-mount>/snapshots/<name>.
+                    f"{snapshots_dir_on_outer}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
+                ],
                 labels=labels,
                 extra_args=list(effective_start_args),
                 entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
@@ -1089,7 +1165,7 @@ class VpsDockerProvider(BaseProviderInstance):
             self._setup_container_ssh(
                 outer=outer,
                 container_name=container_name,
-                host_volume_mount_path=HOST_VOLUME_MOUNT_PATH,
+                host_volume_mount_path=f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}",
                 known_hosts_entries=tuple(known_hosts or ()),
                 authorized_keys_entries=tuple(authorized_keys or ()),
             )
@@ -1123,7 +1199,6 @@ class VpsDockerProvider(BaseProviderInstance):
         lifecycle: HostLifecycleOptions | None,
         region: str,
         plan: str,
-        os_id: int | str,
         vps_instance_id: VpsInstanceId,
         vps_ssh_key_id: str,
         vps_host_public_key: str,
@@ -1155,7 +1230,7 @@ class VpsDockerProvider(BaseProviderInstance):
         self._create_shutdown_script(host)
         with log_span("Starting activity watcher"):
             start_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
-            _exec_in_container(outer, container_name, start_watcher_cmd)
+            exec_in_container(outer, container_name, start_watcher_cmd)
 
         host_record = VpsDockerHostRecord(
             certified_host_data=host_data,
@@ -1166,7 +1241,6 @@ class VpsDockerProvider(BaseProviderInstance):
                 vps_instance_id=vps_instance_id,
                 region=region,
                 plan=plan,
-                os_id=os_id,
                 start_args=effective_start_args,
                 image=base_image,
                 container_name=container_name,
@@ -1175,12 +1249,7 @@ class VpsDockerProvider(BaseProviderInstance):
             ),
             container_id=container_id,
         )
-        host_store = self._get_existing_host_store(outer)
-        if host_store is None:
-            raise MngrError(
-                f"State container not found on VPS {vps_ip} during host finalization -- "
-                "it should have been created by _setup_container_on_vps"
-            )
+        host_store = open_host_store(outer, volume_name)
         host_store.write_host_record(host_record)
 
         # Cache so that persist_agent_data (called moments later) can find
@@ -1195,8 +1264,8 @@ class VpsDockerProvider(BaseProviderInstance):
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
         """Hook called at the very end of ``_finalize_host_creation``.
 
-        Fires after the host record has been written to the state volume
-        and is therefore the "point of no return" for ``create_host``.
+        Fires after the host record has been written to the unified host
+        volume and is therefore the "point of no return" for ``create_host``.
         Subclasses can override to commit any deferred provisioning side
         effects that must only become durable once the host is fully
         usable -- e.g. OVH classic VPS un-cancellation, which must wait
@@ -1226,122 +1295,18 @@ class VpsDockerProvider(BaseProviderInstance):
     ) -> str:
         """Build a Docker image on the VPS from the provided build args.
 
-        Uploads the build context (if a local path is referenced) to the VPS
-        and runs docker build there. Returns the image tag to use.
-
-        If the local build context is a git worktree, clones it into a temp
-        directory first so the .git directory is self-contained. If git_depth
-        is specified, the clone uses --depth and always creates a temp clone
-        (even for non-worktree repos).
+        Thin wrapper around the shared ``build_image_on_outer_from_build_args``
+        helper, supplying this provider's configured docker builder. Returns the
+        image tag to use.
         """
-        build_tag = f"mngr-build-{host_id}"
-        remote_build_dir = f"/tmp/mngr-build-{host_id.get_uuid().hex}"
-
-        # Separate the build context path from other docker build args.
-        # Docker build expects the last positional arg to be the context path.
-        # We scan for args that look like local paths (not starting with --)
-        # and upload them as the build context.
-        context_args: list[str] = []
-        non_context_args: list[str] = []
-        for arg in docker_build_args:
-            if not arg.startswith("-") and Path(arg).exists():
-                context_args.append(arg)
-            else:
-                non_context_args.append(arg)
-
-        # If the build context is a git worktree or --git-depth is set,
-        # clone into a temp directory to get a standalone .git directory.
-        local_clone_dir: Path | None = None
-        if context_args:
-            local_context = Path(context_args[-1]).resolve()
-            is_worktree = (local_context / ".git").is_file()
-            if is_worktree or git_depth is not None:
-                local_clone_dir = Path(tempfile.mkdtemp(prefix="mngr-vps-build-"))
-                clone_reason = "worktree" if is_worktree else f"--git-depth={git_depth}"
-                logger.log(
-                    LogLevel.BUILD.value,
-                    "Cloning build context locally ({})...",
-                    clone_reason,
-                    source="vps",
-                )
-                clone_cmd = ["git", "clone"]
-                if git_depth is not None:
-                    clone_cmd.extend(["--depth", str(git_depth)])
-                # Use file:// so --depth is honored for local repos
-                clone_cmd.extend([f"file://{local_context}", str(local_clone_dir / "repo")])
-                cg = ConcurrencyGroup(name="git-clone-build-context")
-                with cg:
-                    clone_result = cg.run_process_to_completion(
-                        command=clone_cmd,
-                        is_checked_after=False,
-                        timeout=120.0,
-                    )
-                if clone_result.returncode != 0:
-                    raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
-                context_args[-1] = str(local_clone_dir / "repo")
-
-        try:
-            logger.log(
-                LogLevel.BUILD.value,
-                "Building Docker image on VPS (this may take several minutes)...",
-                source="docker",
-            )
-            if context_args:
-                upload_context = Path(context_args[-1])
-                logger.log(LogLevel.BUILD.value, "Uploading build context to VPS...", source="vps")
-                with log_span("Uploading build context to VPS"):
-                    mkdir_result = outer.execute_idempotent_command(f"mkdir -p {shlex.quote(remote_build_dir)}")
-                    if not mkdir_result.success:
-                        raise MngrError(
-                            f"Failed to create remote build dir {remote_build_dir}: {mkdir_result.stderr.strip()}"
-                        )
-                    upload_cg = ConcurrencyGroup(name="rsync-build-context")
-                    with upload_cg:
-                        _upload_directory_to_outer(outer, upload_cg, upload_context, remote_build_dir)
-
-                # Rewrite --file/--dockerfile paths to absolute paths on the VPS.
-                # These are relative to the local build context, but on the VPS
-                # the context lives at remote_build_dir.
-                resolved_build_args = _resolve_dockerfile_paths(non_context_args, remote_build_dir)
-
-                with log_span("Building Docker image on VPS"):
-                    _build_image_on_outer(
-                        outer,
-                        tag=build_tag,
-                        build_context_path=remote_build_dir,
-                        docker_build_args=tuple(resolved_build_args),
-                        timeout_seconds=600.0,
-                        on_output=_emit_docker_build_output,
-                        builder=self.config.builder,
-                    )
-            else:
-                # No local context -- pass all args to docker build with a minimal context
-                mkdir_result = outer.execute_idempotent_command(f"mkdir -p {shlex.quote(remote_build_dir)}")
-                if not mkdir_result.success:
-                    raise MngrError(
-                        f"Failed to create remote build dir {remote_build_dir}: {mkdir_result.stderr.strip()}"
-                    )
-                with log_span("Building Docker image on VPS"):
-                    _build_image_on_outer(
-                        outer,
-                        tag=build_tag,
-                        build_context_path=remote_build_dir,
-                        docker_build_args=tuple(docker_build_args),
-                        timeout_seconds=600.0,
-                        on_output=_emit_docker_build_output,
-                        builder=self.config.builder,
-                    )
-            logger.log(LogLevel.BUILD.value, "Docker image built successfully", source="docker")
-        finally:
-            if local_clone_dir is not None:
-                shutil.rmtree(local_clone_dir, ignore_errors=True)
-
-        # Clean up remote build directory
-        cleanup_result = outer.execute_idempotent_command(f"rm -rf {shlex.quote(remote_build_dir)}")
-        if not cleanup_result.success:
-            logger.debug("Failed to clean up remote build dir: {}", cleanup_result.stderr.strip())
-
-        return build_tag
+        return build_image_on_outer_from_build_args(
+            outer,
+            self.mngr_ctx.concurrency_group,
+            host_id=host_id,
+            docker_build_args=docker_build_args,
+            git_depth=git_depth,
+            builder=self.config.builder,
+        )
 
     def _create_shutdown_script(self, host: Host) -> None:
         """Create the shutdown script that stops the container on idle."""
@@ -1351,14 +1316,20 @@ class VpsDockerProvider(BaseProviderInstance):
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
         host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
+    @abstractmethod
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        """Parse build args, separating VPS provisioning args from Docker build args."""
-        return _parse_build_args(
-            build_args,
-            default_region=self.config.default_region,
-            default_plan=self.config.default_plan,
-            default_os_id=self.config.default_os_id,
-        )
+        """Parse build args, separating provisioning knobs from docker build args.
+
+        Each concrete VpsDockerProvider subclass implements its own parser
+        because the set of accepted flags is per-provider (AWS has
+        ``--aws-region=`` / ``--aws-instance-type=`` / ``--aws-ami=``; Vultr
+        and OVH have a simpler region + plan shape; ``MinimalVpsDockerProvider``
+        accepts only ``--git-depth=`` and docker passthrough). For the common
+        region + plan + git-depth shape, ``parse_vps_build_args`` is a ready-made
+        convenience; for custom shapes, compose the lower-level helpers
+        (``extract_single_value_arg``, ``extract_git_depth``,
+        ``raise_if_vps_migration_arg``, ``raise_if_unknown_provider_arg``).
+        """
 
     # =========================================================================
     # Core Lifecycle: stop_host
@@ -1389,15 +1360,14 @@ class VpsDockerProvider(BaseProviderInstance):
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             with log_span("Stopping container on VPS"):
-                _stop_container(outer, host_record.config.container_name, timeout_seconds=int(timeout_seconds))
+                stop_container(outer, host_record.config.container_name, timeout_seconds=int(timeout_seconds))
 
             # Update host record
-            host_store = self._get_existing_host_store(outer)
-            if host_store is not None:
-                now = datetime.now(timezone.utc)
-                updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
-                updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
-                host_store.write_host_record(updated_record)
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            now = datetime.now(timezone.utc)
+            updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
+            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+            host_store.write_host_record(updated_record)
 
         logger.info("Host {} stopped", host_id)
 
@@ -1417,7 +1387,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             with log_span("Starting container on VPS"):
-                _start_container(outer, host_record.config.container_name)
+                start_container(outer, host_record.config.container_name)
 
         # Wait for sshd in container
         with log_span("Waiting for container SSH"):
@@ -1451,25 +1421,40 @@ class VpsDockerProvider(BaseProviderInstance):
 
         if vps_ip is not None:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # Stop and remove container
+                # Stop and remove the agent container; removing the volume below
+                # will fail otherwise because the container still holds it open.
                 try:
-                    _remove_container(outer, vps_config.container_name, force=True)
-                except (HostConnectionError, MngrError) as e:
+                    remove_container(outer, vps_config.container_name, force=True)
+                except MngrError as e:
                     logger.warning("Failed to remove container: {}", e)
 
-                # Remove host volume
+                # Delete the per-host btrfs subvolume before the named volume.
+                # The VPS-destroy that follows takes the whole loop file with it,
+                # so this is primarily belt-and-suspenders for the rare case of
+                # a destroy retried on a still-existing VPS (e.g. the operator
+                # re-runs `mngr destroy` after VPS termination has failed).
+                subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
                 try:
-                    _remove_volume(outer, vps_config.volume_name)
-                except (HostConnectionError, MngrError) as e:
+                    delete_btrfs_subvolume_on_outer(outer, subvolume_path)
+                except MngrError as e:
+                    logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+
+                # Remove the unified host volume. With bind options the volume
+                # itself holds no data (the subvolume above did), but the named
+                # entry still needs cleanup so a later create with the same
+                # volume name doesn't collide.
+                try:
+                    remove_volume(outer, vps_config.volume_name)
+                except MngrError as e:
                     logger.warning("Failed to remove host volume: {}", e)
 
-                # Delete host record from state volume
+                # Remove the per-host snapshot-trigger volume (the named entry;
+                # the bind source at OUTER_SNAPSHOT_TRIGGER_DIR is shared across
+                # all containers on this outer and is left alone).
                 try:
-                    host_store = self._get_existing_host_store(outer)
-                    if host_store is not None:
-                        host_store.delete_host_record(host_id)
-                except (HostConnectionError, MngrError) as e:
-                    logger.warning("Failed to delete host record from state volume: {}", e)
+                    remove_volume(outer, snapshot_trigger_volume_name_for(host_id))
+                except MngrError as e:
+                    logger.warning("Failed to remove snapshot trigger volume: {}", e)
 
         # Destroy the VPS instance
         with log_span("Destroying VPS instance"):
@@ -1488,11 +1473,11 @@ class VpsDockerProvider(BaseProviderInstance):
         # Clean up local known_hosts
         if vps_ip is not None:
             try:
-                _remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
+                remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
             except Exception as e:
                 logger.trace("Failed to clean up VPS known_hosts: {}", e)
             try:
-                _remove_host_from_known_hosts(
+                remove_host_from_known_hosts(
                     self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
                 )
             except Exception as e:
@@ -1549,7 +1534,7 @@ class VpsDockerProvider(BaseProviderInstance):
         if vps_ip is not None and host_record.config is not None:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 # Check if container is running
-                if _docker_inspect_running(outer, host_record.config.container_name):
+                if docker_inspect_running(outer, host_record.config.container_name):
                     return self._create_host_object(
                         host_id, HostName(host_record.certified_host_data.host_name), vps_ip
                     )
@@ -1571,7 +1556,7 @@ class VpsDockerProvider(BaseProviderInstance):
         discovered: list[DiscoveredHost] = []
 
         # Query all VPS instances from the provider API that have our tags
-        # then SSH to each VPS to read host records from the state volume.
+        # then SSH to each VPS to read host records from its unified host volume.
 
         # First, try to find any VPS instances for this provider
         # We'll need the host records from each VPS
@@ -1590,7 +1575,7 @@ class VpsDockerProvider(BaseProviderInstance):
             # Cache the host object
             if record.vps_ip is not None and record.config is not None:
                 with self._make_outer_for_vps_ip(record.vps_ip) as outer:
-                    if _docker_inspect_running(outer, record.config.container_name):
+                    if docker_inspect_running(outer, record.config.container_name):
                         self._create_host_object(host_id, host_name, record.vps_ip)
                     else:
                         self._create_offline_host(record)
@@ -1604,45 +1589,32 @@ class VpsDockerProvider(BaseProviderInstance):
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Load hosts and agent references from state volumes in batched SSH calls.
+        """Load hosts and agent references from each VPS, reading agents live.
 
-        Reads all host records and agent data from each VPS in a single SSH command,
-        then determines container running status. Avoids the default implementation's
-        per-host SSH calls into containers for agent discovery.
+        For each VPS, reads the host record directly from the docker volume's
+        bind-source path (the per-host btrfs subvolume the volume's
+        ``Options.device`` points at) and reads agent data **live** from the
+        container (so in-container-created agents are discovered). The same
+        live read reports the container's running state, so no separate
+        inspect round-trip is needed.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
-            all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
+            discovery = self._discover_host_records_with_agents()
+        agent_data_by_host_id = discovery.live_agent_data_by_host_id
 
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-        for record in all_records:
+        for record in discovery.records:
             host_id = HostId(record.certified_host_data.host_id)
             host_name = HostName(record.certified_host_data.host_name)
 
             # Cache the host record for later use by get_host_and_agent_details
             self._host_record_cache[host_id] = record
 
-            # Determine host state from container running status. If the VPS
-            # is unreachable, we trust the offline-state derivation rather
-            # than crashing the listing -- one bad VPS must not drop the
-            # other VPSes' hosts.
-            is_running = False
-            if record.vps_ip is not None and record.config is not None:
-                container_name = record.config.container_name
-                if container_name not in self._container_running_cache:
-                    try:
-                        with self._make_outer_for_vps_ip(record.vps_ip) as outer:
-                            self._container_running_cache[container_name] = _docker_inspect_running(
-                                outer, container_name
-                            )
-                    except (HostConnectionError, MngrError) as exc:
-                        logger.warning(
-                            "Failed to inspect container status for host {} on VPS {}: {}",
-                            host_id,
-                            record.vps_ip,
-                            exc,
-                        )
-                        self._container_running_cache[container_name] = False
-                is_running = self._container_running_cache[container_name]
+            # Running status came from the same live listing read. A VPS that
+            # was unreachable during discovery has no entry here, so it falls
+            # through to the offline-state derivation rather than crashing the
+            # listing -- one bad VPS must not drop the other VPSes' hosts.
+            is_running = discovery.is_running_by_host_id.get(host_id, False)
 
             has_snapshots = len(record.certified_host_data.snapshots) > 0
             is_failed = record.certified_host_data.failure_reason is not None
@@ -1669,7 +1641,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_state=host_state,
             )
 
-            # Build agent refs from persisted agent data
+            # Build agent refs from live agent data
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in agent_data_by_host_id.get(host_id, []):
                 ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
@@ -1680,11 +1652,20 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return result
 
+    def _get_effective_auto_shutdown_seconds(self) -> int | None:
+        """Return the auto-shutdown TTL (in seconds) to inject into cloud-init.
+
+        Subclasses can override this to add provider-specific escape hatches
+        (e.g., a test-only env-var that forces a TTL regardless of project
+        config). The base implementation simply returns the configured value.
+        """
+        return self.config.auto_shutdown_seconds
+
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return SSH-reachable hostnames for VPSes owned by this provider instance.
 
         Each entry is whatever the provider hands back as the SSH target
-        for one of its VPSes -- a public IPv4 (Vultr) or a provider DNS
+        for one of its VPSes -- a public IPv4 (Vultr, AWS) or a provider DNS
         name (OVH classic VPS like ``vps-eec8860b.vps.ovh.us``). The
         discovery machinery below treats it as an opaque ``hostname``
         passed to paramiko.
@@ -1692,36 +1673,92 @@ class VpsDockerProvider(BaseProviderInstance):
         Concrete subclasses implement this by querying their provider's
         listing API (e.g. by tag) and resolving the matching instances'
         SSH targets. The remaining discovery machinery -- parallel SSH
-        into each VPS, reading host records and agent data from the
-        state volume, caching -- is shared and lives in this base class.
+        into each VPS, reading host records and agent data from each
+        VPS's unified host volume, caching -- is shared and lives in
+        this base class.
 
         Default returns ``[]`` so test doubles and providers without a
         listing API can opt out without overriding.
         """
         return []
 
+    def _credentials_configured(self) -> bool:
+        """Return True iff the provider's API credentials are resolvable.
+
+        Used by ``_find_host_record`` to short-circuit a full discovery sweep
+        when no credentials are available. Subclasses override to check their
+        own credential source. The default returns True so providers that
+        don't carry credentials (test doubles, OVH IAM via env) opt in
+        automatically.
+        """
+        return True
+
     def _read_records_from_vps(
         self,
         vps_ip: str,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Read all host records and agent data from a single VPS in one SSH command.
+    ) -> _VpsDiscoveryData:
+        """Read the (single) host record + live agent data from one VPS.
 
-        Uses the read-only host store so that discovery never creates the
-        state container. If the container does not exist yet (e.g., the VPS
-        is still being set up by a concurrent ``mngr create``), returns
-        empty results. If outer SSH to the VPS fails, fall back to any
-        in-process cached records for that VPS so the hosts still appear
-        in the listing (with an offline state) instead of disappearing
-        entirely; one bad VPS must not silently drop its hosts.
+        Each VPS hosts exactly one mngr container (1:1 invariant). We find
+        that container by its host-id label, derive its unified volume name,
+        and read host_state.json from the volume's bind-source path (the
+        per-host btrfs subvolume the volume's ``Options.device`` points at,
+        resolved via ``docker volume inspect --format '{{.Options.device}}'``;
+        the docker-managed ``Mountpoint`` placeholder is never consulted).
+
+        Agent data is read **live** from the container's ``host_dir`` via the
+        outer listing script -- not from the persisted ``agents/*.json`` outer
+        store. The outer store is only written by the host-side mngr at
+        agent-create time, so it misses agents created *inside* the container
+        (e.g. by an in-container ``mngr create``); reading live ensures those
+        agents are discoverable by ``mngr message`` and friends. The same call
+        reports the container's running state, avoiding a separate inspect.
+
+        If the container does not exist yet (e.g., the VPS is still being set
+        up by a concurrent ``mngr create``), returns empty results. If outer
+        SSH to the VPS fails, fall back to any in-process cached records for
+        that VPS so the hosts still appear in the listing (with an offline
+        state) instead of disappearing entirely; one bad VPS must not silently
+        drop its hosts.
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                host_store = self._get_existing_host_store(outer)
-                if host_store is None:
-                    logger.debug("State container not ready on VPS {}, skipping", vps_ip)
-                    return [], {}
-                return host_store.list_all_host_records_with_agents()
-        except (HostConnectionError, MngrError) as e:
+                host_id = _read_host_id_label_from_vps(outer)
+                if host_id is None:
+                    logger.debug("No mngr container on VPS {} yet, skipping", vps_ip)
+                    return _VpsDiscoveryData()
+                host_store = open_host_store(outer, host_volume_name_for(host_id))
+                record = host_store.read_host_record()
+                if record is None:
+                    logger.debug("No host record on VPS {} volume yet, skipping", vps_ip)
+                    return _VpsDiscoveryData()
+                # The host record read above succeeded, so the host exists and
+                # must appear in the listing. A failure of the *live-listing*
+                # read alone (e.g. ``docker exec`` racing a container restart)
+                # must not drop the host -- degrade to no live agents and an
+                # offline (not-running) state instead. Genuine VPS-unreachable
+                # failures fail earlier (host-id probe / record read) and are
+                # handled by the outer cache-fallback branch.
+                try:
+                    parsed_listing = _read_live_listing_from_vps(
+                        outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
+                    )
+                except MngrError as listing_exc:
+                    logger.warning(
+                        "Live listing read failed for host {} on VPS {}; surfacing host as offline: {}",
+                        host_id,
+                        vps_ip,
+                        listing_exc,
+                    )
+                    return _VpsDiscoveryData(records=(record,))
+                live_agent_data = _extract_live_agent_data(parsed_listing)
+                is_running = parsed_listing.get("container_state") == "running"
+                return _VpsDiscoveryData(
+                    records=(record,),
+                    live_agent_data_by_host_id={host_id: live_agent_data},
+                    is_running_by_host_id={host_id: is_running},
+                )
+        except MngrError as e:
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
                 logger.warning(
@@ -1732,23 +1769,25 @@ class VpsDockerProvider(BaseProviderInstance):
                 )
             else:
                 logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
-            return cached_records, {}
+            return _VpsDiscoveryData(records=tuple(cached_records))
 
-    def _discover_host_records_with_agents(
-        self,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Discover host records and agent data from all VPSes for this provider.
+    def _discover_host_records_with_agents(self) -> _VpsDiscoveryData:
+        """Discover host records and live agent data from all VPSes for this provider.
 
         Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
-        (provider-specific), then SSHes to each in parallel to read host
-        records and agent data in a single command per VPS.
+        (provider-specific), then SSHes to each in parallel. Within each
+        VPS, ``_read_records_from_vps`` finds the mngr container by host-id
+        label, reads ``host_state.json``, and reads live agent data from the
+        container; the parallel fan-out across VPSes keeps wall time bounded
+        by the slowest VPS rather than the sum.
         """
         vps_ips = self._list_provider_vps_hostnames()
         if not vps_ips:
-            return [], {}
+            return _VpsDiscoveryData()
 
         all_records: list[VpsDockerHostRecord] = []
         all_agent_data: dict[HostId, list[dict[str, Any]]] = {}
+        all_running: dict[HostId, bool] = {}
 
         cg_name = f"{type(self).__name__}-discover"
         with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
@@ -1762,17 +1801,21 @@ class VpsDockerProvider(BaseProviderInstance):
                     futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
 
                 for future in futures:
-                    records, agent_data = future.result()
-                    all_records.extend(records)
-                    for host_id, agents in agent_data.items():
+                    vps_data = future.result()
+                    all_records.extend(vps_data.records)
+                    for host_id, agents in vps_data.live_agent_data_by_host_id.items():
                         all_agent_data.setdefault(host_id, []).extend(agents)
+                    all_running.update(vps_data.is_running_by_host_id)
 
-        return all_records, all_agent_data
+        return _VpsDiscoveryData(
+            records=tuple(all_records),
+            live_agent_data_by_host_id=all_agent_data,
+            is_running_by_host_id=all_running,
+        )
 
     def _discover_host_records(self) -> list[VpsDockerHostRecord]:
         """Discover host records by enumerating this provider's VPSes."""
-        records, _agent_data = self._discover_host_records_with_agents()
-        return records
+        return list(self._discover_host_records_with_agents().records)
 
     def _find_host_record(self, host: HostId | HostName) -> VpsDockerHostRecord | None:
         """Find a host record by ID or name, using cache first."""
@@ -1782,6 +1825,10 @@ class VpsDockerProvider(BaseProviderInstance):
             for cached_record in self._host_record_cache.values():
                 if cached_record.certified_host_data.host_name == str(host):
                     return cached_record
+
+        if not self._credentials_configured():
+            logger.warning("{} credentials not configured, cannot resolve host", self.config.backend)
+            return None
 
         records = self._discover_host_records()
         for record in records:
@@ -1803,6 +1850,8 @@ class VpsDockerProvider(BaseProviderInstance):
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
@@ -1813,20 +1862,32 @@ class VpsDockerProvider(BaseProviderInstance):
 
         # For offline hosts or hosts without a record, fall back to default
         if host_record is None or host_record.vps_ip is None or host_record.config is None:
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
 
         try:
             host = self.get_host(host_ref.host_id)
 
             if not isinstance(host, Host):
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                return super().get_host_and_agent_details(
+                    host_ref,
+                    agent_refs,
+                    field_generators=field_generators,
+                    offline_field_generators=offline_field_generators,
+                    on_error=on_error,
+                )
 
             # Collect all data in one SSH command
             script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
 
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
                 with log_span("Collecting listing data via single SSH command"):
-                    raw_output = _exec_in_container(
+                    raw_output = exec_in_container(
                         outer,
                         host_record.config.container_name,
                         script,
@@ -1842,7 +1903,13 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_ref.host_id,
                 e,
             )
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
         except MngrError as e:
             if on_error:
                 on_error(host_ref, e)
@@ -2050,7 +2117,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             with log_span("Creating Docker snapshot"):
-                image_id = _commit_container(outer, host_record.config.container_name, image_tag)
+                image_id = commit_container(outer, host_record.config.container_name, image_tag)
 
             # Store snapshot record in host data
             snapshot_record = SnapshotRecord(
@@ -2067,11 +2134,8 @@ class VpsDockerProvider(BaseProviderInstance):
             )
             updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
 
-            host_store = self._get_existing_host_store(outer)
-            if host_store is None:
-                raise MngrError(
-                    f"State container not found on VPS {host_record.vps_ip} -- cannot save snapshot record"
-                )
+            # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
+            host_store = open_host_store(outer, host_record.config.volume_name)
             host_store.write_host_record(updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
@@ -2101,7 +2165,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             try:
-                _run_docker(outer, ["rmi", str(snapshot_id)])
+                run_docker(outer, ["rmi", str(snapshot_id)])
             except MngrError as e:
                 logger.warning("Failed to delete snapshot image: {}", e)
 
@@ -2137,10 +2201,13 @@ class VpsDockerProvider(BaseProviderInstance):
         updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
 
         if host_record.vps_ip is not None:
+            if host_record.config is None:
+                raise MngrError(
+                    f"Host record for {host_id} on VPS {host_record.vps_ip} is missing config -- "
+                    "cannot determine unified volume name to rename"
+                )
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-                host_store = self._get_existing_host_store(outer)
-                if host_store is None:
-                    raise MngrError(f"State container not found on VPS {host_record.vps_ip} -- cannot rename host")
+                host_store = open_host_store(outer, host_record.config.volume_name)
                 host_store.write_host_record(updated_record)
 
         return self.get_host(host_id)
@@ -2183,33 +2250,69 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.vps_ip is None:
+        if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._get_existing_host_store(outer)
-            if host_store is None:
-                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
-            return host_store.list_persisted_agent_data_for_host(host_id)
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            return host_store.list_persisted_agent_data()
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.vps_ip is None:
+        if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._get_existing_host_store(outer)
-            if host_store is None:
-                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
-            host_store.persist_agent_data(host_id, agent_data)
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store.persist_agent_data(agent_data)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.vps_ip is None:
+        if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._get_existing_host_store(outer)
-            if host_store is None:
-                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
-            host_store.remove_persisted_agent_data(host_id, agent_id)
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store.remove_persisted_agent_data(agent_id)
+
+
+class MinimalVpsDockerProvider(VpsDockerProvider):
+    """``VpsDockerProvider`` for use cases where VPS provisioning is externally managed.
+
+    Pairs with a ``vps_client`` whose provisioning calls raise (e.g.
+    ``ExternallyManagedVpsClient``): some other system (an imbue_cloud pool
+    lease, a hand-rolled provisioner, etc.) already created the VPS. This
+    provider only ever runs the post-provisioning host-setup machinery --
+    ``teardown_container_on_existing_vps`` and ``create_host_on_existing_vps``
+    -- which take a caller-supplied ``outer`` and make no cloud-API calls.
+
+    Build args here are just the docker-side knobs that flow through to
+    ``docker build`` on the leased VPS: there is no cloud provider to
+    select a region / plan / image for. The parser extracts ``--git-depth=N``
+    (still relevant -- it controls the *local* mngr build context, not the
+    VPS) and forwards everything else verbatim. The legacy shared
+    ``--vps-*`` prefix is rejected with a migration error so a caller that
+    still passes the old shape gets a clear pointer rather than having the
+    arg silently land in docker.
+    """
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        # Composed from the shared helpers rather than hand-rolling the same
+        # git-depth / --vps-* migration handling: this is the same pattern
+        # ``parse_vps_build_args`` and the AWS provider use, just without any
+        # region / plan extraction (provisioning lives outside this provider).
+        args = list(build_args or ())
+        git_depth, args = extract_git_depth(args)
+        docker_build_args: list[str] = []
+        for arg in args:
+            raise_if_vps_migration_arg(arg)
+            docker_build_args.append(arg)
+        # ``region`` / ``plan`` are unused on the externally-managed path
+        # (callers pass them as explicit kwargs to ``create_host_on_existing_vps``),
+        # so the sentinels are harmless.
+        return ParsedVpsBuildOptions(
+            region="",
+            plan="",
+            git_depth=git_depth,
+            docker_build_args=tuple(docker_build_args),
+        )

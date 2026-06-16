@@ -15,11 +15,28 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import PluginTier
 
-# Packages not yet published on PyPI. Excluded from the install wizard.
-# Remove entries from here as they get published.
+# Workspace packages that are deliberately NOT published to PyPI. This is the
+# single opt-out consulted by two consumers:
+#   - the install wizard (below), which never offers an unpublished package; and
+#   - the release tooling (scripts/utils.py), which auto-discovers every libs/*
+#     package as a publish candidate and subtracts this set. Anything NOT listed
+#     here is treated as publishable and will be offered for release.
+#
+# Some entries are permanently internal (a library with no CLI, an experimental
+# plugin, or a test-only helper); others are simply not ready yet. Remove an
+# entry once the package should start publishing -- the next release run will
+# then offer it (a first publication also needs a PyPI Trusted Publisher
+# registered; see scripts/release.py's new-package flow).
 UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
     {
+        # Map-reduce framework library; consumed only by recipes (e.g. tmr), no CLI of its own.
+        "imbue-mngr-mapreduce",
+        # Experimental: reroutes Claude Code subagents; depends on Claude Code internals.
+        "imbue-mngr-claude-subagent-proxy",
+        # Canonical mapreduce recipe (test fan-out); internal tooling, offered nowhere on PyPI.
         "imbue-mngr-tmr",
+        # End-to-end test helper used only by mngr's own test suite (not an mngr plugin).
+        "skitwright",
     }
 )
 
@@ -46,6 +63,12 @@ class OpenCodeSignalCheck(SignalCheck):
     """Detects whether the OpenCode CLI is installed."""
 
     command: tuple[str, ...] = ("opencode", "--version")
+
+
+class CodexSignalCheck(SignalCheck):
+    """Detects whether the OpenAI Codex CLI is installed."""
+
+    command: tuple[str, ...] = ("codex", "--version")
 
 
 class AntigravitySignalCheck(SignalCheck):
@@ -75,6 +98,7 @@ class LimaSignalCheck(SignalCheck):
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
+_CODEX_SIGNAL: Final[CodexSignalCheck] = CodexSignalCheck()
 _ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
@@ -116,6 +140,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         is_recommended=True,
     ),
     CatalogEntry(
+        entry_point_name="codex",
+        package_name="imbue-mngr-codex",
+        description="Codex agent type plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        signal=_CODEX_SIGNAL,
+        is_recommended=True,
+    ),
+    CatalogEntry(
         entry_point_name="antigravity",
         package_name="imbue-mngr-antigravity",
         description="Antigravity agent type plugin for mngr",
@@ -129,6 +161,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Pi coding agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         signal=_PI_SIGNAL,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="modal",
@@ -149,6 +182,24 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         entry_point_name="vultr",
         package_name="imbue-mngr-vultr",
         description="Vultr provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="aws",
+        package_name="imbue-mngr-aws",
+        description="AWS provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="gcp",
+        package_name="imbue-mngr-gcp",
+        description="GCP Compute Engine provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="ovh",
+        package_name="imbue-mngr-ovh",
+        description="OVH Cloud VPS provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
     ),
     CatalogEntry(

@@ -14,9 +14,7 @@ Today, "destroy project" hangs the project-settings page until the underlying `m
 ### POST `/api/destroy-agent/<agent_id>`
 
 - Authenticated; otherwise `403`.
-- **Synchronously**, before spawning anything:
-  - Disassociates the workspace from the session store (existing behavior).
-  - Looks up the agent's `host.id` via a fast `mngr list --include 'id == "<id>"' --format json` call, so the spawned subprocess can do host-mates fanout without a second `mngr list`. If the lookup fails (agent not found, mngr error), the subprocess will fall back to single-agent destroy.
+- **Resolves the workspace's `host.id` from the in-memory backend resolver** (which always knows it for a workspace the user can see). A minds workspace teardown is a *host* teardown, and there is no safe single-agent fallback, so if the host id can't be resolved the endpoint **refuses with `409`** rather than risk a partial destroy. Disassociation does **not** happen here — it is deferred to DONE-time finalization (see "Landing-page marker"), so a failed teardown keeps the workspace visible and owned.
 - **Spawns a detached subprocess** that performs the destroy. Returns immediately:
   - `202 Accepted`
   - body: `{"agent_id": "<id>", "status": "running", "redirect_url": "/"}`
@@ -24,9 +22,8 @@ Today, "destroy project" hangs the project-settings page until the underlying `m
 
 ### Detached destroy subprocess
 
-- **Command**: a single `bash -c '<chained mngr commands>'` invocation. No new Python subcommand; minds backend formats the shell string from the host_id it just looked up:
-  - With host_id: `mngr list --include 'host.id == "<host_id>"' --ids | mngr destroy -f -` (host-mates fanout — every agent on the same Docker host goes down together, matching today's semantics).
-  - Without host_id (lookup failed): `mngr destroy <agent_id> -f` (single-agent fallback).
+- **Command**: a single `bash -c '<chained mngr commands>'` invocation. No new Python subcommand; minds backend formats the shell string from the resolved host_id:
+  - `mngr list --include 'host.id == "<host_id>"' --ids | mngr destroy -f -` — fans out over **every** agent on the host. A minds host also runs a `system-services` agent, so destroying only the workspace agent would leave the host (and its cloud instance) alive; there is deliberately **no single-agent path**.
   - The wrapper runs under `set -o pipefail` and, once the destroy returns, records its exit code to `<destroying_dir>/<agent_id>/result` via an atomic write-then-rename. `pipefail` ensures a failed `mngr list` in the fanout pipe is recorded as a non-zero result rather than being masked by the trailing `mngr destroy` exiting 0 on empty input. This recorded exit code is the **authoritative completion signal** — status is derived from it, not from when the discovery cache happens to catch up.
 - **No imbue_cloud lease release.** Lease release belongs in `mngr_imbue_cloud.instance.delete_host`, which mngr's GC calls after the destroyed-host grace period. Eagerly calling `mngr imbue_cloud hosts release` here was duplicating that responsibility in two places; we drop the eager call so `delete_host` is the single source of truth for lease lifecycle.
 - **Detached spawn**: `subprocess.Popen([...], start_new_session=True, stdin=DEVNULL, stdout=log_file, stderr=log_file, ...)`. Inherits the parent's `MNGR_HOST_DIR` / `MNGR_PREFIX` so the subprocess hits the right minds host dir. The Popen handle is intentionally allowed to go out of scope — same pattern as `spawn_detached_latchkey_gateway`.
@@ -48,15 +45,15 @@ For a given `agent_id`, status is derived from the wrapper's recorded `result` f
 | yes | not yet | yes | **running** |
 | yes | not yet | no | **failed** (wrapper died before recording an outcome) |
 
-Crucially, the resolver / `list_known_workspace_ids()` no longer participates in `done` vs `failed`: that comes solely from the destroy's own exit code. This removes the previous ~1-second jitter window (a clean exit no longer reads "failed" while discovery catches up) and the symmetric closed-app failure modes (a genuinely-failed destroy can no longer be mistaken for "done" during the pre-discovery window after a restart, and a recycled PID can no longer pin a finished destroy at "running" forever).
+Crucially, the resolver / `list_active_workspace_ids()` no longer participates in `done` vs `failed`: that comes solely from the destroy's own exit code. This removes the previous ~1-second jitter window (a clean exit no longer reads "failed" while discovery catches up) and the symmetric closed-app failure modes (a genuinely-failed destroy can no longer be mistaken for "done" during the pre-discovery window after a restart, and a recycled PID can no longer pin a finished destroy at "running" forever).
 
 ### Landing-page marker
 
 - Server reads `<paths.data_dir>/destroying/` on each `/` render; for each subdirectory, computes status per the table above.
-- **The displayed rows are the union of discovered workspace agents and every agent with a live destroy record.** A destroy record is rendered even when `list_known_workspace_ids()` does *not* list its agent. This is the load-bearing guarantee against a silent orphan: a destroy that **failed** leaves a host alive and still billing, and if discovery has since dropped that agent (or hasn't populated yet on a fresh open), keying the page off discovery alone would render nothing — the failed host would be invisible. So a destroy-only agent (one with a record but not in the resolver) still gets its own row carrying the marker. This holds even when `list_known_workspace_ids()` is empty: instead of the "Discovering…" / create-form empty state, the page shows the destroy rows.
+- **The displayed rows are the union of discovered workspace agents and every agent with a live destroy record.** A destroy record is rendered even when `list_active_workspace_ids()` does *not* list its agent. This is the load-bearing guarantee against a silent orphan: a destroy that **failed** leaves a host alive and still billing, and if discovery has since dropped that agent (or hasn't populated yet on a fresh open), keying the page off discovery alone would render nothing — the failed host would be invisible. So a destroy-only agent (one with a record but not in the resolver) still gets its own row carrying the marker. This holds even when `list_active_workspace_ids()` is empty: instead of the "Discovering…" / create-form empty state, the page shows the destroy rows.
 - For **running**: render an inline "Destroying…" marker (small spinner + text) on that workspace's row. The marker is wrapped in an `<a href="/destroying/<agent_id>">` so it doubles as a shortcut to the detail page. The row's main click target (currently `window.location='<plugin>/goto/<id>/'`) is **disabled** while destroying.
 - For **failed**: render a "Destroy failed" badge (red), also linking to `/destroying/<agent_id>`. The agent row still shows because the agent wasn't actually destroyed.
-- For **done**: while the agent is still in `list_known_workspace_ids()` (the destroy succeeded but discovery hasn't dropped it yet), the renderer keeps showing the "Destroying…" marker so the row never flickers back to a normal clickable state mid-teardown. Once the agent is gone from the resolver, the renderer **deletes** `<paths.data_dir>/destroying/<agent_id>/` and renders nothing; the row vanishes naturally. This is the only place the resolver is consulted, and only to time the finalize — never to decide `done` vs `failed`.
+- For **done** (exit code 0): the renderer **finalizes** the destroy — it disassociates the workspace from its account and deletes `<paths.data_dir>/destroying/<agent_id>/`, rendering nothing. Disassociating here (rather than synchronously when the user clicks destroy) means a failed or partial teardown keeps the workspace visible and owned so the user can retry. The resolver is never consulted to decide `done` vs `failed` — only the recorded exit code is.
 
 ### Settings-page destroy button
 

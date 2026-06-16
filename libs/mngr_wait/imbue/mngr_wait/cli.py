@@ -15,9 +15,9 @@ from imbue.mngr.cli.exit_codes import EXIT_CODE_TIMEOUT
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
@@ -114,7 +114,7 @@ def _output_result(result: WaitResult, output_opts: OutputOptions) -> None:
 
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:

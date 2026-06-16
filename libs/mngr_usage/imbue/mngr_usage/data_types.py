@@ -9,6 +9,14 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import PluginConfig
 
+# Discovery convention shared by the reader (``api``) and the destroy-time
+# preservation (``preservation``): each agent's state dir holds usage events at
+#   <agent_state_dir>/events/<source>/usage/events.jsonl
+# Centralized here so the path structure is declared exactly once.
+EVENTS_DIR_NAME = "events"
+USAGE_DIR_NAME = "usage"
+EVENTS_JSONL_FILENAME = "events.jsonl"
+
 
 class CostMode(UpperCaseStrEnum):
     """How the writer's ``cost.total_cost_usd`` reading was computed.
@@ -38,10 +46,11 @@ class CostMode(UpperCaseStrEnum):
 class UsagePluginConfig(PluginConfig):
     """Configuration for the usage plugin."""
 
-    max_age_seconds: int = Field(
+    stale_after_seconds: int = Field(
         default=300,
         description="Snapshot freshness threshold in seconds. When the snapshot's "
         "updated_at is older than this, `mngr usage` prints a stale-snapshot warning. "
+        "Display warning only -- it does not change which events are aggregated. "
         "Reader-only -- this plugin doesn't capture data, it walks events files "
         "produced by writer plugins (one event per provisioned agent's render) and "
         "aggregates them per-source (rate-limit windows reduce freshest-wins; "
@@ -54,6 +63,16 @@ class UsagePluginConfig(PluginConfig):
         "which matches the 'how much have I spent today' question; tighten with --since for "
         "right-now views, widen for longer-tail accounting.",
     )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description="Preserve each agent's usage events locally before its state directory is "
+        "deleted on destroy, so destroyed agents' spend still counts in `mngr usage`. When enabled, "
+        "any agent's events/<source>/usage directories (plus its data.json, for filtering) are copied "
+        "to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the agent's state-directory "
+        "layout. For remote agents, files are pulled to the local machine so they survive host "
+        "destruction. `mngr usage` reads these back by default (opt out with --no-preserved). "
+        "Set to False to discard usage data on destroy.",
+    )
 
     def merge_with(self, override: PluginConfig) -> UsagePluginConfig:
         """Merge with override config (FrozenModel-style)."""
@@ -61,8 +80,13 @@ class UsagePluginConfig(PluginConfig):
             return self
         return UsagePluginConfig(
             enabled=override.enabled if override.enabled is not None else self.enabled,
-            max_age_seconds=override.max_age_seconds if override.max_age_seconds is not None else self.max_age_seconds,
+            stale_after_seconds=(
+                override.stale_after_seconds if override.stale_after_seconds is not None else self.stale_after_seconds
+            ),
             since_seconds=override.since_seconds if override.since_seconds is not None else self.since_seconds,
+            preserve_on_destroy=(
+                override.preserve_on_destroy if override.preserve_on_destroy is not None else self.preserve_on_destroy
+            ),
         )
 
 

@@ -57,3 +57,13 @@ repos:
         stages: [post-checkout]
         always_run: true
         pass_filenames: false
+    -   id: mngr-shim-installed
+#        Enforces that the `mngr` on your PATH is the dev shim (scripts/mngr), so
+#        `mngr` -- and anything that shells out to it (e.g. minds) -- runs the
+#        checkout you are working in, not a stale global install. No opt-out: a
+#        misresolved `mngr` is always a bug. Run `just install-mngr-shim`.
+        name: "mngr dev shim is installed and on PATH"
+        entry: scripts/check_mngr_shim.sh
+        language: script
+        always_run: true
+        pass_filenames: false

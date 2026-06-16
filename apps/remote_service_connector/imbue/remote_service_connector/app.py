@@ -14,12 +14,16 @@ import base64
 import binascii
 import contextlib
 import functools
+import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import re
 import shlex
+import threading
+import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
@@ -29,12 +33,16 @@ from uuid import UUID
 
 import httpx
 import modal
+import ovh
 import paramiko
 import psycopg2
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import HTMLResponse
+from ovh.exceptions import APIError as OvhApiError
+from ovh.exceptions import HTTPError as OvhHttpError
+from ovh.exceptions import ResourceNotFoundError
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
@@ -225,6 +233,85 @@ class InvalidHostNameError(ValueError):
         super().__init__(f"host_name must be alphanumeric (with dashes/underscores allowed in the middle): {value!r}")
 
 
+class InvalidPaidListEntryError(ValueError):
+    """Raised when a paid-list domain or email entry is malformed."""
+
+    def __init__(self, value: object, reason: str) -> None:
+        self.value = value
+        super().__init__(f"Invalid paid-list entry {value!r}: {reason}")
+
+
+class InvalidR2BucketNameError(ValueError):
+    """Raised when a derived R2 bucket name violates Cloudflare's naming rules."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        super().__init__(
+            f"R2 bucket name must be 3-63 lowercase alphanumeric/hyphen chars with no leading/trailing hyphen: {value!r}"
+        )
+
+
+class InvalidR2AccessError(ValueError):
+    """Raised when a key access scope is neither 'read' nor 'readwrite'."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        super().__init__(f"access must be 'read' or 'readwrite', got {value!r}")
+
+
+class R2BucketExistsError(RuntimeError):
+    """Raised when creating a bucket whose derived name already exists for the user."""
+
+    def __init__(self, bucket_name: str) -> None:
+        self.bucket_name = bucket_name
+        super().__init__(f"Bucket already exists: {bucket_name}")
+
+
+class R2BucketNotFoundError(KeyError):
+    """Raised when a bucket the caller referenced does not exist (or is not theirs)."""
+
+    def __init__(self, bucket_name: str) -> None:
+        self.bucket_name = bucket_name
+        super().__init__(f"Bucket not found: {bucket_name}")
+
+
+class R2BucketNotEmptyError(RuntimeError):
+    """Raised when destroying a bucket that still has objects in it."""
+
+    def __init__(self, bucket_name: str) -> None:
+        self.bucket_name = bucket_name
+        super().__init__(f"Bucket is not empty: {bucket_name}. Empty it before destroying.")
+
+
+class R2BucketOwnershipError(PermissionError):
+    """Raised when a bucket name does not carry the caller's ownership prefix."""
+
+    def __init__(self, bucket_name: str, username: str) -> None:
+        self.bucket_name = bucket_name
+        self.username = username
+        super().__init__(f"User '{username}' does not own bucket '{bucket_name}'")
+
+
+class R2BucketLimitError(RuntimeError):
+    """Raised when an account is already at the per-account bucket cap."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        super().__init__(f"Account is at the maximum of {limit} buckets; destroy one before creating another.")
+
+
+class PoolHostCleanupError(RuntimeError):
+    """Raised when a pool-host release/teardown cannot complete its OVH cleanup.
+
+    Surfaced (rather than swallowed to a warning) so a release that fails to
+    actually cancel the VPS reports failure instead of a false success.
+    """
+
+
+class MissingAuthWebsiteDomainError(RuntimeError):
+    """Raised when the required AUTH_WEBSITE_DOMAIN secret is not set."""
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -274,9 +361,9 @@ class AdminAuth(BaseModel):
     username: str
     # Verified email associated with the SuperTokens user, looked up at auth
     # time so that paid-feature endpoints (host pool, LiteLLM keys) can gate
-    # access by ``PAID_ACCOUNT_SUFFIXES``. ``None`` when the SuperTokens
-    # user record has no email or when the lookup failed -- in that case the
-    # paid-feature gate denies access.
+    # access against the ``paid_emails`` / ``paid_domains`` tables. ``None``
+    # when the SuperTokens user record has no email or when the lookup
+    # failed -- in that case the paid-feature gate denies access.
     email: str | None = None
 
 
@@ -322,6 +409,14 @@ class LeaseHostRequest(BaseModel):
         description=(
             "Lease-attribute filter. Matches with PostgreSQL '@>' so only fields the request "
             "explicitly sets are constrained; missing fields are unconstrained. Required."
+        ),
+    )
+    region: str | None = Field(
+        default=None,
+        description=(
+            "Hard region requirement (OVH datacenter code, e.g. 'US-EAST-VA'). When set, only "
+            "hosts whose region column equals this value are eligible; if none is available the "
+            "lease fails. Leave unset to be region-agnostic."
         ),
     )
 
@@ -407,6 +502,58 @@ class UpdateBudgetRequest(BaseModel):
 
 class DeleteKeyResponse(BaseModel):
     status: str = Field(description="Deletion status")
+
+
+# -- R2 bucket models --
+
+_R2_ACCESS_VALUES = ("read", "readwrite")
+
+
+def _validate_r2_access(value: str) -> str:
+    """Field validator: constrain the per-key access scope to read/readwrite."""
+    if value not in _R2_ACCESS_VALUES:
+        raise InvalidR2AccessError(value)
+    return value
+
+
+class CreateBucketRequest(BaseModel):
+    name: str = Field(description="User's short bucket name (the server prefixes it with the owner id)")
+    access: str = Field(default="readwrite", description="Access scope for the default key: 'read' or 'readwrite'")
+
+    _validate_access = field_validator("access")(_validate_r2_access)
+
+
+class BucketInfo(BaseModel):
+    bucket_name: str = Field(description="Full R2 bucket name (<user_id_prefix>--<slug>)")
+    s3_endpoint: str = Field(description="S3-compatible endpoint for this account")
+
+
+class R2KeyMaterial(BaseModel):
+    access_key_id: str = Field(description="S3 Access Key ID (= the Cloudflare token id)")
+    secret_access_key: str = Field(description="S3 Secret Access Key (sha256 of the token value); shown once")
+    s3_endpoint: str = Field(description="S3-compatible endpoint for this account")
+    bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
+    access: str = Field(description="Access scope: 'read' or 'readwrite'")
+
+
+class CreateBucketResponse(BaseModel):
+    bucket: BucketInfo = Field(description="The created bucket")
+    key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
+
+
+class CreateR2KeyRequest(BaseModel):
+    alias: str | None = Field(default=None, description="Optional human-readable alias for the key")
+    access: str = Field(default="readwrite", description="Access scope: 'read' or 'readwrite'")
+
+    _validate_access = field_validator("access")(_validate_r2_access)
+
+
+class R2KeyInfo(BaseModel):
+    access_key_id: str = Field(description="S3 Access Key ID (= the Cloudflare token id)")
+    bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
+    access: str = Field(description="Access scope: 'read' or 'readwrite'")
+    alias: str | None = Field(default=None, description="Human-readable alias")
+    created_at: str = Field(description="ISO 8601 timestamp when the key was created")
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +783,97 @@ def cf_delete_service_token(client: httpx.Client, account_id: str, token_id: str
     cf_check(client.delete(f"/accounts/{account_id}/access/service_tokens/{token_id}"))
 
 
+# --- R2 bucket + account-token operations ---
+
+
+_R2_READ_PERMISSION_GROUP_NAME = "Workers R2 Storage Bucket Item Read"
+_R2_WRITE_PERMISSION_GROUP_NAME = "Workers R2 Storage Bucket Item Write"
+
+
+def _is_bucket_not_empty_error(exc: CloudflareApiError) -> bool:
+    """Detect Cloudflare's 'bucket not empty' rejection from a delete error."""
+    for err in exc.cf_errors:
+        if "not empty" in str(err.get("message", "")).lower():
+            return True
+        if err.get("code") == 10040:
+            return True
+    return False
+
+
+def cf_create_bucket(client: httpx.Client, account_id: str, name: str) -> dict[str, Any]:
+    response = client.post(f"/accounts/{account_id}/r2/buckets", json={"name": name})
+    return cf_check(response)["result"]
+
+
+def cf_list_buckets(client: httpx.Client, account_id: str, name_contains: str = "") -> list[dict[str, Any]]:
+    all_results: list[dict[str, Any]] = []
+    cursor = ""
+    is_more_pages = True
+    while is_more_pages:
+        params: dict[str, str] = {"per_page": "1000"}
+        if name_contains:
+            params["name_contains"] = name_contains
+        if cursor:
+            params["cursor"] = cursor
+        response = client.get(f"/accounts/{account_id}/r2/buckets", params=params)
+        data = cf_check(response)
+        result = data["result"]
+        buckets = result.get("buckets", []) if isinstance(result, dict) else result
+        all_results.extend(buckets)
+        result_info = data.get("result_info")
+        cursor = result_info.get("cursor", "") if isinstance(result_info, dict) else ""
+        is_more_pages = bool(cursor)
+    return all_results
+
+
+def cf_delete_bucket(client: httpx.Client, account_id: str, name: str) -> None:
+    """Delete an R2 bucket. Raises R2BucketNotEmptyError / R2BucketNotFoundError on the matching CF errors."""
+    response = client.delete(f"/accounts/{account_id}/r2/buckets/{name}")
+    try:
+        cf_check(response)
+    except CloudflareApiError as exc:
+        if exc.status_code == 404:
+            raise R2BucketNotFoundError(name) from exc
+        if _is_bucket_not_empty_error(exc):
+            raise R2BucketNotEmptyError(name) from exc
+        raise
+
+
+def cf_list_token_permission_groups(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
+    response = client.get(f"/accounts/{account_id}/tokens/permission_groups")
+    return cf_check(response)["result"]
+
+
+def cf_create_account_token(
+    client: httpx.Client, account_id: str, name: str, policies: list[dict[str, Any]]
+) -> dict[str, Any]:
+    response = client.post(f"/accounts/{account_id}/tokens", json={"name": name, "policies": policies})
+    return cf_check(response)["result"]
+
+
+def cf_delete_account_token(client: httpx.Client, account_id: str, token_id: str) -> None:
+    cf_check(client.delete(f"/accounts/{account_id}/tokens/{token_id}"))
+
+
+def build_r2_bucket_token_policies(
+    account_id: str, bucket_name: str, permission_group_id: str
+) -> list[dict[str, Any]]:
+    """Build the account-token policy list scoping a token to one R2 bucket.
+
+    The resource key mirrors Cloudflare's R2 bucket resource identifier. The
+    ``default`` segment is the (default) jurisdiction; revisit if non-default
+    jurisdictions are ever exposed.
+    """
+    resource_key = f"com.cloudflare.edge.r2.bucket.{account_id}_default_{bucket_name}"
+    return [
+        {
+            "effect": "allow",
+            "permission_groups": [{"id": permission_group_id}],
+            "resources": {resource_key: "*"},
+        }
+    ]
+
+
 # --- Workers KV operations ---
 
 
@@ -829,6 +1067,19 @@ class CloudflareOps(Protocol):
     def list_service_tokens(self) -> list[dict[str, Any]]: ...
     def delete_service_token(self, token_id: str) -> None: ...
 
+    # R2 bucket + bucket-scoped-token operations. These are folded into the
+    # CloudflareOps surface (rather than a parallel R2Ops abstraction) because
+    # they are just more Cloudflare REST calls sharing the same authenticated
+    # client + account_id; the genuinely-different concern (the key-metadata DB)
+    # lives behind the separate KeyStore abstraction below.
+    account_id: str
+
+    def create_bucket(self, name: str) -> dict[str, Any]: ...
+    def list_buckets(self, name_contains: str = "") -> list[dict[str, Any]]: ...
+    def delete_bucket(self, name: str) -> None: ...
+    def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]: ...
+    def delete_bucket_token(self, token_id: str) -> None: ...
+
 
 class HttpCloudflareOps:
     """CloudflareOps implementation backed by real Cloudflare HTTP API calls."""
@@ -842,6 +1093,10 @@ class HttpCloudflareOps:
         self.account_id = account_id
         self.zone_id = zone_id
         self._kv_namespace_id: str | None = None
+        # Per-container cache of R2 permission-group UUIDs, looked up lazily.
+        # Looked up at runtime (not hard-coded) because the connector runs
+        # against different Cloudflare accounts across deploy environments.
+        self._r2_permission_group_id_by_access: dict[str, str] = {}
 
     def _ensure_kv_namespace(self) -> str:
         if self._kv_namespace_id is None:
@@ -922,6 +1177,34 @@ class HttpCloudflareOps:
 
     def delete_service_token(self, token_id: str) -> None:
         cf_delete_service_token(self.client, self.account_id, token_id)
+
+    def _r2_permission_group_id(self, access: str) -> str:
+        if access not in self._r2_permission_group_id_by_access:
+            wanted = _R2_WRITE_PERMISSION_GROUP_NAME if access == "readwrite" else _R2_READ_PERMISSION_GROUP_NAME
+            groups = cf_list_token_permission_groups(self.client, self.account_id)
+            for group in groups:
+                if group.get("name") == wanted:
+                    self._r2_permission_group_id_by_access[access] = group["id"]
+                    break
+            else:
+                raise CloudflareApiError(500, [{"message": f"R2 permission group not found: {wanted}"}])
+        return self._r2_permission_group_id_by_access[access]
+
+    def create_bucket(self, name: str) -> dict[str, Any]:
+        return cf_create_bucket(self.client, self.account_id, name)
+
+    def list_buckets(self, name_contains: str = "") -> list[dict[str, Any]]:
+        return cf_list_buckets(self.client, self.account_id, name_contains=name_contains)
+
+    def delete_bucket(self, name: str) -> None:
+        cf_delete_bucket(self.client, self.account_id, name)
+
+    def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]:
+        policies = build_r2_bucket_token_policies(self.account_id, bucket_name, self._r2_permission_group_id(access))
+        return cf_create_account_token(self.client, self.account_id, token_name, policies)
+
+    def delete_bucket_token(self, token_id: str) -> None:
+        cf_delete_account_token(self.client, self.account_id, token_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1393,55 +1676,181 @@ def require_tunnel_access(auth: AuthResult, tunnel_name: str) -> str:
     return extract_username_from_tunnel_name(tunnel_name)
 
 
-_PAID_ACCOUNT_SUFFIXES_ENV = "PAID_ACCOUNT_SUFFIXES"
+# Env var holding the cache TTL (in seconds) for paid-status lookups. The
+# paid gate consults two Neon tables (``paid_emails`` / ``paid_domains``)
+# on every gated request; this in-memory cache bounds how often that DB
+# round-trip happens per container. Set to ``0`` to disable caching
+# entirely (every gated request hits the DB) -- useful in tests. Unset
+# falls back to ``_DEFAULT_PAID_LIST_CACHE_TTL_SECONDS``. Each Modal
+# container caches independently, so a CRUD change to the lists takes up
+# to the TTL to be reflected everywhere.
+_PAID_LIST_CACHE_TTL_ENV = "MINDS_PAID_LIST_CACHE_TTL_SECONDS"
+_DEFAULT_PAID_LIST_CACHE_TTL_SECONDS = 60.0
+
+# Process-local cache mapping a lowercased email -> (expiry_monotonic, is_paid).
+# Guarded by a lock since uvicorn serves requests from a thread pool.
+_paid_status_cache: dict[str, tuple[float, bool]] = {}
+_paid_status_cache_lock = threading.Lock()
 
 
-def _parse_paid_account_suffixes(raw: str) -> tuple[str, ...]:
-    """Split a ``PAID_ACCOUNT_SUFFIXES`` value into a normalized tuple of suffixes."""
-    return tuple(s.strip().lower() for s in raw.split(",") if s.strip())
+def clear_paid_status_cache() -> None:
+    """Drop every cached paid-status entry (called after a CRUD write, and in tests)."""
+    with _paid_status_cache_lock:
+        _paid_status_cache.clear()
 
 
-def is_email_in_paid_account_allowlist(email: str | None, raw_suffixes: str) -> bool:
-    """Pure helper: does ``email`` match any of the comma-separated suffixes?
+def _paid_list_cache_ttl_seconds() -> float:
+    """Resolve the paid-status cache TTL from the environment.
 
-    Suffix matching is case-insensitive. An empty/missing suffix list always
-    returns ``False`` (no email is allowed), and a missing email always
-    returns ``False``.
+    Falls back to the default on an unset/empty value and on an
+    unparseable one (logging a warning in the latter case) so a typo'd
+    Modal secret degrades to "cache normally" rather than crashing the
+    gate.
     """
-    suffixes = _parse_paid_account_suffixes(raw_suffixes)
-    if not suffixes:
-        return False
-    if not email:
-        return False
-    email_lower = email.lower()
-    return any(email_lower.endswith(suffix) for suffix in suffixes)
-
-
-def require_paid_account(auth: AdminAuth) -> None:
-    """Enforce the ``PAID_ACCOUNT_SUFFIXES`` allowlist for paid features.
-
-    Raises ``HTTPException(403)`` when the env var is unset/empty (paid
-    features disabled on this server) or when ``auth.email`` does not end
-    with any of the configured suffixes. ``/tunnels/*`` (Cloudflare
-    forwarding) intentionally does NOT call this gate -- email-verified
-    accounts can still use forwarding regardless of the allowlist.
-    """
-    raw = os.environ.get(_PAID_ACCOUNT_SUFFIXES_ENV, "")
-    if not _parse_paid_account_suffixes(raw):
-        raise HTTPException(
-            status_code=403,
-            detail="Paid features (host pool, LiteLLM keys) are not enabled on this server",
+    raw = os.environ.get(_PAID_LIST_CACHE_TTL_ENV)
+    if raw is None or not raw.strip():
+        return _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; falling back to %.0fs",
+            _PAID_LIST_CACHE_TTL_ENV,
+            raw,
+            _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS,
         )
+        return _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS
+
+
+def _email_domain(email: str) -> str:
+    """Return the lowercased domain (part after the last ``@``) of an email, or ``""``."""
+    return email.strip().lower().rpartition("@")[2]
+
+
+def is_email_paid_in_db(
+    email: str,
+    connection_factory: Callable[[], Any] | None = None,
+) -> bool:
+    """Return whether ``email`` is paid per the ``paid_emails`` / ``paid_domains`` tables.
+
+    Paid when either an exact (lowercased) full-email match exists in
+    ``paid_emails`` with ``is_paid = true``, OR the email's exact domain
+    matches a ``paid_domains`` row with ``is_paid = true``. ``connection_factory``
+    is injected so unit tests can supply an in-memory backend; it defaults
+    to :func:`_get_pool_db_connection` (resolved lazily because that helper
+    is defined further down this module).
+
+    Raises ``psycopg2.Error`` on any database failure; the caller
+    (:func:`require_paid_account`) converts that into a fail-closed 403.
+    """
+    factory = connection_factory if connection_factory is not None else _get_pool_db_connection
+    email_lower = email.strip().lower()
+    domain = _email_domain(email_lower)
+    conn = factory()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM paid_emails WHERE email = %s AND is_paid = TRUE", (email_lower,))
+            if cur.fetchone() is not None:
+                return True
+            if domain:
+                cur.execute("SELECT 1 FROM paid_domains WHERE domain = %s AND is_paid = TRUE", (domain,))
+                if cur.fetchone() is not None:
+                    return True
+        return False
+    finally:
+        conn.close()
+
+
+def is_email_paid(
+    email: str,
+    db_lookup: Callable[[str], bool] = is_email_paid_in_db,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Cached wrapper around :func:`is_email_paid_in_db`.
+
+    Honors the ``MINDS_PAID_LIST_CACHE_TTL_SECONDS`` TTL: a non-positive
+    TTL bypasses the cache entirely, otherwise both positive and negative
+    results are cached for the TTL window. ``db_lookup`` / ``monotonic``
+    are injected for tests.
+    """
+    email_lower = email.strip().lower()
+    ttl_seconds = _paid_list_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return db_lookup(email_lower)
+    now = monotonic()
+    with _paid_status_cache_lock:
+        cached = _paid_status_cache.get(email_lower)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+    is_paid = db_lookup(email_lower)
+    with _paid_status_cache_lock:
+        _paid_status_cache[email_lower] = (now + ttl_seconds, is_paid)
+    return is_paid
+
+
+def require_paid_account(
+    auth: AdminAuth,
+    paid_checker: Callable[[str], bool] = is_email_paid,
+) -> None:
+    """Gate paid features on the caller's email appearing in the paid lists.
+
+    Raises ``HTTPException(403)`` when the caller has no verified email,
+    when their email is not in the ``paid_emails`` / ``paid_domains``
+    tables, or when the database lookup fails (fail closed). ``/tunnels/*``
+    (Cloudflare forwarding) intentionally does NOT call this gate --
+    email-verified accounts can still use forwarding regardless.
+    ``paid_checker`` is injected for tests; production callers use the
+    cached, table-backed default.
+    """
     if not auth.email:
         raise HTTPException(
             status_code=403,
             detail="Account email unavailable; cannot authorize paid feature access",
         )
-    if not is_email_in_paid_account_allowlist(auth.email, raw):
+    try:
+        is_paid = paid_checker(auth.email)
+    except psycopg2.Error as exc:
+        logger.warning("Paid-status lookup failed for %s: %s", auth.email, exc)
+        raise HTTPException(
+            status_code=403,
+            detail="Could not verify paid-feature access (database error); please try again",
+        ) from exc
+    if not is_paid:
         raise HTTPException(
             status_code=403,
             detail="Account is not authorized for paid features",
         )
+
+
+# Env var holding the single fixed API key that authenticates the paid-list
+# CRUD endpoints (``/paid/*``). Distinct from the SuperTokens / tunnel-token
+# auth used by every other route: those routes reject this key, and the
+# ``/paid/*`` routes reject SuperTokens JWTs / tunnel tokens. Folded into the
+# ``supertokens-<env>`` Modal secret (see .minds/template/supertokens.sh).
+_PAID_ADMIN_KEY_ENV = "MINDS_PAID_ADMIN_KEY"
+
+
+def require_paid_admin_key(request: Request) -> None:
+    """Authenticate a paid-list CRUD request against the fixed admin API key.
+
+    Expects ``Authorization: Bearer <MINDS_PAID_ADMIN_KEY>`` and compares
+    in constant time. Raises ``HTTPException(403)`` when the server has no
+    key configured (the paid-list admin API is disabled), and
+    ``HTTPException(401)`` when credentials are missing or wrong.
+    """
+    expected = os.environ.get(_PAID_ADMIN_KEY_ENV, "")
+    if not expected:
+        raise HTTPException(status_code=403, detail="Paid-list admin API is not enabled on this server")
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer credentials")
+    provided = auth_header[len("bearer ") :]
+    # Compare over UTF-8 bytes: hmac.compare_digest raises TypeError on str
+    # operands containing non-ASCII characters, and HTTP header values can
+    # legitimately carry non-ASCII bytes. Encoding keeps the comparison both
+    # total (a malformed key cleanly yields 401, not a 500) and constant-time.
+    if not hmac.compare_digest(provided.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="Invalid paid-list admin API key")
 
 
 # ---------------------------------------------------------------------------
@@ -1466,6 +1875,17 @@ def raise_as_http(exc: Exception) -> NoReturn:
     if isinstance(exc, CloudflareApiError):
         logger.warning("Cloudflare API error: %s", exc)
         raise HTTPException(status_code=exc.status_code, detail={"errors": exc.cf_errors}) from exc
+    if isinstance(exc, PoolHostCleanupError):
+        # A release that could not finish its teardown -- surface as a server
+        # error so the client retries rather than treating the lease as gone.
+        logger.error("Pool host cleanup error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if isinstance(exc, (OvhApiError, OvhHttpError)):
+        # OVH calls during teardown (tag strip / cancel) failed. Surface as a
+        # bad-gateway so the failed cancel is visible and retryable instead of
+        # being swallowed into a false "released" success.
+        logger.error("OVH API error during pool-host teardown: %s", exc)
+        raise HTTPException(status_code=502, detail=f"OVH API error during teardown: {exc}") from exc
     if isinstance(exc, TunnelNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if isinstance(exc, TunnelOwnershipError):
@@ -1476,6 +1896,20 @@ def raise_as_http(exc: Exception) -> NoReturn:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, TunnelComponentTooLongError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, InvalidPaidListEntryError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, InvalidR2BucketNameError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketOwnershipError):
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketNotFoundError):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketNotEmptyError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketExistsError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketLimitError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     logger.error("Unexpected error in endpoint handler", exc_info=exc)
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1502,6 +1936,21 @@ def _get_pool_db_connection() -> Any:
     return psycopg2.connect(database_url)
 
 
+@contextlib.contextmanager
+def _management_ssh_client(
+    host: str, port: int, user: str, management_key_pem: str, timeout_seconds: float
+) -> Iterator[paramiko.SSHClient]:
+    """Yield an SSHClient connected to ``host`` with the pool management key, closed on exit."""
+    private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=timeout_seconds)
+        yield client
+    finally:
+        client.close()
+
+
 def _append_authorized_key(
     host: str,
     port: int,
@@ -1510,11 +1959,7 @@ def _append_authorized_key(
     public_key_to_add: str,
 ) -> None:
     """SSH into a host using the management key and append a public key to authorized_keys."""
-    private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=15)
+    with _management_ssh_client(host, port, user, management_key_pem, timeout_seconds=15) as client:
         key_line = public_key_to_add.strip()
         commands = (
             "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo {} >> ~/.ssh/authorized_keys && ".format(
@@ -1527,8 +1972,264 @@ def _append_authorized_key(
         if exit_status != 0:
             stderr_text = stderr.read().decode()
             raise paramiko.SSHException(f"SSH command failed (exit {exit_status}): {stderr_text}")
-    finally:
-        client.close()
+
+
+# ---------------------------------------------------------------------------
+# OVH pool-host cleanup
+#
+# Releasing a pool host (and the periodic sweep that mops up interrupted
+# releases) must (a) strip the per-lease OVH IAM tags so the VPS reads as a
+# clean, recyclable host and (b) cancel the VPS in OVH so it stops renewing.
+# We do this with direct OVH REST calls rather than running ``mngr`` here so
+# the connector image stays light; the call surface is intentionally tiny.
+# Keep the tag keys / endpoint defaults in sync with ``libs/mngr_ovh``.
+# ---------------------------------------------------------------------------
+
+# Always kept on a recyclable host so the OVH provider can still discover it.
+OVH_PROVIDER_TAG_KEY = "mngr-provider"
+# Per-lease tags stripped on cleanup (everything except the provider tag).
+_OVH_STALE_TAG_KEYS: tuple[str, ...] = ("minds_env", "mngr-host-id")
+_OVH_DEFAULT_ENDPOINT = "ovh-us"
+
+
+class OvhVpsResource(BaseModel):
+    """A single OVH IAM ``vps`` resource with its tags."""
+
+    urn: str = Field(description="IAM URN like urn:v1:us:resource:vps:<serviceName>")
+    name: str = Field(description="OVH VPS service name")
+    tags: dict[str, str] = Field(default_factory=dict, description="IAM resource tags")
+
+
+class OvhOps(Protocol):
+    """Abstraction over the few OVH REST calls the cleanup path needs."""
+
+    def delete_tag(self, urn: str, key: str) -> None: ...
+    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None: ...
+    def list_vps_resources(self) -> list[OvhVpsResource]: ...
+
+
+class OvhClientCaller(Protocol):
+    """The single python-ovh entrypoint HttpOvhOps depends on (a DI seam for tests)."""
+
+    def call(self, method: str, path: str, data: object, need_auth: bool) -> Any: ...
+
+
+class HttpOvhOps:
+    """OvhOps implementation backed by the official ``ovh`` SDK (signed calls)."""
+
+    def __init__(self, application_key: str, application_secret: str, consumer_key: str, endpoint: str) -> None:
+        self.client: OvhClientCaller = ovh.Client(
+            endpoint=endpoint,
+            application_key=application_key,
+            application_secret=application_secret,
+            consumer_key=consumer_key,
+        )
+
+    def delete_tag(self, urn: str, key: str) -> None:
+        # Idempotent: a missing tag means the strip already happened.
+        try:
+            self.client.call("DELETE", f"/v2/iam/resource/{urn}/tag/{key}", None, True)
+        except ResourceNotFoundError:
+            pass
+
+    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
+        # Read-modify-write so we don't clobber unrelated serviceInfos fields.
+        # Idempotent: a missing service means OVH already removed the VPS, so
+        # there is nothing left to cancel (treat as success, like delete_tag).
+        try:
+            info = dict(self.client.call("GET", f"/vps/{service_name}/serviceInfos", None, True) or {})
+            renew = dict(info.get("renew") or {})
+            renew["deleteAtExpiration"] = delete_at_expiration
+            info["renew"] = renew
+            self.client.call("PUT", f"/vps/{service_name}/serviceInfos", info, True)
+        except ResourceNotFoundError:
+            pass
+
+    def list_vps_resources(self) -> list[OvhVpsResource]:
+        payload = self.client.call("GET", "/v2/iam/resource?resourceType=vps", None, True)
+        if not isinstance(payload, list):
+            return []
+        resources: list[OvhVpsResource] = []
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            urn = str(raw.get("urn") or "")
+            if not urn:
+                continue
+            tags = {str(k): str(v) for k, v in (raw.get("tags") or {}).items()}
+            resources.append(OvhVpsResource(urn=urn, name=str(raw.get("name") or ""), tags=tags))
+        return resources
+
+
+def ovh_region_code_for_endpoint(endpoint: str) -> str:
+    """Map an OVH endpoint id (``ovh-us``) to the URN region segment (``us``)."""
+    if endpoint.startswith("ovh-"):
+        return endpoint.removeprefix("ovh-")
+    return "us"
+
+
+def _get_ovh_endpoint() -> str:
+    return os.environ.get("OVH_ENDPOINT", _OVH_DEFAULT_ENDPOINT)
+
+
+def vps_urn_for(service_name: str, region_code: str) -> str:
+    """Build the IAM resource URN for an OVH VPS owned by this account."""
+    return f"urn:v1:{region_code}:resource:vps:{service_name}"
+
+
+@functools.cache
+def _get_ovh_ops() -> OvhOps:
+    return HttpOvhOps(
+        application_key=os.environ["OVH_APPLICATION_KEY"],
+        application_secret=os.environ["OVH_APPLICATION_SECRET"],
+        consumer_key=os.environ["OVH_CONSUMER_KEY"],
+        endpoint=_get_ovh_endpoint(),
+    )
+
+
+def clean_up_pool_host_in_ovh(ovh_ops: OvhOps, vps_instance_id: str, region_code: str) -> None:
+    """Strip the per-lease tags (keeping ``mngr-provider``) then cancel the VPS.
+
+    Tags are stripped first (per the cleanup contract) so a mid-crash leaves a
+    recyclable-looking host that the next sweep finishes cancelling. Each call
+    is idempotent, so re-running is safe.
+    """
+    urn = vps_urn_for(vps_instance_id, region_code)
+    for tag_key in _OVH_STALE_TAG_KEYS:
+        ovh_ops.delete_tag(urn, tag_key)
+    ovh_ops.set_delete_at_expiration(vps_instance_id, True)
+
+
+def _delete_pool_host_row(conn: Any, host_db_id: Any) -> None:
+    """Delete a single pool_hosts row by id (committing immediately)."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
+    conn.commit()
+
+
+# pool_hosts.backend_kind values (kept in sync with migration 009 and the
+# mngr_imbue_cloud primitives). A real OVH VPS is cancelled in OVH on release;
+# a "slice" is a lima VM on one of our bare-metal boxes and is destroyed by
+# SSHing the box and running limactl.
+BACKEND_KIND_OVH_VPS = "ovh_vps"
+BACKEND_KIND_SLICE = "slice"
+
+
+def build_slice_teardown_commands(lima_instance_name: str, lima_disk_name: str | None) -> tuple[str, ...]:
+    """Commands to run on the bare-metal box to destroy a slice's lima VM + data disk."""
+    commands = [f"limactl delete --force {shlex.quote(lima_instance_name)}"]
+    if lima_disk_name:
+        commands.append(f"limactl disk delete --force {shlex.quote(lima_disk_name)}")
+    return tuple(commands)
+
+
+def _run_ssh_commands_on_box(
+    host: str, port: int, user: str, management_key_pem: str, commands: tuple[str, ...]
+) -> None:
+    """SSH into the box with the pool management key and run each command, raising on failure."""
+    with _management_ssh_client(host, port, user, management_key_pem, timeout_seconds=30) as client:
+        for command in commands:
+            _stdin, stdout, stderr = client.exec_command(command)
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                stderr_text = stderr.read().decode()
+                raise PoolHostCleanupError(
+                    f"slice teardown command {command!r} failed (exit {exit_status}): {stderr_text}"
+                )
+
+
+def clean_up_slice_on_box(
+    conn: Any,
+    host_db_id: Any,
+    bare_metal_server_id: Any,
+    lima_instance_name: str | None,
+    lima_disk_name: str | None,
+) -> None:
+    """Destroy a slice's lima VM (and data disk) on its owning bare-metal box.
+
+    Looks up the box's address + lima service user from ``bare_metal_servers``,
+    then SSHes in with the pool management key and runs limactl. Raises
+    ``PoolHostCleanupError`` if the slice's bookkeeping is incomplete or the box
+    can't be reached, so the row stays ``removing`` and the sweep retries (the
+    slot is only freed once the VM is really gone).
+    """
+    if not (bare_metal_server_id and lima_instance_name):
+        raise PoolHostCleanupError(
+            f"slice pool host {host_db_id} is missing bare_metal_server_id or lima_instance_name; cannot tear down its VM"
+        )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT public_address, lima_service_user FROM bare_metal_servers WHERE id = %s",
+            (str(bare_metal_server_id),),
+        )
+        server_row = cur.fetchone()
+    if server_row is None or not server_row[0]:
+        raise PoolHostCleanupError(
+            f"slice pool host {host_db_id}: bare_metal_servers row {bare_metal_server_id} is missing or has no public_address"
+        )
+    box_address, lima_service_user = server_row[0], server_row[1] or "root"
+    management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
+    commands = build_slice_teardown_commands(lima_instance_name, lima_disk_name)
+    _run_ssh_commands_on_box(box_address, 22, lima_service_user, management_key_pem, commands)
+
+
+def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) -> tuple[int, int]:
+    """Clean up every ``removing`` pool host: strip tags, cancel, delete the row.
+
+    Returns ``(success_count, failure_count)``. Per-host failures are logged
+    and skipped (the row stays ``removing`` for the next run); ``FOR UPDATE
+    SKIP LOCKED`` keeps a concurrent inline release and the sweep from
+    double-processing the same row.
+    """
+    success_count = 0
+    failure_count = 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, vps_instance_id, backend_kind, lima_instance_name, lima_disk_name, bare_metal_server_id "
+            "FROM pool_hosts WHERE status = 'removing' FOR UPDATE SKIP LOCKED"
+        )
+        rows = cur.fetchall()
+        for (
+            host_db_id,
+            vps_instance_id,
+            backend_kind,
+            lima_instance_name,
+            lima_disk_name,
+            bare_metal_server_id,
+        ) in rows:
+            # Per-host savepoint so a DB error on one host's DELETE doesn't
+            # abort the whole transaction (which would roll back every other
+            # host's already-issued DELETE in this run and poison subsequent
+            # statements). Rollback-to-savepoint leaves the transaction usable.
+            cur.execute("SAVEPOINT pool_host_cleanup")
+            try:
+                # Branch on backend: slices are torn down on their box via
+                # limactl; real VPSes are cancelled in OVH. A slice whose VM
+                # isn't destroyed must NOT have its row deleted (that would leak
+                # the VM and the slot), so clean_up_slice_on_box raises on any
+                # problem and the row stays ``removing`` for the next run.
+                if backend_kind == BACKEND_KIND_SLICE:
+                    clean_up_slice_on_box(conn, host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name)
+                elif vps_instance_id:
+                    clean_up_pool_host_in_ovh(ovh_ops, vps_instance_id, region_code)
+                else:
+                    logger.warning("Removing pool host %s has no vps_instance_id; skipping OVH cleanup", host_db_id)
+                cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
+                cur.execute("RELEASE SAVEPOINT pool_host_cleanup")
+                success_count += 1
+            except (
+                OvhApiError,
+                OvhHttpError,
+                psycopg2.Error,
+                PoolHostCleanupError,
+                paramiko.SSHException,
+                OSError,
+            ) as exc:
+                cur.execute("ROLLBACK TO SAVEPOINT pool_host_cleanup")
+                logger.warning("Cleanup failed for removing pool host %s; will retry next run: %s", host_db_id, exc)
+                failure_count += 1
+    conn.commit()
+    return success_count, failure_count
 
 
 # ---------------------------------------------------------------------------
@@ -1777,13 +2478,23 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
         try:
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute(
+                    # Build the lease selection dynamically. A hard ``region``
+                    # adds an equality filter; when unset the lease is
+                    # region-agnostic. The selection stays a single round-trip
+                    # (the fast path must not pay an extra query).
+                    where_clauses = ["status = 'available'", "attributes @> %s::jsonb"]
+                    query_params: list[object] = [json.dumps(body.attributes)]
+                    if body.region is not None:
+                        where_clauses.append("region = %s")
+                        query_params.append(body.region)
+                    order_by = "created_at ASC"
+                    lease_select_sql = (
                         "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
                         "FROM pool_hosts "
-                        "WHERE status = 'available' AND attributes @> %s::jsonb "
-                        "ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-                        (json.dumps(body.attributes),),
+                        f"WHERE {' AND '.join(where_clauses)} "
+                        f"ORDER BY {order_by} LIMIT 1 FOR UPDATE SKIP LOCKED"
                     )
+                    cur.execute(lease_select_sql, tuple(query_params))
                     row = cur.fetchone()
                     if row is None:
                         raise HTTPException(
@@ -1838,12 +2549,22 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
 
 @web_app.post("/hosts/{host_db_id}/release")
 def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
-    """Release a leased host back to the pool.
+    """Release a leased host: cancel the OVH VPS, strip its tags, drop the row.
 
-    Idempotent at the HTTP layer: a second release on an already-
-    released host returns 200 ``status: already_released`` rather than
-    404. Ownership is still enforced -- if some other user leased the
-    row, the call returns 403 regardless of status.
+    Runs the full cleanup chain inline and **synchronously**: flip the row to
+    ``removing`` (the durable, retryable in-progress marker), strip the
+    per-lease OVH tags, cancel the VPS, then delete the row.
+
+    Returns 200 only once *every* step has succeeded -- a "released" result
+    truly means the VPS is cancelled. If any teardown step fails, the row stays
+    ``removing`` and the endpoint returns an error (5xx) so the client (or the
+    hourly sweep backstop) retries; we never report success on a failed cancel.
+    A failure before ``removing`` is committed (lookup, ownership, the status
+    flip) surfaces as an error too.
+
+    Idempotent at the HTTP layer: a release on a row that is already gone
+    (deleted) or no longer leased returns 200 ``status: already_released``.
+    Ownership is still enforced -- a row leased by another user returns 403.
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
@@ -1856,27 +2577,81 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 # Python ``UUID`` type that FastAPI parsed from the path
                 # (it raises "can't adapt type 'UUID'").
                 cur.execute(
-                    "SELECT leased_to_user, status FROM pool_hosts WHERE id = %s",
+                    "SELECT leased_to_user, status, vps_instance_id, backend_kind, "
+                    "lima_instance_name, lima_disk_name, bare_metal_server_id "
+                    "FROM pool_hosts WHERE id = %s",
                     (str(host_db_id),),
                 )
                 row = cur.fetchone()
+                # A missing row means cleanup already finished (idempotent).
                 if row is None:
-                    raise HTTPException(status_code=404, detail="Host not found")
-                leased_to_user, status = row
+                    return ReleaseHostResponse(status="already_released").model_dump()
+                (
+                    leased_to_user,
+                    status,
+                    vps_instance_id,
+                    backend_kind,
+                    lima_instance_name,
+                    lima_disk_name,
+                    bare_metal_server_id,
+                ) = row
                 # Ownership check first: we don't want to leak a status
                 # signal to other users via the response code.
                 if leased_to_user != admin.username:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
-                if status != "leased":
+                # Only a leased or already-removing row is eligible for
+                # cleanup; anything else is treated as already released.
+                if status not in ("leased", "removing"):
                     return ReleaseHostResponse(status="already_released").model_dump()
-                cur.execute(
-                    "UPDATE pool_hosts SET status = 'released', released_at = NOW() WHERE id = %s",
-                    (str(host_db_id),),
-                )
-                conn.commit()
+                if status == "leased":
+                    cur.execute(
+                        "UPDATE pool_hosts SET status = 'removing', released_at = NOW() WHERE id = %s",
+                        (str(host_db_id),),
+                    )
+                    conn.commit()
+            # Past the commit point: the row is durably ``removing`` and the
+            # sweep will finish anything that fails below, so we always
+            # return 200 from here.
+            _finish_releasing_pool_host(
+                conn,
+                host_db_id,
+                vps_instance_id,
+                backend_kind,
+                lima_instance_name,
+                lima_disk_name,
+                bare_metal_server_id,
+            )
         finally:
             conn.close()
         return ReleaseHostResponse(status="released").model_dump()
+
+
+def _finish_releasing_pool_host(
+    conn: Any,
+    host_db_id: Any,
+    vps_instance_id: str | None,
+    backend_kind: str | None,
+    lima_instance_name: str | None,
+    lima_disk_name: str | None,
+    bare_metal_server_id: Any,
+) -> None:
+    """Tear down a host already marked ``removing``, then delete the row.
+
+    Branches on ``backend_kind``: a real OVH VPS is cancelled in OVH; a slice
+    has its lima VM destroyed on its bare-metal box. **Raises** on any failure
+    rather than swallowing it -- the caller has already committed the row to
+    ``removing`` (a durable, retryable in-progress marker), so a failure here
+    propagates to the HTTP layer: the release reports failure, the row stays
+    ``removing``, and the client (or the hourly sweep) retries. A release that
+    cannot actually destroy the underlying machine must never report success.
+    """
+    if backend_kind == BACKEND_KIND_SLICE:
+        clean_up_slice_on_box(conn, host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name)
+    elif vps_instance_id:
+        clean_up_pool_host_in_ovh(_get_ovh_ops(), vps_instance_id, ovh_region_code_for_endpoint(_get_ovh_endpoint()))
+    else:
+        raise PoolHostCleanupError(f"pool host {host_db_id} has no vps_instance_id; cannot cancel its VPS")
+    _delete_pool_host_row(conn, host_db_id)
 
 
 @web_app.get("/hosts")
@@ -1914,6 +2689,162 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
             ).model_dump()
             for r in rows
         ]
+
+
+# ---------------------------------------------------------------------------
+# Paid-list CRUD (admin-key authenticated)
+# ---------------------------------------------------------------------------
+
+
+class PaidListEntryRequest(BaseModel):
+    value: str = Field(description="The domain or email to add/remove (normalized to lowercase server-side)")
+
+
+class PaidDomainInfo(BaseModel):
+    domain: str = Field(description="The allowed domain (lowercased)")
+    is_paid: bool = Field(description="Whether this domain currently grants paid access")
+    created_at: str = Field(description="When the row was first inserted")
+    updated_at: str = Field(description="When is_paid was last changed")
+
+
+class PaidEmailInfo(BaseModel):
+    email: str = Field(description="The allowed email (lowercased)")
+    is_paid: bool = Field(description="Whether this email currently grants paid access")
+    created_at: str = Field(description="When the row was first inserted")
+    updated_at: str = Field(description="When is_paid was last changed")
+
+
+def _normalize_paid_domain(value: str) -> str:
+    """Lowercase + validate a domain entry (no ``@``, no internal whitespace, non-empty)."""
+    normalized = value.strip().lower()
+    if not normalized:
+        raise InvalidPaidListEntryError(value, "domain must not be empty")
+    if "@" in normalized:
+        raise InvalidPaidListEntryError(value, "domain must not contain '@' (use the email list for full addresses)")
+    if any(character.isspace() for character in normalized):
+        raise InvalidPaidListEntryError(value, "domain must not contain whitespace")
+    return normalized
+
+
+def _normalize_paid_email(value: str) -> str:
+    """Lowercase + validate an email entry (exactly one ``@`` with non-empty local + domain parts)."""
+    normalized = value.strip().lower()
+    local, separator, domain = normalized.partition("@")
+    if not separator or not local or not domain or "@" in domain or any(c.isspace() for c in normalized):
+        raise InvalidPaidListEntryError(value, "email must be of the form 'local@domain'")
+    return normalized
+
+
+def _list_paid_entries(table: str, value_column: str, paid_only: bool) -> list[tuple[str, bool, str, str]]:
+    """Return all rows of a paid-list table as ``(value, is_paid, created_at, updated_at)`` tuples."""
+    where_clause = " WHERE is_paid = TRUE" if paid_only else ""
+    conn = _get_pool_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {value_column}, is_paid, created_at, updated_at FROM {table}{where_clause} "
+                f"ORDER BY {value_column} ASC"
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [(row[0], bool(row[1]), str(row[2]), str(row[3])) for row in rows]
+
+
+def _activate_paid_entry(table: str, value_column: str, value: str) -> None:
+    """Upsert a paid-list entry to ``is_paid = true`` (reactivating in place, keeping created_at)."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {table} ({value_column}, is_paid, created_at, updated_at) "
+                    "VALUES (%s, TRUE, NOW(), NOW()) "
+                    f"ON CONFLICT ({value_column}) DO UPDATE SET is_paid = TRUE, updated_at = NOW()",
+                    (value,),
+                )
+    finally:
+        conn.close()
+    clear_paid_status_cache()
+
+
+def _deactivate_paid_entry(table: str, value_column: str, value: str) -> None:
+    """Soft-delete a paid-list entry (``is_paid = false``). A no-op when the row is absent."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {table} SET is_paid = FALSE, updated_at = NOW() WHERE {value_column} = %s",
+                    (value,),
+                )
+    finally:
+        conn.close()
+    clear_paid_status_cache()
+
+
+@web_app.get("/paid/domains")
+def list_paid_domains(request: Request, paid_only: bool = False) -> list[dict[str, object]]:
+    """List paid-domain rows. ``paid_only=true`` filters to currently-active entries."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        rows = _list_paid_entries("paid_domains", "domain", paid_only)
+        return [
+            PaidDomainInfo(domain=value, is_paid=is_paid, created_at=created_at, updated_at=updated_at).model_dump()
+            for (value, is_paid, created_at, updated_at) in rows
+        ]
+
+
+@web_app.post("/paid/domains/add")
+def add_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Add (or reactivate) a paid domain. Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        domain = _normalize_paid_domain(body.value)
+        _activate_paid_entry("paid_domains", "domain", domain)
+        return {"status": "added", "domain": domain}
+
+
+@web_app.post("/paid/domains/remove")
+def remove_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Soft-remove a paid domain (set is_paid=false). Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        domain = _normalize_paid_domain(body.value)
+        _deactivate_paid_entry("paid_domains", "domain", domain)
+        return {"status": "removed", "domain": domain}
+
+
+@web_app.get("/paid/emails")
+def list_paid_emails(request: Request, paid_only: bool = False) -> list[dict[str, object]]:
+    """List paid-email rows. ``paid_only=true`` filters to currently-active entries."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        rows = _list_paid_entries("paid_emails", "email", paid_only)
+        return [
+            PaidEmailInfo(email=value, is_paid=is_paid, created_at=created_at, updated_at=updated_at).model_dump()
+            for (value, is_paid, created_at, updated_at) in rows
+        ]
+
+
+@web_app.post("/paid/emails/add")
+def add_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Add (or reactivate) a paid email. Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        email = _normalize_paid_email(body.value)
+        _activate_paid_entry("paid_emails", "email", email)
+        return {"status": "added", "email": email}
+
+
+@web_app.post("/paid/emails/remove")
+def remove_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Soft-remove a paid email (set is_paid=false). Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        email = _normalize_paid_email(body.value)
+        _deactivate_paid_entry("paid_emails", "email", email)
+        return {"status": "removed", "email": email}
 
 
 # ---------------------------------------------------------------------------
@@ -2118,6 +3049,380 @@ def delete_litellm_key(request: Request, key_id: str) -> dict[str, object]:
         _litellm_request("POST", "/key/delete", json_body={"keys": [key_id]})
 
         return DeleteKeyResponse(status="deleted").model_dump()
+
+
+# ---------------------------------------------------------------------------
+# R2 bucket naming + ownership helpers
+# ---------------------------------------------------------------------------
+
+
+_MAX_BUCKETS_PER_ACCOUNT = 50
+_R2_BUCKET_NAME_SEP = "--"
+_R2_BUCKET_MIN_LENGTH = 3
+_R2_BUCKET_MAX_LENGTH = 63
+_R2_BUCKET_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_DEFAULT_R2_KEY_ALIAS = "default"
+
+
+def slugify_r2_name(value: str) -> str:
+    """Lowercase + collapse non-alphanumeric runs into single hyphens; strip edge hyphens."""
+    lowered = value.strip().lower()
+    return re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+
+
+def _validate_r2_bucket_name(name: str) -> None:
+    if not (_R2_BUCKET_MIN_LENGTH <= len(name) <= _R2_BUCKET_MAX_LENGTH) or not _R2_BUCKET_NAME_RE.match(name):
+        raise InvalidR2BucketNameError(name)
+
+
+def bucket_owner_prefix(username: str) -> str:
+    return f"{username}{_R2_BUCKET_NAME_SEP}"
+
+
+def make_bucket_name(username: str, short_name: str) -> str:
+    """Derive the full R2 bucket name from the owner prefix and the user's short name."""
+    name = f"{bucket_owner_prefix(username)}{slugify_r2_name(short_name)}"
+    _validate_r2_bucket_name(name)
+    return name
+
+
+def verify_bucket_ownership(bucket_name: str, username: str) -> None:
+    if not bucket_name.startswith(bucket_owner_prefix(username)):
+        raise R2BucketOwnershipError(bucket_name, username)
+
+
+def r2_s3_endpoint(account_id: str) -> str:
+    return f"https://{account_id}.r2.cloudflarestorage.com"
+
+
+def derive_s3_secret_access_key(token_value: str) -> str:
+    """R2 derives the S3 Secret Access Key as the SHA-256 hex digest of the API token value."""
+    return hashlib.sha256(token_value.encode()).hexdigest()
+
+
+def _r2_token_name(bucket_name: str, alias: str | None) -> str:
+    return f"mngr-r2:{bucket_name}:{alias or _DEFAULT_R2_KEY_ALIAS}"
+
+
+# ---------------------------------------------------------------------------
+# R2 key-metadata store (DB)
+#
+# Tracks the *existence* of each bucket-scoped key (access key id, owner,
+# bucket, scope, alias) so the connector can list + revoke them. The secret
+# (sha256 of the token value) is never persisted -- only the non-secret access
+# key id is stored.
+# ---------------------------------------------------------------------------
+
+
+_R2_KEY_COLUMNS = "access_key_id, owner_user_id, bucket_name, access, alias, created_at"
+
+
+def _r2_key_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "access_key_id": row[0],
+        "owner_user_id": row[1],
+        "bucket_name": row[2],
+        "access": row[3],
+        "alias": row[4],
+        "created_at": str(row[5]) if row[5] is not None else "",
+    }
+
+
+class KeyStore(Protocol):
+    """Abstraction over the r2_keys table so endpoints are unit-testable."""
+
+    def add_key(
+        self, access_key_id: str, owner_user_id: str, bucket_name: str, access: str, alias: str | None
+    ) -> None: ...
+    def list_keys(self, owner_user_id: str, bucket_name: str | None = None) -> list[dict[str, Any]]: ...
+    def get_key(self, access_key_id: str) -> dict[str, Any] | None: ...
+    def delete_key(self, access_key_id: str) -> None: ...
+    def delete_keys_for_bucket(self, owner_user_id: str, bucket_name: str) -> list[dict[str, Any]]: ...
+
+
+class PostgresKeyStore:
+    """KeyStore backed by the connector's existing Neon DB (same DB as pool_hosts)."""
+
+    def add_key(
+        self, access_key_id: str, owner_user_id: str, bucket_name: str, access: str, alias: str | None
+    ) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO r2_keys (access_key_id, owner_user_id, bucket_name, access, alias) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (access_key_id, owner_user_id, bucket_name, access, alias),
+                    )
+        finally:
+            conn.close()
+
+    def list_keys(self, owner_user_id: str, bucket_name: str | None = None) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                if bucket_name is None:
+                    cur.execute(
+                        f"SELECT {_R2_KEY_COLUMNS} FROM r2_keys WHERE owner_user_id = %s ORDER BY created_at",
+                        (owner_user_id,),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT {_R2_KEY_COLUMNS} FROM r2_keys "
+                        "WHERE owner_user_id = %s AND bucket_name = %s ORDER BY created_at",
+                        (owner_user_id, bucket_name),
+                    )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [_r2_key_row_to_dict(row) for row in rows]
+
+    def get_key(self, access_key_id: str) -> dict[str, Any] | None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {_R2_KEY_COLUMNS} FROM r2_keys WHERE access_key_id = %s", (access_key_id,))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return _r2_key_row_to_dict(row) if row is not None else None
+
+    def delete_key(self, access_key_id: str) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM r2_keys WHERE access_key_id = %s", (access_key_id,))
+        finally:
+            conn.close()
+
+    def delete_keys_for_bucket(self, owner_user_id: str, bucket_name: str) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM r2_keys WHERE owner_user_id = %s AND bucket_name = %s RETURNING {_R2_KEY_COLUMNS}",
+                        (owner_user_id, bucket_name),
+                    )
+                    rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [_r2_key_row_to_dict(row) for row in rows]
+
+
+@functools.cache
+def get_key_store() -> KeyStore:
+    return PostgresKeyStore()
+
+
+# ---------------------------------------------------------------------------
+# R2 bucket endpoints
+# ---------------------------------------------------------------------------
+
+
+def _list_owned_buckets(ops: CloudflareOps, username: str) -> list[dict[str, Any]]:
+    """List the caller's buckets: R2 name_contains filter, then re-verify the prefix in code."""
+    prefix = bucket_owner_prefix(username)
+    return [b for b in ops.list_buckets(name_contains=prefix) if str(b.get("name", "")).startswith(prefix)]
+
+
+def _owned_bucket_exists(ops: CloudflareOps, username: str, full_name: str) -> bool:
+    return any(b.get("name") == full_name for b in _list_owned_buckets(ops, username))
+
+
+def _best_effort_revoke_token(ops: CloudflareOps, token_id: str) -> None:
+    try:
+        ops.delete_bucket_token(token_id)
+    except (CloudflareApiError, httpx.HTTPError) as exc:
+        logger.warning("Failed to revoke R2 token %s: %s", token_id, exc)
+
+
+def _best_effort_delete_bucket(ops: CloudflareOps, bucket_name: str) -> None:
+    try:
+        ops.delete_bucket(bucket_name)
+    except (CloudflareApiError, R2BucketNotEmptyError, R2BucketNotFoundError, httpx.HTTPError) as exc:
+        logger.warning("Failed to roll back bucket %s: %s", bucket_name, exc)
+
+
+def _key_info_from_row(row: dict[str, Any]) -> R2KeyInfo:
+    return R2KeyInfo(
+        access_key_id=row["access_key_id"],
+        bucket_name=row["bucket_name"],
+        access=row["access"],
+        alias=row["alias"],
+        created_at=row["created_at"],
+    )
+
+
+def _mint_and_record_key(
+    ops: CloudflareOps,
+    store: KeyStore,
+    owner_user_id: str,
+    bucket_name: str,
+    access: str,
+    alias: str | None,
+    rollback_bucket: bool,
+) -> R2KeyMaterial:
+    """Mint a bucket-scoped Cloudflare token, record its metadata, and return the S3 material.
+
+    On any failure, best-effort revokes a partially-created token and (when
+    ``rollback_bucket``) deletes the just-created bucket so ``bucket create``
+    stays atomic.
+    """
+    created_token_id: str | None = None
+    try:
+        token_result = ops.create_bucket_token(bucket_name, access, _r2_token_name(bucket_name, alias))
+        access_key_id = str(token_result["id"])
+        created_token_id = access_key_id
+        secret_access_key = derive_s3_secret_access_key(str(token_result["value"]))
+        store.add_key(access_key_id, owner_user_id, bucket_name, access, alias)
+        return R2KeyMaterial(
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            s3_endpoint=r2_s3_endpoint(ops.account_id),
+            bucket_name=bucket_name,
+            access=access,
+        )
+    except (CloudflareApiError, httpx.HTTPError, psycopg2.Error) as exc:
+        if created_token_id is not None:
+            _best_effort_revoke_token(ops, created_token_id)
+        if rollback_bucket:
+            _best_effort_delete_bucket(ops, bucket_name)
+        raise HTTPException(status_code=502, detail=f"Failed to provision bucket key: {exc}") from exc
+
+
+@web_app.post("/buckets")
+def create_bucket_endpoint(request: Request, body: CreateBucketRequest) -> dict[str, object]:
+    """Create an R2 bucket for the caller and mint its default key (returned inline)."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        ops = get_ctx().ops
+        full_name = make_bucket_name(admin.username, body.name)
+        owned = _list_owned_buckets(ops, admin.username)
+        if any(b.get("name") == full_name for b in owned):
+            raise R2BucketExistsError(full_name)
+        if len(owned) >= _MAX_BUCKETS_PER_ACCOUNT:
+            raise R2BucketLimitError(_MAX_BUCKETS_PER_ACCOUNT)
+        ops.create_bucket(full_name)
+        material = _mint_and_record_key(
+            ops, get_key_store(), owner_user_id, full_name, body.access, _DEFAULT_R2_KEY_ALIAS, rollback_bucket=True
+        )
+        return CreateBucketResponse(
+            bucket=BucketInfo(bucket_name=full_name, s3_endpoint=r2_s3_endpoint(ops.account_id)),
+            key=material,
+        ).model_dump()
+
+
+@web_app.get("/buckets")
+def list_buckets_endpoint(request: Request) -> list[dict[str, object]]:
+    """List all R2 buckets owned by the caller."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        ops = get_ctx().ops
+        endpoint = r2_s3_endpoint(ops.account_id)
+        return [
+            BucketInfo(bucket_name=str(b["name"]), s3_endpoint=endpoint).model_dump()
+            for b in _list_owned_buckets(ops, admin.username)
+        ]
+
+
+@web_app.get("/buckets/{name}")
+def get_bucket_endpoint(request: Request, name: str) -> dict[str, object]:
+    """Return metadata for one of the caller's buckets (keys come from the keys endpoints)."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        ops = get_ctx().ops
+        full_name = make_bucket_name(admin.username, name)
+        if not _owned_bucket_exists(ops, admin.username, full_name):
+            raise R2BucketNotFoundError(full_name)
+        return BucketInfo(bucket_name=full_name, s3_endpoint=r2_s3_endpoint(ops.account_id)).model_dump()
+
+
+@web_app.delete("/buckets/{name}")
+def delete_bucket_endpoint(request: Request, name: str) -> dict[str, str]:
+    """Destroy one of the caller's buckets (refuses non-empty) and cascade-revoke its keys."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        ops = get_ctx().ops
+        full_name = make_bucket_name(admin.username, name)
+        verify_bucket_ownership(full_name, admin.username)
+        ops.delete_bucket(full_name)
+        revoked = get_key_store().delete_keys_for_bucket(owner_user_id, full_name)
+        for row in revoked:
+            _best_effort_revoke_token(ops, str(row["access_key_id"]))
+        return {"status": "deleted"}
+
+
+@web_app.post("/buckets/{name}/keys")
+def create_bucket_key_endpoint(request: Request, name: str, body: CreateR2KeyRequest) -> dict[str, object]:
+    """Mint an additional bucket-scoped key for one of the caller's buckets."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        ops = get_ctx().ops
+        full_name = make_bucket_name(admin.username, name)
+        if not _owned_bucket_exists(ops, admin.username, full_name):
+            raise R2BucketNotFoundError(full_name)
+        material = _mint_and_record_key(
+            ops, get_key_store(), owner_user_id, full_name, body.access, body.alias, rollback_bucket=False
+        )
+        return material.model_dump()
+
+
+@web_app.get("/buckets/{name}/keys")
+def list_bucket_keys_endpoint(request: Request, name: str) -> list[dict[str, object]]:
+    """List the caller's keys scoped to one bucket."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        full_name = make_bucket_name(admin.username, name)
+        rows = get_key_store().list_keys(owner_user_id, full_name)
+        return [_key_info_from_row(row).model_dump() for row in rows]
+
+
+@web_app.get("/bucket-keys")
+def list_all_bucket_keys_endpoint(request: Request) -> list[dict[str, object]]:
+    """List all of the caller's bucket keys across every bucket."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        rows = get_key_store().list_keys(owner_user_id, None)
+        return [_key_info_from_row(row).model_dump() for row in rows]
+
+
+@web_app.delete("/bucket-keys/{access_key_id}")
+def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str, str]:
+    """Revoke one of the caller's bucket keys (by Access Key ID) and drop its DB row."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+        store = get_key_store()
+        row = store.get_key(access_key_id)
+        if row is None or row["owner_user_id"] != owner_user_id:
+            raise HTTPException(status_code=404, detail="Key not found")
+        get_ctx().ops.delete_bucket_token(access_key_id)
+        store.delete_key(access_key_id)
+        return {"status": "deleted"}
 
 
 # ---------------------------------------------------------------------------
@@ -2622,8 +3927,20 @@ _MINDS_DEPLOY_ID = os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, "MINDS_DEPLOY_ID_UNS
 # cheapest possible warm pool (cold start on first hit).
 _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 
+# How long (seconds) an idle container stays alive before Modal scales it
+# down. ``minds env deploy`` threads the tier's
+# ``[scaledown_window].connector`` from its committed ``deploy.toml`` here as
+# ``MINDS_CONNECTOR_SCALEDOWN_WINDOW`` at ``modal deploy`` time. Dev tiers set
+# this high (~10 min) so the no-warm-pool connector stays hot across a dev
+# session instead of cold-booting on every request; staging / production
+# leave it unset and rely on ``min_containers`` instead. ``0`` (the default,
+# and what the ci/test tier uses) means "don't pin it" -- the function falls
+# back to Modal's own default scaledown window. Modal requires the value to
+# be > 0, so 0 is normalized to ``None`` at the call site below.
+_SCALEDOWN_WINDOW = int(os.environ.get("MINDS_CONNECTOR_SCALEDOWN_WINDOW", "0"))
+
 image = modal.Image.debian_slim().pip_install(
-    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
+    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko", "ovh"
 )
 app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 
@@ -2641,7 +3958,7 @@ def _get_auth_website_domain() -> str:
     """
     value = os.environ.get("AUTH_WEBSITE_DOMAIN")
     if not value:
-        raise RuntimeError(
+        raise MissingAuthWebsiteDomainError(
             "AUTH_WEBSITE_DOMAIN is not set. Populate it in the "
             f"`supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}` Modal secret (the deploy script "
             "pushes it from the tier's Vault entry)."
@@ -2736,17 +4053,26 @@ def _init_supertokens() -> None:
     logger.info("SuperTokens SDK initialized (providers=%d)", len(providers))
 
 
-@app.function(
-    name="api",
-    secrets=[
+def _connector_secrets() -> list[modal.Secret]:
+    """The Modal secrets attached to every connector function (web app + cron).
+
+    Includes ``ovh-<env>`` so the release route and the cleanup cron can make
+    signed OVH calls (tag strip + cancel) at runtime.
+    """
+    return [
         modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"neon-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
-        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"ovh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, _MINDS_DEPLOY_ID_ENV_VAR: _MINDS_DEPLOY_ID}),
-    ],
+    ]
+
+
+@app.function(
+    name="api",
+    secrets=_connector_secrets(),
     # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
     # module: defaults to 1 for production / staging (avoid cold-boot
     # penalty on auth / lease / tunnel hits from the desktop client) and
@@ -2754,8 +4080,33 @@ def _init_supertokens() -> None:
     # at deploy time with ``MINDS_MIN_CONTAINERS=<n>``. Mirrors the
     # equivalent block in apps/modal_litellm/app.py.
     min_containers=_MIN_CONTAINERS,
+    # Idle-before-scaledown window driven by ``_SCALEDOWN_WINDOW``. ``0``
+    # (default / ci) -> ``None`` so Modal uses its own default; dev pins this
+    # high so the no-warm-pool connector stays hot across a dev session.
+    scaledown_window=_SCALEDOWN_WINDOW or None,
 )
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:
     _init_supertokens()
     return web_app
+
+
+@app.function(
+    name="cleanup_removing_pool_hosts",
+    secrets=_connector_secrets(),
+    # Hourly mop-up of any pool host left in ``removing`` by a crashed or
+    # timed-out inline release. The happy path deletes the row inline, so this
+    # is purely a safety net.
+    schedule=modal.Cron("0 * * * *"),
+    timeout=900,
+)
+def cleanup_removing_pool_hosts() -> dict[str, int]:
+    conn = _get_pool_db_connection()
+    try:
+        success_count, failure_count = run_pool_host_cleanup_sweep(
+            conn, _get_ovh_ops(), ovh_region_code_for_endpoint(_get_ovh_endpoint())
+        )
+    finally:
+        conn.close()
+    logger.info("Pool host cleanup sweep done: cleaned=%d failed=%d", success_count, failure_count)
+    return {"cleaned": success_count, "failed": failure_count}

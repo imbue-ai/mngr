@@ -4,6 +4,51 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+Marked the `test_schedule_run_local_deployed_trigger` integration test `@pytest.mark.flaky` with a longer per-test timeout. The test executes a deployed trigger's `run.sh`, which shells out to `mngr`; that subprocess startup is slow and variable under CI load and intermittently exceeded the default 10s pytest-timeout. No change to `mngr_schedule` runtime behavior.
+
+## 2026-06-14
+
+- Fixed: `mngr schedule remove` (and the redeploy path that calls it) now passes `--yes` when stopping a schedule's Modal app, so it no longer aborts with "no interactive terminal detected" under newer Modal CLIs when run non-interactively (e.g. from a deploy script).
+
+## 2026-06-12
+
+Added a `--timezone` option to `mngr schedule add` that pins the IANA timezone
+in which the `--schedule` cron expression is interpreted (e.g.
+`--timezone America/Los_Angeles`).
+
+Previously the cron was always interpreted in the deploying machine's local
+timezone, so the same schedule could fire at different wall-clock times
+depending on where it was deployed from. Pinning `--timezone` makes the fire
+time deterministic. The value is validated against the IANA timezone database
+at deploy time. The option is only supported for the modal provider; passing it
+with `--provider local` is an error.
+
+## 2026-06-11
+
+Replaced direct ValueError raises in modal deploy upload-spec parsing with a dedicated UploadSpecError exception type.
+
+## 2026-06-08
+
+- Now auto-discovered as a publishable package by the release tooling. This also fixes a latent bug: `imbue-mngr-schedule` is already listed in the mngr install catalog, so the wizard offered it even though it had never been published (a user picking it hit a PyPI 404). It will be offered for first publication on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `imbue-mngr-modal`) are now pinned with `==` to their current workspace versions. No runtime change.
+
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `imbue-mngr-modal`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-02
+
+Internal refactor with no user-visible behavior change. Updated the JSON/JSONL output call sites to use the renamed `write_json_line` helper from `imbue.mngr.cli.output_helpers` (formerly `emit_final_json`, now removed).
+
+## 2026-06-01
+
+Fixed the PyPI package names in the PACKAGE-mode Modal deploy Dockerfile generator: it now installs `imbue-mngr` and `imbue-mngr-schedule` (the published distribution names) instead of `mngr` / `mngr-schedule`, which do not resolve on PyPI. (Note: `imbue-mngr-schedule` is not yet published, so PACKAGE-mode schedule deploys still require publishing it.)
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

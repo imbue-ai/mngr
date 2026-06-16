@@ -62,6 +62,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import wait_for
@@ -74,6 +75,14 @@ from imbue.mngr.utils.polling import wait_for
 # Each xdist worker is a separate process with isolated memory, so this
 # list only contains IDs from tests run by THIS worker.
 worker_test_ids: list[str] = []
+
+# Track the mngr prefixes under which this worker's docker fixtures may have
+# created a singleton state container. Each xdist worker is a separate process,
+# so this only holds prefixes from THIS worker's tests. The session cleanup uses
+# it to attribute leaked state containers to us (and fail), as opposed to
+# containers from other concurrent workers/sessions (which it can only
+# warn-and-clean). Mirrors worker_test_ids.
+worker_docker_state_prefixes: list[str] = []
 
 # Track Modal app names that were created during tests for cleanup verification.
 # This enables detection of leaked apps that weren't properly cleaned up.
@@ -361,9 +370,12 @@ def assert_home_is_temp_directory() -> None:
     """
     actual_home = Path.home()
     actual_home_str = str(actual_home)
-    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS
+    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS.
+    # /private/tmp is also valid: when TMPDIR points into /tmp (e.g. a /tmp/<runner> sandbox),
+    # macOS realpath-resolves the /tmp -> /private/tmp symlink, so tmp_path lands under /private/tmp.
     if not (
         actual_home_str.startswith("/tmp")
+        or actual_home_str.startswith("/private/tmp")
         or actual_home_str.startswith("/var/folders")
         or actual_home_str.startswith("/private/var")
     ):
@@ -415,6 +427,29 @@ def setup_mngr_test_environment(
     # Safety check: verify Path.home() is in a temp directory.
     # If this fails, tests could accidentally modify the real home directory.
     assert_home_is_temp_directory()
+
+
+@contextmanager
+def capture_log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages, yielding the list they accumulate in.
+
+    Core logic shared by all log_warnings fixtures (in mngr/conftest.py and
+    plugin_testing.py). This is the single source of truth so the fixtures stay
+    thin delegation wrappers rather than duplicating the handler bookkeeping.
+
+    Tolerates handler removal during the test (e.g. setup_logging() calls
+    logger.remove() which clears all handlers, so the handler we added may no
+    longer exist by the time teardown runs).
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 def get_subprocess_test_env(
@@ -880,6 +915,7 @@ def make_test_agent_details(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    plugin: dict | None = None,
     host_id: HostId | None = None,
     provider_name: ProviderInstanceName | None = None,
     ssh: SSHInfo | None = None,
@@ -911,6 +947,7 @@ def make_test_agent_details(
         start_on_boot=False,
         state=state,
         labels=labels or {},
+        plugin=plugin or {},
         host=host_details,
     )
 
@@ -1030,7 +1067,7 @@ def get_stash_count(path: Path) -> int:
 
 def is_claude_installed() -> bool:
     """Check if the Claude Code CLI is installed and available on PATH."""
-    return shutil.which("claude") is not None
+    return CLAUDE.is_available()
 
 
 def write_executable_script(path: Path, content: str) -> None:
@@ -1466,6 +1503,19 @@ def local_sshd(
     authorized_keys_path = sshd_dir / "authorized_keys"
     authorized_keys_path.write_text(authorized_keys_content)
 
+    # Isolate git's global/system config for sessions on this sshd. mngr runs
+    # `git config --global ...` over SSH when preparing a remote target (e.g.
+    # `git config --global --add safe.directory <target>` in
+    # Host._transfer_git_repo and add_safe_directory_on_remote). That command
+    # runs inside the SSH login, which sees the real user's $HOME -- the
+    # HOME-redirection done by isolate_home()/setup_git_config cannot reach
+    # across the SSH hop, so without this those writes would land in the
+    # developer's real ~/.gitconfig. Point GIT_CONFIG_GLOBAL at a throwaway file
+    # inside the sshd sandbox and GIT_CONFIG_SYSTEM at /dev/null so the session
+    # git is fully isolated from the host's real config.
+    git_global_config_path = sshd_dir / "git_global_config"
+    git_global_config_path.touch()
+
     # Create sshd_config
     sshd_config_path = etc_dir / "sshd_config"
     current_user = os.environ.get("USER", "root")
@@ -1482,6 +1532,7 @@ PidFile {run_dir}/sshd.pid
 StrictModes no
 Subsystem sftp {_sftp_server_path()}
 AllowUsers {current_user}
+SetEnv GIT_CONFIG_GLOBAL={git_global_config_path} GIT_CONFIG_SYSTEM=/dev/null
 """
     sshd_config_path.write_text(sshd_config)
 
@@ -1587,6 +1638,18 @@ def write_discovery_snapshot_to_path(
         "hosts": hosts,
     }
     events_path.write_text(json.dumps(event) + "\n")
+
+
+class FakeTtyStream(StringIO):
+    """A StringIO that reports itself as a TTY, for exercising color logic.
+
+    Used by tests that need ``should_use_color`` (and the code paths gated on it,
+    e.g. ``MngrError.show``) to take the colored branch even though the test's
+    real streams are not terminals.
+    """
+
+    def isatty(self) -> bool:
+        return True
 
 
 def walk_concrete_subclasses(cls: type) -> list[type]:

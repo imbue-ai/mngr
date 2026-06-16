@@ -17,7 +17,7 @@ dependencies = [
 # only ever forward -- pushing it back would re-exclude a deliberately-pinned
 # fresh dep and break resolution. This only buys a detection delay;
 # it can't catch a compromise that stays undetected past the window.
-exclude-newer = "2026-05-23T00:00:00Z"
+exclude-newer = "2026-06-02T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
@@ -73,6 +73,7 @@ addopts = [
   "--cov=imbue.mngr_claude_subagent_proxy",
   "--cov=imbue.mngr_opencode",
   "--cov=imbue.mngr_antigravity",
+  "--cov=imbue.mngr_codex",
   "--cov=imbue.mngr_pi_coding",
   "--cov=imbue.mngr_pair",
   "--cov=imbue.mngr_schedule",
@@ -97,10 +98,12 @@ addopts = [
   "--cov=imbue.concurrency_group",
   "--cov=imbue.modal_proxy",
   "--cov=imbue.mngr_wait",
-  "--cov=imbue.mngr_uncapped_claude",
+  "--cov=imbue.mngr_robinhood",
   "--cov=imbue.mngr_vps_docker",
   "--cov=imbue.mngr_vultr",
+  "--cov=imbue.mngr_aws",
   "--cov=imbue.mngr_ovh",
+  "--cov=imbue.mngr_gcp",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",
@@ -189,6 +192,10 @@ omit = [
     "apps/minds/imbue/minds/telegram/bot_creator.py",
     "apps/minds/imbue/minds/telegram/injector.py",
     "apps/minds/imbue/minds/desktop_client/supertokens_routes.py",
+    "apps/minds/imbue/minds/desktop_client/tunnel_token_injection.py",
+    # Minds Docker state-container teardown shells out to the `docker` CLI and
+    # needs a real daemon -- exercised via a docker-marked test, not offload.
+    "apps/minds/imbue/minds/envs/docker_cleanup.py",
     # Minds deployment_tests importable helpers are exercised only by the
     # minds_deployment / minds_services pytest suites against real cloud,
     # which are excluded from `just test-offload`. No path through the
@@ -215,6 +222,7 @@ source = [
 root_packages = [
     "imbue.mngr",
     "imbue.minds",
+    "imbue.mngr_imbue_cloud",
 ]
 
 [[tool.importlinter.contracts]]
@@ -248,4 +256,21 @@ layers = [
     "imbue.minds.errors",
     "imbue.minds.utils",
     "imbue.minds.primitives",
+]
+
+[[tool.importlinter.contracts]]
+name = "mngr_imbue_cloud layers contract"
+type = "layers"
+layers = [
+    "imbue.mngr_imbue_cloud.plugin",
+    "imbue.mngr_imbue_cloud.cli",
+    "imbue.mngr_imbue_cloud.bake",
+    "imbue.mngr_imbue_cloud.providers",
+    "imbue.mngr_imbue_cloud.hosts",
+    "imbue.mngr_imbue_cloud.slices",
+    "imbue.mngr_imbue_cloud.connector",
+    "imbue.mngr_imbue_cloud.config",
+    "imbue.mngr_imbue_cloud.data_types",
+    "imbue.mngr_imbue_cloud.errors",
+    "imbue.mngr_imbue_cloud.primitives",
 ]

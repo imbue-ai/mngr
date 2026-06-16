@@ -19,7 +19,7 @@ from imbue.mngr.errors import MngrError
 # ConcurrencyExceptionGroup before re-raising. So the subprocess-runner
 # helpers below must catch the group in addition to the bare ProcessError --
 # either can surface depending on where the failure happens.
-_SUBPROCESS_ERRORS: tuple[type[Exception], ...] = (OSError, ProcessError, ConcurrencyExceptionGroup)
+SUBPROCESS_ERRORS: tuple[type[Exception], ...] = (OSError, ProcessError, ConcurrencyExceptionGroup)
 
 
 class OsName(UpperCaseStrEnum):
@@ -77,10 +77,14 @@ class SystemDependency(FrozenModel):
 
 SSH = SystemDependency(
     binary="ssh",
-    purpose="remote host connections and git over SSH",
+    # Remote host connectivity itself goes through paramiko (pure-Python, no ssh
+    # binary). The ssh binary is only needed to attach an interactive session to a
+    # remote agent and as the transport for rsync/git over SSH -- all remote-only
+    # features -- so it is optional, like rsync and unison.
+    purpose="interactive connect to remote agents; transport for rsync and git over SSH",
     macos_hint="ssh is included with macOS",
     linux_hint="sudo apt-get install openssh-client",
-    category=DependencyCategory.CORE,
+    category=DependencyCategory.OPTIONAL,
     install_method=InstallMethod(apt_package="openssh-client"),
 )
 
@@ -138,8 +142,8 @@ CLAUDE = SystemDependency(
     install_method=InstallMethod(custom_install_script="https://claude.ai/install.sh"),
 )
 
-CORE_DEPS: tuple[SystemDependency, ...] = (SSH, GIT, TMUX, JQ)
-OPTIONAL_DEPS: tuple[SystemDependency, ...] = (CLAUDE, RSYNC, UNISON)
+CORE_DEPS: tuple[SystemDependency, ...] = (GIT, TMUX, JQ)
+OPTIONAL_DEPS: tuple[SystemDependency, ...] = (SSH, CLAUDE, RSYNC, UNISON)
 ALL_DEPS: tuple[SystemDependency, ...] = CORE_DEPS + OPTIONAL_DEPS
 
 
@@ -164,7 +168,7 @@ def check_bash_version(minimum: int = 4) -> bool:
             result = cg.run_process_to_completion(["bash", "-c", "echo ${BASH_VERSINFO[0]}"])
         version = int(result.stdout.strip())
         return version >= minimum
-    except (*_SUBPROCESS_ERRORS, ValueError):
+    except (*SUBPROCESS_ERRORS, ValueError):
         return False
 
 
@@ -269,7 +273,7 @@ def _install_via_brew(packages: list[str]) -> bool:
         with ConcurrencyGroup(name="brew-install") as cg:
             cg.run_process_to_completion(["brew", "install", *packages])
         return True
-    except _SUBPROCESS_ERRORS:
+    except SUBPROCESS_ERRORS:
         return False
 
 
@@ -282,7 +286,7 @@ def _install_via_apt(packages: list[str]) -> bool:
             cg.run_process_to_completion(["sudo", "apt-get", "update", "-qq"])
             cg.run_process_to_completion(["sudo", "apt-get", "install", "-y", "-qq", *packages])
         return True
-    except _SUBPROCESS_ERRORS:
+    except SUBPROCESS_ERRORS:
         return False
 
 

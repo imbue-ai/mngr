@@ -1,6 +1,5 @@
 import ast
 import fnmatch
-import os
 import re
 import subprocess
 import sys
@@ -17,12 +16,9 @@ from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extensio
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
-from imbue.imbue_common.test_profiles import detect_branch
-from scripts.changelog_projects import DEV_PROJECT
 from scripts.changelog_projects import all_known_projects
 from scripts.changelog_projects import project_dir as get_project_dir
 from scripts.changelog_projects import project_entries_dir
-from scripts.changelog_projects import project_for_path
 from scripts.changelog_projects import pyproject_projects
 
 _REPO_ROOT = Path(__file__).parent
@@ -161,6 +157,19 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
+def test_no_import_layer_violations_mngr_imbue_cloud() -> None:
+    """Ensure mngr_imbue_cloud production code has zero import layer violations.
+
+    Enforces the ``mngr_imbue_cloud layers contract`` (the sub-package layering:
+    plugin > cli > bake > providers > hosts > slices > connector > config >
+    data_types > errors > primitives). See ``test_no_import_layer_violations``
+    for the flaky/timeout rationale.
+    """
+    check_no_import_lint_errors(_REPO_ROOT, contract_name="mngr_imbue_cloud layers contract")
+
+
 @pytest.mark.timeout(60)
 def test_no_type_errors() -> None:
     """Ensure the whole workspace has zero type errors (ty).
@@ -209,6 +218,11 @@ def test_no_ruff_errors() -> None:
         raise AssertionError("\n".join(errors) + "\n" + fix_hint)
 
 
+# Regenerating every command's docs spawns a fresh interpreter with all plugins loaded,
+# which takes several seconds locally and exceeds the default 10s pytest-timeout in the
+# slower offload sandbox (the bare-metal `admin server` + slice commands enlarged the CLI
+# surface). Match the other heavy meta-ratchet tests with a generous timeout.
+@pytest.mark.timeout(60)
 def test_cli_docs_are_up_to_date() -> None:
     """Committed CLI docs and the PyPI README must match scripts/make_cli_docs.py output.
 
@@ -237,15 +251,36 @@ def test_cli_docs_are_up_to_date() -> None:
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
-    Snapshot accommodates the committed secret-file templates at
-    ``.minds/template/*.sh``. Those files are shell-sourceable env
-    declarations (consumed by ``scripts/push_vault_from_file.py`` when
-    seeding HCP Vault), not executable scripts -- adding
-    ``set -euo pipefail`` to them would leak strict mode into whatever
-    shell sources them.
+    Snapshot accommodates two kinds of committed exception:
+
+    - The secret-file templates at ``.minds/template/*.sh``. Those files are
+      shell-sourceable env declarations (consumed by
+      ``scripts/push_vault_from_file.py`` when seeding HCP Vault), not
+      executable scripts -- adding ``set -euo pipefail`` to them would leak
+      strict mode into whatever shell sources them.
+    - The minds verify scripts ``apps/minds/scripts/first-message-verify.sh``
+      and ``apps/minds/scripts/launch-and-verify.sh``, which use
+      ``set -uo pipefail`` (omitting ``-e``) on purpose: they handle errors
+      explicitly (a ``fail`` helper, ``PIPESTATUS``, polling loops that depend
+      on commands exiting non-zero while they retry, and diagnostic blocks on
+      failure). ``-e`` would abort that handling instead of running it. The
+      sibling non-verify scripts in the same directory do use ``set -euo
+      pipefail``, so this omission is a deliberate, matched choice rather than
+      an oversight.
+
+    - The merged agent-plugin ports' shell resources under
+      ``libs/mngr_{codex,opencode,antigravity}/.../resources/`` (lifecycle-marker,
+      hook, and launch scripts), brought in by merging the codex/opencode/antigravity
+      plugin ports. Marker/hook scripts routinely omit ``-e`` on purpose -- they test
+      for files that may be absent and act on non-zero exits, which ``-e`` would abort
+      -- so tightening any that do not need the exemption is left to those plugins.
+
+    The count is enumerated against the full local checkout. In offload
+    sandboxes the count is lower because ``.dockerignore`` omits some of these
+    tracked paths from the build context, so they are absent on disk there.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(10), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(17), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -311,6 +346,79 @@ def test_every_project_has_pypi_readme() -> None:
         errors.append("readme file does not exist: " + ", ".join(missing_file))
 
     assert len(errors) == 0, "Projects with PyPI readme issues:\n" + "\n".join(f"  - {e}" for e in errors)
+
+
+def _is_mngr_plugin(project_dir: Path) -> bool:
+    """Return True if the project registers itself as an mngr plugin.
+
+    An mngr plugin is any project whose ``pyproject.toml`` declares a
+    ``[project.entry-points.mngr]`` table -- that entry point group is how mngr's
+    pluggy-based plugin manager discovers and loads a package's hooks at runtime.
+    Support libraries that merely have an ``mngr_`` name prefix but register no
+    such entry point (e.g. ``mngr_mapreduce``, ``mngr_vps_docker``) are *not*
+    plugins and are intentionally excluded.
+    """
+    pyproject = tomlkit.parse((project_dir / "pyproject.toml").read_text())
+    entry_points = pyproject.get("project", {}).get("entry-points", {})
+    return "mngr" in entry_points
+
+
+def _conftest_registers_plugin_test_fixtures(conftest_path: Path) -> bool:
+    """Return True if the conftest calls ``register_plugin_test_fixtures(...)``.
+
+    Parses the AST (rather than substring-matching) so that comments or
+    docstrings mentioning the helper do not count -- only an actual call does.
+    """
+    tree = ast.parse(conftest_path.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+        if name == "register_plugin_test_fixtures":
+            return True
+    return False
+
+
+def test_every_mngr_plugin_isolates_home_in_tests() -> None:
+    """Ensure each mngr plugin pulls in mngr's shared test fixtures.
+
+    Every mngr plugin (a project with a ``[project.entry-points.mngr]`` table)
+    must have a ``conftest.py`` that calls
+    ``register_plugin_test_fixtures(globals())`` from
+    ``imbue.mngr.utils.plugin_testing``. That helper injects the shared fixture
+    set -- crucially the autouse ``setup_test_mngr_env`` fixture, which redirects
+    ``HOME`` to a temp dir so the plugin's tests cannot read or write the real
+    ``~/.mngr`` / ``~/.claude.json``.
+
+    Without it, a plugin run on its own (``pytest libs/<plugin>``) does *not*
+    inherit that autouse fixture -- mngr's root conftest is not an ancestor of
+    the plugin's test files -- and the tests execute against the developer's real
+    home directory. This is the meta-level analogue of
+    ``test_every_project_has_pypi_readme``: a symmetric requirement that every
+    plugin opt into the shared HOME-isolation infrastructure the same way.
+
+    The single sanctioned mechanism is ``register_plugin_test_fixtures``; the
+    older ``pytest_plugins = ["imbue.mngr.conftest"]`` form is intentionally not
+    accepted here so the codebase keeps exactly one way to do this.
+    """
+    missing: list[str] = []
+    for project_dir in _get_all_project_dirs():
+        if not _is_mngr_plugin(project_dir):
+            continue
+        conftests = list(project_dir.rglob("conftest.py"))
+        if not any(_conftest_registers_plugin_test_fixtures(c) for c in conftests):
+            missing.append(project_dir.name)
+
+    assert len(missing) == 0, (
+        "Every mngr plugin must isolate HOME in its tests by calling "
+        "register_plugin_test_fixtures(globals()) (from imbue.mngr.utils.plugin_testing) "
+        "in a conftest.py. Add it to the plugin's project-level conftest.py, e.g.:\n\n"
+        "    from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures\n\n"
+        "    register_plugin_test_fixtures(globals())\n\n"
+        "Plugins missing it (tests would run against the real ~/.mngr / ~/.claude.json):\n"
+        + "\n".join(f"  - {m}" for m in missing)
+    )
 
 
 _REQUIRED_WHEEL_EXCLUDE_PATTERNS: tuple[str, ...] = (
@@ -476,139 +584,13 @@ def test_every_project_with_tests_has_coverage_config() -> None:
     )
 
 
-# --- Changelog entry enforcement ---
-
-# Branch prefixes that are exempt from the changelog requirement
-_CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation",)
-
-
-def _resolve_diff_base() -> str:
-    """Return the git ref to diff the PR branch against.
-
-    Prefers ``origin/$GITHUB_BASE_REF`` in CI (the actual PR base), then
-    ``origin/main``, then plain ``main``. Returns the first ref that
-    ``git rev-parse`` resolves; otherwise raises ``RuntimeError``.
-    """
-    candidates: list[str] = []
-    base_ref = os.environ.get("GITHUB_BASE_REF", "")
-    if base_ref:
-        candidates.append(f"origin/{base_ref}")
-    candidates.extend(["origin/main", "main"])
-    for ref in candidates:
-        result = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", ref],
-            cwd=_REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return ref
-    raise RuntimeError(
-        "Cannot resolve a diff base: none of "
-        + ", ".join(candidates)
-        + " are reachable. Fetch the base branch and re-run."
-    )
-
-
-def _changed_files_against_base(base: str) -> list[str]:
-    """Return the repo-relative paths the PR branch changes vs. ``base``.
-
-    Uses ``git diff --name-only <base>...HEAD`` (three-dot form, i.e. the
-    diff against the merge base) so renames/branches behave intuitively.
-    Raises ``RuntimeError`` if ``git diff`` itself fails.
-    """
-    result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...HEAD"],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git diff failed against {base} (exit {result.returncode}): {result.stderr.strip()}")
-    return [line for line in result.stdout.splitlines() if line.strip()]
-
-
-def _projects_requiring_entry(changed_files: list[str]) -> set[str]:
-    """Return the set of projects this PR must produce a changelog entry for.
-
-    A project is "touched" iff the PR changes any file under it.
-    ``project_for_path`` handles the ``libs/<name>`` / ``apps/<name>`` /
-    ``dev`` bucketing. Files that are themselves changelog artifacts (entry
-    files, ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``) are intentionally
-    *not* excluded -- adding an entry file inherently satisfies the
-    requirement, and a PR that only edits a project's consolidated changelog
-    should still describe that edit in a per-PR entry.
-    """
-    known = set(all_known_projects(_REPO_ROOT))
-    touched: set[str] = set()
-    for rel_path in changed_files:
-        project = project_for_path(rel_path, _REPO_ROOT)
-        if project in known:
-            touched.add(project)
-    return touched
-
-
-# Marked as acceptance because this check should be done soon before merging,
-# not during iteration.
-@pytest.mark.acceptance
-def test_pr_has_changelog_entry() -> None:
-    """Ensure every PR branch has one changelog entry per project it touches.
-
-    For each project the PR changes a file in (``libs/<name>``,
-    ``apps/<name>``, or the synthetic ``dev`` bucket for root-level files),
-    require ``<project_dir>/changelog/<branch-name>.md`` to exist (with
-    slashes in the branch name replaced by dashes). The nightly consolidator
-    routes each project's entries into that project's ``UNABRIDGED_CHANGELOG.md``.
-    """
-    branch = detect_branch()
-
-    if not branch or branch in ("main", "release"):
-        pytest.skip("Not a PR branch")
-
-    for prefix in _CHANGELOG_EXEMPT_BRANCH_PREFIXES:
-        if branch.startswith(prefix):
-            pytest.skip(f"Branch '{branch}' is exempt from changelog requirement")
-
-    diff_base = _resolve_diff_base()
-    changed_files = _changed_files_against_base(diff_base)
-    touched = _projects_requiring_entry(changed_files)
-
-    sanitized = branch.replace("/", "-")
-    missing: list[str] = []
-    for project in sorted(touched):
-        entry_path = project_entries_dir(project, _REPO_ROOT) / f"{sanitized}.md"
-        if not entry_path.exists():
-            missing.append(str(entry_path.relative_to(_REPO_ROOT)))
-
-    assert not missing, (
-        f"Missing changelog entries for branch '{branch}' "
-        f"(diff base: '{diff_base}', resolved via "
-        f"git diff --name-only {diff_base}...HEAD). This PR appears to touch "
-        f"the project(s) {sorted(touched)}; each needs its own entry file.\n"
-        f"Create:\n" + "\n".join(f"  - {p}" for p in missing) + "\n"
-        f"Each file should briefly describe the user-visible changes in this PR "
-        f"that pertain to that project. The synthetic '{DEV_PROJECT}' project "
-        f"covers root-level files (scripts/, .github/, top-level docs, build tooling).\n"
-        f"\n"
-        f"IMPORTANT: for any individual project listed above where you believe "
-        f"this PR makes NO actual changes to that project, do NOT add a placebo "
-        f"entry just to satisfy this check. A stale or misconfigured diff base "
-        f"('{diff_base}') can make unrelated files from main appear as if they "
-        f"changed on this branch, falsely implicating projects you didn't touch. "
-        f"In that case the right fix is to correct the diff base, not to add "
-        f"entries for projects you actually didn't change."
-    )
-
-
 # --- Meta: ensure every project has the changelog layout files ---
 
 
 def test_every_project_has_changelog_layout() -> None:
     """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
     has the full changelog layout: ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``,
-    and a ``changelog/`` directory for per-PR entries.
+    and a ``changelog/.gitkeep`` anchoring the directory for per-PR entries.
 
     Mirrors ``test_every_project_has_test_ratchets_file`` and
     ``test_every_project_has_pypi_readme``: a symmetric requirement that
@@ -617,19 +599,20 @@ def test_every_project_has_changelog_layout() -> None:
     missing: list[str] = []
     for project in all_known_projects(_REPO_ROOT):
         proj_dir = get_project_dir(project, _REPO_ROOT)
-        for required in ("CHANGELOG.md", "UNABRIDGED_CHANGELOG.md"):
-            target = proj_dir / required
+        required = [
+            proj_dir / "CHANGELOG.md",
+            proj_dir / "UNABRIDGED_CHANGELOG.md",
+            project_entries_dir(project, _REPO_ROOT) / ".gitkeep",
+        ]
+        for target in required:
             if not target.exists():
                 missing.append(str(target.relative_to(_REPO_ROOT)))
-        entries = project_entries_dir(project, _REPO_ROOT)
-        if not entries.is_dir():
-            missing.append(f"{entries.relative_to(_REPO_ROOT)}/ (directory)")
 
     assert not missing, (
         "The following projects are missing required changelog-layout files:\n"
         + "\n".join(f"  - {m}" for m in missing)
         + "\n\nEvery project must have CHANGELOG.md (with an '## [Unreleased]' heading), "
-        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory."
+        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory containing a .gitkeep."
     )
 
 

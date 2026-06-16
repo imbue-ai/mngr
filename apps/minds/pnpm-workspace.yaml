@@ -6,6 +6,21 @@ onlyBuiltDependencies:
 # freshly-compromised release therefore cannot be pulled in until it has had
 # time to be noticed and yanked. Only bites during resolution (e.g. `pnpm
 # install` without --frozen-lockfile, `pnpm add`, `pnpm update`); frozen
-# installs replay the existing lockfile unaffected. Available since pnpm
-# 10.16.0 (this app pins 10.33.4).
+# installs replay the existing lockfile unaffected.
 minimumReleaseAge: 20160
+minimumReleaseAgeExclude:
+  - latchkey
+  - "@imbue-ai/detent"
+
+# ToDesktop builds every platform target from one host, but pnpm (like
+# npm) only installs optional deps matching the build host's
+# OS/arch/libc. Without these knobs, scripts/build.js's `pnpm deploy`
+# would omit the cross-platform native prebuilds (@napi-rs/keyring-*,
+# playwright fsevents, ...) and the shipped resources/latchkey/ would
+# crash on user platforms different from the builder's. Every variant
+# is already resolved in pnpm-lock.yaml, so this only changes WHICH
+# resolved entries get materialized, not which versions are picked.
+supportedArchitectures:
+  os: [current, darwin, linux, win32]
+  cpu: [current, x64, arm64]
+  libc: [current, glibc, musl]

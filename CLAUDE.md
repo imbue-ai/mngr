@@ -28,6 +28,7 @@ Only after doing all of the above should you begin writing code.
 
 # Important commands and conventions:
 
+- The `mngr` on your PATH is the dev shim (`scripts/mngr`), which routes `mngr` (and anything that shells out to it, e.g. minds) to the checkout you're working in instead of a stale global install. A pre-commit hook installs it automatically (a symlink in `~/.local/bin`) and verifies it's on PATH; if it fails, put `~/.local/bin` on your PATH ahead of any venv bin (then `hash -r`) -- do not bypass it.
 - Never run `uv sync`, always run `uv sync --all-packages` instead
 - Never pipe the output of a non-instant command through `grep`, `jq`, `awk`, `head`, `tail`, or similar without preserving the full output. If you later need something that was discarded, you have to rerun the entire command. Instead, write the output to a file first and then filter the file, or use `tee` to capture and filter simultaneously (e.g. `some_command | tee /tmp/some_command_output.txt | grep pattern`).
 
@@ -39,6 +40,8 @@ Only after doing all of the above should you begin writing code.
 - During your final reflection, if you see a potentially better way to do something (e.g. by using an existing library or reusing existing code), flag that as a potential task for future improvement.
 - Never use emojis. Remove any emojis you see in the code or docs whenever you are modifying that code or those docs.
 - Be concise in your communications. Don't hype up your results, say "perfect!", or use emojis. Be serious and professional.
+- All changes should have a corresponding changelog entry in the correct project!
+- During your final reflection, if you notice that there was no changelog entry for a change, fix it immediately!  And definitely flag it.
 
 # When coding, follow these guidelines:
 
@@ -56,9 +59,10 @@ Only after doing all of the above should you begin writing code.
 - Use the shared fixtures (`temp_host_dir`, `temp_mngr_ctx`, `local_provider`, etc.) instead of creating your own.
 - Do NOT create tests for test utilities (e.g. never create `testing_test.py`). Code in `testing.py` and `conftest.py` is exercised by the tests that use it and does not need its own test file.
 - Do NOT create tests that code raises NotImplementedError.
-- If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit.
+- If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit. First investigate *why* the test is flaky. If it can be made more robust, do so. If the test is correct but it fundamentally requires additional time, increase the timeout for that individual test (but do NOT allow unreasonably long timeouts--in such a case, prefer to leave the test marked as flaky instead, eg, if this happened because of a weird infrastructure level fluke that sometimes makes an operation take *much* longer).
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
+- `mngr` is installed by end users from PyPI, so the built wheel must be self-contained: it only packages the `imbue` package (`packages = ["imbue"]`), so production code must not read files outside it at runtime unless they're shipped into the package (e.g. via wheel `force-include`, as the help-topic docs are).
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
 # Running tests
@@ -69,6 +73,7 @@ Only after doing all of the above should you begin writing code.
 - When running pytest locally with a Bash tool timeout, always set `PYTEST_MAX_DURATION_SECONDS` to match the timeout (in seconds). For example, if using a 2-minute timeout: `PYTEST_MAX_DURATION_SECONDS=120 just test-quick ...`. This ensures the pytest global lock file records a deadline, allowing other pytest processes to break a stale lock if this one gets killed by the timeout.
 - Offload produces results in test-results/ (junit.xml and .coverage files). Local pytest produces files in .test_output/ for things like slow tests and coverage reports.
 - Acceptance tests also run in CI via offload (`just test-offload-acceptance`). Do *not* run all acceptance tests locally to validate changes--just allow CI to run them automatically after you finish responding.
+- Release tests do *not* run in CI. If you are developing or modifying release tests, CI will not verify them for you, so you must run them yourself locally.
 - If you need to run a specific acceptance or release test to write or fix it, iterate on that specific test locally by calling "just test <full_path>::<test_name>" from the root of the git checkout. Do this rather than re-running all tests in CI.
 - Note that tasks are *not* allowed to finish without A) all tests passing in CI, B) running /autofix to verify and fix code issues, and C) running /verify-conversation to review the conversation for behavioral issues.
 - Before finishing your response, create a draft PR for the current branch using `gh pr create --draft`. If a PR already exists for the branch, skip this step. The stop hook will then poll CI checks on the PR.
@@ -140,6 +145,7 @@ Every PR must include one changelog entry file **per project it touches**. CI wi
   - Example: branch `mngr/add-mngr-feature-and-minds-fix` touches `libs/mngr` and `apps/minds`, so create both `libs/mngr/changelog/mngr-add-mngr-feature-and-minds-fix.md` and `apps/minds/changelog/mngr-add-mngr-feature-and-minds-fix.md`.
   - A PR that only edits `scripts/` and CI workflows is a `dev`-only PR: `dev/changelog/<branch>.md`.
 - Each file should briefly describe the user-visible changes in the PR that pertain to *that* project. Same-PR entries can repeat shared context if it helps readers of each project's changelog.
+  - If the entry uses a list, separate the bullets with a double newline (a blank line between each bullet).
 - A nightly agent fans each project's entries into that project's `<project_dir>/UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `<project_dir>/CHANGELOG.md` (concise AI-generated summary).
 - The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
 - There is no separate "this file is a changelog file, so it doesn't count" exemption: adding a `<project_dir>/changelog/<branch>.md` entry is itself an edit under that project, and inherently satisfies the requirement. A PR that *only* touches a project's consolidated `CHANGELOG.md` (e.g. a manual correction) still owes a per-PR entry describing the correction.

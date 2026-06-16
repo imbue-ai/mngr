@@ -36,10 +36,13 @@ from typing import IO
 import httpx
 from loguru import logger
 from playwright.sync_api import Browser
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.desktop_client.templates import FALLBACK_BRANCH as _FORM_DEFAULT_BRANCH
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
@@ -58,6 +61,11 @@ _FCT_FALLBACK_BRANCH: Final[str] = "main"
 # re-encoding the localhost-origin contract a second time.
 _BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhost:\d+)(?:/|$)")
 _CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/_chrome(?:/|$|\?)")
+# The modal overlay view loads ``/inbox`` (optionally with ``?selected=<id>``)
+# when the inbox modal is shown. Like the chrome views, it lives on the
+# backend origin but is not the content view; exclude it so the runner does
+# not pick it up if the modal has ever been opened.
+_INBOX_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/inbox(?:/|$|\?)")
 # The agent subdomain URL the create flow redirects to once the workspace's
 # ``system_interface`` is reachable. The desktop client wraps that origin in
 # the mngr_forward plugin, so the port may differ from the bare backend.
@@ -78,6 +86,16 @@ _CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
 _BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
 _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
+_CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
+
+# The onboarding wizard's screen-advance is driven by creating.js, a deferred
+# script that attaches its ``.js-next`` click handlers after the page renders.
+# Playwright's ``click`` waits for the button to be visible/stable but not for
+# that handler to be wired up, so an early click can silently no-op and leave
+# the wizard on the same screen. We click and confirm the screen advanced,
+# retrying the click if it was lost.
+_ONBOARDING_ADVANCE_TIMEOUT_MS: Final[int] = 5_000
+_ONBOARDING_CLICK_ATTEMPTS: Final[int] = 3
 
 # Pre-tested CSS selector against the system_interface frontend at
 # .external_worktrees/forever-claude-template/apps/system_interface/.
@@ -122,6 +140,15 @@ def _current_mngr_branch() -> str | None:
     Returning ``None`` for a detached HEAD lets the FCT resolver skip the
     "branch matching" step rather than asking FCT for a ref named ``HEAD``.
 
+    In CI the checkout is a detached HEAD, so ``git rev-parse --abbrev-ref
+    HEAD`` returns ``HEAD`` and the branch-matching step would never fire --
+    meaning a PR that needs a same-named FCT branch (e.g. one changing the
+    mngr<->FCT config contract) could not be tested against it. GitHub Actions
+    exposes the real branch in the environment, so consult that first:
+    ``GITHUB_HEAD_REF`` is the PR source branch (set only for pull_request
+    events); ``GITHUB_REF_NAME`` is the branch for push events (but a
+    ``<n>/merge`` ref for PRs, which we ignore).
+
     Any failure to invoke git (missing ``.git`` -- e.g. when the runner
     executes inside a Modal sandbox whose source tree was uploaded via
     ``add_local_dir`` and the worktree's ``.git`` file points at a
@@ -130,6 +157,12 @@ def _current_mngr_branch() -> str | None:
     "branch unknown", which routes the caller through the documented
     fall-back to FCT ``main`` rather than crashing the whole run.
     """
+    ci_head_ref = os.environ.get("GITHUB_HEAD_REF")
+    if ci_head_ref:
+        return ci_head_ref
+    ci_ref_name = os.environ.get("GITHUB_REF_NAME")
+    if ci_ref_name and not ci_ref_name.endswith("/merge"):
+        return ci_ref_name
     try:
         result = subprocess.run(
             ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
@@ -176,7 +209,16 @@ def _fct_remote_has_branch(branch: str) -> bool:
 
 
 def _shallow_clone_fct(branch: str, destination: Path) -> Path:
-    """Shallow-clone ``branch`` of the FCT public remote into ``destination``."""
+    """Shallow-clone ``branch`` of the FCT public remote into ``destination``.
+
+    Also fetches any release tags into the clone. The minds create form's
+    default branch field (see ``FALLBACK_BRANCH`` in templates.py) pins
+    to an annotated FCT tag (e.g. ``v0.3.0``); without this extra fetch,
+    a depth-1 clone of an unrelated branch does not have the tag's commit,
+    and the downstream ``mngr create`` clone of the form's branch field
+    would fail with ``Remote branch v0.3.0 not found``. Cheap (a handful
+    of extra refs) and keeps test create flows aligned with production.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", branch, _FCT_REMOTE, str(destination)],
@@ -185,7 +227,65 @@ def _shallow_clone_fct(branch: str, destination: Path) -> Path:
         text=True,
         timeout=120,
     )
+    # ``--depth 1`` would only fetch the tag's tip, but ``--tags`` already
+    # implies fetching all tag-pointed commits at shallow depth; combine
+    # so each tag's target commit is reachable without filling out full
+    # branch history.
+    subprocess.run(
+        ["git", "-C", str(destination), "fetch", "--depth", "1", "--tags", "origin"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    # The create form pre-fills its branch field with `_FORM_DEFAULT_BRANCH`
+    # (templates.py `FALLBACK_BRANCH`), so the spawned `mngr create` runs
+    # `git checkout <that ref>` in this very clone. Leaving the clone on
+    # the originally-cloned branch turns that into a real checkout that
+    # rejects any uncommitted edits the test fixture made to opt files in
+    # (e.g. `.mngr/settings.toml is_allowed_in_pytest`). Pre-positioning
+    # to the form's default makes that downstream checkout a no-op even
+    # when the working tree is dirty. Best effort: if the ref is not
+    # reachable (e.g. tag not present on FCT remote yet), leave the clone
+    # as-is and let `mngr create` surface the resulting error.
+    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
     return destination
+
+
+def _checkout_best_effort(repo: Path, ref: str) -> None:
+    verify = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if verify.returncode != 0:
+        logger.info("Skipping pre-checkout of FCT clone to {!r}: ref not reachable", ref)
+        return
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "--detach", ref],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    # Point FETCH_HEAD at the same commit we just checked out. The minds create
+    # flow runs ``git checkout -B <ref> FETCH_HEAD`` in this clone; with HEAD
+    # already on <ref>, making FETCH_HEAD == HEAD turns that into a true no-op
+    # that preserves the uncommitted ``is_allowed_in_pytest`` opt-in the test
+    # writes into ``.mngr/settings.toml``. Without this, FETCH_HEAD still points
+    # at the branch tip left by the earlier ``fetch --tags`` (a different
+    # commit, whose ``.mngr/settings.toml`` differs from the tag's), so the
+    # downstream checkout tries to switch content and aborts on the dirty file
+    # ("Your local changes ... would be overwritten by checkout"). Fetching from
+    # ``.`` is local-only (no network).
+    subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--no-tags", ".", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 def resolve_fct_path(scratch_dir: Path) -> Path:
@@ -216,6 +316,35 @@ def resolve_fct_path(scratch_dir: Path) -> Path:
         _FCT_FALLBACK_BRANCH,
     )
     return _shallow_clone_fct(_FCT_FALLBACK_BRANCH, destination)
+
+
+def materialize_isolated_fct(fct_source: Path, scratch_dir: Path) -> Path:
+    """Return a throwaway FCT working tree the caller may safely write into.
+
+    The pytest wrapper writes a ``is_allowed_in_pytest`` opt-in into the
+    returned tree's ``.mngr/settings.toml`` before ``mngr create`` mirrors
+    it into the workspace container. When ``fct_source`` is the operator's
+    ``.external_worktrees/forever-claude-template/`` checkout, that edit
+    must not land on the real file, so clone it into ``scratch_dir``
+    (committed state) and position it on the create form's default branch
+    (matching :func:`_shallow_clone_fct`). When ``fct_source`` is already a
+    throwaway clone (steps 2-3 of :func:`resolve_fct_path`), return it
+    unchanged.
+    """
+    if fct_source != _FCT_EXTERNAL_WORKTREE:
+        return fct_source
+    destination = scratch_dir / "fct_isolated"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Cloning FCT external worktree into {} to keep the operator's checkout pristine", destination)
+    subprocess.run(
+        ["git", "clone", str(fct_source), str(destination)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
+    return destination
 
 
 def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
@@ -254,14 +383,17 @@ def _build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[st
     """Return the env vars the Electron child process should inherit.
 
     Mirrors ``just minds-start``: passes the FCT path + agent name through
-    the ``MINDS_WORKSPACE_*`` prefill vars (honored only in dev tiers --
-    see ``_dev_only_workspace_default`` in templates.py), and scrubs any
+    the ``MINDS_WORKSPACE_*`` prefill vars (honored only when the explicit
+    opt-in ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is also set -- see
+    ``_operator_workspace_default`` in templates.py), and scrubs any
     ANTHROPIC creds the operator's shell might have exported so they
     don't silently leak into every workspace we create.
     """
     env = dict(os.environ)
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
     env["MINDS_WORKSPACE_NAME"] = workspace_name
+    # Opt into the local-worktree create-form defaults (see just minds-start).
+    env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
     # spawned `mngr create` subprocess finds FCT's .mngr/settings.toml
     # (which defines the `main` + `docker` create templates). The minds
@@ -316,8 +448,19 @@ def _launched_electron(
     workspace_git_url: Path,
     workspace_name: str,
     debug_port: int,
+    host_config_dir: Path | None = None,
 ) -> Iterator[subprocess.Popen[bytes]]:
     """Start the Electron app, yield the process, and always tear it down.
+
+    ``host_config_dir`` becomes the Electron process's cwd, so the
+    host-side ``mngr`` invocations the app spawns (e.g. the ``mngr auth
+    list`` account-discovery poll, ``mngr forward``) resolve their
+    project config by walking up from there instead of the mngr repo
+    root. The pytest wrapper points this at an isolated, opted-in config
+    tree so the real repo ``.mngr/`` (which carries ``is_allowed_in_pytest
+    = false`` plus a developer's untracked ``settings.local.toml``) is
+    never loaded under the pytest config guard. ``None`` keeps the mngr
+    repo root, which is what the snapshot script wants.
 
     SIGTERM with a ``_ELECTRON_SIGTERM_GRACE_SECONDS`` grace, then
     SIGKILL. The Electron main process owns the backend subprocess and
@@ -355,7 +498,7 @@ def _launched_electron(
     logger.info("Launching Electron: {}", " ".join(cmd))
     process = subprocess.Popen(
         cmd,
-        cwd=str(_REPO_ROOT),
+        cwd=str(host_config_dir or _REPO_ROOT),
         env=_build_electron_env(workspace_git_url, workspace_name),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -402,9 +545,11 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     """Return the Electron WebContentsView that serves the main content.
 
     Electron's BaseWindow has multiple WebContentsView's (chrome view,
-    content view, requests panel, sidebar). Each is its own CDP page. The
-    content view is the one whose URL is on the backend origin but is NOT
-    rooted at ``/_chrome``. We poll until that page exists because Electron
+    content view, sidebar, and a lazy modal overlay view). Each is its
+    own CDP page. The content view is the one whose URL is on the
+    backend origin and is not one of the chrome-owned surfaces: not
+    rooted at ``/_chrome`` (chrome / sidebar) and not the inbox modal
+    at ``/inbox``. We poll until that page exists because Electron
     spawns the backend asynchronously after launch.
     """
     deadline = time.monotonic() + timeout_seconds
@@ -418,6 +563,8 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
                 if not _BACKEND_ORIGIN_PATTERN.match(url):
                     continue
                 if _CHROME_PATH_PATTERN.match(url):
+                    continue
+                if _INBOX_PATH_PATTERN.match(url):
                     continue
                 logger.info("Picked Electron content page at {}", url)
                 return page
@@ -443,10 +590,10 @@ def _backend_origin_from_page(page: Page) -> str:
 def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     """Type ``expected_value`` into the form field if it isn't already there.
 
-    Handles both the prefilled-via-env-var case (dev tiers) and the
-    blank-form case (shared tiers like ``minds-staging`` where
-    ``_dev_only_workspace_default`` deliberately ignores the
-    ``MINDS_WORKSPACE_*`` env vars).
+    Handles both the prefilled-via-env-var case (when the opt-in
+    ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set) and the blank-form case
+    (a normal launch where ``_operator_workspace_default`` falls back to the
+    hardcoded defaults).
     """
     current_value = page.input_value(selector)
     if current_value == expected_value:
@@ -456,7 +603,32 @@ def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     page.fill(selector, expected_value)
 
 
-def destroy_agent_best_effort(workspace_name: str) -> None:
+def _advance_onboarding_screen(page: Page, screen_name: str) -> None:
+    """Click an onboarding screen's Next button and confirm the wizard advanced.
+
+    Waits for the screen's ``.js-next`` to be visible, clicks it, then waits for
+    that button to become hidden (``creating.js``'s ``showScreen`` toggles the
+    leaving screen's ``hidden`` class). Retries the click because Playwright's
+    ``click`` can land before the deferred ``creating.js`` attaches its handlers,
+    silently no-opping; without the retry the wizard appears stuck on the next
+    screen. Raises ``AssertionError`` if the screen never advances.
+    """
+    next_button = f'[data-screen="{screen_name}"] .js-next'
+    page.wait_for_selector(next_button, state="visible", timeout=10_000)
+    for _attempt in range(_ONBOARDING_CLICK_ATTEMPTS):
+        page.click(next_button)
+        try:
+            page.wait_for_selector(next_button, state="hidden", timeout=_ONBOARDING_ADVANCE_TIMEOUT_MS)
+            return
+        except PlaywrightTimeoutError:
+            logger.warning("Onboarding screen {!r} did not advance after click; retrying", screen_name)
+    raise AssertionError(
+        f"Onboarding screen {screen_name!r} did not advance after {_ONBOARDING_CLICK_ATTEMPTS} "
+        "clicks of its Next button (creating.js handlers may not have attached)"
+    )
+
+
+def destroy_agent_best_effort(workspace_name: str, config_project_dir: Path | None = None) -> None:
     """Tear down the mngr agent created during a run. Always survives.
 
     ``mngr destroy`` may legitimately fail (e.g. the run crashed before
@@ -466,13 +638,22 @@ def destroy_agent_best_effort(workspace_name: str) -> None:
     an agent into the host. The snapshot script does NOT call it -- the
     whole point of the snapshot is to capture the sandbox with the agent
     alive.
+
+    ``config_project_dir`` is exported as ``MNGR_PROJECT_CONFIG_DIR`` so
+    this subprocess loads the same isolated, opted-in config the pytest
+    wrapper built, rather than the repo's ``.mngr/`` (which would fail the
+    pytest config guard). Leave unset outside pytest.
     """
     cmd = ["uv", "run", "mngr", "destroy", workspace_name, "--force"]
     logger.info("Cleanup: {}", " ".join(cmd))
+    env = dict(os.environ)
+    if config_project_dir is not None:
+        env["MNGR_PROJECT_CONFIG_DIR"] = str(config_project_dir)
     try:
         completed = subprocess.run(
             cmd,
             cwd=str(_REPO_ROOT),
+            env=env,
             capture_output=True,
             text=True,
             timeout=120,
@@ -489,10 +670,66 @@ def destroy_agent_best_effort(workspace_name: str) -> None:
         )
 
 
+class WorkspaceCreationFailedError(RuntimeError):
+    """Raised when the Electron create flow surfaces its failure view.
+
+    Carries the human-readable text minds rendered into the loading
+    screen's ``#error-message`` element (whatever ``mngr create`` reported)
+    so a creation failure fails the run *fast* with the real cause, instead
+    of blocking until the full create-form navigation budget elapses. The
+    silent-hang this prevents is what turned a one-line "unknown runtime
+    'runsc'" docker error into an opaque 10-minute Playwright timeout.
+    """
+
+
+def _read_failure_message(page: Page) -> str:
+    """Return the text minds rendered into the failure view's '#error-message' element."""
+    message_element = page.query_selector("#error-message")
+    if message_element is None:
+        return "unknown error: the '#error-message' element was not present"
+    message = message_element.inner_text().strip()
+    return message or "unknown error: the '#error-message' element was empty"
+
+
+def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> None:
+    """Block until the create flow reaches the workspace or reports failure.
+
+    The minds create flow has two mutually exclusive terminal states after
+    the onboarding questions: a redirect to the ``agent-<id>.localhost``
+    workspace URL (success), or the loading screen's failure sub-view
+    (``#failure-view``) becoming visible (failure -- ``creating.js``'s
+    ``showFailure()`` un-hides it once the status poll/SSE reports FAILED).
+
+    Polls both rather than only waiting for the success URL (the old
+    behavior), so a creation failure raises ``WorkspaceCreationFailedError``
+    with the surfaced error text immediately instead of hanging until
+    ``timeout_seconds`` expires. Raises ``PlaywrightTimeoutError`` if neither
+    state is reached within the budget.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _AGENT_SUBDOMAIN_PATTERN.search(page.url):
+            return
+        try:
+            failure_is_visible = page.is_visible("#failure-view")
+        except PlaywrightError:
+            # A redirect to the workspace can destroy the execution context
+            # mid-check; loop so the next iteration re-reads page.url, which
+            # will match the success pattern and return.
+            failure_is_visible = False
+        if failure_is_visible:
+            raise WorkspaceCreationFailedError(f"Workspace creation failed: {_read_failure_message(page)}")
+        page.wait_for_timeout(_CREATE_OUTCOME_POLL_INTERVAL_MS)
+    raise PlaywrightTimeoutError(
+        f"Workspace neither became ready nor reported failure within {timeout_seconds}s (last URL: {page.url!r})"
+    )
+
+
 def create_workspace_via_electron(
     fct_path: Path,
     workspace_name: str,
     debug_port: int,
+    host_config_dir: Path | None = None,
 ) -> None:
     """Drive Electron to create a local Docker workspace from ``fct_path``.
 
@@ -508,8 +745,10 @@ def create_workspace_via_electron(
     - ``debug_port`` must be an unused TCP port (use :func:`find_free_port`).
     - ``MINDS_ROOT_NAME`` must already be set in ``os.environ`` (call
       :func:`ensure_minds_env_defaults` first or activate a minds env).
+    - ``host_config_dir`` is the cwd for the Electron process (see
+      :func:`_launched_electron`); leave unset outside pytest.
     """
-    with _launched_electron(fct_path, workspace_name, debug_port):
+    with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir):
         _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
@@ -522,25 +761,55 @@ def create_workspace_via_electron(
                 page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
                 page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
-                # The fields are inside the collapsed "Advanced options"
-                # section; opening the section first lets us see typed
-                # values during debugging and matches what a user would do.
+                # The repo field lives inside the collapsed "Configure..."
+                # panel's nested "Show advanced settings" section; open both
+                # so the field is visible (and to mirror what a user setting
+                # a non-default repo would do). ``#host_name`` is top-level.
+                page.click("#configure-toggle")
+                page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
                 page.click("#toggle-advanced")
                 page.wait_for_selector("#git_url:visible", timeout=5_000)
 
                 _ensure_field_value(page, "#host_name", workspace_name)
                 _ensure_field_value(page, "#git_url", str(fct_path))
-                # DOCKER + SUBSCRIPTION are the defaults when no account
-                # is selected; don't touch the launch_mode / ai_provider
-                # selects so this stays robust to future option
-                # reorderings in the form.
+                # Explicitly select the DOCKER compute provider: with no
+                # account selected the form now defaults to LIMA (a local VM
+                # that isn't available on the CI runner), so this test --
+                # which is specifically about local Docker -- must pin DOCKER
+                # rather than relying on the default. The select lives in the
+                # (now-open) "Configure..." panel. AI provider stays at its
+                # no-account default of SUBSCRIPTION.
+                page.select_option("#launch_mode", "DOCKER")
 
                 logger.info("Submitting create form")
                 page.click("#create-submit")
-                page.wait_for_url(
-                    _AGENT_SUBDOMAIN_PATTERN,
-                    timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
-                )
+
+                # Submitting starts creation in the background and lands on
+                # the onboarding question flow. Walk the three questions
+                # accepting their pre-selected defaults; finishing the last
+                # one enters the workspace (directly if creation already
+                # finished, otherwise via the loading screen, which redirects
+                # once creation completes).
+                page.wait_for_selector("#onboarding", state="attached", timeout=10_000)
+                # Walk the three onboarding questions, accepting each
+                # pre-selected default. q1/q2 advance to the next question
+                # screen; confirm each advance (retrying the click) to absorb
+                # the creating.js handler-attach race. The final (q3) Next runs
+                # finishQuestions(), which shows the loading screen or redirects
+                # straight to the workspace -- the workspace-ready-or-failure wait
+                # below covers that transition (and the failure case), and by q3
+                # creating.js has long since loaded.
+                _advance_onboarding_screen(page, "q1")
+                _advance_onboarding_screen(page, "q2")
+                q3_next_button = '[data-screen="q3"] .js-next'
+                page.wait_for_selector(q3_next_button, state="visible", timeout=10_000)
+                page.click(q3_next_button)
+
+                # Race the workspace-ready redirect against the create flow's
+                # failure view, so a `mngr create` failure (e.g. an unregistered
+                # docker runtime) fails this run fast with the surfaced error
+                # rather than blocking the whole navigation budget.
+                _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
                 logger.info("Workspace ready at {}", page.url)
 
                 page.wait_for_selector(

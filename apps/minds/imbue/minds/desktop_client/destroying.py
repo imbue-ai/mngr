@@ -10,33 +10,36 @@ guarantees the opposite -- every spawned process is killed on group
 exit -- so it is structurally the wrong tool here. Same justification as
 ``apps/minds/imbue/minds/desktop_client/latchkey/_spawn.py``.
 
+A minds destroy is a whole-*host* teardown: the host also runs a
+``system-services`` agent, so the wrapper fans out over every agent on the
+host (see :func:`_build_destroy_command`) -- destroying only the workspace
+agent would leave the host (and its cloud instance) alive.
+
 Status is derived from disk; there is no state.json. For each in-flight
 destroy ``<paths.data_dir>/destroying/<agent_id>/`` holds:
 
   - ``pid`` (single-line int): the detached bash wrapper's PID.
   - ``process_start`` (single-line float): the wrapper's psutil
-    ``create_time()``, so a recycled PID is not mistaken for a live
-    wrapper.
+    ``create_time()``, so a recycled PID is not mistaken for a live wrapper.
   - ``output.log``: combined stdout+stderr from the wrapper.
   - ``result`` (single-line int): the wrapper's exit code, written
-    atomically the instant ``mngr destroy`` finishes. Its presence is
-    the authoritative completion signal.
+    atomically the instant ``mngr destroy`` finishes. Its presence is the
+    authoritative completion signal.
 
 :py:class:`DestroyingStatus` is computed as:
 
-  - ``result`` present, exit code 0        -> DONE   (caller deletes the dir)
+  - ``result`` present, exit code 0        -> DONE   (caller finalizes the record)
   - ``result`` present, exit code non-zero -> FAILED (kept for inspection)
   - ``result`` absent, pid alive           -> RUNNING
   - ``result`` absent, pid dead            -> FAILED (wrapper died mid-destroy)
 
-Completion is read from the wrapper's own recorded exit code rather than
-from the lagging ``mngr observe`` discovery cache, so the status is
-correct the instant the wrapper exits and survives a minds restart: a
-destroy that succeeded reads DONE and one that genuinely failed reads
-FAILED, with no spurious FAILED flicker while discovery catches up.
+Reading the wrapper's own recorded exit code -- rather than inferring the
+host's state from the lagging ``mngr observe`` discovery cache -- keeps the
+status correct the instant the wrapper exits and across a minds restart:
+no spurious FAILED while discovery catches up, and a genuinely failed
+destroy is never mistaken for DONE (which would orphan a still-billing host).
 """
 
-import json
 import os
 import shlex
 import shutil
@@ -56,6 +59,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 _DESTROYING_DIR_NAME: Final[str] = "destroying"
 _PID_FILE_NAME: Final[str] = "pid"
@@ -195,94 +199,32 @@ def _read_process_start(paths: WorkspacePaths, agent_id: AgentId) -> float | Non
         return None
 
 
-def lookup_host_id(agent_id: AgentId, env: dict[str, str] | None = None, timeout_seconds: float = 10.0) -> str | None:
-    """Look up the host_id for ``agent_id`` via ``mngr list --include 'id == "..."' --format json``.
-
-    Used by the API handler to compute host_id *synchronously* before
-    spawning the detached destroy, so the spawned bash wrapper can do
-    host-mates fanout without a second ``mngr list`` round-trip.
-
-    Returns ``None`` on any failure (mngr exit non-zero, malformed JSON,
-    no agents matched). Callers fall back to single-agent destroy in
-    that case.
-    """
-    process_env = dict(os.environ) if env is None else dict(env)
-    # Fixed mngr binary + a filter expression we built from a validated AgentId,
-    # no untrusted input on argv -- ruff would flag the bare subprocess.run via
-    # S603 if it were in our select list (it's not).
-    try:
-        result = subprocess.run(
-            [
-                MNGR_BINARY,
-                "list",
-                "--include",
-                f'id == "{agent_id}"',
-                "--format",
-                "json",
-            ],
-            capture_output=True,
-            text=True,
-            env=process_env,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        logger.warning("lookup_host_id({}) failed: {}", agent_id, e)
-        return None
-    if result.returncode != 0:
-        logger.debug(
-            "lookup_host_id({}) returned exit {}: {}",
-            agent_id,
-            result.returncode,
-            result.stderr.strip()[:200],
-        )
-        return None
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        logger.warning("lookup_host_id({}) returned non-JSON: {}", agent_id, e)
-        return None
-    agents = data.get("agents") if isinstance(data, dict) else None
-    if not agents:
-        return None
-    host = agents[0].get("host", {}) if isinstance(agents[0], dict) else {}
-    host_id = host.get("id") if isinstance(host, dict) else None
-    return host_id if isinstance(host_id, str) and host_id else None
-
-
-def _build_destroy_command(
-    agent_id: AgentId,
-    host_id: str | None,
-    result_path: Path,
-    mngr_binary: str = MNGR_BINARY,
-) -> list[str]:
+def _build_destroy_command(host_id: HostId, result_path: Path, mngr_binary: str = MNGR_BINARY) -> list[str]:
     """Build the bash command run by the detached subprocess.
 
-    With a host_id, fans out to every agent on the same host (matches the
-    pre-detached behavior in ``AgentCreator._destroy_all_agents_on_host``).
-    Without a host_id (lookup failed before spawn), falls back to
-    single-agent destroy.
+    Always fans out to *every* agent on the host (the workspace agent plus the
+    constant ``system-services`` agent that every minds workspace runs in the
+    same container). Destroying only the workspace agent would leave
+    system-services -- and therefore the host and its cloud instance -- alive,
+    so there is deliberately no single-agent path here: a minds workspace
+    teardown is a *host* teardown.
 
     The wrapper records ``mngr destroy``'s exit code to ``result_path``
-    atomically (write-then-rename) once it finishes; this is the
-    authoritative completion signal :py:func:`read_destroying` derives
-    status from. ``set -o pipefail`` ensures a failed ``mngr list`` in the
-    fanout pipe surfaces as a non-zero result rather than being masked by
-    the trailing ``mngr destroy`` exiting 0 on empty input.
+    atomically (write-then-rename) once it finishes; this is the authoritative
+    completion signal :func:`read_destroying` derives status from. ``set -o
+    pipefail`` ensures a failed ``mngr list`` surfaces as a non-zero result
+    rather than being masked by the trailing ``mngr destroy`` exiting 0 on
+    empty input.
 
-    Lease release is intentionally NOT chained here. For imbue_cloud
-    agents the lease lifecycle is owned by
-    ``mngr_imbue_cloud.instance.delete_host``, called by mngr's GC after
-    the destroyed-host grace period. Eagerly chaining
-    ``mngr imbue_cloud hosts release`` from minds was duplicating that
-    responsibility in two places.
+    Lease release is not chained explicitly because ``mngr destroy`` handles
+    it: when the last agent on a host is destroyed, ``mngr destroy`` calls
+    ``provider.destroy_host`` which (for ``imbue_cloud``) wipes the on-VPS data
+    and releases the lease back to the pool, and (for the VPS providers)
+    terminates the instance.
     """
-    if host_id is not None:
-        # ``mngr list ... --ids`` writes one id per line; ``mngr destroy -f -`` reads
-        # ids from stdin. The pipe handles host-mates fanout in one shot.
-        destroy = f"{mngr_binary} list --include 'host.id == \"{host_id}\"' --ids | {mngr_binary} destroy -f -"
-    else:
-        destroy = f"{mngr_binary} destroy {agent_id} -f"
+    # ``mngr list ... --ids`` writes one id per line; ``mngr destroy -f -`` reads
+    # ids from stdin. The pipe handles host-mates fanout in one shot.
+    destroy = f"{mngr_binary} list --include 'host.id == \"{host_id}\"' --ids | {mngr_binary} destroy -f -"
     final = shlex.quote(str(result_path))
     partial = shlex.quote(str(result_path) + _RESULT_TMP_SUFFIX)
     shell_command = (
@@ -305,23 +247,32 @@ def _build_destroy_command(
 def start_destroy(
     agent_id: AgentId,
     paths: WorkspacePaths,
-    host_id: str | None,
+    host_id: HostId,
     env: dict[str, str] | None = None,
+    mngr_binary: str = MNGR_BINARY,
 ) -> DestroyingRecord:
-    """Spawn the detached destroy subprocess.
+    """Spawn the detached destroy subprocess that tears down ``host_id``.
 
-    Caller (the desktop-client API handler) is expected to have already
-    looked up ``host_id`` via ``mngr list`` -- if that lookup failed,
-    pass ``None`` and we fall back to a single-agent destroy.
+    The caller (the desktop-client API handler) resolves ``host_id`` from the
+    in-memory backend resolver -- which always knows it for a workspace the
+    user can see -- and must refuse to destroy when it can't, rather than
+    passing a sentinel. ``host_id`` is required: there is no single-agent
+    fallback (see :func:`_build_destroy_command`).
 
-    The subprocess is detached (``start_new_session=True``), so it
-    survives a minds-backend exit. stdout+stderr go to a single
-    ``output.log`` file; the wrapper's PID is written to ``pid`` and its
-    create_time to ``process_start``.
+    The subprocess is detached (``start_new_session=True``), so it survives a
+    minds-backend exit. stdout+stderr go to a single ``output.log`` file; the
+    wrapper's PID is written to ``pid`` and its create_time to ``process_start``
+    (so a later status read can reject a recycled PID), and the wrapper itself
+    records its exit code to ``result`` on completion.
 
-    Idempotent: if a destroy is already running for this agent
-    (``pid`` exists and is alive), we return the existing record
-    without spawning a second process.
+    Idempotent: if a destroy is already running for this agent (``pid`` exists
+    and is alive), we return the existing record without spawning a second
+    process.
+
+    ``mngr_binary`` defaults to the absolute path resolved at import time
+    (so the packaged app finds mngr in its venv even when Electron's PATH
+    doesn't include the venv bin dir). Tests override this with ``"mngr"``
+    so a PATH-prepended fake mngr binary can be picked up.
     """
     existing = read_destroying(agent_id, paths)
     if existing is not None and existing.status == DestroyingStatus.RUNNING:
@@ -343,13 +294,13 @@ def start_destroy(
     result_path.unlink(missing_ok=True)
     process_start_path.unlink(missing_ok=True)
 
-    command = _build_destroy_command(agent_id, host_id, result_path)
+    command = _build_destroy_command(host_id, result_path, mngr_binary=mngr_binary)
     log_handle = log_path.open("ab")
     try:
         process_env = dict(os.environ) if env is None else dict(env)
-        # bash -c with a command string we built from a validated AgentId +
-        # the host_id we just looked up via mngr list. The S603 ruff rule is
-        # not in our select list; intent is documented for future readers.
+        # bash -c with a command string we built from a host_id resolved from
+        # discovery (no untrusted input). The S603 ruff rule is not in our
+        # select list; intent is documented for future readers.
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,

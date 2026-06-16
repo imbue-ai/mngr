@@ -15,6 +15,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from scripts.release import _gate_release_on_pending_changelog_entries  # noqa: E402
 from scripts.release import _pluralize_entry  # noqa: E402
+from scripts.release import _realign_dep_string  # noqa: E402
 from scripts.release import update_exclude_newer  # noqa: E402
 
 
@@ -78,8 +79,40 @@ def test_gate_blocks_and_returns_false_with_pending_entries(
     assert "2 pending changelog entries" in err
     assert "libs/mngr/changelog/fake-a.md" in err
     assert "libs/mngr_lima/changelog/fake-b.md" in err
-    # The error path prints the on-demand command for the user to copy.
-    assert "mngr schedule run" in err
+    # The error path points the user at the on-demand trigger recipe.
+    assert "just changelog-trigger" in err
+
+
+def test_realign_dep_string_realigns_existing_pin_regardless_of_force() -> None:
+    # An existing == pin is always realigned, whether or not the dep is forced.
+    assert _realign_dep_string("imbue-mngr==0.2.8", "0.2.10", force_pin=False) == "imbue-mngr==0.2.10"
+    assert _realign_dep_string("imbue-mngr==0.2.8", "0.2.10", force_pin=True) == "imbue-mngr==0.2.10"
+
+
+def test_realign_dep_string_leaves_unpinned_alone_without_force() -> None:
+    # A deliberately-unpinned internal dep (non-publishable consumer) stays unpinned.
+    assert _realign_dep_string("imbue-mngr", "0.2.10", force_pin=False) == "imbue-mngr"
+    assert _realign_dep_string("imbue-mngr>=0.2.0", "0.2.10", force_pin=False) == "imbue-mngr>=0.2.0"
+
+
+def test_realign_dep_string_introduces_pin_when_forced() -> None:
+    # A publishable wheel must pin its internal deps, so force_pin adds the pin
+    # (collapsing any looser specifier).
+    assert _realign_dep_string("imbue-mngr", "0.2.10", force_pin=True) == "imbue-mngr==0.2.10"
+    assert _realign_dep_string("imbue-mngr>=0.2.0", "0.2.10", force_pin=True) == "imbue-mngr==0.2.10"
+
+
+def test_realign_dep_string_no_op_when_already_correct() -> None:
+    assert _realign_dep_string("imbue-mngr==0.2.10", "0.2.10", force_pin=True) == "imbue-mngr==0.2.10"
+
+
+def test_realign_dep_string_rejects_extras_and_markers() -> None:
+    # The collapse-to-`name==version` form would silently drop an extra or marker;
+    # internal deps never carry one, so guard loudly if that assumption breaks.
+    with pytest.raises(AssertionError):
+        _realign_dep_string("imbue-mngr==0.2.8 ; python_version < '3.12'", "0.2.10", force_pin=False)
+    with pytest.raises(AssertionError):
+        _realign_dep_string("imbue-mngr[extra]==0.2.8", "0.2.10", force_pin=False)
 
 
 def _write_root_pyproject(tmp_path: Path, exclude_newer: str) -> Path:

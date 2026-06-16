@@ -5,6 +5,8 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.api.connect import connect_to_agent
+from imbue.mngr.api.connect import resolve_connect_command
+from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -33,7 +35,25 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     start: bool
     reconnect: bool
     session_command: str | None
+    connect_command: str | None
     allow_unknown_host: bool
+
+
+def _check_connect_future_options(opts: ConnectCliOptions) -> None:
+    """Raise NotImplementedError for unimplemented connect options.
+
+    Mirrors the `[future]` suffix carried on each option's `--help` text;
+    pinned by `test_future_flags_raise_not_implemented_error` so removing
+    a raise (i.e. shipping the feature) forces a synopsis update.
+    """
+    # Run this command instead of the default tmux attach.
+    if opts.session_command is not None:
+        raise NotImplementedError("--session-command is not implemented yet")
+
+    # Disable automatic reconnection if the connection is dropped.
+    # Default behavior (--reconnect) should automatically reconnect.
+    if not opts.reconnect:
+        raise NotImplementedError("--no-reconnect is not implemented yet")
 
 
 @click.command()
@@ -57,6 +77,10 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
 )
 @optgroup.option("--session-command", help="Command to run instead of attaching to main session [future]")
 @optgroup.option(
+    "--connect-command",
+    help="Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set.",
+)
+@optgroup.option(
     "--allow-unknown-host/--no-allow-unknown-host",
     "allow_unknown_host",
     default=False,
@@ -73,15 +97,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         command_class=ConnectCliOptions,
     )
 
-    # Run this command instead of the default tmux attach
-    # Useful for running a different shell or command in the agent's environment
-    if opts.session_command is not None:
-        raise NotImplementedError("--session-command is not implemented yet")
-
-    # Disable automatic reconnection if the connection is dropped
-    # Default behavior (--reconnect) should automatically reconnect
-    if not opts.reconnect:
-        raise NotImplementedError("--no-reconnect is not implemented yet")
+    _check_connect_future_options(opts)
 
     logger.info("Finding agent...")
 
@@ -103,6 +119,21 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         mngr_ctx=mngr_ctx,
     )
 
+    logger.info("Connecting to agent: {}", agent.name)
+
+    # A custom connect command (from --connect-command or config) replaces the
+    # builtin tmux attach, mirroring how create/start honor connect_command.
+    resolved_connect_command = resolve_connect_command(opts.connect_command, mngr_ctx)
+    if resolved_connect_command is not None:
+        session_name = f"{mngr_ctx.config.prefix}{agent.name}"
+        run_connect_command(
+            resolved_connect_command,
+            str(agent.name),
+            session_name,
+            is_local=host.is_local,
+        )
+        return
+
     # Build connection options
     connection_opts = ConnectionOptions(
         is_reconnect=opts.reconnect,
@@ -112,7 +143,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         is_unknown_host_allowed=opts.allow_unknown_host,
     )
 
-    logger.info("Connecting to agent: {}", agent.name)
     connect_to_agent(agent, host, mngr_ctx, connection_opts)
 
 
@@ -120,7 +150,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="connect",
     one_line_description="Connect to an existing agent via the terminal",
-    synopsis="mngr [connect|conn] [OPTIONS] [AGENT]",
+    synopsis="mngr [connect|conn] [AGENT] [--agent <AGENT>] [--[no-]start] [--connect-command <CMD>] [--[no-]allow-unknown-host]",
     description="""Attaches to the agent's tmux session, roughly equivalent to SSH'ing into
 the agent's machine and attaching to the tmux session.
 

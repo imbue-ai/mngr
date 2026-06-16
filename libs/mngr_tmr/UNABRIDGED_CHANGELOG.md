@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+## Fix snapshot launch path after provider bootstrap refactor
+
+The AWS-provider shared-layer refactor removed the `is_for_host_creation` parameter from `get_provider_instance`, but `mngr_tmr`'s `--use-snapshot` launch path still passed it, which broke the type check. The snapshot path now calls the new `bootstrap_backend_for_host_creation(provider_name, mngr_ctx)` helper before `get_provider_instance`, matching how `mngr create` triggers one-time backend bootstrap (e.g. Modal's per-user environment).
+
+## 2026-06-10
+
+Fixed a stale See-Also reference in the `tmr` command's help metadata. The `pull` reference pointed at a top-level command that was removed when push/pull were restructured into `rsync` and `git push`/`git pull`; it is now replaced with an `rsync` reference. Previously this produced a broken `[mngr help pull](mngr help pull)` markdown link in the generated docs.
+
+Raised the stale coverage floor from 50% to 75% to match the coverage CI already measures (~78%).
+
+## 2026-06-08
+
+- Stays unpublished-on-purpose (already in `UNPUBLISHED_PACKAGES`; the canonical mapreduce recipe, internal tooling). Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+Marked the `TestRunInfo`, `TestResult`, and `TestMapReduceResult` result models
+with `__test__ = False` so pytest no longer attempts to collect them as test
+classes (their names start with "Test"). This silences the "cannot collect
+test class ... because it has a __init__ constructor" warnings in CI. No
+behavior change.
+
 ## 2026-05-28
 
 `mngr_tmr` is now a thin recipe on top of the new `mngr_mapreduce` framework. The `mngr tmr` CLI surface is unchanged for users; under the hood, all agent launching / polling / extraction code moved out, and TMR is now expressed as a `TestMapReduceRecipe` (in `imbue.mngr_tmr.recipe`) implementing discovery (pytest collect), prompt building, and the `on_mapper_finalized` / `on_reducer_finalized` hooks (which apply each agent's `branch.bundle` to the local repo). Server-side labels were renamed to `mapreduce_role` / `mapreduce_run_name` and the outputs-archive path was simplified to `plugin/mapreduce/outputs.tar.gz` — agents from older TMR runs are not discoverable by this version (run them down with the prior `mngr` build first).

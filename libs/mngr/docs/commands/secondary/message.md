@@ -51,7 +51,6 @@ mngr message [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when errors occur: abort (stop immediately) or continue (keep going) | `continue` |
-| `--provider` | text | Message only agents using specified provider (repeatable) | None |
 
 ## Common
 
@@ -89,7 +88,7 @@ $ mngr message my-agent --message "Hello"
 $ mngr message agent1 agent2 --message "Hello to all"
 ```
 
-**Send to all agents**
+**Send to all agents via stdin**
 
 ```bash
 $ mngr list --ids | mngr message - --message 'Hello everyone'

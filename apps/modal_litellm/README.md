@@ -85,10 +85,33 @@ See `litellm_proxy/start.sh` output for virtual key creation instructions.
 
 ## Supported models
 
-- `claude-opus-4-7` (latest Opus)
+The proxy registers each model with inline per-token pricing (mirrored from
+litellm's `model_prices_and_context_window` map) so cost tracking is accurate
+even on litellm versions whose bundled price map predates a model. The model
+list lives in `apps/modal_litellm/app.py` (`LITELLM_CONFIG`) and is mirrored in
+`litellm_proxy/config.yaml`; `config_drift_test.py` fails if the two diverge.
+
+Opus (current price tier, $5 / $25 per 1M input / output):
+
+- `claude-opus-4-8` (latest Opus)
+- `claude-opus-4-7`
+- `claude-opus-4-6`
+- `claude-opus-4-5`
+
+Opus (older, $15 / $75 per 1M):
+
+- `claude-opus-4-1`
+- `claude-opus-4-20250514` (Opus 4)
+
+Sonnet ($3 / $15 per 1M):
+
 - `claude-sonnet-4-6` (latest Sonnet)
-- `claude-sonnet-4-20250514`
-- `claude-opus-4-20250514`
+- `claude-sonnet-4-5`
+- `claude-sonnet-4-20250514` (Sonnet 4)
+
+Haiku ($1 / $5 per 1M):
+
+- `claude-haiku-4-5`
 - `claude-haiku-4-5-20251001`
 
 ## Checking spend

@@ -13,8 +13,10 @@ dependencies = [
     "imbue-common",
     "itsdangerous>=2.2.0",
     "jinja2>=3.1.0",
+    "jinjax>=0.45",
     "loguru",
     "imbue-mngr",
+    "imbue-mngr-aws",
     "imbue-mngr-forward",
     "imbue-mngr-latchkey",
     "imbue-mngr-ovh",
@@ -22,8 +24,10 @@ dependencies = [
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
+    "psycopg2-binary>=2.9",
     "pydantic>=2.0",
     "python-multipart>=0.0.9",
+    "tenacity",
     "tomlkit>=0.12.0",
     "telethon>=1.40.0",
     "uvicorn>=0.32.0",
@@ -46,6 +50,7 @@ build-backend = "hatchling.build"
 [tool.uv.sources]
 concurrency-group = { workspace = true }
 imbue-mngr = { workspace = true }
+imbue-mngr-aws = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-ovh = { workspace = true }
@@ -91,8 +96,15 @@ omit = [
   "*/telegram/credential_extractor.py",
   "*/telegram/bot_creator.py",
   "*/telegram/injector.py",
+  # Cloudflare tunnel token inject/clear shell out via `mngr exec` -- exercised
+  # via acceptance/release tests. The path constant is pinned in the *_test.py.
+  "*/desktop_client/tunnel_token_injection.py",
   # SuperTokens routes require a live Core connection -- tested via release test.
   "*/desktop_client/supertokens_routes.py",
+  # Docker state-container teardown shells out to the `docker` CLI and needs a
+  # real daemon -- exercised via a docker-marked test. The pure functions
+  # (user-id resolution, name building) are tested in docker_cleanup_test.py.
+  "*/envs/docker_cleanup.py",
   # The deployment_tests importable helper package is exercised only by the
   # minds_deployment / minds_services pytest suites against real cloud
   # (see apps/minds/deployment_tests/). Those suites are excluded from
@@ -116,9 +128,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-# Local single-process runs report 69%; offload's combined-coverage merge from
-# parallel modal sandboxes drifts the stmt count by ~21 lines (covered count
-# unchanged) which lands the gate at 68% in CI. Pin to the CI-observed value
-# so the gate doesn't fail on a coverage-tooling artifact unrelated to any
-# real coverage regression.
-fail_under = 68
+fail_under = 70

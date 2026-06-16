@@ -19,6 +19,7 @@ from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.help_formatter import get_pager_command
 from imbue.mngr.cli.help_formatter import help_option_callback
 from imbue.mngr.cli.help_formatter import is_interactive_terminal
+from imbue.mngr.cli.help_formatter import render_markdown
 from imbue.mngr.cli.help_formatter import run_pager
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.config.data_types import MngrConfig
@@ -550,6 +551,28 @@ def test_commands_with_aliases_have_aliases_in_synopsis() -> None:
         )
 
 
+# The standard agent-filter flags injected by
+# ``imbue.mngr.cli.filter_opts.add_agent_filter_options``. Every command that
+# uses that decorator inherits this set under the "Filtering" optgroup; their
+# synopses don't enumerate them (the convention across the codebase) so they
+# go in opt-outs.
+_AGENT_FILTER_FLAGS: frozenset[str] = frozenset(
+    {
+        "--active",
+        "--archived",
+        "--exclude",
+        "--host-label",
+        "--include",
+        "--label",
+        "--local",
+        "--project",
+        "--remote",
+        "--running",
+        "--stopped",
+    }
+)
+
+
 # Per-command, long-form flags that are intentionally omitted from the synopsis
 # (niche flags, alternative spellings of things already represented, or flags
 # whose meaning is conveyed by a positional). If you add a new flag and decide
@@ -582,12 +605,14 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--reconnect",
             "--session-command",
             "--connect-command",
+            "--tmux-width",
+            "--tmux-height",
+            "--tmux-window-size",
         }
     ),
     "start": frozenset({"--connect-command"}),
     "stop": frozenset({"--graceful-timeout"}),
     "destroy": frozenset(),
-    "message": frozenset({"--provider"}),
     "exec": frozenset(),
     "cleanup": frozenset({"--action", "--snapshot-before"}),
     "limit": frozenset(
@@ -616,27 +641,37 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--uncommitted-changes",
         }
     ),
-    # ``mngr usage wait``'s synopsis enumerates the wait-specific predicate and
-    # wait-control options (--until / --timeout / --interval). The standard
-    # agent-filter flags (--include / --exclude / --local / ... / --provider)
-    # are inherited via ``add_agent_filter_options`` and listed in the OPTIONS
-    # section of help/docs; keeping them out of the synopsis keeps it readable.
-    "usage.wait": frozenset(
+    # ``mngr usage`` and ``mngr usage wait`` synopses enumerate the
+    # usage-specific options; the inherited agent-filter set (and --provider)
+    # is left out of the synopsis for readability and captured here.
+    "usage": _AGENT_FILTER_FLAGS | frozenset({"--provider"}),
+    "usage.wait": _AGENT_FILTER_FLAGS | frozenset({"--provider"}),
+    # ``mngr connect``'s synopsis enumerates the connect-specific options;
+    # the inherited agent-filter set is omitted, as is each ``[future]`` flag.
+    # The [future] flags are pinned by
+    # ``test_future_flags_raise_not_implemented_error`` in connect_test.py --
+    # implementing one of them must come with a synopsis update.
+    "connect": _AGENT_FILTER_FLAGS | frozenset({"--reconnect", "--session-command"}),
+    # ``mngr kanpan`` and ``mngr list`` synopses enumerate the most-useful
+    # filter flags; the rarely-used ``--label`` / ``--host-label`` (and for
+    # ``list``, ``--header``) are omitted.
+    "kanpan": frozenset({"--label", "--host-label"}),
+    "list": frozenset({"--label", "--host-label", "--header"}),
+    # ``mngr snapshot create`` and ``mngr snapshot list`` synopses enumerate
+    # the implemented options; the ``[future]`` stubs are pinned by
+    # ``test_snapshot_create_future_flags_raise_not_implemented_error`` and
+    # ``test_snapshot_list_future_flags_raise_not_implemented_error`` in
+    # snapshot_test.py -- implementing one must come with a synopsis update.
+    "snapshot.create": frozenset(
         {
-            "--active",
-            "--archived",
-            "--exclude",
-            "--host-label",
-            "--include",
-            "--label",
-            "--local",
-            "--project",
-            "--provider",
-            "--remote",
-            "--running",
-            "--stopped",
+            "--description",
+            "--pause-during",
+            "--restart-if-larger-than",
+            "--tag",
+            "--wait",
         }
     ),
+    "snapshot.list": frozenset({"--after", "--before"}),
 }
 
 
@@ -699,17 +734,14 @@ def _resolve_help_key_to_command(key: str) -> click.Command | None:
     return current
 
 
-def _commands_with_flag_enumerating_synopsis() -> list[tuple[str, CommandHelpMetadata, click.Command]]:
-    """Find every command whose synopsis enumerates at least one flag.
+def _resolvable_commands_with_metadata() -> list[tuple[str, CommandHelpMetadata, click.Command]]:
+    """Find every help-registry entry whose key resolves to a click command.
 
-    Synopses like `mngr foo [OPTIONS] [ARGS]` aren't worth ratcheting -- they
-    don't make a per-flag commitment. We only ratchet commands whose authors
-    chose to enumerate specific flags in the synopsis line.
+    Plugin-only commands not registered on the root cli in this test environment
+    are skipped, since we can't introspect their params here.
     """
     result: list[tuple[str, CommandHelpMetadata, click.Command]] = []
     for key, metadata in get_all_help_metadata().items():
-        if not _flags_in_synopsis(metadata.synopsis):
-            continue
         command = _resolve_help_key_to_command(key)
         if command is None:
             continue
@@ -717,7 +749,7 @@ def _commands_with_flag_enumerating_synopsis() -> list[tuple[str, CommandHelpMet
     return result
 
 
-_RATCHETED_COMMANDS = _commands_with_flag_enumerating_synopsis()
+_RATCHETED_COMMANDS = _resolvable_commands_with_metadata()
 
 
 @pytest.mark.parametrize(
@@ -726,15 +758,19 @@ _RATCHETED_COMMANDS = _commands_with_flag_enumerating_synopsis()
     ids=[entry[0] for entry in _RATCHETED_COMMANDS],
 )
 def test_synopsis_lists_all_non_optout_flags(key: str, metadata: CommandHelpMetadata, command: click.Command) -> None:
-    """Every non-Common flag on a flag-enumerating synopsis must appear or be opted out.
+    """Every non-Common flag on a command must appear in the synopsis or be opted out.
 
-    Catches both forgotten additions (new flag added without updating the
-    synopsis) and silent renames (synopsis still showing the old name -- the
-    old form is no longer a click param so the new name shows up as missing).
+    Catches three kinds of drift:
+    - Forgotten additions: a new flag added without updating the synopsis.
+    - Silent renames: synopsis still shows the old name; the old form is no
+      longer a click param so the new name shows up as missing.
+    - Placeholder synopses: a synopsis like `mngr foo [OPTIONS]` whose command
+      actually has custom non-Common flags. Every such flag is reported as
+      missing -- a generic placeholder is treated as enumerating nothing.
 
-    Only runs against commands whose synopsis enumerates specific flags.
-    Generic synopses like `[OPTIONS]` are skipped, since they don't make a
-    per-flag commitment to ratchet against.
+    A command with no custom non-Common flags (e.g. a group whose work is done
+    by subcommands) passes regardless of synopsis content, since there's
+    nothing the synopsis would need to enumerate.
     """
     synopsis_flags = _flags_in_synopsis(metadata.synopsis)
     # Plugins only inject options into top-level commands (see
@@ -885,6 +921,53 @@ def test_wrap_text_wraps_long_lines() -> None:
     assert len(lines) > 1
     assert lines[0].startswith("  ")
     assert lines[1].startswith("    ")
+
+
+# =============================================================================
+# render_markdown link rewriting
+# =============================================================================
+
+# Link-target resolution is unit-tested in markdown_render_test.py; these cover
+# that render_markdown threads link_base through to the rich renderer.
+_DOC_URL = "https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/docs/cron_recipes.md"
+
+
+def test_render_markdown_passthrough_when_not_ansi() -> None:
+    """Without ANSI, markdown (and its relative links) is returned unchanged."""
+    md = "See [x](../y.md)."
+    assert render_markdown(md, use_ansi=False, width=80, link_base=_DOC_URL) == md
+
+
+def test_render_markdown_rewrites_links_when_ansi() -> None:
+    """With ANSI and a link_base, relative links are rewritten to absolute URLs."""
+    output = render_markdown("[x](../README.md#y)", use_ansi=True, width=80, link_base=_DOC_URL)
+    assert "https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/README.md#y" in output
+
+
+def test_ansi_description_section_is_indented() -> None:
+    """The DESCRIPTION prose is indented to man-page depth in the ANSI (pager) path.
+
+    Regression test: the rich-rendered description used to render flush-left while
+    the surrounding section bodies stayed indented by seven spaces. It must match
+    the indentation the plain (piped) path produces.
+    """
+    metadata = CommandHelpMetadata(
+        key="test",
+        one_line_description="A test command",
+        synopsis="mngr test [options]",
+        description="A description paragraph that occupies the DESCRIPTION section.",
+    )
+
+    @click.command()
+    def test_cmd() -> None:
+        """A test command."""
+
+    ctx = click.Context(test_cmd, info_name="test")
+    output = format_git_style_help(ctx, test_cmd, metadata, use_ansi=True)
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    description_line = next(line for line in plain.splitlines() if "description paragraph" in line)
+    assert description_line.startswith("       ")
 
 
 # =============================================================================

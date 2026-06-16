@@ -1,53 +1,33 @@
 #!/usr/bin/env bash
 # Raw-transcript streaming for antigravity agents.
 #
-# Antigravity writes one JSONL transcript per conversation at
-# $ANTIGRAVITY_APP_DATA_DIR/brain/<conv_id>/.system_generated/logs/transcript.jsonl.
-# Multiple agy instances on the same host share that brain/ directory, so a
-# naive watch-all would interleave foreign conversations into our output.
+# Since agy 1.0.4 (2026-06-01) the interactive conversation store is a protobuf
+# SQLite .db per conversation under
+# $ANTIGRAVITY_APP_DATA_DIR/conversations/<conv_id>.db (earlier agy wrote a
+# per-conversation JSONL transcript that this script used to tail; see
+# libs/mngr_antigravity/regenerating_protobuf_schema.md for the migration and the recovered schema).
 #
-# To scope the watch to *this* agent, we read agy's own `--log-file` output
-# (configured by AntigravityAgent.assemble_command) for lines of the form
-#   `Created conversation <uuid>`
-# Every uuid that appears in our agy log file is owned by this agent. New
-# conversation IDs can appear at any time -- /fork, /new, resume -- so the
-# discovery step re-runs every poll cycle.
-#
-# Per-conversation offsets are stored in
-# <agent-state-dir>/plugin/antigravity/.transcript_offsets/<conv_id>
-# (uuids are already filename-safe; no percent encoding needed) so the
-# script can resume efficiently after restarts. Antigravity's JSONL records
-# carry `step_index` which is unique only within a conversation (not across
-# conversations), so we cannot use the mngr_transcript_reconcile_offset
-# helper that mngr_claude relies on -- it builds a global id set from the
-# merged output and would treat duplicate step_indexes as already-emitted.
-# Instead we trust the stored offset; if a crash occurred between an emit
-# and the matching `_save_offset`, restart will re-emit at most the
-# duplicate lines in question. The downstream common_transcript.sh dedupes
-# by event_id so terminal output is not corrupted.
-#
-# Output is the raw bytes agy wrote: this script never rewrites or
-# reschematises content. The common_transcript.sh converter reads from
-# the raw output produced here.
+# This script is now a thin supervisor around decode_agy_transcript.py, which
+# reads new `steps` rows from each of this agent's conversation .db files and
+# appends one JSON record per step to
+# $MNGR_AGENT_STATE_DIR/logs/antigravity_transcript/events.jsonl -- in the same
+# shape the old JSONL had, so common_transcript.sh converts them unchanged. The
+# Python decoder owns conversation discovery (from the capture-hook ids file),
+# per-conversation step offsets, and the protobuf decode; this script only
+# guards python3 and loops it.
 #
 # Usage: stream_transcript.sh [--single-pass]
 #
 # Environment:
 #   MNGR_AGENT_STATE_DIR        - agent state directory (contains commands/)
 #   ANTIGRAVITY_APP_DATA_DIR    - agy app-data dir (default ~/.gemini/antigravity-cli)
-#   ANTIGRAVITY_AGY_LOG_FILE    - agy --log-file location (required)
 
 set -euo pipefail
 
 AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
-AGY_LOG_FILE="${ANTIGRAVITY_AGY_LOG_FILE:?ANTIGRAVITY_AGY_LOG_FILE must be set}"
 APP_DATA_DIR="${ANTIGRAVITY_APP_DATA_DIR:-$HOME/.gemini/antigravity-cli}"
-OUTPUT_FILE="$AGENT_DATA_DIR/logs/antigravity_transcript/events.jsonl"
-OFFSET_DIR="$AGENT_DATA_DIR/plugin/antigravity/.transcript_offsets"
+DECODER="$AGENT_DATA_DIR/commands/decode_agy_transcript.py"
 POLL_INTERVAL=1
-
-mkdir -p "$(dirname "$OUTPUT_FILE")" "$OFFSET_DIR"
-touch "$OUTPUT_FILE"
 
 # Configure and source the shared logging library
 _MNGR_LOG_TYPE="stream_transcript"
@@ -56,166 +36,24 @@ _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/stream_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
-# Keys are conversation UUIDs; values are line counts already emitted.
-declare -A _OFFSET_BY_ID=()
+# Reading agy's SQLite conversation store requires python3 on the agent host
+# (the decoder is a dependency-free stdlib script). Fail loudly rather than
+# silently capturing no transcript if it is missing.
+if ! command -v python3 >/dev/null 2>&1; then
+    log_error "python3 is required to decode agy's SQLite conversation store but was not found on PATH; antigravity transcript capture is disabled"
+    exit 1
+fi
 
-_line_count() {
-    if [ -f "$1" ]; then
-        wc -l < "$1"
-    else
-        echo 0
-    fi
-}
-
-_load_stored_offset() {
-    if [ -f "$OFFSET_DIR/$1" ]; then
-        cat "$OFFSET_DIR/$1"
-    else
-        echo 0
-    fi
-}
-
-_save_offset() {
-    echo "$2" > "$OFFSET_DIR/$1"
-}
-
-# Transcript path for a given conversation UUID.
-_transcript_path() {
-    echo "$APP_DATA_DIR/brain/$1/.system_generated/logs/transcript.jsonl"
-}
-
-# Discover conversation IDs owned by this agent by scanning agy's log.
-#
-# agy writes `Created conversation <uuid>` to its --log-file every time it
-# opens a new conversation (new session, /fork, /new). Resumed conversations
-# (-c / --conversation) emit `Resumed conversation <uuid>` -- we accept both
-# verbs. The log is re-scanned on every poll cycle; this is cheap relative
-# to the JSONL emit step and keeps the implementation stateless.
-#
-# Echoes one uuid per line.
-_find_conversation_ids() {
-    if [ ! -f "$AGY_LOG_FILE" ]; then
-        return 0
-    fi
-    # uuid pattern: 8-4-4-4-12 hex chars
-    grep -oE "(Created|Resumed) conversation [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" "$AGY_LOG_FILE" 2>/dev/null \
-        | awk '{print $3}' \
-        | sort -u
-}
-
-# Append new lines from a transcript file to the output.
-#
-# Each line is augmented with `_mngr_conv_id` so the downstream
-# common_transcript.sh can correlate tool calls with their results inside
-# the same conversation (Antigravity's `step_index` is conversation-scoped,
-# not globally unique, so the merged output needs the id added back).
-# Uses a bounded line-range read to avoid a TOCTOU race between the
-# wc and the read (any lines appended in between are deferred to the
-# next poll cycle).
-_emit_new_lines() {
-    local conv_id="$1"
-    local transcript_file
-    transcript_file=$(_transcript_path "$conv_id")
-    if [ ! -f "$transcript_file" ]; then
-        return
-    fi
-    local offset="${_OFFSET_BY_ID[$conv_id]:-0}"
-
-    local file_lines
-    file_lines=$(_line_count "$transcript_file")
-    if [ "$file_lines" -le "$offset" ]; then
-        return
-    fi
-
-    local start=$((offset + 1))
-    local end="$file_lines"
-    local new_count=$((file_lines - offset))
-
-    # Augment each line with _mngr_conv_id. Skip blank lines and lines
-    # that fail to parse rather than aborting the whole emit -- agy may
-    # write a partial line mid-flush which the next cycle will pick up
-    # in full.
-    sed -n "${start},${end}p" "$transcript_file" | _MNGR_CONV_ID="$conv_id" python3 -c '
-import json, os, sys
-conv_id = os.environ["_MNGR_CONV_ID"]
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        sys.stderr.write("skipping malformed transcript line\n")
-        continue
-    if not isinstance(obj, dict):
-        sys.stderr.write("skipping non-object transcript line\n")
-        continue
-    obj["_mngr_conv_id"] = conv_id
-    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
-' >> "$OUTPUT_FILE"
-
-    _OFFSET_BY_ID[$conv_id]=$file_lines
-    _save_offset "$conv_id" "$file_lines"
-
-    log_debug "Emitted $new_count line(s) from conversation $conv_id (offset $offset -> $file_lines)"
-}
-
-# Trust the stored per-conversation offset.
-#
-# Antigravity's JSONL transcript only carries `step_index`, which is unique
-# *within* a conversation but not across them, so we cannot use the global
-# id-set reconciliation that mngr_claude relies on. If a crash interrupted
-# the script between an emit and the matching `_save_offset`, restart will
-# re-emit the duplicate lines; common_transcript.sh dedupes by event_id
-# downstream so the user-visible transcript stays clean.
-_record_conversation_offset() {
-    local conv_id="$1"
-    local log_prefix="$2"
-    local transcript_file
-    transcript_file=$(_transcript_path "$conv_id")
-    if [ ! -f "$transcript_file" ]; then
-        _OFFSET_BY_ID[$conv_id]=0
-        return
-    fi
-    local stored
-    stored=$(_load_stored_offset "$conv_id")
-    # Defensive reset: if the on-disk transcript got shorter than the
-    # stored offset (e.g. agy rewrote the file), start from 0 rather than
-    # silently skipping the rest.
-    local file_lines
-    file_lines=$(_line_count "$transcript_file")
-    if [ "$file_lines" -lt "$stored" ]; then
-        log_warn "$log_prefix $conv_id: stored offset $stored > file lines $file_lines; resetting to 0"
-        stored=0
-        _save_offset "$conv_id" 0
-    fi
-    _OFFSET_BY_ID[$conv_id]=$stored
-}
-
-_initialize() {
-    local conv_id
-    while IFS= read -r conv_id; do
-        [ -n "$conv_id" ] || continue
-        _record_conversation_offset "$conv_id" "Loaded offset for"
-    done < <(_find_conversation_ids)
-
-    log_info "Tracked ${#_OFFSET_BY_ID[@]} conversation(s) at startup"
-}
-
+# Run one decode pass, forwarding the decoder's stderr to the structured log.
 _run_one_cycle() {
-    local current_ids=()
-    local conv_id
-    while IFS= read -r conv_id; do
-        [ -n "$conv_id" ] || continue
-        current_ids+=("$conv_id")
-    done < <(_find_conversation_ids)
-
-    for conv_id in "${current_ids[@]}"; do
-        if [ -z "${_OFFSET_BY_ID[$conv_id]+exists}" ]; then
-            _record_conversation_offset "$conv_id" "Picked up new conversation"
-        fi
-        _emit_new_lines "$conv_id"
-    done
+    local stderr_file
+    stderr_file=$(mktemp)
+    if ! python3 "$DECODER" --state-dir "$AGENT_DATA_DIR" --app-data-dir "$APP_DATA_DIR" 2>"$stderr_file"; then
+        log_warn "decode pass failed: $(cat "$stderr_file")"
+    elif [ -s "$stderr_file" ]; then
+        log_warn "decode pass warning: $(cat "$stderr_file")"
+    fi
+    rm -f "$stderr_file"
 }
 
 main() {
@@ -225,12 +63,9 @@ main() {
     fi
 
     log_info "Stream transcript started"
-    log_info "  Agy log file: $AGY_LOG_FILE"
     log_info "  App data dir: $APP_DATA_DIR"
-    log_info "  Output: $OUTPUT_FILE"
+    log_info "  Decoder: $DECODER"
     log_info "  Poll interval: ${POLL_INTERVAL}s"
-
-    _initialize
 
     if [ "$is_single_pass" = true ]; then
         _run_one_cycle
@@ -238,7 +73,6 @@ main() {
     fi
 
     log_info "Entering main loop"
-
     while true; do
         _run_one_cycle
         sleep "$POLL_INTERVAL"

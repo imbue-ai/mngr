@@ -49,7 +49,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -59,7 +58,10 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
@@ -70,6 +72,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import HostInterface
@@ -86,6 +89,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
@@ -156,12 +160,18 @@ def _is_transient_ssh_error(exception: BaseException) -> bool:
       including ChannelException (server refused to open a new channel,
       e.g. MaxSessions limit -- the transport may still be alive)
     - EOFError (remote end closed connection)
+    - TimeoutError (pyinfra read_output_buffers timeout when the remote
+      sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
+      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
+      check must precede any narrower OSError handling.
     """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
         return True
     if isinstance(exception, SSHException):
         return True
     if isinstance(exception, EOFError):
+        return True
+    if isinstance(exception, TimeoutError):
         return True
     return False
 
@@ -191,12 +201,6 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     if client is not None:
         return client.get_transport()
     return None
-
-
-@pure
-def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
-    """Compute the state directory path for an agent given the host directory and agent ID."""
-    return host_dir / "agents" / str(agent_id)
 
 
 def install_packaged_script_on_host(
@@ -274,6 +278,12 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
 
 # mngr's preferred length of tmux's status-left.
 _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
+
+# Default tmux window dimensions used when the agent does not specify its own.
+# These match the historical hard-coded ``-x 200 -y 50`` (see the new-session
+# call in _build_start_agent_shell_command for why -x/-y are passed at all).
+_DEFAULT_TMUX_WIDTH: Final[int] = 200
+_DEFAULT_TMUX_HEIGHT: Final[int] = 50
 
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
@@ -413,6 +423,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         with self._notify_on_connection_error():
             try:
                 return self._run_shell_command_with_transient_retry(command, pyinfra_kwargs)
+            except TimeoutError as e:
+                # ``TimeoutError`` is a subclass of ``OSError``, so this
+                # must precede the OSError branch below. Reached when the
+                # retry decorator has exhausted its attempts on transient
+                # SSH read timeouts; surface as a structured
+                # HostConnectionError so callers don't see a raw timeout.
+                raise HostConnectionError("SSH command timed out reading output") from e
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while running command") from e
@@ -609,7 +626,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     )
                     try:
                         self.execute_idempotent_command(f"rm -f '{lock_file_path}'")
-                    except (BaseMngrError, OSError) as lock_removal_error:
+                    except (MngrError, OSError) as lock_removal_error:
                         logger.warning(
                             "Failed to remove host lock file during error cleanup: {}",
                             lock_removal_error,
@@ -891,6 +908,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Get resources from the provider."""
         return self.provider_instance.get_host_resources(self)
 
+    def get_outer_ssh_port(self) -> int | None:
+        """Delegate to the provider, which knows whether this host has a distinct outer sshd port."""
+        return self.provider_instance.get_outer_ssh_port(self.id)
+
     def set_tags(self, tags: Mapping[str, str]) -> None:
         """Set tags via the provider and sync to certified data."""
         self.provider_instance.set_host_tags(self, tags)
@@ -935,7 +956,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def get_agents(self) -> list[AgentInterface]:
         """Get all agents on this host."""
-        agents_dir = self.host_dir / "agents"
+        agents_dir = get_agents_root_dir(self.host_dir)
         if not self._is_directory(agents_dir):
             logger.trace("Failed to find agents directory for host {}", self.id)
             return []
@@ -961,7 +982,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         since that data is more likely to be up-to-date.
         """
         with log_span("Loading all agents from host {}", self.id):
-            agents_dir = self.host_dir / "agents"
+            agents_dir = get_agents_root_dir(self.host_dir)
 
             with log_span("Listing agent dir for host {}", self.id):
                 try:
@@ -1321,6 +1342,48 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.trace("No info/exclude in source, skipping")
             return None
 
+    def _git_mirror_pull_from_source(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        dest_git_dir: Path,
+    ) -> None:
+        """Mirror a remote source repo's branches and tags into a local bare repo via ssh.
+
+        Runs locally, so the source host's ssh key and known_hosts -- which live on this
+        machine -- are valid. `dest_git_dir` may already be an initialized bare repo (the
+        remote->local target, which `_transfer_git_repo` created via `git init --bare`) or
+        a fresh path (the remote->remote relay's temp mirror); `git init --bare` is
+        idempotent, so both cases are handled. We use a mirror-style `git fetch` rather
+        than `git clone --mirror` because clone refuses a non-empty destination, and the
+        remote->local target always pre-exists by this point.
+        """
+        source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
+        if source_ssh_info is None:
+            raise MngrError("Cannot determine SSH connection info for remote source host")
+        user, hostname, port, key_path = source_ssh_info
+        source_known_hosts = get_ssh_known_hosts_file(source_host)
+        git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
+        remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
+        try:
+            self.mngr_ctx.concurrency_group.run_process_to_completion(
+                ["git", "init", "--bare", str(dest_git_dir)],
+            )
+            self.mngr_ctx.concurrency_group.run_process_to_completion(
+                [
+                    "git",
+                    "-C",
+                    str(dest_git_dir),
+                    "fetch",
+                    "--prune",
+                    remote_url,
+                    *GIT_MIRROR_PUSH_REFSPECS,
+                ],
+                env={**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd},
+            )
+        except ProcessError as e:
+            raise MngrError(f"Failed to fetch from remote source: {e}") from e
+
     def _git_push_to_target(
         self,
         source_host: OnlineHostInterface,
@@ -1332,29 +1395,57 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         same_machine = _is_same_machine(source_host, self)
         target_ssh_info = self.get_ssh_connection_info()
 
+        # Cross-machine git transfer shells out to the ssh binary (via
+        # GIT_SSH_COMMAND); ssh is optional, so surface a clear error if it's absent.
+        if not same_machine:
+            SSH.require()
+
         # Same-machine push uses a bare local-on-host URL with no SSH
         # transport (covers both local-laptop-to-itself and
         # remote-host-to-itself).
         if same_machine:
             git_url = str(target_path / ".git")
         elif target_ssh_info is None:
-            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
-            if source_ssh_info is None:
-                raise MngrError("Cannot determine SSH connection info for remote source host")
-            user, hostname, port, key_path = source_ssh_info
-            source_known_hosts = get_ssh_known_hosts_file(source_host)
+            # Remote source -> local target: pull a bare mirror straight onto
+            # this machine using the source host's ssh credentials.
             with log_span("Fetching from remote source to local target"):
-                git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
-                env = {"GIT_SSH_COMMAND": git_ssh_cmd}
-                remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
-                try:
-                    self.mngr_ctx.concurrency_group.run_process_to_completion(
-                        ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
-                        env={**os.environ, **env},
-                    )
-                except ProcessError as e:
-                    raise MngrError(f"Failed to clone from remote source: {e}") from e
+                self._git_mirror_pull_from_source(source_host, source_path, target_path / ".git")
                 return
+        elif not source_host.is_local:
+            # Remote source -> remote target: a direct `git push` would run on
+            # the remote source host, but the target's ssh key and known_hosts
+            # live on this (orchestrator) machine, not there. So relay through a
+            # local bare mirror: pull from the source with the source's
+            # credentials, then push to the target with the target's, both run
+            # locally where those files exist. This mirrors the remote-to-remote
+            # handling used for rsync transfers.
+            user, hostname, port, key_path = target_ssh_info
+            target_known_hosts = get_ssh_known_hosts_file(self)
+            git_ssh_cmd = build_ssh_transport_command(key_path, port, target_known_hosts)
+            git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
+            with log_span("Relaying git repo remote-to-remote via local mirror: {}", git_url):
+                with tempfile.TemporaryDirectory(prefix="mngr-git-relay-") as temp_dir:
+                    mirror_git_dir = Path(temp_dir) / "mirror.git"
+                    self._git_mirror_pull_from_source(source_host, source_path, mirror_git_dir)
+                    command_args = [
+                        "git",
+                        "-C",
+                        str(mirror_git_dir),
+                        "push",
+                        "--no-verify",
+                        "--force",
+                        "--prune",
+                        git_url,
+                        *GIT_MIRROR_PUSH_REFSPECS,
+                    ]
+                    try:
+                        self.mngr_ctx.concurrency_group.run_process_to_completion(
+                            command_args,
+                            env={**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"},
+                        )
+                    except ProcessError as e:
+                        raise MngrError(f"Failed to push git repo to remote target: {e}") from e
+            return
         else:
             user, hostname, port, key_path = target_ssh_info
             git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
@@ -1375,6 +1466,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         # and without this, it can take a ridiculously long time.
         env["GIT_LFS_SKIP_PUSH"] = "1"
 
+        # Only same-machine and local-source pushes reach here: remote-source
+        # transfers (to a local or a remote target) returned above, since they
+        # cannot run a direct push from the source host with credentials that
+        # only exist on this machine.
         with log_span("Pushing git repo to target: {}", git_url):
             if same_machine:
                 # Run the push on the shared machine via the host interface.
@@ -1384,7 +1479,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 if not result.success:
                     output = (result.stderr + "\n" + result.stdout).strip()
                     raise MngrError(f"Failed to push git repo on same host: {output}")
-            elif source_host.is_local:
+            else:
+                assert source_host.is_local, "remote-source pushes must be handled before this point"
                 command_args = [
                     "git",
                     "-C",
@@ -1404,14 +1500,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 except ProcessError as e:
                     raise MngrError(f"Failed to push git repo: {e}") from e
                 logger.trace("Ran git mirror push from local source to target: {}", " ".join(command_args))
-            else:
-                env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-                refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
-                push_cmd = f"{env_prefix} git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
-                result = source_host.execute_idempotent_command(push_cmd, cwd=source_path)
-                if not result.success:
-                    output = (result.stderr + "\n" + result.stdout).strip()
-                    raise MngrError(f"Failed to push git repo from remote source: {output}")
 
     def _warn_if_submodules_detected(
         self,
@@ -1634,6 +1722,45 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             exclude_git=exclude_git,
         )
 
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a local-machine directory to self:target_path. See OnlineHostInterface."""
+        # rsync does not create intermediate parents for the destination root.
+        self.execute_idempotent_command(f"mkdir -p {shlex.quote(str(target_path))}", timeout_seconds=5.0)
+        # --keep-dirlinks (-K) is essential: on some hosts a destination directory is a
+        # symlink to real storage (e.g. on Modal, host_dir /mngr is a symlink into the
+        # mounted volume). Without -K, when the source has a real directory where the
+        # receiver has a symlink-to-directory, rsync DELETES the symlink and replaces it
+        # with a real directory on the ephemeral filesystem -- stranding everything that
+        # lived behind the symlink (e.g. agents/<id>/data.json on the volume) and writing
+        # our files to a non-persistent location. -K makes rsync follow the symlinked dir
+        # and write through it instead. See github issue 1825.
+        rsync_args = ["rsync", "-rlpt", "--keep-dirlinks"]
+        if extra_args:
+            rsync_args.extend(shlex.split(extra_args))
+        source_str = str(source_path).rstrip("/") + "/"
+        target_str = str(target_path).rstrip("/") + "/"
+
+        if self.is_local:
+            rsync_args.extend([source_str, target_str])
+            rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
+            with log_span("rsync: local dir {} -> {}", source_path, target_path):
+                result = self.execute_idempotent_command(rsync_cmd)
+                if not result.success:
+                    raise MngrError(f"rsync failed (local): {result.stderr}")
+            return
+
+        ssh_info = self.get_ssh_connection_info()
+        assert ssh_info is not None
+        user, hostname, port, key_path = ssh_info
+        known_hosts = get_ssh_known_hosts_file(self)
+        rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, known_hosts)])
+        rsync_args.extend([source_str, f"{user}@{hostname}:{target_str}"])
+        with log_span("rsync: local dir -> {}@{}:{}", user, hostname, port):
+            try:
+                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
+            except ProcessError as e:
+                raise MngrError(f"rsync failed (push to {hostname}): {e.stderr}") from e
+
     def _rsync_files(
         self,
         source_host: OnlineHostInterface,
@@ -1698,6 +1825,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                             f"rm -f {shlex.quote(str(host_files_from))}", timeout_seconds=5.0
                         )
             return
+
+        # Every remaining branch transfers to/from a remote host and uses the ssh
+        # binary as rsync's transport (-e ssh); ssh is optional, so require it here.
+        SSH.require()
 
         if source_host.is_local and not self.is_local:
             # Local to remote
@@ -1851,7 +1982,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     raise UserInputError(
                         f"{stderr.strip()}\n"
                         f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name\n"
-                        f"To work directly in the existing worktree, use --in-place from that directory"
+                        f"To work directly in the existing worktree, cd into it and re-run with --transfer=none"
                     )
                 # `git worktree add` cannot resolve any commit reference in a
                 # repo with no commits and reports a cryptic error. Probe HEAD
@@ -1892,7 +2023,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """
         agent_id = options.agent_id if options.agent_id is not None else AgentId.generate()
         agent_name = options.name or AgentName(f"agent-{str(agent_id)}")
-        agent_type = options.agent_type or AgentTypeName("claude")
+        agent_type = options.agent_type
         with info_span(
             "Creating agent state...",
             agent_id=str(agent_id),
@@ -1967,6 +2098,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 "start_on_boot": False,
                 "labels": dict(options.label_options.labels),
                 "created_branch_name": created_branch_name,
+                "tmux": options.tmux.to_data_dict(),
             }
 
             # this is really just here to parallelize some of the work and decrease latency to creating a host
@@ -2113,9 +2245,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         # Merge agent type provisioning fields into options before any other logic.
         # Use resolve_agent_type to get the parent-merged config so that
         # provisioning fields defined on a parent type are inherited by children.
-        if options.agent_type is not None:
-            resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
-            options = _merge_agent_type_provisioning(resolved.agent_config, options)
+        resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
+        options = _merge_agent_type_provisioning(resolved.agent_config, options)
 
         with self.mngr_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
             # Call pre-provisioning validation on agent
@@ -2128,9 +2259,23 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     agent.get_provision_file_transfers(host=self, options=options, mngr_ctx=mngr_ctx)
                 )
 
+            # Resolve the remote home once: bulk uploads stage files under their
+            # absolute remote paths, and relative destinations resolve against it.
+            # (Unused for local hosts, which write directly.) Fail loudly if the remote
+            # home cannot be determined -- an empty home would silently misplace every
+            # `~/...` or relative upload at the filesystem root instead of under $HOME.
+            remote_home = ""
+            if not self.is_local:
+                home_result = self.execute_idempotent_command("echo $HOME")
+                if not home_result.success:
+                    raise MngrError(f"Failed to determine remote home directory: {home_result.stderr}")
+                remote_home = home_result.stdout.strip()
+                if not remote_home:
+                    raise MngrError("Failed to determine remote home directory: $HOME resolved to an empty string")
+
             # Validate required files exist and execute transfers
             agent_file_transfer_thread = concurrency_group.start_new_thread(
-                self._execute_agent_file_transfers, (agent, all_file_transfers)
+                self._execute_agent_file_transfers, (agent, all_file_transfers, remote_home)
             )
 
             # Write environment variables to agent env file (before agent.provision()
@@ -2163,12 +2308,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     self._mkdir(directory)
                     logger.trace("Created directory: {}", directory)
 
-                # Upload files (read from local filesystem, write to host)
-                for upload_spec in provisioning.upload_files:
-                    # Read from local filesystem (not via host primitives)
-                    local_content = upload_spec.local_path.read_bytes()
-                    self.write_file(upload_spec.remote_path, local_content)
-                    logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
+                # Upload files in a single bulk transfer (rsync for remote hosts).
+                # skip_missing=False: a user-specified upload whose source is missing
+                # is an error.
+                upload_files_in_bulk(
+                    self,
+                    {spec.remote_path: spec.local_path for spec in provisioning.upload_files},
+                    remote_home,
+                    skip_missing=False,
+                )
 
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
@@ -2187,7 +2335,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             with log_span("Calling on_after_provisioning for agent {}", agent.name):
                 agent.on_after_provisioning(host=self, options=options, mngr_ctx=mngr_ctx)
 
-    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = ("mngr_log.sh", "mngr_transcript_lib.sh")
+    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = (
+        "mngr_log.sh",
+        "mngr_transcript_lib.sh",
+        "mngr_common_transcript_lib.sh",
+    )
 
     def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
         """Write the shared shell libraries to host-level and agent-level commands dirs.
@@ -2203,9 +2355,18 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
           (field extraction, id-set construction, offset reconciliation,
           bounded sed-append, percent-encoded path keys) shared by per-agent
           streamers such as claude's ``stream_transcript.sh``.
+        - ``mngr_common_transcript_lib.sh`` provides the common-transcript
+          converter primitives (the convert lock and the turn-end flush) shared
+          by per-agent ``common_transcript.sh`` converters and the turn-end
+          hooks that flush them (claude's ``wait_for_stop_hook.sh``,
+          antigravity's ``statusline.sh``).
         """
         host_commands = self.host_dir / "commands"
         agent_commands = self._get_agent_state_dir(agent) / "commands"
+        # These should stay per-file write_file calls (not upload_files_in_bulk) because
+        # they need the executable bit (mode="0755"), which the rsync staging helper does
+        # not preserve. The set is fixed and tiny (two libs x two destinations), so the
+        # per-file cost is negligible and this is exempt from the bulk-upload ratchet.
         for name in self._SHARED_SHELL_LIB_NAMES:
             content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
             self.write_file(host_commands / name, content_bytes, mode="0755")
@@ -2215,12 +2376,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         self,
         agent: AgentInterface,
         transfers: list[FileTransferSpec],
+        remote_home: str,
     ) -> None:
         """Validate and execute file transfers from the agent.
 
-        First validates that all required files exist, then executes transfers.
-        Always emits a "Transferring agent files" log_span (with count=0 when
-        the agent declared no transfers) so timing is visible at -vv.
+        First validates that all required files exist, then transfers everything in a
+        single bulk upload (rsync for remote hosts). Always emits a "Transferring agent
+        files" log_span (with count=0 when the agent declared no transfers) so timing is
+        visible at -vv.
         """
         with log_span("Transferring agent files", count=len(transfers)):
             if not transfers:
@@ -2236,18 +2399,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 missing_str = ", ".join(str(p) for p in missing_required)
                 raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
-            for transfer in transfers:
-                if not transfer.local_path.exists():
-                    # Optional file doesn't exist, skip it
-                    logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
-                    continue
-
-                # Resolve relative remote paths to work_dir
-                remote_path = agent.work_dir / transfer.agent_path
-
-                local_content = transfer.local_path.read_bytes()
-                self.write_file(remote_path, local_content)
-                logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
+            # Required files were validated above; skip_missing=True drops any optional
+            # transfer whose source does not exist.
+            uploads = {agent.work_dir / transfer.agent_path: transfer.local_path for transfer in transfers}
+            upload_files_in_bulk(self, uploads, remote_home, skip_missing=True)
 
     def rename_agent(
         self,
@@ -2331,7 +2486,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 agent.on_destroy(self)
             finally:
                 self.stop_agents([agent.id])
-                state_dir = self.host_dir / "agents" / str(agent.id)
+                state_dir = get_agent_state_dir_path(self.host_dir, agent.id)
                 self._remove_directory(state_dir)
 
                 # Remove persisted agent data from external storage (e.g., Modal volume)
@@ -2495,6 +2650,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         tmux_config_path=tmux_config_path,
                         unset_vars=self.mngr_ctx.config.unset_vars,
                         host_dir=self.host_dir,
+                        tmux_options=self.get_agent_tmux_options(agent),
                         onboarding_text=onboarding_text,
                     )
                     result = self.execute_stateful_command(combined_command, cwd=agent.work_dir)
@@ -2684,7 +2840,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def _get_agent_command(self, agent: AgentInterface) -> str:
         """Get the command for an agent."""
-        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
         except FileNotFoundError as e:
@@ -2698,7 +2854,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def _get_agent_additional_commands(self, agent: AgentInterface) -> list[NamedCommand]:
         """Get the additional commands for an agent."""
-        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
         except FileNotFoundError:
@@ -2717,6 +2873,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # New format: dict with command and window_name
                 result.append(NamedCommand(command=cmd["command"], window_name=cmd.get("window_name")))
         return result
+
+    def get_agent_tmux_options(self, agent: AgentInterface) -> AgentTmuxOptions:
+        """Read the agent's persisted tmux window options from data.json.
+
+        Returns default (all-None) options when there is no data.json or no tmux
+        block, so older agents created before this field existed behave as before.
+        """
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
+        try:
+            content = self.read_text_file(data_path)
+        except FileNotFoundError:
+            return AgentTmuxOptions()
+        data = json.loads(content)
+        return AgentTmuxOptions.from_data_dict(data.get("tmux"))
 
     # =========================================================================
     # Agent-Derived Information
@@ -2843,6 +3013,7 @@ def _build_start_agent_shell_command(
     tmux_config_path: Path,
     unset_vars: Sequence[str],
     host_dir: Path,
+    tmux_options: AgentTmuxOptions,
     onboarding_text: str | None = None,
 ) -> str:
     """Build a single shell command that starts an agent and its tmux session.
@@ -2877,16 +3048,29 @@ def _build_start_agent_shell_command(
     # Code's Ink framework to render at 1 column wide, breaking marker-based
     # message sending. Passing -x/-y appears to use a different tmux code
     # path that sets the PTY dimensions correctly at creation time.
-    # The window will be resized to match the client's terminal when attached.
+    # Width/height come from the agent's tmux options (falling back to the
+    # historical 200x50). Unless window-size is "manual", the window will still be
+    # resized to match the client's terminal when attached.
+    tmux_width = int(tmux_options.width) if tmux_options.width is not None else _DEFAULT_TMUX_WIDTH
+    tmux_height = int(tmux_options.height) if tmux_options.height is not None else _DEFAULT_TMUX_HEIGHT
     steps.append(
         f"tmux -f {shlex.quote(str(tmux_config_path))} new-session -d"
         f" -s {shlex.quote(session_name)}"
-        f" -x 200 -y 50"
+        f" -x {tmux_width} -y {tmux_height}"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+
+    # Apply the requested resize policy (e.g. "manual" pins the window to the
+    # dimensions above so attaching clients never resize it). window-size is a
+    # window option, so it is set on the agent's window (:0). When unset, tmux's
+    # own default ("latest") is left in place -- today's behavior.
+    if tmux_options.window_size is not None:
+        steps.append(
+            f"tmux set-option -t {quoted_exact_agent_window} window-size {tmux_options.window_size.value.lower()}"
+        )
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
@@ -2955,7 +3139,7 @@ def _build_start_agent_shell_command(
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content
-    activity_dir = host_dir / "agents" / str(agent.id) / "activity"
+    activity_dir = get_agent_state_dir_path(host_dir, agent.id) / "activity"
     activity_path = activity_dir / ActivitySource.START.value.lower()
     steps.append(f"mkdir -p {shlex.quote(str(activity_dir))}")
     activity_printf_cmd = (

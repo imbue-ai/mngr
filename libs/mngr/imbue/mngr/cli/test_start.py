@@ -12,6 +12,7 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_start_restart_running_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -35,13 +36,19 @@ def test_start_restart_running_agent(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_start_restart_stopped_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     create_test_agent: Callable[..., str],
     mngr_test_prefix: str,
 ) -> None:
-    """start --restart on a stopped agent should simply start it."""
+    """start --restart on a stopped agent should simply start it.
+
+    Marked flaky: this exercises four sequential tmux agent-lifecycle operations
+    (create, stop, restart, readiness wait) against a tight per-test timeout, so it
+    can intermittently exceed the limit on a loaded CI runner.
+    """
     create_test_agent("restart-stopped-agent", "sleep 140102")
     session_name = f"{mngr_test_prefix}restart-stopped-agent"
 

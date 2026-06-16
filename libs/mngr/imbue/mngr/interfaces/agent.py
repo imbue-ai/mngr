@@ -90,6 +90,11 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         ...
 
     @abstractmethod
+    def set_command(self, command: CommandString) -> None:
+        """Replace the command used to start this agent (applied on the next start/restart)."""
+        ...
+
+    @abstractmethod
     def get_expected_process_name(self) -> str:
         """Get the expected process name for lifecycle state detection.
 
@@ -158,14 +163,17 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         ...
 
     @abstractmethod
-    def capture_pane_content(self, include_scrollback: bool = False) -> str | None:
+    def capture_pane_content(self, include_scrollback: bool = False, window: int | str | None = None) -> str | None:
         """Capture the current tmux pane content for this agent.
 
         When include_scrollback is True, captures the full scrollback buffer
         instead of just the visible pane.
 
+        When window is None, captures the agent's primary window. Otherwise,
+        captures the given tmux window (by index or name) in the agent's session.
+
         Returns the pane content as a string, or None if capture fails
-        (e.g., the session doesn't exist or the host is unreachable).
+        (e.g., the session/window doesn't exist or the host is unreachable).
         """
         ...
 

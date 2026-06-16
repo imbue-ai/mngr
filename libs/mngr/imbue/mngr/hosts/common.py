@@ -14,11 +14,30 @@ from imbue.mngr.config.agent_config_registry import is_known_agent_type
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import WaitingReason
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
+
+
+@pure
+def get_agents_root_dir(host_dir: Path) -> Path:
+    """Return the directory under which all agents' state directories live.
+
+    This is the single source of truth for where agent state lives on disk, so
+    code that needs to enumerate agents (rather than address a single one) can do
+    so without duplicating the path structure.
+    """
+    return host_dir / "agents"
+
+
+@pure
+def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Compute the state directory path for an agent given the host directory and agent ID."""
+    return get_agents_root_dir(host_dir) / str(agent_id)
 
 
 def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
@@ -45,8 +64,25 @@ def build_ssh_transport_command(
     present in the known_hosts file. When known_hosts_file is provided, that file is
     used via UserKnownHostsFile. When None, the system default (~/.ssh/known_hosts)
     is used without setting UserKnownHostsFile.
+
+    `IdentitiesOnly=yes` + `IdentityAgent=none` pin authentication to the
+    explicit `-i` key. Without this, ssh first consults `SSH_AUTH_SOCK` --
+    on a macOS user session that's the Apple launchd agent socket which
+    forwards to 1Password's biometric prompt. In a BatchMode child like
+    `git push` or `rsync` that prompt cannot fire, and ssh blocks
+    indefinitely on the agent reply with no error surfaced upstream.
     """
-    parts = ["ssh", "-i", shlex.quote(str(key_path)), "-p", str(port)]
+    parts = [
+        "ssh",
+        "-i",
+        shlex.quote(str(key_path)),
+        "-p",
+        str(port),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "IdentityAgent=none",
+    ]
     if known_hosts_file is not None:
         parts.extend(
             ["-o", f"UserKnownHostsFile={shlex.quote(str(known_hosts_file))}", "-o", "StrictHostKeyChecking=yes"]
@@ -76,6 +112,66 @@ def add_safe_directory_on_remote(host: OnlineHostInterface, path: Path) -> None:
 def is_macos() -> bool:
     """Check if the current system is macOS (Darwin)."""
     return platform.system() == "Darwin"
+
+
+def symlink_on_host(
+    host: OnlineHostInterface,
+    source: Path,
+    dest: Path,
+    *,
+    ensure_source_parent: bool = False,
+    timeout_seconds: float = 10.0,
+) -> None:
+    """Create ``dest`` as a symlink to ``source`` on the host, idempotently, in one round-trip.
+
+    Always creates the symlink (``ln -sfn``), even if ``source`` does not exist yet -- a
+    dangling symlink that becomes live when ``source`` is later created (e.g. a tool that
+    writes the token/cache *through* it). ``dest``'s parent dir (and, when
+    ``ensure_source_parent`` is True, ``source``'s parent dir) is created so the link --
+    and any write-through -- resolves.
+
+    Mirrors the symlink credential pattern used across plugins (e.g. agy's oauth token and
+    playwright cache, and ``mngr_claude``'s credentials), so the shell-building and quoting
+    live in one place. See also ``copy_on_host`` for the full-isolation copy variant.
+    """
+    quoted_source = shlex.quote(str(source))
+    quoted_dest = shlex.quote(str(dest))
+    mkdir_targets = shlex.quote(str(dest.parent))
+    if ensure_source_parent:
+        mkdir_targets += f" {shlex.quote(str(source.parent))}"
+    host.execute_idempotent_command(
+        f"mkdir -p {mkdir_targets} && ln -sfn {quoted_source} {quoted_dest}",
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def copy_on_host(
+    host: OnlineHostInterface,
+    source: Path,
+    dest: Path,
+    *,
+    copy_file_mode: str = "600",
+    timeout_seconds: float = 10.0,
+) -> bool:
+    """Copy ``source`` to ``dest`` on the host, idempotently, in one round-trip.
+
+    Copies ``source`` to ``dest`` (and ``chmod``s it to ``copy_file_mode``) only if
+    ``source`` exists; ``dest``'s parent is created first. Returns True if it copied,
+    False if it skipped because ``source`` was absent.
+
+    The full-isolation counterpart to ``symlink_on_host``: a copy is independent of the
+    source (no write-through, no propagation of later changes).
+    """
+    quoted_source = shlex.quote(str(source))
+    quoted_dest = shlex.quote(str(dest))
+    quoted_dest_parent = shlex.quote(str(dest.parent))
+    copied_marker = "__MNGR_COPIED__"
+    result = host.execute_idempotent_command(
+        f"if [ -e {quoted_source} ]; then mkdir -p {quoted_dest_parent} && rm -f {quoted_dest} "
+        f"&& cp {quoted_source} {quoted_dest} && chmod {copy_file_mode} {quoted_dest} && echo {copied_marker}; fi",
+        timeout_seconds=timeout_seconds,
+    )
+    return copied_marker in result.stdout
 
 
 # Activity sources that are host-level (vs agent-level)
@@ -312,3 +408,29 @@ def determine_lifecycle_state(
         return AgentLifecycleState.DONE
 
     return replaced_state
+
+
+@pure
+def classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> WaitingReason | None:
+    """Classify why an agent is waiting from two marker signals, or None if running.
+
+    Shared by agent plugins so that a lifecycle reader (the RUNNING -> WAITING
+    promotion in ``get_lifecycle_state``) and a ``waiting_reason`` field generator
+    make the *same* decision from the same inputs and cannot drift. Callers differ
+    only in how they derive ``is_active`` -- e.g. from the live process plus an
+    ``active`` marker, or from a single cheap ``active`` marker read.
+
+    - not active -> END_OF_TURN (idle, turn complete)
+    - active and blocked on a permission dialog -> PERMISSIONS
+    - active and not blocked -> None (actively running)
+
+    PERMISSIONS is gated on ``is_active``: a permission dialog is only meaningful
+    during a live turn, so a *stranded* permission marker (one that outlived its
+    turn) reports END_OF_TURN rather than PERMISSIONS. Correctness therefore does
+    not depend on a cleanup hook having removed the marker.
+    """
+    if not is_active:
+        return WaitingReason.END_OF_TURN
+    if is_blocked_on_permission:
+        return WaitingReason.PERMISSIONS
+    return None

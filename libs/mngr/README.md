@@ -232,7 +232,7 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.
 ```
 This installs [uv](https://docs.astral.sh/uv/) and mngr (`uv tool install imbue-mngr`), then interactively prompts about system dependencies, optional extras, and a default agent type for `mngr create`. You can [review the script](https://github.com/imbue-ai/mngr/blob/main/scripts/install.sh) before running it.
 
-**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `ssh`, `git`, `tmux`, `jq`; optional: `rsync`, `unison`, `claude`):
+**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `git`, `tmux`, `jq`; optional: `ssh`, `rsync`, `unison`, `claude`):
 ```bash
 uv tool install imbue-mngr
 
@@ -247,15 +247,19 @@ uv tool upgrade imbue-mngr
 
 **For development:**
 ```bash
-git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages && uv tool install -e libs/mngr
+git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages
 ```
+
+A pre-commit hook installs a small `mngr` shim into `~/.local/bin` (make sure that's on your PATH) that always runs the checkout you're working in -- so editing the source, or switching git worktrees, takes effect immediately with no per-worktree setup. (Don't `uv tool install -e libs/mngr` for development: that pins a single global `mngr` to one clone, which silently runs the wrong code when you work in another worktree.)
 
 ## Shell completion
 
-`mngr` supports tab completion for commands, options, and agent names in bash and zsh.
-Shell completion is configured automatically by the install script (`scripts/install.sh`).
+`mngr` supports tab completion for commands, options, agent names, and `-S`/`--setting` config overrides (both the `KEY` and, where the value is constrained, the `VALUE`) in bash and zsh.
+Shell completion is configured automatically by the install script (`scripts/install.sh`), or interactively via `mngr extras completion`.
 
-To set up manually, generate the completion script and append it to your shell rc file:
+Your rc file gets only a small, stable shim that sources a managed completion file mngr keeps up to date, so completion improvements apply automatically when you upgrade mngr -- no need to re-edit your rc. If you have an older self-contained completion function in your rc, tab completion will nudge you to run `mngr extras completion` once to switch to the shim.
+
+To set up manually, append the shim to your shell rc file (this also writes the managed completion file):
 
 **Zsh** (run once):
 ```bash
@@ -389,7 +393,7 @@ As well as the code for some plugins that we maintain, including:
 
 - [libs/mngr_modal/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_modal/README.md)
 - [libs/mngr_claude/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_claude/README.md)
-- [libs/mngr_uncapped_claude/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_uncapped_claude/README.md)
+- [libs/mngr_robinhood/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_robinhood/README.md)
 - [libs/mngr_pair/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_pair/README.md)
 - [libs/mngr_opencode/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_opencode/README.md)
 - [libs/mngr_antigravity/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_antigravity/README.md)

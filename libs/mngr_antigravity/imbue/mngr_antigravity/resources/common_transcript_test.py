@@ -18,13 +18,18 @@ Each test sets up:
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from imbue.mngr import resources as mngr_resources
+from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
 
@@ -57,18 +62,13 @@ def _make_event(
 
 
 def _user_input(conv_id: str, step_index: int, prompt_text: str) -> str:
-    """USER_EXPLICIT/USER_INPUT shaped exactly the way agy 1.0.0 wraps it."""
-    envelope = (
-        f"<USER_REQUEST>\n{prompt_text}\n</USER_REQUEST>\n"
-        "<ADDITIONAL_METADATA>\nThe current local time is: 2026-05-21T00:00:00-07:00.\n"
-        "</ADDITIONAL_METADATA>\n"
-    )
+    """USER_EXPLICIT/USER_INPUT carrying the clean typed text agy's SQLite store records."""
     return _make_event(
         conv_id=conv_id,
         step_index=step_index,
         source="USER_EXPLICIT",
         type_="USER_INPUT",
-        content=envelope,
+        content=prompt_text,
     )
 
 
@@ -111,11 +111,16 @@ def _conversation_history(conv_id: str, step_index: int) -> str:
 
 @pytest.fixture
 def state_dir(tmp_path: Path, stub_mngr_log_sh: str) -> Path:
-    """Per-test fake $MNGR_AGENT_STATE_DIR with stub mngr_log.sh installed."""
+    """Per-test fake $MNGR_AGENT_STATE_DIR with stub mngr_log.sh + the real
+    shared common-transcript lib installed (the converter sources it for the
+    convert lock), mirroring Host._ensure_shared_shell_libs."""
     state = tmp_path / "agent"
     (state / "commands").mkdir(parents=True)
     (state / "logs" / "antigravity_transcript").mkdir(parents=True)
     (state / "commands" / "mngr_log.sh").write_text(stub_mngr_log_sh)
+    (state / "commands" / "mngr_common_transcript_lib.sh").write_text(
+        importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+    )
     return state
 
 
@@ -166,7 +171,12 @@ def _read_common_events(state_dir: Path) -> list[dict[str, Any]]:
 
 
 def test_user_input_is_converted_to_user_message(state_dir: Path) -> None:
-    """USER_EXPLICIT/USER_INPUT -> user_message with the USER_REQUEST envelope stripped."""
+    """USER_EXPLICIT/USER_INPUT -> user_message carrying agy's clean typed text.
+
+    agy's SQLite store (via decode_agy_transcript.py) records the bare typed text in
+    ``CortexStepUserInput.query``; the converter passes it through, stripped of surrounding
+    whitespace, with no envelope handling.
+    """
     _write_raw_transcript(state_dir, [_user_input("conv-A", 0, "What is 2+2?")])
 
     _run_converter(state_dir)
@@ -176,36 +186,10 @@ def test_user_input_is_converted_to_user_message(state_dir: Path) -> None:
     event = events[0]
     assert event["type"] == "user_message"
     assert event["role"] == "user"
-    # The inner text only; the ADDITIONAL_METADATA preamble must be discarded.
     assert event["content"] == "What is 2+2?"
     assert event["conversation_id"] == "conv-A"
     assert event["step_index"] == 0
     assert event["source"] == "antigravity/common_transcript"
-
-
-def test_user_input_without_user_request_envelope_drops_event_with_loud_error(state_dir: Path) -> None:
-    """If a future agy version drops the <USER_REQUEST> envelope, surface a loud error and drop the event.
-
-    Silently falling through to the raw content would bake agy's bookkeeping
-    (metadata preamble, future fields) into the user-visible transcript and
-    hide the schema break. Better to drop and shout so the schema mismatch is
-    visible upstream when it happens for the first time.
-    """
-    raw = _make_event(
-        conv_id="conv-A",
-        step_index=0,
-        source="USER_EXPLICIT",
-        type_="USER_INPUT",
-        content="plain text without envelope",
-    )
-    _write_raw_transcript(state_dir, [raw])
-
-    stderr = _run_converter(state_dir)
-
-    assert _read_common_events(state_dir) == []
-    assert "USER_INPUT content missing <USER_REQUEST> envelope" in stderr
-    assert "conv=conv-A" in stderr
-    assert "step=0" in stderr
 
 
 def test_planner_response_without_tool_calls_is_assistant_message(state_dir: Path) -> None:
@@ -481,7 +465,7 @@ def test_events_without_mngr_conv_id_are_dropped(state_dir: Path) -> None:
             "source": "USER_EXPLICIT",
             "type": "USER_INPUT",
             "created_at": "2026-05-21T07:00:00Z",
-            "content": "<USER_REQUEST>\nhi\n</USER_REQUEST>",
+            "content": "hi",
         }
     )
     _write_raw_transcript(state_dir, [raw])
@@ -518,3 +502,100 @@ def test_event_ids_are_stable_and_per_conversation(state_dir: Path) -> None:
     events = _read_common_events(state_dir)
     ids = sorted(e["event_id"] for e in events)
     assert ids == ["conv-A-0-user", "conv-B-0-user"]
+
+
+def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> None:
+    """Every record antigravity's converter emits must validate against the shared envelope schema.
+
+    Guards against the antigravity emitter (common_transcript.sh) and the canonical schema
+    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives all three record
+    types and asserts each emitted record conforms.
+    """
+    _write_raw_transcript(
+        state_dir,
+        [
+            _user_input("conv-A", 0, "create test.txt"),
+            _planner_response(
+                "conv-A",
+                2,
+                text="hi there",
+                tool_calls=[{"name": "write_to_file", "args": {"path": "test.txt"}}],
+            ),
+            _code_action("conv-A", 3, content="Created test.txt"),
+        ],
+    )
+
+    _run_converter(state_dir)
+
+    records = _read_common_events(state_dir)
+    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
+
+
+# -- Convert-lock serialization (shared by the 5s daemon and on-demand flush) --
+
+
+def _lock_dir(state_dir: Path) -> Path:
+    return state_dir / ".common_transcript_convert.lock"
+
+
+def test_held_convert_lock_skips_pass(state_dir: Path) -> None:
+    """A pass that cannot take the convert lock (held by a concurrent pass)
+    skips conversion rather than racing into duplicate output. Simulated by
+    pre-creating the (fresh) lock dir and giving the pass a short timeout."""
+    _write_raw_transcript(state_dir, [_user_input("conv-A", 0, "hello")])
+    _lock_dir(state_dir).mkdir(parents=True)
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir), "MNGR_CONVERT_LOCK_TIMEOUT": "1"}
+    result = subprocess.run(
+        ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
+    )
+    assert "Traceback" not in result.stderr, result.stderr
+    assert _read_common_events(state_dir) == []
+
+    _lock_dir(state_dir).rmdir()
+    _run_converter(state_dir)
+    assert len(_read_common_events(state_dir)) == 1
+
+
+def test_stale_convert_lock_is_broken(state_dir: Path) -> None:
+    """A convert lock older than a minute is treated as stale and broken, so the
+    converter never wedges permanently."""
+    _write_raw_transcript(state_dir, [_user_input("conv-A", 0, "hello")])
+    lock = _lock_dir(state_dir)
+    lock.mkdir(parents=True)
+    stale = time.time() - 120
+    os.utime(lock, (stale, stale))
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir), "MNGR_CONVERT_LOCK_TIMEOUT": "1"}
+    result = subprocess.run(
+        ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
+    )
+    assert "Traceback" not in result.stderr, result.stderr
+    assert len(_read_common_events(state_dir)) == 1
+
+
+def test_concurrent_passes_do_not_duplicate(state_dir: Path) -> None:
+    """Two passes racing over the same input must not both append the same
+    events: the lock serializes them so the second sees the first's output in
+    its dedup set. Without the lock this produces duplicate event_ids."""
+    _write_raw_transcript(state_dir, [_user_input(f"conv-{i}", i, f"msg {i}") for i in range(20)])
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)}
+    procs = [
+        subprocess.Popen(
+            ["bash", str(_SCRIPT_PATH), "--single-pass"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    for proc in procs:
+        assert proc.wait(timeout=30) == 0
+
+    events = _read_common_events(state_dir)
+    event_ids = [e["event_id"] for e in events]
+    assert len(event_ids) == len(set(event_ids)), "convert lock failed to prevent duplicate events"
+    assert len(events) == 20
