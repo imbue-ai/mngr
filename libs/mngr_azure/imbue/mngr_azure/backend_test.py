@@ -19,12 +19,9 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.backend import AGENT_TAG_PREFIX
 from imbue.mngr_azure.backend import AzureProvider
 from imbue.mngr_azure.backend import AzureProviderBackend
-from imbue.mngr_azure.backend import IDLE_WATCHER_UNIT_NAME
 from imbue.mngr_azure.backend import ParsedAzureBuildOptions
-from imbue.mngr_azure.backend import _build_idle_watcher_path_unit
 from imbue.mngr_azure.backend import _build_idle_watcher_service_unit
 from imbue.mngr_azure.backend import _build_self_deallocate_script
-from imbue.mngr_azure.backend import _build_sentinel_shutdown_script
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.testing import FakeAuthorizationClient
@@ -647,29 +644,6 @@ def test_persisted_agent_dicts_reassembles_id_with_dashes(temp_mngr_ctx: MngrCon
 # =============================================================================
 # Idle-watcher / sentinel module functions (systemd path/service + deallocate)
 # =============================================================================
-
-
-def test_build_sentinel_shutdown_script_touches_the_sentinel_path() -> None:
-    """The in-container shutdown script signals idle by touching the given sentinel (not killing pid 1).
-
-    The sentinel path is the only contract tying the in-container write to the
-    host-side path unit's ``PathExists``, so it must appear verbatim (quoted
-    against spaces).
-    """
-    sentinel = "/mngr-vol/host_dir/commands/stop-instance-requested"
-    script = _build_sentinel_shutdown_script(sentinel)
-    assert script.startswith("#!/bin/bash\n")
-    assert f'touch "{sentinel}"' in script
-    assert "kill -TERM 1" not in script
-
-
-def test_build_idle_watcher_path_unit_watches_sentinel_and_targets_service() -> None:
-    """The systemd .path unit fires the watcher .service when the sentinel appears."""
-    sentinel = "/mngr-btrfs/abc123/host_dir/commands/stop-instance-requested"
-    unit = _build_idle_watcher_path_unit(sentinel)
-    assert f"PathExists={sentinel}" in unit
-    assert f"Unit={IDLE_WATCHER_UNIT_NAME}.service" in unit
-    assert "WantedBy=multi-user.target" in unit
 
 
 def test_build_idle_watcher_service_unit_execstart_points_at_deallocate_script() -> None:

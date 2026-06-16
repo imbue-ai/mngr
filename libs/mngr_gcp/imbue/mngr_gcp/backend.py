@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
-from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -17,16 +16,13 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
@@ -36,8 +32,6 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SnapshotId
-from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
@@ -47,13 +41,10 @@ from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
-from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
-from imbue.mngr_vps_docker.container_setup import host_volume_name_for
-from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -80,57 +71,6 @@ _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"STOPPING", "TERMINATED"})
 # ``mngr-host-name`` metadata holds ``mngr-<host_name>``; strip the prefix to
 # recover the host name when reconstructing a stopped host.
 _HOST_NAME_PREFIX: Final[str] = "mngr-"
-
-# Self-stopping idle watcher (host-side). Identical mechanism to AWS: the
-# in-container activity watcher writes ``IDLE_SENTINEL_FILENAME`` onto the shared
-# volume when idle; a host-side systemd ``.path`` unit watches the outer path and
-# triggers a oneshot ``.service`` that runs ``shutdown -P now``. On GCE a guest
-# poweroff lands the instance in ``TERMINATED`` (stopped, disk preserved, no
-# compute billing) by default -- there is no GCE analog to AWS's
-# ``InstanceInitiatedShutdownBehavior`` and none is needed (and no IAM/API call).
-IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-gcp-idle-watcher"
-IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
-
-
-def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
-    """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
-
-    Unlike the base ``VpsDockerProvider`` shutdown script (``kill -TERM 1``, which
-    stops only the container), the GCP variant signals idle by touching a sentinel
-    file on the shared volume. A host-side systemd path unit observes it and powers
-    the whole GCE instance off (a container cannot power off its host).
-    """
-    return f'#!/bin/bash\ntouch "{sentinel_in_container}"\n'
-
-
-def _build_idle_watcher_path_unit(sentinel_on_outer: str) -> str:
-    """Build the systemd ``.path`` unit that fires when the idle sentinel appears."""
-    return (
-        "[Unit]\n"
-        "Description=Watch for the mngr idle sentinel and stop this GCE instance when idle\n"
-        "[Path]\n"
-        f"PathExists={sentinel_on_outer}\n"
-        f"Unit={IDLE_WATCHER_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-
-
-def _build_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
-    """Build the oneshot systemd ``.service`` that powers the host off when idle.
-
-    Runs ``shutdown -P now``; on GCE a guest poweroff stops the instance
-    (``TERMINATED``, disk preserved, no compute billing) with no API call. Removes
-    the sentinel BEFORE powering off so the rearmed ``.path`` unit does not
-    immediately re-stop a just-resumed instance.
-    """
-    return (
-        "[Unit]\n"
-        "Description=Power off this instance when mngr signals the host is idle\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && shutdown -P now'\n"
-    )
 
 
 def _resolve_credentials_project_and_zone_or_unavailable(
@@ -381,250 +321,27 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
         return vps_ips
 
     # =========================================================================
-    # Native GCE stop/start (idle-pause + resume)
+    # Native GCE stop/start + idle-watcher hooks (for OfflineCapableVpsDockerProvider)
     # =========================================================================
 
-    def stop_host(
-        self,
-        host: HostInterface | HostId,
-        create_snapshot: bool = True,
-        timeout_seconds: float = 60.0,
-        stop_reason: HostState | None = None,
-    ) -> None:
-        """Stop the agent container *and* the GCE instance, preserving the boot disk.
-
-        The base ``VpsDockerProvider.stop_host`` only stops the inner Docker
-        container, leaving the GCE instance running and billing. This override
-        additionally calls ``instances.stop`` so a paused GCP agent costs only disk
-        storage; the boot disk (and all on-disk state) survives, so ``start_host``
-        can resume it. ``create_snapshot`` is ignored -- native GCE stop preserves
-        the whole filesystem. The base container-stop + record-write is reused via
-        ``super()`` with ``stop_reason=STOPPED`` so the single write marks the host
-        STOPPED before the instance (and its volume) goes unreachable. Mirrors
-        ``AwsProvider.stop_host``.
-        """
-        del create_snapshot
-        host_id = host.id if isinstance(host, HostInterface) else host
-        host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(self.name, host_id)
-        super().stop_host(
-            host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
-        )
+    def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
+        """Stop the GCE instance; the boot disk and all on-disk state survive."""
         with log_span("Stopping GCE instance"):
-            self.gcp_client.stop_instance(host_record.config.vps_instance_id)
+            self.gcp_client.stop_instance(instance_id)
 
-    def start_host(
-        self,
-        host: HostInterface | HostId,
-        snapshot_id: SnapshotId | None = None,
-    ) -> Host:
-        """Resume a stopped GCP agent: start the GCE instance, then its container.
-
-        A stopped GCE instance is not SSH-reachable and (with an ephemeral external
-        IP) has no address, so it is located by its ``mngr-host-id`` label, started,
-        and its fresh external IP read back. The instance keeps its SSH host keys
-        across a stop/start (they live on the boot disk), so we re-point known_hosts
-        at the new IP and rewrite the persisted record's ``vps_ip`` before delegating
-        the container start to ``super()``. Mirrors ``AwsProvider.start_host``.
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            raise HostNotFoundError(self.name, host_id)
-        instance_id = VpsInstanceId(instance["id"])
+    def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
+        """Start the GCE instance and return its fresh external IP (an ephemeral IP changes on resume)."""
         with log_span("Starting GCE instance"):
-            new_ip = self.gcp_client.start_instance(instance_id)
-        # The cached instance list predates the start (stale state / no external IP);
-        # drop it so any later discovery sees the running instance + new IP.
-        self._instances_cache = None
-        # Rebind known_hosts to the new IP from mngr's local host keypairs BEFORE
-        # connecting -- the instance kept its host keys across the stop/start (they
-        # are on the boot disk), but the IP changed and the record can't be read
-        # until we can SSH in. The local keypairs are what was injected at create.
-        self._rebind_known_hosts_pre_connect(new_ip)
-        with log_span("Waiting for VPS SSH after start"):
-            self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
-        with self._make_outer_for_vps_ip(new_ip) as outer:
-            host_store = open_host_store(outer, host_volume_name_for(host_id))
-            record = host_store.read_host_record()
-            if record is None or record.config is None:
-                raise HostNotFoundError(self.name, host_id)
-            self._rebind_known_hosts(record, new_ip)
-            # Clear any stale idle sentinel so the freshly-resumed instance isn't
-            # immediately re-stopped by the systemd path unit (belt-and-suspenders;
-            # the self-stop service also removes it when it fires).
-            outer.execute_idempotent_command(f"rm -f {self._idle_sentinel_path_on_outer(host_id)}")
-            certified = record.certified_host_data
-            updated_data = certified.model_copy_update(
-                to_update(certified.field_ref().stop_reason, None),
-                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
-            )
-            updated_record = record.model_copy_update(
-                to_update(record.field_ref().vps_ip, new_ip),
-                to_update(record.field_ref().certified_host_data, updated_data),
-            )
-            host_store.write_host_record(updated_record)
-        # Drop any cached Host bound to the old IP, then seed the record cache so
-        # super().start_host()'s _find_host_record returns the rebound record.
-        self._evict_cached_host(host_id)
-        self._host_record_cache[host_id] = updated_record
-        return super().start_host(host_id, snapshot_id)
-
-    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
-        """Locate this host's GCE instance by its ``mngr-host-id`` label (works while stopped).
-
-        Unlike ``_find_host_record`` (which SSHes into the VPS), this reads only the
-        instance labels returned by ``instances.list``, so it resolves an instance
-        that is stopped and therefore unreachable over SSH. Refuses (raises) when
-        more than one instance carries the same ``mngr-host-id`` -- the label is
-        account-writable, so a duplicate could otherwise steer ``mngr start`` onto
-        the wrong instance. Mirrors ``AwsProvider._find_instance_for_host``.
-        """
-        matches = self._instances_matching_host_id(host_id)
-        if not matches:
-            # The cached list can predate this instance (e.g. a discovery pass during
-            # create populated it first); refresh once and retry before giving up.
-            self._instances_cache = None
-            matches = self._instances_matching_host_id(host_id)
-        if len(matches) > 1:
-            ids = sorted(str(m.get("id")) for m in matches)
-            raise MngrError(
-                f"GCP provider {self.name!r}: {len(matches)} GCE instances are labeled "
-                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
-                "Resolve the duplicate labels (or delete the stray instance) and retry."
-            )
-        return matches[0] if matches else None
+            return self.gcp_client.start_instance(instance_id)
 
     def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Return every cached instance labeled ``mngr-host-id=<host_id>``."""
+        """Match on the GCE-label-encoded host id (GCE labels cannot hold a raw mngr host id)."""
         wanted = f"mngr-host-id={to_gce_label_value(str(host_id))}"
         return [instance for instance in self._list_instances_cached() if wanted in instance.get("tags", ())]
 
-    def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
-        """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
-
-        GCE stop/start keeps the instance's SSH host keys (on the boot disk), so only
-        the IP changes. Drop any stale entries for the old IP, then add the new IP
-        with the recorded VPS (port 22) and container host keys.
-        """
-        old_ip = record.vps_ip
-        if old_ip is not None and old_ip != new_ip:
-            remove_host_from_known_hosts(self._vps_known_hosts_path(), old_ip, 22)
-            remove_host_from_known_hosts(self._container_known_hosts_path(), old_ip, self.config.container_ssh_port)
-        if record.ssh_host_public_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path=self._vps_known_hosts_path(),
-                hostname=new_ip,
-                port=22,
-                public_key=record.ssh_host_public_key,
-            )
-        if record.container_ssh_host_public_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path=self._container_known_hosts_path(),
-                hostname=new_ip,
-                port=self.config.container_ssh_port,
-                public_key=record.container_ssh_host_public_key,
-            )
-
-    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
-        """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
-
-        Runs on resume *before* any SSH connection (the host record, the other key
-        source, can't be read until we can connect). The VPS/container host keypairs
-        are generated and held locally by mngr and injected at create time, so the
-        public keys here are exactly what the resumed instance presents (its host
-        keys persist on the boot disk across a stop/start).
-        """
-        add_host_to_known_hosts(
-            known_hosts_path=self._vps_known_hosts_path(),
-            hostname=new_ip,
-            port=22,
-            public_key=self._get_vps_host_keypair()[1],
-        )
-        add_host_to_known_hosts(
-            known_hosts_path=self._container_known_hosts_path(),
-            hostname=new_ip,
-            port=self.config.container_ssh_port,
-            public_key=self._get_container_host_keypair()[1],
-        )
-
-    # =========================================================================
-    # Self-stopping idle watcher (in-container sentinel + host-side systemd)
-    # =========================================================================
-
-    def _create_shutdown_script(self, host: Host) -> None:
-        """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
-
-        The base writes ``kill -TERM 1`` (stops the container); for GCP an idle
-        container should stop the whole *instance* (so a paused agent costs only
-        disk), but a container cannot power off its host. Instead the in-container
-        watcher touches a sentinel on the shared volume; a host-side systemd path
-        unit (installed in ``_on_host_finalized``) observes it and powers the host
-        off, which on GCE stops the instance. Mirrors ``AwsProvider._create_shutdown_script``.
-        """
-        sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
-        shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
-
-    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the host-side systemd idle watcher that self-stops this instance.
-
-        Best-effort (the base contract says this MUST NOT raise): any failure just
-        means no auto-stop on idle (manual ``mngr stop`` still works). Mirrors
-        ``AwsProvider._on_host_finalized``.
-        """
-        try:
-            self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            logger.warning(
-                "GCP idle watcher install failed for host {} ({}); the agent will not "
-                "auto-stop on idle, but `mngr stop` still works",
-                host_id,
-                e,
-            )
-
-    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the systemd path/service idle watcher on the outer host.
-
-        The watcher powers the host off when the in-container idle sentinel appears;
-        on GCE a guest poweroff stops the instance (no API/IAM). Returns early (after
-        a WARNING) when the host record is missing.
-        """
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            logger.warning(
-                "GCP idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
-                host_id,
-            )
-            return
-        sentinel_on_outer = self._idle_sentinel_path_on_outer(host_id)
-        with log_span("Installing GCP idle self-stop watcher"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.path"),
-                    _build_idle_watcher_path_unit(str(sentinel_on_outer)),
-                )
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
-                    _build_idle_watcher_service_unit(str(sentinel_on_outer)),
-                )
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
-        logger.info("GCP idle self-stop watcher installed for host {}", host_id)
-
-    def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of the in-container idle sentinel for this host."""
-        return (
-            self.config.btrfs_mount_path
-            / host_id.get_uuid().hex
-            / HOST_DIR_SUBPATH
-            / "commands"
-            / IDLE_SENTINEL_FILENAME
-        )
+    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
+        """Idle action: power the host off; on GCE a guest poweroff stops the instance (TERMINATED)."""
+        return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
 
     # =========================================================================
     # Offline metadata via instance metadata (so STOPPED hosts list + resolve by name)

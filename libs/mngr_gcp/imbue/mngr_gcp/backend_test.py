@@ -21,12 +21,7 @@ from imbue.mngr_gcp.backend import AGENT_METADATA_PREFIX
 from imbue.mngr_gcp.backend import GCP_BACKEND_NAME
 from imbue.mngr_gcp.backend import GcpProvider
 from imbue.mngr_gcp.backend import GcpProviderBackend
-from imbue.mngr_gcp.backend import IDLE_SENTINEL_FILENAME
-from imbue.mngr_gcp.backend import IDLE_WATCHER_UNIT_NAME
 from imbue.mngr_gcp.backend import ParsedGcpBuildOptions
-from imbue.mngr_gcp.backend import _build_idle_watcher_path_unit
-from imbue.mngr_gcp.backend import _build_idle_watcher_service_unit
-from imbue.mngr_gcp.backend import _build_sentinel_shutdown_script
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
@@ -767,50 +762,3 @@ def test_persisted_agent_dicts_reassembles_id_with_dashes(temp_mngr_ctx: MngrCon
         _normalized_instance({"mngr-agent-ab-cd-ef-name": "a1", "mngr-agent-ab-cd-ef-type": "command"})
     )
     assert agents == [{"id": "ab-cd-ef", "name": "a1", "type": "command"}]
-
-
-# =============================================================================
-# Idle-watcher / sentinel module functions
-# =============================================================================
-
-
-def test_build_sentinel_shutdown_script_touches_the_sentinel_path() -> None:
-    """The in-container shutdown script signals idle by touching the given sentinel file.
-
-    The sentinel path is the only contract tying the in-container write to the
-    host-side path unit's ``PathExists``, so it must appear verbatim (quoted
-    against spaces) and the script must ``touch`` it rather than kill pid 1.
-    """
-    sentinel = f"/mngr-vol/host_dir/commands/{IDLE_SENTINEL_FILENAME}"
-    script = _build_sentinel_shutdown_script(sentinel)
-    assert script.startswith("#!/bin/bash\n")
-    assert f'touch "{sentinel}"' in script
-    assert "kill -TERM 1" not in script, "GCP shutdown must NOT kill the container; it signals via a sentinel"
-
-
-def test_build_idle_watcher_path_unit_watches_sentinel_and_targets_service() -> None:
-    """The systemd .path unit fires the watcher service when the sentinel appears."""
-    sentinel = f"/mngr-btrfs/abc123/host_dir/commands/{IDLE_SENTINEL_FILENAME}"
-    unit = _build_idle_watcher_path_unit(sentinel)
-    assert f"PathExists={sentinel}" in unit
-    assert f"Unit={IDLE_WATCHER_UNIT_NAME}.service" in unit
-    assert "WantedBy=multi-user.target" in unit
-
-
-def test_build_idle_watcher_service_unit_removes_sentinel_then_powers_off() -> None:
-    """The oneshot .service removes the sentinel, then powers the host off via ``shutdown -P now``.
-
-    On GCE a guest poweroff stops the instance (TERMINATED, disk preserved, no
-    compute billing) with no API/IAM call. The sentinel ``rm -f`` must run BEFORE
-    the power-off so a later resume isn't immediately re-stopped by the path unit.
-    """
-    sentinel = "/mngr-btrfs/deadbeef/host_dir/commands/stop-instance-requested"
-    unit = _build_idle_watcher_service_unit(sentinel)
-    assert "Type=oneshot" in unit
-    assert "shutdown -P now" in unit
-    assert f"rm -f {sentinel}" in unit
-    # rm must precede the power-off so resume gets a clean slate.
-    assert unit.index("rm -f") < unit.index("shutdown -P now")
-    # No GCE API path: the watcher powers the host off, it does not call instances.stop.
-    assert "instances.stop" not in unit
-    assert "gcloud" not in unit
