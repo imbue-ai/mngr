@@ -4,17 +4,16 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import Literal
 
 import click
 from botocore.exceptions import BotoCoreError
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
@@ -56,6 +55,7 @@ from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
@@ -274,11 +274,6 @@ class AwsProvider(VpsDockerProvider):
     aws_client: AwsVpsClient = Field(frozen=True, description="EC2 API client")
     aws_config: AwsProviderConfig = Field(frozen=True, description="AWS-specific configuration")
 
-    # Lazily-resolved S3 state bucket. ``False`` means "not yet resolved"; once
-    # resolved it holds either an ``S3StateBucket`` or ``None`` (no bucket
-    # configured / account id unresolvable -- the legacy tag-mirror fallback).
-    _state_bucket_cache: S3StateBucket | None | Literal[False] = PrivateAttr(default=False)
-
     def _host_identity(self) -> S3StateHostIdentity | None:
         """Return the bucket-write IAM host identity (uncached), or None when unresolvable.
 
@@ -287,19 +282,18 @@ class AwsProvider(VpsDockerProvider):
         """
         return self.aws_config.build_host_identity(self.aws_client.session)
 
+    @cached_property
     def _state_bucket(self) -> S3StateBucket | None:
-        """Return the S3 state bucket when it actually exists, else None (cached).
+        """Return the S3 state bucket when it actually exists, else None.
 
         When present, the bucket is the source of truth for agent records and the
-        offline host record (replacing the legacy EC2 tag mirror); when None
+        offline host record (replacing the EC2 tag mirror); when None
         (no bucket configured/derivable, or one whose name resolves but does not
         yet exist because ``mngr aws prepare`` was never run), mngr falls back to
-        the per-agent tag mirror. The existence probe is cached so it runs at most
-        once per provider lifetime.
+        the per-agent tag mirror. The existence probe runs at most once per
+        provider lifetime (cached).
         """
-        if self._state_bucket_cache is False:
-            self._state_bucket_cache = self._resolve_existing_state_bucket()
-        return self._state_bucket_cache
+        return self._resolve_existing_state_bucket()
 
     def _resolve_existing_state_bucket(self) -> S3StateBucket | None:
         """Build the configured/derived bucket and return it only if it exists."""
@@ -309,7 +303,7 @@ class AwsProvider(VpsDockerProvider):
         try:
             if not bucket.bucket_exists():
                 logger.debug(
-                    "S3 state bucket {} does not exist; using the legacy EC2 tag mirror "
+                    "S3 state bucket {} does not exist; using the EC2 tag mirror "
                     "(run `mngr aws prepare` to create it)",
                     bucket.bucket_name,
                 )
@@ -318,6 +312,19 @@ class AwsProvider(VpsDockerProvider):
             logger.warning("Could not check S3 state bucket {}; falling back to EC2 tags: {}", bucket.bucket_name, e)
             return None
         return bucket
+
+    @cached_property
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror: the S3 bucket when present, else the EC2 tag mirror.
+
+        Selecting one store here lets the persist / remove / list / read paths
+        below stop branching on bucket-vs-tags. Offline ``host_dir`` reads are a
+        separate, bucket-only feature and stay keyed off ``_state_bucket``.
+        """
+        bucket = self._state_bucket
+        if bucket is not None:
+            return _S3BucketHostStateStore(bucket=bucket)
+        return _Ec2TagHostStateStore(provider=self)
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List EC2 instances tagged with this provider's name."""
@@ -465,7 +472,7 @@ class AwsProvider(VpsDockerProvider):
         """
         if not self.aws_config.is_host_dir_synced_to_bucket:
             return None
-        if self._state_bucket() is None:
+        if self._state_bucket is None:
             return None
         identity = self._host_identity()
         if identity is None:
@@ -474,7 +481,7 @@ class AwsProvider(VpsDockerProvider):
             if not identity.host_identity_exists():
                 logger.warning(
                     "host_dir sync is on but the bucket-write IAM identity {} does not exist; launching "
-                    "without it (run `mngr aws prepare --host-dir-identity require` to enable offline host_dir)",
+                    "without it (run `mngr aws prepare --use-offline-host-dir yes` to enable offline host_dir)",
                     identity.identity_name,
                 )
                 return None
@@ -776,7 +783,7 @@ class AwsProvider(VpsDockerProvider):
         """
         if not self.aws_config.is_host_dir_synced_to_bucket:
             return
-        bucket = self._state_bucket()
+        bucket = self._state_bucket
         if bucket is None:
             logger.debug("No S3 state bucket; skipping host_dir sync install for host {}", host_id)
             return
@@ -811,7 +818,7 @@ class AwsProvider(VpsDockerProvider):
         a sync hiccup never blocks the stop -- the offline copy is then simply
         "as of the last periodic sync".
         """
-        if not self.aws_config.is_host_dir_synced_to_bucket or self._state_bucket() is None:
+        if not self.aws_config.is_host_dir_synced_to_bucket or self._state_bucket is None:
             return
         try:
             with log_span("Triggering final host_dir sync before stop"):
@@ -878,34 +885,20 @@ class AwsProvider(VpsDockerProvider):
     # =========================================================================
 
     def _persist_host_record_externally(self, record: VpsDockerHostRecord) -> None:
-        """Mirror the full host record into the S3 state bucket when one is configured.
+        """Mirror the full host record into the external store (best-effort).
 
-        Best-effort: a bucket-write failure is logged at WARNING and swallowed
-        so it never breaks create / stop / rename. When no bucket is configured
-        this is a no-op (the legacy tag mirror covers offline listing instead).
+        Delegates to the selected store: the S3 bucket writes the full record; the
+        tag mirror is a no-op (the instance's own tags carry it).
         """
-        bucket = self._state_bucket()
-        if bucket is None:
-            return
-        host_id = HostId(record.certified_host_data.host_id)
-        try:
-            bucket.write_host_record(host_id, record.model_dump_json(indent=2))
-        except S3StateBucketError as e:
-            logger.warning("Failed to mirror host record for {} to S3 state bucket: {}", host_id, e)
+        self._state_store.persist_host_record(record)
 
     def _delete_host_record_externally(self, host_id: HostId) -> None:
-        """Delete the host's state from the S3 bucket when one is configured.
+        """Delete the host's state from the external store (best-effort, idempotent).
 
-        Best-effort: a failure is logged at WARNING and swallowed so it never
-        breaks destroy / delete. No-op when no bucket is configured.
+        Delegates to the selected store: the S3 bucket deletes the host's prefix;
+        the tag mirror is a no-op (destroying the instance drops its tags).
         """
-        bucket = self._state_bucket()
-        if bucket is None:
-            return
-        try:
-            bucket.delete_host_state(host_id)
-        except S3StateBucketError as e:
-            logger.warning("Failed to delete host state for {} from S3 state bucket: {}", host_id, e)
+        self._state_store.delete_host_state(host_id)
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         """Persist an agent's record on the host volume *and* in the external store.
@@ -917,10 +910,10 @@ class AwsProvider(VpsDockerProvider):
         write is best-effort: a *stopped* host raises ``HostNotFoundError`` (no
         reachable ``vps_ip``), in which case only the external mirror is written.
 
-        When an S3 state bucket is configured, the agent record is mirrored into
-        the bucket (full record, no size limit). Otherwise it falls back to the
-        legacy per-field EC2 tag mirror (``mngr-agent-<id>-<field>``), which caps
-        each value at 256 chars and the instance at 50 tags.
+        The external mirror is the S3 bucket (full record, no size limit) when
+        one is configured, else the per-field EC2 tag mirror
+        (``mngr-agent-<id>-<field>``), which caps each value at 256 chars and the
+        instance at 50 tags. ``_state_store`` selects between them.
         """
         try:
             super().persist_agent_data(host_id, agent_data)
@@ -932,23 +925,10 @@ class AwsProvider(VpsDockerProvider):
         if agent_id is None:
             logger.warning("Cannot mirror agent data without an id (name={!r})", agent_data.get("name"))
             return
-        bucket = self._state_bucket()
-        if bucket is not None:
-            self._persist_agent_to_bucket(bucket, host_id, str(agent_id), agent_data)
-        else:
-            self._persist_agent_to_tags(host_id, str(agent_id), agent_data)
-
-    def _persist_agent_to_bucket(
-        self, bucket: S3StateBucket, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]
-    ) -> None:
-        """Mirror an agent record into the S3 state bucket (full record, no tag limits)."""
-        try:
-            bucket.write_agent_record(host_id, agent_id, agent_data)
-        except S3StateBucketError as e:
-            logger.warning("Failed to mirror agent {} for host {} to S3 state bucket: {}", agent_id, host_id, e)
+        self._state_store.persist_agent_record(host_id, str(agent_id), agent_data)
 
     def _persist_agent_to_tags(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror an agent record into per-field EC2 tags (legacy, no-bucket fallback)."""
+        """Mirror an agent record into per-field EC2 tags (no-bucket fallback)."""
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             logger.warning("No EC2 instance found for host {}; cannot persist agent tags", host_id)
@@ -987,18 +967,7 @@ class AwsProvider(VpsDockerProvider):
             super().remove_persisted_agent_data(host_id, agent_id)
         except HostNotFoundError:
             logger.debug("Host {} unreachable; removing agent data from the external store only", host_id)
-        bucket = self._state_bucket()
-        if bucket is not None:
-            try:
-                bucket.remove_agent_record(host_id, str(agent_id))
-            except S3StateBucketError as e:
-                logger.warning("Failed to remove agent {} for host {} from S3 state bucket: {}", agent_id, host_id, e)
-            return
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
-        self.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
+        self._state_store.remove_agent_record(host_id, str(agent_id))
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         """Return the host's persisted agent records, on-volume when reachable else from the external store.
@@ -1012,13 +981,7 @@ class AwsProvider(VpsDockerProvider):
         try:
             return super().list_persisted_agent_data_for_host(host_id)
         except HostNotFoundError:
-            bucket = self._state_bucket()
-            if bucket is not None:
-                return bucket.list_agent_records(host_id)
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return []
-            return self._persisted_agent_dicts_from_instance(instance)
+            return self._state_store.list_agent_records(host_id)
 
     def discover_hosts_and_agents(
         self,
@@ -1035,7 +998,6 @@ class AwsProvider(VpsDockerProvider):
         """
         result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
-        bucket = self._state_bucket()
         for instance in self._list_instances_cached():
             # Reconstruct hosts whose instance is stopping or fully stopped: the OS
             # is down, so the SSH-based sweep above can't reach them. Gate on state,
@@ -1060,10 +1022,16 @@ class AwsProvider(VpsDockerProvider):
                 continue
             if host_ref is None or host_ref.host_id in online_host_ids:
                 continue
-            if bucket is not None:
-                agent_dicts = bucket.list_agent_records(host_ref.host_id)
-            else:
-                agent_dicts = self._persisted_agent_dicts_from_instance(instance)
+            try:
+                agent_dicts = self._state_store.list_agent_records(host_ref.host_id)
+            except MngrError as e:
+                # e.g. duplicate mngr-host-id tags: skip this host's agents rather
+                # than aborting the whole offline sweep (matches the per-instance
+                # skip above for malformed tags).
+                logger.opt(exception=e).warning(
+                    "Skipping agents for host {} in offline discovery: {}", host_ref.host_id, e
+                )
+                continue
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in agent_dicts:
                 ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
@@ -1110,43 +1078,20 @@ class AwsProvider(VpsDockerProvider):
 
         Falls back to the base (SSH/volume-backed) path first; if that can't find
         the host (because it is stopped and unreachable), reconstruct it from the
-        external store. When an S3 state bucket is configured, the *full*
-        ``VpsDockerHostRecord`` is read from ``host_state.json`` (no information
-        loss); otherwise a minimal ``CertifiedHostData`` is rebuilt from EC2 tags.
+        external store: the *full* ``VpsDockerHostRecord`` when the store has it
+        (S3 ``host_state.json``), otherwise a minimal record rebuilt from the
+        instance's own EC2 tags -- which also covers a bucket-mode host created
+        before the bucket existed (so its ``host_state.json`` is absent).
         """
         try:
             return super().to_offline_host(host_id)
         except HostNotFoundError:
-            bucket_record = self._host_record_from_bucket(host_id)
-            if bucket_record is not None:
-                return self._create_offline_host(bucket_record)
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
+            record = self._state_store.read_host_record(host_id)
+            if record is None:
+                record = self._host_record_from_instance_tags(host_id)
+            if record is None:
                 raise
-            return self._offline_host_from_tags(host_id, instance)
-
-    def _host_record_from_bucket(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Read and parse the full host record from the S3 state bucket, or None.
-
-        Returns None when no bucket is configured, no record exists, or the
-        stored JSON is malformed (logged at warning) -- so the caller falls back
-        to the tag-based reconstruction.
-        """
-        bucket = self._state_bucket()
-        if bucket is None:
-            return None
-        try:
-            record_json = bucket.read_host_record(host_id)
-        except S3StateBucketError as e:
-            logger.warning("Failed to read host record for {} from S3 state bucket: {}", host_id, e)
-            return None
-        if record_json is None:
-            return None
-        try:
-            return VpsDockerHostRecord.model_validate_json(record_json)
-        except ValueError as e:
-            logger.warning("Malformed host record for {} in S3 state bucket: {}", host_id, e)
-            return None
+            return self._create_offline_host(record)
 
     # =========================================================================
     # Offline host_dir volume (reads via the operator's credentials)
@@ -1163,7 +1108,7 @@ class AwsProvider(VpsDockerProvider):
         """
         if not self.aws_config.is_host_dir_synced_to_bucket:
             return None
-        bucket = self._state_bucket()
+        bucket = self._state_bucket
         if bucket is None:
             return None
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -1176,14 +1121,14 @@ class AwsProvider(VpsDockerProvider):
         host's ``host_dir/`` prefix actually has objects (a cheap ``list`` with
         ``MaxKeys=1``). When the prefix is empty, runs the missing-identity
         diagnostic (Decision 7) -- a clear WARNING pointing at
-        ``mngr aws prepare --host-dir-identity require`` if the instance has no
+        ``mngr aws prepare --use-offline-host-dir yes`` if the instance has no
         attached IAM profile -- and returns None (callers treat None as "not
         available"). This never raises.
         """
         reference = self.get_volume_reference_for_host(host)
         if reference is None:
             return None
-        bucket = self._state_bucket()
+        bucket = self._state_bucket
         if bucket is None:
             return None
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -1204,7 +1149,7 @@ class AwsProvider(VpsDockerProvider):
         Detects the Decision-7 case directly from cloud state: when the host's
         instance has no attached IAM instance profile, the on-box sync daemon
         could never push host_dir, which is why the prefix is empty. Points the
-        user at ``mngr aws prepare --host-dir-identity require`` (and recreating
+        user at ``mngr aws prepare --use-offline-host-dir yes`` (and recreating
         the host so it picks up the profile). Best-effort: any probe failure is
         swallowed (this is purely advisory).
         """
@@ -1220,7 +1165,7 @@ class AwsProvider(VpsDockerProvider):
             logger.warning(
                 "Host {}'s instance has no attached IAM instance profile, so its host_dir was never "
                 "pushed to the bucket and is not readable offline. Run `mngr aws prepare "
-                "--host-dir-identity require`, then recreate the host so it picks up the profile.",
+                "--use-offline-host-dir yes`, then recreate the host so it picks up the profile.",
                 host_id,
             )
 
@@ -1339,8 +1284,18 @@ class AwsProvider(VpsDockerProvider):
             host_state=HostState.STOPPED,
         )
 
-    def _offline_host_from_tags(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
+    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        """Rebuild a minimal STOPPED host record from the instance's own ``mngr-*`` tags, or None.
+
+        Uses only the base tags mngr writes at launch (host-id, Name, created-at),
+        so it works regardless of the external-store mode -- including a bucket-mode
+        host created before the bucket existed (whose ``host_state.json`` is absent).
+        Returns None when no instance carries the host's tag. Backs the tag store's
+        ``read_host_record`` and the universal fallback in ``to_offline_host``.
+        """
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return None
         tags = self._tag_dict_from_normalized(instance)
         created_at_raw = tags.get("mngr-created-at")
         now = datetime.now(timezone.utc)
@@ -1364,7 +1319,94 @@ class AwsProvider(VpsDockerProvider):
             updated_at=now,
             stop_reason=HostState.STOPPED.value,
         )
-        return self._create_offline_host(VpsDockerHostRecord(certified_host_data=certified))
+        return VpsDockerHostRecord(certified_host_data=certified)
+
+
+class _S3BucketHostStateStore(HostStateStore):
+    """Bucket-backed host-state mirror: full host + agent records in S3 (no size limit)."""
+
+    bucket: S3StateBucket
+
+    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+        host_id = HostId(record.certified_host_data.host_id)
+        try:
+            self.bucket.write_host_record(host_id, record.model_dump_json(indent=2))
+        except S3StateBucketError as e:
+            logger.warning("Failed to mirror host record for {} to S3 state bucket: {}", host_id, e)
+
+    def delete_host_state(self, host_id: HostId) -> None:
+        try:
+            self.bucket.delete_host_state(host_id)
+        except S3StateBucketError as e:
+            logger.warning("Failed to delete host state for {} from S3 state bucket: {}", host_id, e)
+
+    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        try:
+            self.bucket.write_agent_record(host_id, agent_id, agent_data)
+        except S3StateBucketError as e:
+            logger.warning("Failed to mirror agent {} for host {} to S3 state bucket: {}", agent_id, host_id, e)
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        try:
+            self.bucket.remove_agent_record(host_id, agent_id)
+        except S3StateBucketError as e:
+            logger.warning("Failed to remove agent {} for host {} from S3 state bucket: {}", agent_id, host_id, e)
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        return self.bucket.list_agent_records(host_id)
+
+    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        try:
+            record_json = self.bucket.read_host_record(host_id)
+        except S3StateBucketError as e:
+            logger.warning("Failed to read host record for {} from S3 state bucket: {}", host_id, e)
+            return None
+        if record_json is None:
+            return None
+        try:
+            return VpsDockerHostRecord.model_validate_json(record_json)
+        except ValueError as e:
+            logger.warning("Malformed host record for {} in S3 state bucket: {}", host_id, e)
+            return None
+
+
+class _Ec2TagHostStateStore(HostStateStore):
+    """Tag-backed host-state mirror: the instance's own EC2 tags are the store (no-bucket fallback).
+
+    Compact (256-char per value, 50-tag-per-instance) and keyed off the live
+    instance, so the host record / agent records are reconstructed from the
+    instance's ``mngr-*`` tags. Delegates the tag I/O to the owning provider,
+    which already resolves instances from its cached ``DescribeInstances`` listing.
+    """
+
+    provider: AwsProvider
+
+    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+        # The instance's own create/stop tags carry the host record; nothing extra to write.
+        pass
+
+    def delete_host_state(self, host_id: HostId) -> None:
+        # Destroying the instance drops its tags, so there is no separate state to delete.
+        pass
+
+    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        self.provider._persist_agent_to_tags(host_id, agent_id, agent_data)
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return
+        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
+        self.provider.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return []
+        return self.provider._persisted_agent_dicts_from_instance(instance)
+
+    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        return self.provider._host_record_from_instance_tags(host_id)
 
 
 class AwsProviderBackend(ProviderBackendInterface):

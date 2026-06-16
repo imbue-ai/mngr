@@ -28,7 +28,7 @@ mngr azure prepare [OPTIONS]
 | `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
 | `--resource-group` | text | Resource group to create / reuse. Defaults to the resolved provider config's resource_group. | None |
 | `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production. | None |
-| `--host-dir-identity` | choice (`auto` &#x7C; `require` &#x7C; `skip`) | Whether to provision the bucket-write managed identity (user-assigned identity + a Storage Blob Data Contributor role assignment scoped to just the state storage account) that lets a VM push its host_dir to the bucket for offline reads. 'auto': attempt it, but degrade a missing-permission failure to a warning (network + bucket prepare still succeed). 'require': fail the command if the identity can't be provisioned. 'skip': don't attempt it. Needs Microsoft.ManagedIdentity/userAssignedIdentities/write + Microsoft.Authorization/roleAssignments/write (Owner or User Access Administrator) when something is actually created. | `auto` |
+| `--use-offline-host-dir` | choice (`yes` &#x7C; `auto` &#x7C; `no`) | Enable offline host_dir -- reading a stopped host's files via `mngr file` / `mngr event` / `mngr transcript` while the host is powered off. 'yes' requires it (fail if it can't be enabled); 'auto' (default) enables it when possible, otherwise warns and continues; 'no' disables it. | `auto` |
 
 ## Common
 
@@ -62,6 +62,7 @@ mngr azure cleanup [OPTIONS]
 | `--subscription-id` | text | Azure subscription ID. Defaults to the resolved provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription. | None |
 | `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
 | `--resource-group` | text | Resource group to delete. Defaults to the resolved provider config's resource_group. | None |
+| `--purge-state` | boolean | Also delete the state storage account when it still holds offline host state left over from hosts that no longer exist as VMs (otherwise cleanup refuses to delete a non-empty account). | `False` |
 
 ## Common
 

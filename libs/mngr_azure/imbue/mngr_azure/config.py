@@ -213,7 +213,7 @@ class AzureProviderConfig(VpsDockerProviderConfig):
             "and without the 256-char Azure tag limit. When None, the effective name is derived as "
             "'mngrst<hash>' from the subscription + resource group (3-24 lowercase alnum). When the "
             "account+container exist (created by `mngr azure prepare`), the per-agent VM tag mirror is "
-            "dropped in favor of the bucket; without it, mngr falls back to the legacy tag mirror."
+            "dropped in favor of the bucket; without it, mngr falls back to the tag mirror."
         ),
     )
     is_host_dir_synced_to_bucket: bool = Field(

@@ -27,6 +27,7 @@ from moto import mock_aws
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
@@ -268,10 +269,21 @@ def test_perform_state_bucket_cleanup_refuses_while_host_state_remains() -> None
         bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-refuse")
         bucket.ensure_bucket()
         bucket.write_host_record(HostId.generate(), "{}")
-        with pytest.raises(click.ClickException, match="still holds host state"):
-            _perform_state_bucket_cleanup(bucket)
+        with pytest.raises(click.ClickException, match="still holds offline host state"):
+            _perform_state_bucket_cleanup(bucket, purge_state=False)
         # The bucket must still exist after a refusal.
         assert bucket.bucket_exists() is True
+
+
+def test_perform_state_bucket_cleanup_purge_state_deletes_despite_host_state() -> None:
+    """``--purge-state`` deletes the bucket (and its leftover state) instead of refusing."""
+    with mock_aws():
+        session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
+        bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-purge")
+        bucket.ensure_bucket()
+        bucket.write_host_record(HostId.generate(), "{}")
+        assert _perform_state_bucket_cleanup(bucket, purge_state=True) == "mngr-state-cleanup-purge"
+        assert bucket.bucket_exists() is False
 
 
 def test_perform_state_bucket_cleanup_deletes_empty_bucket() -> None:
@@ -280,17 +292,17 @@ def test_perform_state_bucket_cleanup_deletes_empty_bucket() -> None:
         session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
         bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-empty")
         bucket.ensure_bucket()
-        assert _perform_state_bucket_cleanup(bucket) == "mngr-state-cleanup-empty"
+        assert _perform_state_bucket_cleanup(bucket, purge_state=False) == "mngr-state-cleanup-empty"
         assert bucket.bucket_exists() is False
 
 
 def test_perform_state_bucket_cleanup_none_is_noop() -> None:
     """A None bucket (none configured) is a harmless no-op."""
-    assert _perform_state_bucket_cleanup(None) is None
+    assert _perform_state_bucket_cleanup(None, purge_state=False) is None
 
 
 # =============================================================================
-# host-dir identity provisioning (prepare --host-dir-identity tri-state)
+# host-dir identity provisioning (prepare --use-offline-host-dir tri-state)
 # =============================================================================
 
 _IDENTITY_BUCKET = "mngr-state-identity-cli"
@@ -301,11 +313,11 @@ def _moto_identity() -> S3StateHostIdentity:
     return S3StateHostIdentity(session=session, region="us-east-1", bucket_name=_IDENTITY_BUCKET)
 
 
-def test_provision_host_identity_skip_does_nothing() -> None:
-    """'skip' provisions no identity and creates nothing, even when one is available."""
+def test_provision_host_identity_no_does_nothing() -> None:
+    """'no' provisions no identity and creates nothing, even when one is available."""
     with mock_aws():
         identity = _moto_identity()
-        assert _provision_host_identity(identity, "skip") is None
+        assert _provision_host_identity(identity, AutoToggle.NO) is None
         assert identity.host_identity_exists() is False
 
 
@@ -313,26 +325,26 @@ def test_provision_host_identity_auto_creates_identity() -> None:
     """'auto' provisions the identity when IAM is available, returning its name."""
     with mock_aws():
         identity = _moto_identity()
-        assert _provision_host_identity(identity, "auto") == host_identity_name_for_bucket(_IDENTITY_BUCKET)
+        assert _provision_host_identity(identity, AutoToggle.AUTO) == host_identity_name_for_bucket(_IDENTITY_BUCKET)
         assert identity.host_identity_exists() is True
 
 
-def test_provision_host_identity_require_creates_identity() -> None:
-    """'require' provisions the identity when possible (same success path as auto)."""
+def test_provision_host_identity_yes_creates_identity() -> None:
+    """'yes' provisions the identity when possible (same success path as auto)."""
     with mock_aws():
         identity = _moto_identity()
-        assert _provision_host_identity(identity, "require") == host_identity_name_for_bucket(_IDENTITY_BUCKET)
+        assert _provision_host_identity(identity, AutoToggle.YES) == host_identity_name_for_bucket(_IDENTITY_BUCKET)
 
 
 def test_provision_host_identity_auto_warns_and_continues_when_unresolvable() -> None:
     """'auto' degrades to None when the identity is unresolvable (None)."""
-    assert _provision_host_identity(None, "auto") is None
+    assert _provision_host_identity(None, AutoToggle.AUTO) is None
 
 
-def test_provision_host_identity_require_raises_when_unresolvable() -> None:
-    """'require' raises a ClickException when the identity can't be provisioned."""
+def test_provision_host_identity_yes_raises_when_unresolvable() -> None:
+    """'yes' raises a ClickException when the identity can't be provisioned."""
     with pytest.raises(click.ClickException):
-        _provision_host_identity(None, "require")
+        _provision_host_identity(None, AutoToggle.YES)
 
 
 def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:

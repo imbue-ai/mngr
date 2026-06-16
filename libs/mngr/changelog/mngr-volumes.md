@@ -1,1 +1,3 @@
-Regenerated the `mngr aws` / `mngr azure` CLI doc pages to cover the new `prepare --host-dir-identity {auto,require,skip}` flag and the state-bucket setup these commands now perform (the providers' state-bucket feature is described in the `mngr_aws` / `mngr_azure` changelogs).
+Added a reusable `AutoToggle` enum (`yes` / `auto` / `no`) to `mngr.primitives` for force-on / best-effort / force-off CLI options, with an `auto_toggle_choices()` helper and a shared `AUTO_TOGGLE_HELP_SUFFIX`. The `mngr aws` / `mngr azure` `prepare --use-offline-host-dir` flag uses it.
+
+Regenerated the `mngr aws` / `mngr azure` CLI doc pages to cover the new `prepare --use-offline-host-dir {yes,auto,no}` flag and the state-bucket setup these commands now perform (the providers' state-bucket feature is described in the `mngr_aws` / `mngr_azure` changelogs).

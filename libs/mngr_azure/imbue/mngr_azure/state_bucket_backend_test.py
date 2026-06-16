@@ -1,4 +1,4 @@
-"""Tests for the AzureProvider's Blob-state-bucket vs legacy-tag agent-data behavior."""
+"""Tests for the AzureProvider's Blob-state-bucket vs tag agent-data behavior."""
 
 from datetime import datetime
 from datetime import timezone
@@ -81,9 +81,9 @@ def _build_bucket_provider(mngr_ctx: MngrContext) -> tuple[AzureProvider, FakeCo
         fake_backend=backend,
     )
     bucket.ensure_bucket()
-    # Inject the resolved bucket so the provider's existence probe is bypassed
-    # (the production probe would hit real Azure).
-    provider._state_bucket_cache = bucket
+    # Pre-seed the ``_state_bucket`` cached_property so the provider's existence
+    # probe is bypassed (the production probe would hit real Azure).
+    provider.__dict__["_state_bucket"] = bucket
     return provider, compute
 
 
@@ -120,7 +120,7 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(temp_mngr
 
     provider._persist_host_record_externally(record)
 
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     assert bucket.read_host_record(host_id) is not None
 
@@ -146,7 +146,7 @@ def test_bucket_mode_remove_agent_clears_bucket_record(temp_mngr_ctx: MngrContex
 def test_delete_host_externally_removes_bucket_state(temp_mngr_ctx: MngrContext) -> None:
     provider, _compute = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     bucket.write_host_record(host_id, "{}")
     bucket.write_agent_record(host_id, "agent-1", {"id": "agent-1"})
@@ -156,12 +156,12 @@ def test_delete_host_externally_removes_bucket_state(temp_mngr_ctx: MngrContext)
     assert bucket.has_any_host_state() is False
 
 
-def test_no_bucket_uses_legacy_tag_path(temp_mngr_ctx: MngrContext) -> None:
+def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
     """Without a resolved bucket, the provider falls back to the VM tag mirror.
 
-    Forcing ``_state_bucket_cache = None`` takes ``persist_agent_data`` down the tag
-    path: it looks up the VM via the fake compute list and upserts tags, which the
-    fake resource client records.
+    Pre-seeding ``_state_bucket`` with None takes ``persist_agent_data`` down the
+    tag path: it looks up the VM via the fake compute list and upserts tags, which
+    the fake resource client records.
     """
     config = AzureProviderConfig(subscription_id="sub-123", auto_shutdown_seconds=3600)
     compute = FakeComputeClient()
@@ -185,8 +185,8 @@ def test_no_bucket_uses_legacy_tag_path(temp_mngr_ctx: MngrContext) -> None:
         azure_client=client,
         azure_config=config,
     )
-    # Force the no-bucket resolution to be cached.
-    provider._state_bucket_cache = None
+    # Pre-seed the no-bucket resolution into the cached_property.
+    provider.__dict__["_state_bucket"] = None
 
     host_id = HostId.generate()
     agent_id = AgentId.generate()
@@ -200,7 +200,7 @@ def test_no_bucket_uses_legacy_tag_path(temp_mngr_ctx: MngrContext) -> None:
         )
     ]
     provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
-    # The legacy tag path ran: a server-side tag Merge patch was recorded.
+    # The tag path ran: a server-side tag Merge patch was recorded.
     assert len(resource.tags.updates) == 1
 
 
@@ -275,7 +275,7 @@ def _build_provider_with_identity(
         fake_backend=backend,
     )
     bucket.ensure_bucket()
-    provider._state_bucket_cache = bucket
+    provider.__dict__["_state_bucket"] = bucket
     return provider, compute
 
 
@@ -283,7 +283,7 @@ def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(temp_mngr_ctx: Mng
     """The reference getter returns a host_dir-scoped volume with no probe."""
     provider, _compute = _build_provider_with_identity(temp_mngr_ctx)
     host_id = HostId.generate()
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     # Seed under the host's host_dir prefix via the bucket's own volume writer.
     bucket.volume_for_host(host_id).write_files({"events/e.jsonl": b"evt"})
@@ -295,7 +295,7 @@ def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(temp_mngr_ctx: Mng
 def test_get_volume_for_host_returns_volume_when_objects_present(temp_mngr_ctx: MngrContext) -> None:
     provider, _compute = _build_provider_with_identity(temp_mngr_ctx)
     host_id = HostId.generate()
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     bucket.volume_for_host(host_id).write_files({"logs/a.log": b"a"})
     volume = provider.get_volume_for_host(host_id)

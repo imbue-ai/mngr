@@ -20,7 +20,6 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
-from typing import Final
 from typing import assert_never
 
 import click
@@ -35,8 +34,11 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AUTO_TOGGLE_HELP_SUFFIX
+from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import auto_toggle_choices
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
@@ -45,18 +47,6 @@ from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
-
-# Tri-state for ``mngr azure prepare --host-dir-identity`` (Decisions 3 & 6):
-# whether/how to provision the bucket-write managed identity that lets a VM push
-# its host_dir to the bucket for offline reads.
-_HOST_DIR_IDENTITY_AUTO: Final[str] = "auto"
-_HOST_DIR_IDENTITY_REQUIRE: Final[str] = "require"
-_HOST_DIR_IDENTITY_SKIP: Final[str] = "skip"
-_HOST_DIR_IDENTITY_CHOICES: Final[tuple[str, ...]] = (
-    _HOST_DIR_IDENTITY_AUTO,
-    _HOST_DIR_IDENTITY_REQUIRE,
-    _HOST_DIR_IDENTITY_SKIP,
-)
 
 
 class _AzureOperatorCliOptions(CommonCliOptions):
@@ -76,7 +66,12 @@ class _AzureOperatorCliOptions(CommonCliOptions):
 
 class _AzurePrepareCliOptions(_AzureOperatorCliOptions):
     allowed_ssh_cidrs: tuple[str, ...]
-    host_dir_identity: str
+    # Raw CLI choice string ("yes"/"auto"/"no"); parsed to AutoToggle in ``prepare``.
+    use_offline_host_dir: str
+
+
+class _AzureCleanupCliOptions(_AzureOperatorCliOptions):
+    purge_state: bool
 
 
 def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AzureProviderConfig:
@@ -223,20 +218,25 @@ def _ensure_state_bucket_best_effort(bucket: BlobStateBucket) -> tuple[str | Non
     return bucket.account_name, was_created
 
 
-def _perform_state_bucket_cleanup(bucket: BlobStateBucket) -> str | None:
+def _perform_state_bucket_cleanup(bucket: BlobStateBucket, *, purge_state: bool) -> str | None:
     """Delete the state storage account, refusing while any managed-host state remains.
 
-    Returns the deleted account name, or ``None`` when none existed. Raises
-    ``AzureProviderError`` when the account still holds any ``hosts/`` state,
-    mirroring the VM-exists safety: deleting it would strand the offline state of
-    still-managed hosts. Split out so the refuse/delete decision is unit-testable.
+    Returns the deleted account name, or ``None`` when none existed. Unless
+    ``purge_state`` is set, raises ``AzureProviderError`` when the account still
+    holds ``hosts/`` state. By the time this runs the VM-exists check has already
+    passed, so any remaining state is *orphaned* offline state (a host whose VM
+    is gone but whose ``delete_host_state`` never ran, or one deleted outside
+    mngr) -- deleting it silently could drop offline records the operator still
+    wants, so we refuse and let ``--purge-state`` opt into deleting it. Split out
+    so the refuse/delete decision is unit-testable.
     """
     if not bucket.account_exists():
         return None
-    if bucket.container_exists() and bucket.has_any_host_state():
+    if not purge_state and bucket.container_exists() and bucket.has_any_host_state():
         raise AzureProviderError(
-            f"Refusing to delete Azure state storage account {bucket.account_name!r}: it still holds host state. "
-            "Destroy the managed hosts first with `mngr destroy <agent>`, then re-run `mngr azure cleanup`."
+            f"Refusing to delete Azure state storage account {bucket.account_name!r}: it still holds offline "
+            "host state (from hosts that are no longer running VMs). Re-run with `--purge-state` to delete "
+            "the account and the remaining state."
         )
     bucket.delete_bucket()
     return bucket.account_name
@@ -258,20 +258,20 @@ def _build_host_identity(base: AzureProviderConfig, client: AzureVpsClient) -> B
     )
 
 
-def _provision_host_identity(identity: BlobStateHostIdentity, host_dir_identity: str) -> str | None:
+def _provision_host_identity(identity: BlobStateHostIdentity, use_offline_host_dir: AutoToggle) -> str | None:
     """Provision the bucket-write managed identity per the tri-state flag, returning its name or None.
 
-    ``skip`` does nothing (returns None). ``auto`` attempts provisioning and
+    ``NO`` does nothing (returns None). ``AUTO`` attempts provisioning and
     degrades a permission/API failure to a WARNING so the network + bucket prepare
     still succeed -- offline host_dir just won't work until prepare is re-run with
-    sufficient role-assignment permissions. ``require`` raises a
+    sufficient role-assignment permissions. ``YES`` raises a
     ``click.ClickException`` when the identity cannot be provisioned, for a clean
     programmatic "this prepare must yield a working offline host_dir". Mirrors
     ``mngr_aws.cli._provision_host_identity``.
     """
-    if host_dir_identity == _HOST_DIR_IDENTITY_SKIP:
+    if use_offline_host_dir is AutoToggle.NO:
         return None
-    is_required = host_dir_identity == _HOST_DIR_IDENTITY_REQUIRE
+    is_required = use_offline_host_dir is AutoToggle.YES
     try:
         identity.ensure_host_identity()
     except BlobStateHostIdentityError as e:
@@ -292,24 +292,24 @@ def _provision_host_identity(identity: BlobStateHostIdentity, host_dir_identity:
 
 
 def _provision_host_identity_for_prepare(
-    base: AzureProviderConfig, client: AzureVpsClient, host_dir_identity: str, *, was_account_set_up: bool
+    base: AzureProviderConfig, client: AzureVpsClient, use_offline_host_dir: AutoToggle, *, was_account_set_up: bool
 ) -> str | None:
     """Provision the host-dir identity during prepare, gating on the state account existing.
 
     The identity's Storage Blob Data Contributor role assignment is scoped to the
     state account, so provisioning is only meaningful once that account is set up.
-    When the account setup was skipped (``was_account_set_up`` is False): ``require``
-    raises (it cannot deliver a working offline host_dir), while ``auto`` / ``skip``
+    When the account setup was skipped (``was_account_set_up`` is False): ``YES``
+    raises (it cannot deliver a working offline host_dir), while ``AUTO`` / ``NO``
     return None (no identity, the documented degraded outcome). When the account is
     present, defer to ``_provision_host_identity`` for the tri-state behavior.
     """
     if was_account_set_up:
-        return _provision_host_identity(_build_host_identity(base, client), host_dir_identity)
-    if host_dir_identity == _HOST_DIR_IDENTITY_REQUIRE:
+        return _provision_host_identity(_build_host_identity(base, client), use_offline_host_dir)
+    if use_offline_host_dir is AutoToggle.YES:
         raise click.ClickException(
             "Cannot provision the host-dir managed identity: the state storage account could not be set up "
             "(its Storage Blob Data Contributor role assignment is scoped to that account). Re-run with "
-            "sufficient Microsoft.Storage permissions, or use --host-dir-identity auto/skip."
+            "sufficient Microsoft.Storage permissions, or use --use-offline-host-dir auto/no."
         )
     return None
 
@@ -469,20 +469,14 @@ def azure_cli_group() -> None:
     ),
 )
 @optgroup.option(
-    "--host-dir-identity",
-    "host_dir_identity",
-    type=click.Choice(_HOST_DIR_IDENTITY_CHOICES),
-    default=_HOST_DIR_IDENTITY_AUTO,
+    "--use-offline-host-dir",
+    "use_offline_host_dir",
+    type=click.Choice(auto_toggle_choices()),
+    default=AutoToggle.AUTO.value.lower(),
     show_default=True,
     help=(
-        "Whether to provision the bucket-write managed identity (user-assigned identity + a Storage "
-        "Blob Data Contributor role assignment scoped to just the state storage account) that lets a VM "
-        "push its host_dir to the bucket for offline reads. 'auto': attempt it, but degrade a missing-"
-        "permission failure to a warning (network + bucket prepare still succeed). 'require': fail the "
-        "command if the identity can't be provisioned. 'skip': don't attempt it. Needs "
-        "Microsoft.ManagedIdentity/userAssignedIdentities/write + "
-        "Microsoft.Authorization/roleAssignments/write (Owner or User Access Administrator) when something "
-        "is actually created."
+        "Enable offline host_dir -- reading a stopped host's files via `mngr file` / "
+        "`mngr event` / `mngr transcript` while the host is powered off. " + AUTO_TOGGLE_HELP_SUFFIX
     ),
 )
 @add_common_options
@@ -533,15 +527,18 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # to a warning so the network prepare still succeeds (offline state then falls
     # back to the VM tag mirror).
     state_account_name, was_bucket_created = _ensure_state_bucket_best_effort(_build_state_bucket(base, client))
-    # Provision the bucket-write managed identity per --host-dir-identity
-    # (Decisions 3 & 6). 'auto' degrades a failure to a warning; 'require' raises;
-    # 'skip' returns None. The bucket-only steps above are unconditional, so a
-    # later `prepare --host-dir-identity require` adds just the identity. The
+    # Provision the bucket-write managed identity per --use-offline-host-dir
+    # (Decisions 3 & 6). 'auto' degrades a failure to a warning; 'yes' raises;
+    # 'no' returns None. The bucket-only steps above are unconditional, so a
+    # later `prepare --use-offline-host-dir yes` adds just the identity. The
     # identity's role assignment is scoped to the state account, so it is only
     # meaningful when the account was set up; skip it when the bucket setup was
     # itself skipped (state_account_name is None).
     host_identity_name = _provision_host_identity_for_prepare(
-        base, client, opts.host_dir_identity, was_account_set_up=state_account_name is not None
+        base,
+        client,
+        AutoToggle(opts.use_offline_host_dir.upper()),
+        was_account_set_up=state_account_name is not None,
     )
     _output_prepare_result(
         result, state_account_name, was_bucket_created, host_identity_name, output_opts.output_format
@@ -579,6 +576,16 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     default=None,
     help="Resource group to delete. Defaults to the resolved provider config's resource_group.",
 )
+@optgroup.option(
+    "--purge-state",
+    "purge_state",
+    is_flag=True,
+    default=False,
+    help=(
+        "Also delete the state storage account when it still holds offline host state left over from "
+        "hosts that no longer exist as VMs (otherwise cleanup refuses to delete a non-empty account)."
+    ),
+)
 @add_common_options
 @click.pass_context
 def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
@@ -594,7 +601,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="azure cleanup",
-        command_class=_AzureOperatorCliOptions,
+        command_class=_AzureCleanupCliOptions,
     )
     base = _resolve_provider_config(mngr_ctx, opts.provider)
     try:
@@ -613,7 +620,9 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     # (its own refusal mirrors the VM check, as defense in depth). The storage
     # account lives in the resource group, so it is deleted first (its own
     # delete, before the RG cascade).
-    deleted_account_name = _perform_state_bucket_cleanup(_build_state_bucket(base, client))
+    deleted_account_name = _perform_state_bucket_cleanup(
+        _build_state_bucket(base, client), purge_state=opts.purge_state
+    )
     # Delete the bucket-write managed identity (best-effort, idempotent) before the
     # RG cascade. The RG delete would reap it anyway, but the explicit delete keeps
     # cleanup well-defined when the identity outlives a partial prior cleanup.

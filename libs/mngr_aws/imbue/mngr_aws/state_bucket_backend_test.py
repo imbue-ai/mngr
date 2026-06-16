@@ -1,4 +1,4 @@
-"""Tests for the AwsProvider's S3-state-bucket vs legacy-tag agent-data behavior."""
+"""Tests for the AwsProvider's S3-state-bucket vs tag agent-data behavior."""
 
 from collections.abc import Iterator
 from datetime import datetime
@@ -79,11 +79,11 @@ def _build_bucket_provider(
         aws_client=client,
         aws_config=config,
     )
-    # Pre-create the bucket directly (before resolving _state_bucket(), which
+    # Pre-create the bucket directly (before resolving _state_bucket, which
     # caches None when the bucket does not yet exist) so writes land and the
     # provider's existence probe sees it.
     S3StateBucket(session=session, region="us-east-1", bucket_name=_BUCKET_NAME).ensure_bucket()
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     return provider, stubber
 
@@ -131,7 +131,7 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(
 
     provider._persist_host_record_externally(record)
 
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     assert bucket.read_host_record(host_id) is not None
 
@@ -167,7 +167,7 @@ def test_bucket_mode_remove_agent_clears_bucket_record(aws_mock: None, temp_mngr
 def test_delete_host_externally_removes_bucket_state(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
     provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     bucket.write_host_record(host_id, "{}")
     bucket.write_agent_record(host_id, "agent-1", {"id": "agent-1"})
@@ -177,11 +177,11 @@ def test_delete_host_externally_removes_bucket_state(aws_mock: None, temp_mngr_c
     assert bucket.has_any_host_state() is False
 
 
-def test_no_bucket_uses_legacy_tag_path(temp_mngr_ctx: MngrContext) -> None:
+def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
     """Without a bucket name (and no STS), the provider falls back to the EC2 tag mirror.
 
     ``state_bucket_name=None`` plus an STS failure (no moto active, dummy creds)
-    yields ``_state_bucket() is None``, so ``persist_agent_data`` takes the tag
+    yields ``_state_bucket is None``, so ``persist_agent_data`` takes the tag
     path: it looks up the instance via ``describe_instances`` and upserts tags.
     """
     config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-x", auto_shutdown_seconds=3600)
@@ -204,8 +204,8 @@ def test_no_bucket_uses_legacy_tag_path(temp_mngr_ctx: MngrContext) -> None:
         aws_client=client,
         aws_config=config,
     )
-    # Force the no-bucket resolution to be cached (account id unresolvable -> None).
-    provider._state_bucket_cache = None
+    # Pre-seed the no-bucket resolution into the cached_property (account id unresolvable -> None).
+    provider.__dict__["_state_bucket"] = None
 
     host_id = HostId.generate()
     agent_id = AgentId.generate()
@@ -232,7 +232,7 @@ def test_no_bucket_uses_legacy_tag_path(temp_mngr_ctx: MngrContext) -> None:
         provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
     finally:
         stubber.deactivate()
-    # All queued responses consumed => the legacy tag path ran (describe + create_tags).
+    # All queued responses consumed => the tag path ran (describe + create_tags).
     stubber.assert_no_pending_responses()
 
 
@@ -245,7 +245,7 @@ def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(aws_mock: None, te
     """The reference getter returns a host_dir-scoped volume with no S3 probe."""
     provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     # Seed a file under the host's host_dir prefix and confirm the reference reads it.
     hex_id = host_id.get_uuid().hex
@@ -310,7 +310,7 @@ def test_get_volume_for_host_returns_volume_when_objects_present(aws_mock: None,
     """A non-empty host_dir prefix yields a readable volume."""
     provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    bucket = provider._state_bucket()
+    bucket = provider._state_bucket
     assert bucket is not None
     hex_id = host_id.get_uuid().hex
     bucket.session.client("s3", region_name="us-east-1").put_object(

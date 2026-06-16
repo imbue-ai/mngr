@@ -172,7 +172,7 @@ class AwsProviderConfig(VpsDockerProviderConfig):
             "the 256-char EC2 tag limit. When None, the effective name is derived as "
             "'mngr-state-<account_id>-<region>' (account id from sts:GetCallerIdentity). When a "
             "bucket is configured/derivable, the per-agent EC2 tag mirror is dropped in favor of "
-            "the bucket; without one, mngr falls back to the legacy tag mirror."
+            "the bucket; without one, mngr falls back to the tag mirror."
         ),
     )
     is_host_dir_synced_to_bucket: bool = Field(

@@ -101,8 +101,11 @@ The safe inverse of `prepare`. Deletes the mngr-owned resource group (cascading
 its vnet/subnet/NSG), but **refuses** while any mngr-managed VM still exists in
 the group (destroy those first with `mngr destroy <agent>`), and only deletes a
 group it owns (tagged `managed-by=mngr`). It also deletes the state storage
-account, but **refuses** that while any managed host still has state in the
-container (the same safety as the VM check). Idempotent.
+account; because the VM check above has already passed, any remaining state is
+**orphaned** offline state (from hosts no longer running as VMs), so it
+**refuses** to delete a non-empty account rather than silently dropping records
+you may still want -- pass `--purge-state` to delete the account and its
+remaining state. Idempotent.
 
 ```bash
 mngr azure cleanup
@@ -115,7 +118,7 @@ Blob container holding mngr's control-plane state — the full host record and t
 per-agent records — keyed by host id. The mngr host machine writes these with
 **your own Azure credentials** (no keys stored on the box) whenever it writes
 state (on create and on stop), so a **deallocated** VM's full state is readable
-without SSH. This replaces the legacy VM-tag mirror, which (a) silently dropped
+without SSH. This replaces the VM-tag mirror, which (a) silently dropped
 per-agent `labels` larger than the 256-char Azure tag value limit and (b) could
 only reconstruct a lossy subset of the host record while the VM was stopped.
 
@@ -130,7 +133,7 @@ Contributor`** role on the state storage account, in addition to the
 storage-account create/delete permission `prepare`/`cleanup` use
 (`Microsoft.Storage/storageAccounts/write` + `delete`). A missing storage
 permission during `prepare` is **not fatal**: it degrades to a warning, the
-network prepare still succeeds, and offline state falls back to the legacy VM-tag
+network prepare still succeeds, and offline state falls back to the VM-tag
 mirror. Existing deployments that never re-ran the new `prepare` keep working on
 that fallback.
 
@@ -151,10 +154,10 @@ Set `is_host_dir_synced_to_bucket = false` in `[providers.azure]` to disable it
 The instance-push needs a cloud identity, which `prepare` provisions:
 
 ```bash
-mngr azure prepare --host-dir-identity require   # fail if the identity can't be created
+mngr azure prepare --use-offline-host-dir yes   # fail if the identity can't be created
 ```
 
-`--host-dir-identity {auto,require,skip}` (default `auto`) provisions a
+`--use-offline-host-dir {yes,auto,no}` (default `auto`) provisions a
 **user-assigned managed identity** plus a **`Storage Blob Data Contributor`**
 role assignment scoped to **just the state storage account** (least privilege --
 never the resource group or subscription). `auto` warns and continues on a
@@ -168,7 +171,7 @@ Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentitie
 + `Microsoft.Authorization/roleAssignments/write` (Owner or User Access
 Administrator). When offline `host_dir` is requested for a host whose VM has no
 attached managed identity, mngr logs a non-fatal diagnostic pointing at
-`mngr azure prepare --host-dir-identity require` rather than returning an empty
+`mngr azure prepare --use-offline-host-dir yes` rather than returning an empty
 volume.
 
 ### Quota note
@@ -261,7 +264,7 @@ size has no capacity in the region right now; pick another size with
   VMs from those index tags and reads their full host record + per-agent records
   from the **state storage account** (see "Offline state storage account") when
   it exists. When it does not (older `prepare` / no storage permission), it falls
-  back to the legacy per-agent VM-tag mirror (`mngr-agent-<id>-<field>`), which is
+  back to the per-agent VM-tag mirror (`mngr-agent-<id>-<field>`), which is
   capped at the 256-char Azure tag value limit. Either way, power state for a
   not-SSH-reachable VM is confirmed with a per-VM `get_instance_status` call
   (Azure rejects `expand=instanceView` on a resource-group VM list).

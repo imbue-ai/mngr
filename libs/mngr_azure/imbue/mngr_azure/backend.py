@@ -4,17 +4,16 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import Literal
 
 import click
 from azure.core.exceptions import AzureError
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
@@ -54,6 +53,7 @@ from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
 from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
+from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
@@ -327,24 +327,18 @@ class AzureProvider(VpsDockerProvider):
     azure_client: AzureVpsClient = Field(frozen=True, description="Azure VM API client")
     azure_config: AzureProviderConfig = Field(frozen=True, description="Azure-specific configuration")
 
-    # Lazily-resolved Blob state bucket. ``False`` means "not yet resolved"; once
-    # resolved it holds either a ``BlobStateBucket`` or ``None`` (no
-    # account/container yet -- the legacy tag-mirror fallback).
-    _state_bucket_cache: BlobStateBucket | None | Literal[False] = PrivateAttr(default=False)
-
+    @cached_property
     def _state_bucket(self) -> BlobStateBucket | None:
-        """Return the Blob state bucket when account + container actually exist, else None (cached).
+        """Return the Blob state bucket when account + container actually exist, else None.
 
         When present, the bucket is the source of truth for agent records and the
-        offline host record (replacing the legacy VM tag mirror); when None (the
+        offline host record (replacing the VM tag mirror); when None (the
         storage account / container do not yet exist because ``mngr azure prepare``
         was never run, or the subscription can't be resolved), mngr falls back to
-        the per-agent tag mirror. The existence probe is cached so it runs at most
-        once per provider lifetime. Mirrors ``AwsProvider._state_bucket``.
+        the per-agent tag mirror. The existence probe runs at most once per
+        provider lifetime (cached). Mirrors ``AwsProvider._state_bucket``.
         """
-        if self._state_bucket_cache is False:
-            self._state_bucket_cache = self._resolve_existing_state_bucket()
-        return self._state_bucket_cache
+        return self._resolve_existing_state_bucket()
 
     def _resolve_existing_state_bucket(self) -> BlobStateBucket | None:
         """Build the configured/derived bucket and return it only if it exists."""
@@ -357,7 +351,7 @@ class AzureProvider(VpsDockerProvider):
         try:
             if not (bucket.account_exists() and bucket.container_exists()):
                 logger.debug(
-                    "Azure state account/container {}/{} does not exist; using the legacy VM tag mirror "
+                    "Azure state account/container {}/{} does not exist; using the VM tag mirror "
                     "(run `mngr azure prepare` to create it)",
                     bucket.account_name,
                     bucket.container_name,
@@ -369,6 +363,20 @@ class AzureProvider(VpsDockerProvider):
             )
             return None
         return bucket
+
+    @cached_property
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror: the Blob bucket when present, else the VM tag mirror.
+
+        Selecting one store here lets the persist / remove / list / read paths
+        below stop branching on bucket-vs-tags. Offline ``host_dir`` reads are a
+        separate, bucket-only feature and stay keyed off ``_state_bucket``. Mirrors
+        ``AwsProvider._state_store``.
+        """
+        bucket = self._state_bucket
+        if bucket is not None:
+            return _BlobBucketHostStateStore(bucket=bucket)
+        return _VmTagHostStateStore(provider=self)
 
     def _host_identity(self) -> BlobStateHostIdentity | None:
         """Return the bucket-write managed-identity helper (uncached), or None when unresolvable.
@@ -512,7 +520,7 @@ class AzureProvider(VpsDockerProvider):
         """
         if not self.azure_config.is_host_dir_synced_to_bucket:
             return None
-        if self._state_bucket() is None:
+        if self._state_bucket is None:
             return None
         identity = self._host_identity()
         if identity is None:
@@ -521,7 +529,7 @@ class AzureProvider(VpsDockerProvider):
             if not identity.host_identity_exists():
                 logger.warning(
                     "host_dir sync is on but the bucket-write managed identity {} does not exist; launching "
-                    "without it (run `mngr azure prepare --host-dir-identity require` to enable offline host_dir)",
+                    "without it (run `mngr azure prepare --use-offline-host-dir yes` to enable offline host_dir)",
                     identity.identity_name,
                 )
                 return None
@@ -751,7 +759,7 @@ class AzureProvider(VpsDockerProvider):
         """
         if not self.azure_config.is_host_dir_synced_to_bucket:
             return
-        bucket = self._state_bucket()
+        bucket = self._state_bucket
         if bucket is None:
             logger.debug("No Azure state bucket; skipping host_dir sync install for host {}", host_id)
             return
@@ -760,7 +768,7 @@ class AzureProvider(VpsDockerProvider):
         if identity_client_id is None:
             logger.warning(
                 "host_dir sync is on but the bucket-write managed identity for host {} is absent; skipping "
-                "the sync daemon install (run `mngr azure prepare --host-dir-identity require`)",
+                "the sync daemon install (run `mngr azure prepare --use-offline-host-dir yes`)",
                 host_id,
             )
             return
@@ -794,7 +802,7 @@ class AzureProvider(VpsDockerProvider):
         hiccup never blocks the stop -- the offline copy is then simply "as of the
         last periodic sync". Mirrors ``AwsProvider._trigger_final_host_dir_sync``.
         """
-        if not self.azure_config.is_host_dir_synced_to_bucket or self._state_bucket() is None:
+        if not self.azure_config.is_host_dir_synced_to_bucket or self._state_bucket is None:
             return
         try:
             with log_span("Triggering final host_dir sync before deallocate"):
@@ -856,39 +864,25 @@ class AzureProvider(VpsDockerProvider):
 
     # =========================================================================
     # Offline metadata (so DEALLOCATED hosts list + resolve by name): the Blob
-    # state bucket when configured, else the legacy VM tag mirror.
+    # state bucket when configured, else the VM tag mirror.
     # =========================================================================
 
     def _persist_host_record_externally(self, record: VpsDockerHostRecord) -> None:
-        """Mirror the full host record into the Blob state bucket when one exists.
+        """Mirror the full host record into the external store (best-effort).
 
-        Best-effort: a bucket-write failure is logged at WARNING and swallowed so
-        it never breaks create / stop / rename. No-op when no bucket exists (the
-        legacy tag mirror covers offline listing instead). Mirrors
+        Delegates to the selected store: the Blob bucket writes the full record;
+        the tag mirror is a no-op (the VM's own tags carry it). Mirrors
         ``AwsProvider._persist_host_record_externally``.
         """
-        bucket = self._state_bucket()
-        if bucket is None:
-            return
-        host_id = HostId(record.certified_host_data.host_id)
-        try:
-            bucket.write_host_record(host_id, record.model_dump_json(indent=2))
-        except BlobStateBucketError as e:
-            logger.warning("Failed to mirror host record for {} to Azure state bucket: {}", host_id, e)
+        self._state_store.persist_host_record(record)
 
     def _delete_host_record_externally(self, host_id: HostId) -> None:
-        """Delete the host's state from the Blob bucket when one exists.
+        """Delete the host's state from the external store (best-effort, idempotent).
 
-        Best-effort: a failure is logged at WARNING and swallowed so it never
-        breaks destroy / delete. No-op when no bucket exists.
+        Delegates to the selected store: the Blob bucket deletes the host's prefix;
+        the tag mirror is a no-op (destroying the VM drops its tags).
         """
-        bucket = self._state_bucket()
-        if bucket is None:
-            return
-        try:
-            bucket.delete_host_state(host_id)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to delete host state for {} from Azure state bucket: {}", host_id, e)
+        self._state_store.delete_host_state(host_id)
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         """Persist an agent's record on the host volume *and* in the external store.
@@ -897,9 +891,9 @@ class AzureProvider(VpsDockerProvider):
         authoritative on-volume record (read by SSH-based discovery for *running*
         hosts -- best-effort, raises ``HostNotFoundError`` when deallocated), and
         this override mirrors the record externally so a *deallocated* VM still
-        surfaces its agents and resolves for ``mngr start``. When a Blob state
-        bucket exists, the full record is written there (no size limit); otherwise
-        it falls back to the legacy per-field VM tag mirror (256-char cap).
+        surfaces its agents and resolves for ``mngr start``. The external mirror is
+        the Blob bucket (full record, no size limit) when one exists, else the
+        per-field VM tag mirror (256-char cap); ``_state_store`` selects between them.
         """
         try:
             super().persist_agent_data(host_id, agent_data)
@@ -909,23 +903,10 @@ class AzureProvider(VpsDockerProvider):
         if agent_id is None:
             logger.warning("Cannot mirror agent data without an id (name={!r})", agent_data.get("name"))
             return
-        bucket = self._state_bucket()
-        if bucket is not None:
-            self._persist_agent_to_bucket(bucket, host_id, str(agent_id), agent_data)
-        else:
-            self._persist_agent_to_tags(host_id, str(agent_id), agent_data)
-
-    def _persist_agent_to_bucket(
-        self, bucket: BlobStateBucket, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]
-    ) -> None:
-        """Mirror an agent record into the Blob state bucket (full record, no tag limits)."""
-        try:
-            bucket.write_agent_record(host_id, agent_id, agent_data)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to mirror agent {} for host {} to Azure state bucket: {}", agent_id, host_id, e)
+        self._state_store.persist_agent_record(host_id, str(agent_id), agent_data)
 
     def _persist_agent_to_tags(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror an agent record into per-field VM tags (legacy, no-bucket fallback)."""
+        """Mirror an agent record into per-field VM tags (no-bucket fallback)."""
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             logger.warning("No Azure VM found for host {}; cannot persist agent tags", host_id)
@@ -948,33 +929,14 @@ class AzureProvider(VpsDockerProvider):
             super().remove_persisted_agent_data(host_id, agent_id)
         except HostNotFoundError:
             logger.debug("Host {} unreachable; removing agent data from the external store only", host_id)
-        bucket = self._state_bucket()
-        if bucket is not None:
-            try:
-                bucket.remove_agent_record(host_id, str(agent_id))
-            except BlobStateBucketError as e:
-                logger.warning(
-                    "Failed to remove agent {} for host {} from Azure state bucket: {}", agent_id, host_id, e
-                )
-            return
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
-        self.azure_client.remove_tags(VpsInstanceId(instance["id"]), keys)
+        self._state_store.remove_agent_record(host_id, str(agent_id))
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         """Return the host's persisted agent records, on-volume when reachable else from the external store."""
         try:
             return super().list_persisted_agent_data_for_host(host_id)
         except HostNotFoundError:
-            bucket = self._state_bucket()
-            if bucket is not None:
-                return bucket.list_agent_records(host_id)
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return []
-            return self._persisted_agent_dicts_from_instance(instance)
+            return self._state_store.list_agent_records(host_id)
 
     def discover_hosts_and_agents(
         self,
@@ -997,7 +959,6 @@ class AzureProvider(VpsDockerProvider):
         """
         result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
-        bucket = self._state_bucket()
         for instance in self._list_instances_cached():
             try:
                 host_ref = self._discovered_host_from_tags(instance)
@@ -1015,10 +976,16 @@ class AzureProvider(VpsDockerProvider):
             # and their in-flight transitions.
             if self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) != VpsInstanceStatus.HALTED:
                 continue
-            if bucket is not None:
-                agent_dicts = bucket.list_agent_records(host_ref.host_id)
-            else:
-                agent_dicts = self._persisted_agent_dicts_from_instance(instance)
+            try:
+                agent_dicts = self._state_store.list_agent_records(host_ref.host_id)
+            except MngrError as e:
+                # e.g. duplicate mngr-host-id tags: skip this host's agents rather
+                # than aborting the whole offline sweep (matches the per-VM skip
+                # above for malformed tags).
+                logger.opt(exception=e).warning(
+                    "Skipping agents for host {} in offline discovery: {}", host_ref.host_id, e
+                )
+                continue
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in agent_dicts:
                 ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
@@ -1054,44 +1021,21 @@ class AzureProvider(VpsDockerProvider):
 
         Falls back to the base (SSH/volume-backed) path first; if that can't find
         the host (deallocated and unreachable), reconstruct it from the external
-        store. When a Blob state bucket exists, the *full* ``VpsDockerHostRecord``
-        is read from ``host_state.json`` (no information loss); otherwise a minimal
-        ``CertifiedHostData`` is rebuilt from VM tags. Mirrors
+        store: the *full* ``VpsDockerHostRecord`` when the store has it (Blob
+        ``host_state.json``), otherwise a minimal record rebuilt from the VM's own
+        tags -- which also covers a bucket-mode host created before the bucket
+        existed (so its ``host_state.json`` is absent). Mirrors
         ``AwsProvider.to_offline_host``.
         """
         try:
             return super().to_offline_host(host_id)
         except HostNotFoundError:
-            bucket_record = self._host_record_from_bucket(host_id)
-            if bucket_record is not None:
-                return self._create_offline_host(bucket_record)
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
+            record = self._state_store.read_host_record(host_id)
+            if record is None:
+                record = self._host_record_from_instance_tags(host_id)
+            if record is None:
                 raise
-            return self._offline_host_from_tags(host_id, instance)
-
-    def _host_record_from_bucket(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Read and parse the full host record from the Blob state bucket, or None.
-
-        Returns None when no bucket exists, no record exists, or the stored JSON is
-        malformed (logged at warning) -- so the caller falls back to the tag-based
-        reconstruction. Mirrors ``AwsProvider._host_record_from_bucket``.
-        """
-        bucket = self._state_bucket()
-        if bucket is None:
-            return None
-        try:
-            record_json = bucket.read_host_record(host_id)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to read host record for {} from Azure state bucket: {}", host_id, e)
-            return None
-        if record_json is None:
-            return None
-        try:
-            return VpsDockerHostRecord.model_validate_json(record_json)
-        except ValueError as e:
-            logger.warning("Malformed host record for {} in Azure state bucket: {}", host_id, e)
-            return None
+            return self._create_offline_host(record)
 
     # =========================================================================
     # Offline host_dir volume (reads via the operator's credentials)
@@ -1109,7 +1053,7 @@ class AzureProvider(VpsDockerProvider):
         """
         if not self.azure_config.is_host_dir_synced_to_bucket:
             return None
-        bucket = self._state_bucket()
+        bucket = self._state_bucket
         if bucket is None:
             return None
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -1121,7 +1065,7 @@ class AzureProvider(VpsDockerProvider):
         Like ``get_volume_reference_for_host`` but additionally confirms the host's
         ``host_dir/`` prefix actually has blobs (a cheap prefix list). When the
         prefix is empty, runs the missing-identity diagnostic (Decision 7) -- a
-        clear WARNING pointing at ``mngr azure prepare --host-dir-identity require``
+        clear WARNING pointing at ``mngr azure prepare --use-offline-host-dir yes``
         if the VM has no attached user-assigned identity -- and returns None
         (callers treat None as "not available"). This never raises. Mirrors
         ``AwsProvider.get_volume_for_host``.
@@ -1129,7 +1073,7 @@ class AzureProvider(VpsDockerProvider):
         reference = self.get_volume_reference_for_host(host)
         if reference is None:
             return None
-        bucket = self._state_bucket()
+        bucket = self._state_bucket
         if bucket is None:
             return None
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -1150,7 +1094,7 @@ class AzureProvider(VpsDockerProvider):
         Detects the Decision-7 case directly from cloud state: when the host's VM
         has no attached user-assigned managed identity, the on-box sync daemon
         could never push host_dir, which is why the prefix is empty. Points the user
-        at ``mngr azure prepare --host-dir-identity require`` (and recreating the
+        at ``mngr azure prepare --use-offline-host-dir yes`` (and recreating the
         host so it picks up the identity). Best-effort: any probe failure is
         swallowed (this is purely advisory). Mirrors
         ``AwsProvider._warn_if_host_dir_identity_missing``.
@@ -1169,7 +1113,7 @@ class AzureProvider(VpsDockerProvider):
             logger.warning(
                 "Host {}'s VM has no attached user-assigned managed identity, so its host_dir was never "
                 "pushed to the bucket and is not readable offline. Run `mngr azure prepare "
-                "--host-dir-identity require`, then recreate the host so it picks up the identity.",
+                "--use-offline-host-dir yes`, then recreate the host so it picks up the identity.",
                 host_id,
             )
 
@@ -1280,8 +1224,18 @@ class AzureProvider(VpsDockerProvider):
             host_state=HostState.STOPPED,
         )
 
-    def _offline_host_from_tags(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a deallocated VM from its tags."""
+    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        """Rebuild a minimal STOPPED host record from the VM's own ``mngr-*`` tags, or None.
+
+        Uses only the base tags mngr writes at launch (host-id, Name, created-at),
+        so it works regardless of the external-store mode -- including a bucket-mode
+        host created before the bucket existed (whose ``host_state.json`` is absent).
+        Returns None when no VM carries the host's tag. Backs the tag store's
+        ``read_host_record`` and the universal fallback in ``to_offline_host``.
+        """
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return None
         tags = self._tag_dict_from_normalized(instance)
         now = datetime.now(timezone.utc)
         created_at = now
@@ -1302,7 +1256,93 @@ class AzureProvider(VpsDockerProvider):
             updated_at=now,
             stop_reason=HostState.STOPPED.value,
         )
-        return self._create_offline_host(VpsDockerHostRecord(certified_host_data=certified))
+        return VpsDockerHostRecord(certified_host_data=certified)
+
+
+class _BlobBucketHostStateStore(HostStateStore):
+    """Bucket-backed host-state mirror: full host + agent records in Azure Blob (no size limit)."""
+
+    bucket: BlobStateBucket
+
+    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+        host_id = HostId(record.certified_host_data.host_id)
+        try:
+            self.bucket.write_host_record(host_id, record.model_dump_json(indent=2))
+        except BlobStateBucketError as e:
+            logger.warning("Failed to mirror host record for {} to Azure state bucket: {}", host_id, e)
+
+    def delete_host_state(self, host_id: HostId) -> None:
+        try:
+            self.bucket.delete_host_state(host_id)
+        except BlobStateBucketError as e:
+            logger.warning("Failed to delete host state for {} from Azure state bucket: {}", host_id, e)
+
+    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        try:
+            self.bucket.write_agent_record(host_id, agent_id, agent_data)
+        except BlobStateBucketError as e:
+            logger.warning("Failed to mirror agent {} for host {} to Azure state bucket: {}", agent_id, host_id, e)
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        try:
+            self.bucket.remove_agent_record(host_id, agent_id)
+        except BlobStateBucketError as e:
+            logger.warning("Failed to remove agent {} for host {} from Azure state bucket: {}", agent_id, host_id, e)
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        return self.bucket.list_agent_records(host_id)
+
+    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        try:
+            record_json = self.bucket.read_host_record(host_id)
+        except BlobStateBucketError as e:
+            logger.warning("Failed to read host record for {} from Azure state bucket: {}", host_id, e)
+            return None
+        if record_json is None:
+            return None
+        try:
+            return VpsDockerHostRecord.model_validate_json(record_json)
+        except ValueError as e:
+            logger.warning("Malformed host record for {} in Azure state bucket: {}", host_id, e)
+            return None
+
+
+class _VmTagHostStateStore(HostStateStore):
+    """Tag-backed host-state mirror: the VM's own tags are the store (no-bucket fallback).
+
+    Compact (256-char per value) and keyed off the live VM, so the host record /
+    agent records are reconstructed from the VM's ``mngr-*`` tags. Delegates the
+    tag I/O to the owning provider, which resolves VMs from its cached listing.
+    """
+
+    provider: AzureProvider
+
+    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+        # The VM's own create/stop tags carry the host record; nothing extra to write.
+        pass
+
+    def delete_host_state(self, host_id: HostId) -> None:
+        # Destroying the VM drops its tags, so there is no separate state to delete.
+        pass
+
+    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        self.provider._persist_agent_to_tags(host_id, agent_id, agent_data)
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return
+        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
+        self.provider.azure_client.remove_tags(VpsInstanceId(instance["id"]), keys)
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return []
+        return self.provider._persisted_agent_dicts_from_instance(instance)
+
+    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        return self.provider._host_record_from_instance_tags(host_id)
 
 
 class AzureProviderBackend(ProviderBackendInterface):

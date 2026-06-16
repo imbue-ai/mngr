@@ -1047,7 +1047,7 @@ class AzureVpsClient(VpsClientInterface):
         Reads the VM's ``identity.user_assigned_identities`` map. Used by the
         offline host_dir path to detect a VM that was never granted the
         bucket-write identity (Decision 7), so it can tell the user to re-run
-        ``mngr azure prepare --host-dir-identity require``. Returns ``[]`` for a
+        ``mngr azure prepare --use-offline-host-dir yes``. Returns ``[]`` for a
         nonexistent VM too (no identities to report). Mirrors AWS's
         ``get_instance_iam_profile_arn``.
         """
