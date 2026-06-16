@@ -358,8 +358,10 @@ is what usage data the tool exposes.
   so `input` is already cache-exclusive — no subtraction needed (unlike Codex).
   Map `cacheRead → cache_read`, `cacheWrite → cache_creation`; emit `tokens` for
   auditability. The model is a **bare name** (`claude-opus-4-8`) with `provider`
-  a **separate** field (`anthropic`); auth mode is `auth.json[provider].type`
-  (`"api_key"` → `API_KEY`; oauth-style → `SUBSCRIPTION`).
+  a **separate** field (`anthropic`). As shipped, the writer emits `cost_mode =
+  API_KEY` unconditionally (pi runs against a real provider key); deriving the
+  mode from `auth.json[provider].type` (`"api_key"` → `API_KEY`; oauth-style →
+  `SUBSCRIPTION`) is a deferred refinement for oauth/subscription providers.
 - **Fallback logic:** for a provider/model where pi does *not* compute a cost
   (`usage.cost` absent — possible for some of openai/gemini/groq/openrouter), the
   writer omits `cost` and the reader estimates from `tokens` + `provider/model`.
