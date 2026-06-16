@@ -97,13 +97,15 @@ mechanical.
 | Today | OTel-aligned | Notes |
 |---|---|---|
 | `assistant_message.stop_reason` | `finish_reason` | Exact OTel term, identical semantics. Already optional (`str \| None`). |
-| `tool_calls[].tool_call_id` | `tool_calls[].id` | Cosmetic alignment. |
-| `tool_calls[].tool_name` | `tool_calls[].name` | Cosmetic alignment. |
-| `tool_calls[].input_preview` | *(keep `input_preview`)* | **Deliberate divergence.** OTel's `arguments` is the full argument payload; ours is a *truncated preview* for display. Renaming it `arguments` would misrepresent the data. Keep the name; document the correspondence. |
 | `role` values (`user`/`assistant`/`tool`) | unchanged | Already match OTel. |
 
-**Touch points (all five emitters):** each emitter sets `stop_reason` and builds `tool_calls[]`
-entries, so each is edited once per renamed field:
+The `tool_calls[]` field names (`tool_call_id`, `tool_name`, `input_preview`) are **deliberately
+left unchanged.** Renaming `tool_call_id`/`tool_name` to OTel's `id`/`name` is cosmetic and would
+force the reader to carry a fallback for old records, for no semantic gain. `input_preview` is a
+*truncated preview*, not OTel's full `arguments` payload, so renaming it to `arguments` would
+misrepresent the data. These names are kept; the OTel correspondence is documented here instead.
+
+**Touch points (all five emitters):** each emitter sets `stop_reason`, so each is edited once:
 
 - claude: `libs/mngr_claude/imbue/mngr_claude/resources/common_transcript_convert.py`
 - codex: `libs/mngr_codex/imbue/mngr_codex/resources/common_transcript_convert.py`
@@ -112,9 +114,8 @@ entries, so each is edited once per renamed field:
 - pi-coding: `libs/mngr_pi_coding/imbue/mngr_pi_coding/resources/mngr_pi_lifecycle.ts`
 
 Plus the schema (`common_transcript_records.py`), the five conformance tests' golden records, and
-`common_transcript_records_test.py`. The reader does not currently display `stop_reason`, so the
-rename does not affect rendering; the tool-call field renames touch the reader's
-`_format_event_human` assistant case (`cli/transcript.py`).
+`common_transcript_records_test.py`. The reader does not display `stop_reason`, so Tier 1 does not
+affect rendering.
 
 **Note:** the TypeScript emitters (opencode, pi-coding) are under active rework. The Tier 1
 renames there should be coordinated with that work; the logic is unchanged by the rename.
@@ -141,9 +142,10 @@ class TextPart(_RecordModel):
 
 class ToolCallPart(_RecordModel):
     type: Literal["tool_call"]
-    id: str
-    name: str
-    input_preview: str  # same truncated-preview semantics as tool_calls[].input_preview
+    # field names match the flat tool_calls[] entries, so the record has one naming scheme
+    tool_call_id: str
+    tool_name: str
+    input_preview: str
 
 AssistantPart = Annotated[TextPart | ToolCallPart, Field(discriminator="type")]
 
@@ -211,11 +213,11 @@ the additive design plus reader tolerance is sufficient.
 
 ## Impact
 
-- **Schema:** `common_transcript_records.py` — rename `stop_reason`→`finish_reason`, rename
-  `ToolCall.tool_call_id`→`id` and `tool_name`→`name`; add the `parts[]` part union (Tier 2).
-- **Emitters:** all five for Tier 1; claude + pi-coding additionally for Tier 2.
-- **Reader:** `cli/transcript.py` — tool-call field names in `_format_event_human`; prefer
-  `parts[]` when present (Tier 2).
+- **Schema:** `common_transcript_records.py` — rename `stop_reason`→`finish_reason` (Tier 1); add
+  the `parts[]` part union (Tier 2).
+- **Emitters:** all five for Tier 1 (`finish_reason`); claude + pi-coding additionally for Tier 2.
+- **Reader:** `cli/transcript.py` — prefer `parts[]` when present, else fall back to flat
+  `text` + `tool_calls[]` (Tier 2). Tier 1 does not touch the reader.
 - **Tests:** five conformance tests + their golden records, `common_transcript_records_test.py`.
 - **Docs:** this spec; parity-matrix row in `agent-plugin-parity/spec.md`.
 - **Changelog:** entries for each touched project (`mngr`, `mngr_claude`, `mngr_codex`,
