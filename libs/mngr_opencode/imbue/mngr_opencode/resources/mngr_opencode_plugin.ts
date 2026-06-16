@@ -12,13 +12,28 @@
 // when MNGR_OPENCODE_ROLE=server -- the role mngr sets exclusively on the serve
 // invocation. In every other process it is inert.
 //
-// In the server process it does three things, keyed off $MNGR_AGENT_STATE_DIR:
+// In the server process it does four things, keyed off $MNGR_AGENT_STATE_DIR:
 //
 //   1. Active marker -> RUNNING vs WAITING. BaseAgent.get_lifecycle_state reads
 //      the presence of $MNGR_AGENT_STATE_DIR/active as "actively working". The
 //      plugin touches it when a session goes busy and removes it when the ROOT
 //      session goes idle (the session with no `parentID`), so task-tool subagents
 //      keep the agent RUNNING until the whole turn is done.
+//
+//   1b. Permissions-waiting marker -> WAITING reason. While a tool is blocked on an
+//      approval prompt (the `ask` permission policy), opencode emits
+//      `permission.asked` (one per blocked tool, carrying the request id) and
+//      `permission.replied` when it is answered. The plugin tracks the set of
+//      pending ids and keeps $MNGR_AGENT_STATE_DIR/permissions_waiting present iff
+//      the set is non-empty, so OpenCodeAgent.get_lifecycle_state can promote
+//      RUNNING -> WAITING and `mngr list` can report a PERMISSIONS reason. Cleared
+//      as a safety net on root idle (a prompt stranded without a reply). The marker
+//      is independent of the active recompute -- the session stays busy (active
+//      present) the whole time a prompt is open. (The running binary emits
+//      `permission.asked` carrying `id`, and `permission.replied` carrying `requestID`
+//      -- verified against 1.16.2 and 1.17.7. The @opencode-ai/sdk type stubs disagree,
+//      naming them `permission.updated`/`permissionID`. The two handlers accept either,
+//      since opencode self-upgrades.)
 //
 //   2. Raw transcript. Each message.updated / message.part.updated event is
 //      appended verbatim (as {type, properties}) to
@@ -47,9 +62,11 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileS
 import { dirname, join } from "node:path"
 
 // Keep in sync with opencode_config.py: ACTIVE_MARKER_FILENAME,
-// RAW_TRANSCRIPT_RELATIVE_PATH, COMMON_TRANSCRIPT_RELATIVE_PATH,
-// COMMON_TRANSCRIPT_SOURCE, ROLE_ENV_VAR, SERVER_ROLE, EMIT_COMMON_ENV_VAR.
+// PERMISSIONS_WAITING_FILENAME, RAW_TRANSCRIPT_RELATIVE_PATH,
+// COMMON_TRANSCRIPT_RELATIVE_PATH, COMMON_TRANSCRIPT_SOURCE, ROLE_ENV_VAR,
+// SERVER_ROLE, EMIT_COMMON_ENV_VAR.
 const ACTIVE_MARKER_FILENAME = "active"
+const PERMISSIONS_WAITING_FILENAME = "permissions_waiting"
 const RAW_TRANSCRIPT_RELATIVE_PATH = "logs/opencode_transcript/events.jsonl"
 const COMMON_TRANSCRIPT_RELATIVE_PATH = "events/opencode/common_transcript/events.jsonl"
 const COMMON_TRANSCRIPT_SOURCE = "opencode/common_transcript"
@@ -93,6 +110,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
   }
 
   const markerPath = join(stateDir, ACTIVE_MARKER_FILENAME)
+  const permissionsWaitingPath = join(stateDir, PERMISSIONS_WAITING_FILENAME)
   const rawTranscriptPath = join(stateDir, RAW_TRANSCRIPT_RELATIVE_PATH)
   const commonTranscriptPath = join(stateDir, COMMON_TRANSCRIPT_RELATIVE_PATH)
   const emitCommon = process.env[EMIT_COMMON_ENV_VAR] === "1"
@@ -163,6 +181,47 @@ export const MngrLifecyclePlugin: Plugin = async () => {
       // best-effort
     }
   }
+
+  // Permission ids currently awaiting a reply. The permissions_waiting marker is
+  // present iff this set is non-empty. The binary emits one `permission.asked` per
+  // tool blocked on approval (carrying the request `id`) and one `permission.replied`
+  // (carrying `requestID`) when it is answered; the handlers also accept the SDK stub
+  // aliases (see the header and the two handlers below). Tracking ids (rather than a
+  // single flag like codex) handles concurrent prompts, e.g. from task-tool subagents.
+  const pendingPermissions = new Set<string>()
+
+  const refreshPermissionsMarker = (): void => {
+    try {
+      if (pendingPermissions.size > 0) {
+        writeFileSync(permissionsWaitingPath, "")
+      } else {
+        rmSync(permissionsWaitingPath, { force: true })
+      }
+    } catch {
+      // best-effort: a transient fs error must not break OpenCode's loop
+    }
+  }
+
+  // Clear the active marker AND any pending permission state when the root turn
+  // ends. The permissions reset is a safety net: a prompt cancelled/denied or
+  // stranded without a `permission.replied` would otherwise leave the agent
+  // reporting PERMISSIONS forever. The whole turn is done, so nothing can still be
+  // legitimately pending.
+  const clearMarkersForRootIdle = (): void => {
+    clearMarker()
+    pendingPermissions.clear()
+    refreshPermissionsMarker()
+  }
+
+  // Clear any stranded permissions_waiting marker at server startup. The in-memory
+  // pendingPermissions set is the authority within a server's lifetime (the marker
+  // is derived from it), and a freshly started server has none pending -- so an
+  // on-disk marker here is stale, left by a prior server that was killed/crashed
+  // mid-prompt (a clean turn-end clears it via clearMarkersForRootIdle). Without
+  // this, after `mngr stop`/`start` a stale marker would falsely read PERMISSIONS
+  // once the next turn sets `active`. This is opencode's analog of codex clearing a
+  // stranded marker at a fresh root turn (and of claude's startup reset).
+  refreshPermissionsMarker()
 
   let rawDirEnsured = false
   const appendRaw = (line: string): void => {
@@ -294,7 +353,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
           touchMarker()
         } else if (status === "idle") {
           if (isRootSession(event.properties.sessionID)) {
-            clearMarker()
+            clearMarkersForRootIdle()
           }
           rebuildCommon()
         }
@@ -302,9 +361,28 @@ export const MngrLifecyclePlugin: Plugin = async () => {
       }
       if (type === "session.idle") {
         if (isRootSession(event.properties.sessionID)) {
-          clearMarker()
+          clearMarkersForRootIdle()
         }
         rebuildCommon()
+        return
+      }
+
+      // A tool is blocked on an approval prompt. The running opencode server
+      // (verified against the 1.16.2 binary) emits `permission.asked`; the
+      // `@opencode-ai/sdk` type stubs instead name it `permission.updated`. The two
+      // disagree, and opencode self-upgrades, so accept either -- both carry the
+      // request id in `properties.id`.
+      if (type === "permission.asked" || type === "permission.updated") {
+        pendingPermissions.add(event.properties.id)
+        refreshPermissionsMarker()
+        return
+      }
+      // The prompt was answered (allowed or denied). The reply references the asked
+      // request id; the running binary names it `requestID`, the sdk stubs name it
+      // `permissionID` -- accept either.
+      if (type === "permission.replied") {
+        pendingPermissions.delete(event.properties.requestID ?? event.properties.permissionID)
+        refreshPermissionsMarker()
         return
       }
 

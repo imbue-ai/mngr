@@ -47,6 +47,16 @@ hook mechanism. mngr leans into that shape:
   `active` marker (it runs only in the server process). It is subagent-aware: the
   marker clears only when the *root* session goes idle, so spawning task-tool
   subagents keeps the agent RUNNING until the whole turn finishes.
+- **`waiting_reason`** (shown by `mngr list`) reports *why* a WAITING agent is
+  blocked, as the claude and codex agent types do. When a tool blocks on an
+  approval prompt (an `ask` permission policy), opencode emits `permission.asked`;
+  the plugin tracks pending prompts and keeps a `permissions_waiting` marker, which
+  promotes the agent to WAITING and surfaces a `PERMISSIONS` reason. An idle agent
+  whose turn is complete reports `END_OF_TURN`. Unlike codex (whose hook model fires
+  nothing when a dialog is cancelled, briefly mislabeling the reason), answering or
+  cancelling an opencode prompt clears the marker promptly: a denial emits
+  `permission.replied` *and* `session.idle`, and an abort emits `session.idle` —
+  each clears it (verified live against opencode 1.17.7).
 - **Transcripts**: the same plugin writes the raw transcript and, on session
   idle, rebuilds the common-format transcript `mngr transcript` reads — both
   in-process, no background converter or supervisor.
@@ -115,15 +125,8 @@ Notes:
 ## Not yet implemented
 
 Carried gaps (shared with `mngr_antigravity`): session preservation on destroy,
-scheduled-deploy contributions, the `waiting_reason` listing field, the live
-streaming snapshot, and clone carrying the source conversation forward.
-
-`waiting_reason` would report *why* a WAITING agent is blocked (`mngr list`), as
-the claude and codex agent types do. It is unimplemented but doable in-process: an
-agent using an `ask` permission policy blocks on a prompt, and opencode's event bus
-emits `permission.asked` / `permission.replied`, which this plugin's extension
-already receives via its `event` hook. Maintaining a marker on those events (the
-way codex's hooks do) would surface a `PERMISSIONS` reason with no upstream change.
+scheduled-deploy contributions, the live streaming snapshot, and clone carrying
+the source conversation forward.
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md)
 for more details.
