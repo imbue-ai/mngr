@@ -134,30 +134,55 @@ def _find_orphan_test_instances(ec2: Any) -> list[str]:
     return leaked
 
 
+def _mark_session_failed(session: pytest.Session) -> None:
+    """Fail the session, but only if it was otherwise passing.
+
+    Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
+    setting ``session.exitstatus`` is the supported way to signal failure.
+    Only overwrite a successful (0) status: a non-zero status
+    (INTERRUPTED=2, INTERNAL_ERROR=3, USAGE_ERROR=4, NO_TESTS_COLLECTED=5)
+    carries strictly more diagnostic information than TESTS_FAILED=1, so
+    downgrading would hide the real reason CI failed.
+    """
+    if session.exitstatus == 0:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Detect and clean up leaked AWS resources at session end.
 
     Implemented as a pytest hook (not a fixture) so it runs after every
-    session-scoped fixture teardown, mirroring the Modal pattern. Skips
-    silently unless release tests were actually opted into
-    (``MNGR_AWS_RELEASE_TESTS=1``) and AWS credentials are available --
-    the same conjunction that gates the release-test ``pytestmark``, so
-    the cleanup hook never makes a live EC2 API call from a run that did
-    not opt into AWS-using tests. If leaks are found, force-cleans them
-    and sets ``session.exitstatus`` to ``TESTS_FAILED`` -- but only when
-    the session was otherwise passing, so a more-specific failure
-    (INTERRUPTED, INTERNAL_ERROR, etc.) is preserved.
+    session-scoped fixture teardown, mirroring the Modal pattern. No-ops
+    when release tests were not opted into (``MNGR_AWS_RELEASE_TESTS`` is
+    unset) -- an ordinary run that never touches EC2. When the opt-in *is*
+    set but AWS credentials cannot be resolved (or the EC2 client cannot be
+    built), the session is *failed* rather than skipped: a release run that
+    cannot authenticate is a misconfiguration, not a benign skip, and
+    skipping would silently green a run that could not have scanned for
+    leaks. If leaks are found they are force-cleaned and the session fails.
+    All failure paths set ``session.exitstatus`` only when the session was
+    otherwise passing, so a more-specific failure (INTERRUPTED,
+    INTERNAL_ERROR, etc.) is preserved.
     """
     # exitstatus is required by the hook signature but unused; we read
     # session.exitstatus, which is the canonical source.
     del exitstatus
-    if not (AWS_RELEASE_TESTS_OPT_IN and aws_credentials_available()):
+    if not AWS_RELEASE_TESTS_OPT_IN:
+        return
+    if not aws_credentials_available():
+        logger.error(
+            "MNGR_AWS_RELEASE_TESTS=1 is set but AWS credentials could not be resolved, so the "
+            "session-end leak scan cannot run. Configure credentials, or unset "
+            "MNGR_AWS_RELEASE_TESTS to skip the AWS release tests."
+        )
+        _mark_session_failed(session)
         return
 
     try:
         ec2 = boto3.Session(region_name=AWS_DEFAULT_REGION).client("ec2")
     except (BotoCoreError, ClientError) as e:
-        logger.warning("Failed to build EC2 client for session-end leak scan: {}", e)
+        logger.error("Failed to build EC2 client for session-end leak scan: {}", e)
+        _mark_session_failed(session)
         return
 
     orphans = _find_orphan_test_instances(ec2)
@@ -178,9 +203,4 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         + "\n\nInstances have been force-terminated, but tests should not leak.\n"
     )
     logger.error(message)
-    # Force the test session to fail. Only overwrite a successful
-    # status: a non-zero status (INTERRUPTED=2, INTERNAL_ERROR=3,
-    # USAGE_ERROR=4, NO_TESTS_COLLECTED=5) carries strictly more
-    # diagnostic information than TESTS_FAILED=1.
-    if session.exitstatus == 0:
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    _mark_session_failed(session)

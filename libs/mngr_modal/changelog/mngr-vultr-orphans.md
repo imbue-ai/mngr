@@ -1,0 +1,1 @@
+mngr_modal: correct docstrings in `conftest.py` that described the Modal test-resource cleanup script as the "CI hourly cleanup". There is no cron trigger; the `cleanup_old_modal_test_environments.py` CI job runs on every push to main and every pull request. The docstrings now say so. No behavior change.

@@ -1,7 +1,8 @@
 """End-to-end release tests for the Vultr provider.
 
 These tests create and destroy real VPS instances on Vultr and require
-the VULTR_API_KEY environment variable to be set.
+both ``MNGR_VULTR_RELEASE_TESTS=1`` and the VULTR_API_KEY environment
+variable to be set.
 
 They are marked with @pytest.mark.release so they only run in CI or
 when explicitly requested via `just test <path>::<test>`.
@@ -17,13 +18,17 @@ import pytest
 from pydantic import SecretStr
 
 from imbue.mngr_vultr.client import VultrVpsClient
+from imbue.mngr_vultr.testing import VULTR_RELEASE_TESTS_OPT_IN
 
 _VULTR_API_KEY = os.environ.get("VULTR_API_KEY", "")
 
 pytestmark = [
     pytest.mark.release,
     pytest.mark.timeout(600),
-    pytest.mark.skipif(not _VULTR_API_KEY, reason="VULTR_API_KEY not set"),
+    pytest.mark.skipif(
+        not (VULTR_RELEASE_TESTS_OPT_IN and _VULTR_API_KEY),
+        reason="MNGR_VULTR_RELEASE_TESTS=1 and VULTR_API_KEY must both be set",
+    ),
 ]
 
 

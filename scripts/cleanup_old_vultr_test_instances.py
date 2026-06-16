@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Script to clean up old Vultr test VPS instances.
 
-This script is designed to be run periodically (e.g. in CI on a schedule) to
+This script is run by a CI job (on every push to main and pull request) to
 destroy Vultr instances created by the mngr_vultr release tests that were left
 behind when a test session was killed before its in-process cleanup
 (``pytest_sessionfinish`` in ``libs/mngr_vultr/imbue/mngr_vultr/conftest.py``)

@@ -54,8 +54,9 @@ GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 def gcp_credentials_available() -> bool:
     """Return True iff Google ADC can resolve credentials.
 
-    Used to gate release tests and the session-end cleanup hook (no-op when
-    credentials are absent). Delegates to the same
+    Used to gate release tests and the session-end cleanup hook (which, when
+    ``MNGR_GCP_RELEASE_TESTS`` is set, fails the session if credentials are
+    absent rather than skipping). Delegates to the same
     ``GcpProviderConfig.get_credentials_and_resolved_project`` the provider calls
     at construction time, so the gate and production code agree on what counts as
     "available".

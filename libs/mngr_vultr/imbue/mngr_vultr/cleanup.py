@@ -13,8 +13,9 @@ is older than a max age, and destroys them -- independent of the session
 uuid. The creation tag does double duty: its presence marks an instance
 as test-created (so production VPSes, which never carry it, are never
 touched), and its value gives the age. Driven by
-``scripts/cleanup_old_vultr_test_instances.py`` (e.g. from CI on a
-schedule). Mirrors Modal's ``cleanup_old_modal_test_environments``.
+``scripts/cleanup_old_vultr_test_instances.py`` (run by a CI job on every
+push to main and pull request). Mirrors Modal's
+``cleanup_old_modal_test_environments``.
 """
 
 from collections.abc import Sequence
@@ -98,7 +99,7 @@ def cleanup_old_vultr_test_instances(client: VultrReaperClient, max_age: timedel
     it). A 404 means the instance is already gone -- it raced with another
     reaper or a test's own teardown -- and counts as cleaned. Any other
     failure leaves the instance live and is logged at error level so a stuck
-    safety-net run is greppable in the cron/CI logs that drive this script.
+    safety-net run is greppable in the CI logs that drive this script.
     """
     old = find_old_test_instances(client.list_instances(), max_age, now)
     if not old:

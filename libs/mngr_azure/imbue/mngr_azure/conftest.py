@@ -185,33 +185,64 @@ def _is_orphan_test_resource(resource: Any, cutoff: datetime) -> bool:
     return created_at < cutoff
 
 
+def _mark_session_failed(session: pytest.Session) -> None:
+    """Fail the session, but only if it was otherwise passing.
+
+    Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
+    setting ``session.exitstatus`` is the supported way to signal failure.
+    Only overwrite a successful (0) status: a non-zero status
+    (INTERRUPTED=2, INTERNAL_ERROR=3, USAGE_ERROR=4, NO_TESTS_COLLECTED=5)
+    carries strictly more diagnostic information than TESTS_FAILED=1, so
+    downgrading would hide the real reason CI failed.
+    """
+    if session.exitstatus == 0:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Detect and clean up leaked Azure resources at session end.
 
     Implemented as a pytest hook (not a fixture) so it runs after every
-    session-scoped fixture teardown. Skips silently unless release tests were
-    actually opted into (``MNGR_AZURE_RELEASE_TESTS=1``), credentials are
-    available, and a subscription is resolvable -- the same conjunction that
-    gates the release-test ``pytestmark``, so the cleanup hook never makes a live
-    Azure call from a run that did not opt into Azure-using tests. Leaked VMs
-    force-fail the session (a real test bug); orphaned NICs / public IPs from
-    capacity-failed creates are reclaimed silently. The session exit status is set
-    to ``TESTS_FAILED`` only for VM leaks, and only when the session was otherwise
-    passing so a more-specific failure (INTERRUPTED, INTERNAL_ERROR, etc.) is
-    preserved.
+    session-scoped fixture teardown. No-ops when release tests were not opted
+    into (``MNGR_AZURE_RELEASE_TESTS`` is unset) -- an ordinary run that never
+    touches Azure. When the opt-in *is* set but credentials cannot be resolved
+    (or no subscription is resolvable, or the clients cannot be built), the
+    session is *failed* rather than skipped: a release run that cannot
+    authenticate is a misconfiguration, not a benign skip, and skipping would
+    silently green a run that could not have scanned for leaks. Leaked VMs
+    also force-fail the session (a real test bug); orphaned NICs / public IPs
+    from capacity-failed creates are reclaimed silently (an Azure-side
+    artifact, not a test leak). All failure paths set ``session.exitstatus``
+    only when the session was otherwise passing, so a more-specific failure
+    (INTERRUPTED, INTERNAL_ERROR, etc.) is preserved.
     """
     del exitstatus
-    if not (AZURE_RELEASE_TESTS_OPT_IN and azure_credentials_available()):
+    if not AZURE_RELEASE_TESTS_OPT_IN:
+        return
+    if not azure_credentials_available():
+        logger.error(
+            "MNGR_AZURE_RELEASE_TESTS=1 is set but Azure credentials could not be resolved, so the "
+            "session-end leak scan cannot run. Configure credentials, or unset "
+            "MNGR_AZURE_RELEASE_TESTS to skip the Azure release tests."
+        )
+        _mark_session_failed(session)
         return
     subscription_id = get_default_subscription_id()
     if subscription_id is None:
+        logger.error(
+            "MNGR_AZURE_RELEASE_TESTS=1 is set but no Azure subscription could be resolved, so the "
+            "session-end leak scan cannot run. Configure a subscription, or unset "
+            "MNGR_AZURE_RELEASE_TESTS."
+        )
+        _mark_session_failed(session)
         return
 
     try:
         compute = ComputeManagementClient(DefaultAzureCredential(), subscription_id)
         network = NetworkManagementClient(DefaultAzureCredential(), subscription_id)
     except AzureError as e:
-        logger.warning("Failed to build Azure clients for session-end leak scan: {}", e)
+        logger.error("Failed to build Azure clients for session-end leak scan: {}", e)
+        _mark_session_failed(session)
         return
 
     _reclaim_orphan_test_network(network)
@@ -232,5 +263,4 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         + "\n\nVMs have been force-deleted, but tests should not leak.\n"
     )
     logger.error(message)
-    if session.exitstatus == 0:
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    _mark_session_failed(session)

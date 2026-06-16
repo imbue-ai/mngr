@@ -61,8 +61,9 @@ AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 def azure_credentials_available() -> bool:
     """Return True iff ``DefaultAzureCredential`` can mint an ARM token.
 
-    Used to gate release tests and the session-end cleanup hook (no-op when
-    credentials are absent). Mints an ARM-scoped token through the same
+    Used to gate release tests and the session-end cleanup hook (which, when
+    ``MNGR_AZURE_RELEASE_TESTS`` is set, fails the session if credentials are
+    absent rather than skipping). Mints an ARM-scoped token through the same
     ``AzureProviderConfig.get_credential`` the provider uses at construction time,
     so the gate and production code agree on what counts as "available". This only
     runs behind the ``MNGR_AZURE_RELEASE_TESTS`` opt-in, so the network call never
