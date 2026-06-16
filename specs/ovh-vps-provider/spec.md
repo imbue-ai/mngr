@@ -91,8 +91,7 @@ In `mngr_ovh/client.py`:
   - `create_instance(label, region, plan, os_id, user_data, ssh_key_ids, tags)` — runs the order-and-rebuild flow; `user_data` and `ssh_key_ids` are accepted (for interface compat) but `user_data` is ignored (OVH has no userData field) and `ssh_key_ids` is treated as a list of public keys to install via `publicSshKey` during rebuild. Returns the `VpsInstanceId` (= OVH `serviceName` like `vps-eec8860b.vps.ovh.us`).
   - `destroy_instance(instance_id)` — calls `POST /vps/{s}/terminate` then `POST /vps/{s}/confirmTermination`.
   - `get_instance_status / get_instance_ip / wait_for_instance_active / list_instances` — wrappers around `GET /vps/{s}` and `GET /vps`.
-  - `create_snapshot / delete_snapshot / list_snapshots` — wrappers around `POST /vps/{s}/createSnapshot`, `DELETE /vps/{s}/snapshot`, `GET /vps/{s}/snapshot` (single snapshot per VPS; surfaces a clear error if one already exists).
-  - `upload_ssh_key / delete_ssh_key / list_ssh_keys` — VPS rebuild takes inline pubkeys, so these become no-ops that return synthetic IDs (or raise `NotImplementedError` with a clear message that OVH VPS doesn't use a separate key store). To preserve the `VpsClientInterface` contract without weird semantics, we instead have `upload_ssh_key(name, public_key)` cache `public_key` in memory keyed by `name` and return `name` as the ID; `create_instance` then resolves the ID back to the key for `publicSshKey`. No round-trip to OVH for keys.
+  - `upload_ssh_key / delete_ssh_key` — VPS rebuild takes inline pubkeys, so these become no-ops that return synthetic IDs (or raise `NotImplementedError` with a clear message that OVH VPS doesn't use a separate key store). To preserve the `VpsClientInterface` contract without weird semantics, we instead have `upload_ssh_key(name, public_key)` cache `public_key` in memory keyed by `name` and return `name` as the ID; `create_instance` then resolves the ID back to the key for `publicSshKey`. No round-trip to OVH for keys.
   - `wait_for_task(task_id, timeout_seconds)` — polls `GET /vps/{s}/tasks/{taskId}` until `state in {"done", "error", "cancelled", "blocked"}`; raises on terminal-error states.
 
 In `mngr_ovh/bootstrap.py`:
@@ -177,7 +176,7 @@ Each phase ends with a working (if incomplete) system that can be merged indepen
 - Implement `client.py`: thin wrappers around python-ovh for `GET /vps`, `GET /vps/{s}`, `POST /vps/{s}/start/stop/reboot`, `POST /vps/{s}/createSnapshot`, `DELETE /vps/{s}/snapshot`, etc.
 - Implement `wait_for_task` task-polling helper.
 - Unit tests with mocked `ovh.Client.{get,post,delete}`.
-- Release-test stub (`@pytest.mark.release`) that exercises read-only endpoints (`list_instances`, `list_snapshots`).
+- Release-test stub (`@pytest.mark.release`) that exercises read-only endpoints (`list_instances`).
 
 ### Phase 4 — Ordering and bootstrap
 - Implement `ordering.py`: cart flow with full datacenter+OS configuration walk.
@@ -221,7 +220,6 @@ Each phase ends with a working (if incomplete) system that can be merged indepen
 - Rebuild task transitions to `error` → `OvhVpsClient.wait_for_task` raises `VpsProvisioningError` with the task type and ID in the message.
 - IAM tag attach returns 404 for a not-yet-visible VPS (race after provisioning) → retry with backoff up to 5 attempts before giving up.
 - Two VPSes in the same project from two different `mngr` provider instances (`name=alice-ovh`, `name=bob-ovh`) → each instance's discovery only returns its own VPSes.
-- VPS-1 already has a snapshot → `create_snapshot` raises a clear "OVH VPS supports only one snapshot at a time; delete the existing one first" message.
 - `~/.ovh.conf` exists but has a syntax error → falls back to env / explicit config rather than crashing on import.
 - Manual verification: stand up one VPS, run an agent, check `mngr list` from a second machine that has the same OVH credentials but a fresh local profile — confirm the agent appears (proves IAM-tag-based discovery is truly server-side).
 
@@ -230,7 +228,7 @@ Each phase ends with a working (if incomplete) system that can be merged indepen
 
 ## Open Questions
 
-1. **Should the `VpsClientInterface.upload_ssh_key` / `delete_ssh_key` / `list_ssh_keys` methods become optional (e.g. raise `NotImplementedError` and have the base class gate behavior accordingly), or do we stick with the "treat as in-memory cache, return a synthetic ID" hack proposed in the plan?** The hack keeps the interface unchanged at the cost of slight semantic weirdness. Cleanest answer is probably to refactor the interface to take an inline `public_keys: Sequence[str]` in `create_instance` and drop the upload/delete/list methods entirely — but that's a larger ripple than this PR wants.
+1. **Should the `VpsClientInterface.upload_ssh_key` / `delete_ssh_key` methods become optional (e.g. raise `NotImplementedError` and have the base class gate behavior accordingly), or do we stick with the "treat as in-memory cache, return a synthetic ID" hack proposed in the plan?** The hack keeps the interface unchanged at the cost of slight semantic weirdness. Cleanest answer is probably to refactor the interface to take an inline `public_keys: Sequence[str]` in `create_instance` and drop the upload/delete methods entirely — but that's a larger ripple than this PR wants.
 2. **Where does the per-VPS `known_hosts` file live, and is it cleaned up on `destroy`?** Plan assumes `{profile_dir}/providers/ovh/{name}/known_hosts/{service_name}` and that `destroy_host` removes that file. Worth confirming the directory structure matches what `mngr_vps_docker`'s SSH-utils code expects.
 3. **Should we surface a `--vps-pricing-mode=upfront12` build arg so users can opt into the 16% discount on long-running pools, or is that purely a config-file knob?** Build-arg gives per-host control; config-file is simpler. Default to config-file, follow up if real pool usage demands per-host overrides.
 4. **`OvhProviderConfig.project_id` is currently optional (only needed for Public Cloud, which we're not implementing yet). Drop it from the config entirely, or keep the field as a no-op so a future `mngr_ovh_cloud` plugin could read the same config?** Recommend keep, document as "reserved for future Public Cloud support."

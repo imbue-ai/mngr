@@ -20,11 +20,9 @@ from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import make_azure_http_error
 from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 _SUBSCRIPTION = "sub-123"
 _REGION = "westus"
@@ -535,7 +533,7 @@ def test_delete_managed_resource_group_none_when_missing() -> None:
 
 
 # =========================================================================
-# destroy / snapshots / ssh keys
+# destroy
 # =========================================================================
 
 
@@ -545,35 +543,3 @@ def test_destroy_instance_idempotent_on_404() -> None:
     client = _make_client(compute=compute)
     # Should not raise.
     client.destroy_instance(VpsInstanceId("vm1"))
-
-
-# Managed-disk snapshot support is intentionally unwired (the Azure provider has
-# no host snapshot workflow); the three VpsClientInterface snapshot methods are
-# stubbed to fail loudly, mirroring AwsVpsClient.
-def test_create_snapshot_raises_unavailable() -> None:
-    client = _make_client()
-    with pytest.raises(VpsDockerError, match="managed-disk snapshot support is not implemented"):
-        client.create_snapshot(VpsInstanceId("vm1"), "irrelevant")
-
-
-def test_delete_snapshot_raises_unavailable() -> None:
-    client = _make_client()
-    with pytest.raises(VpsDockerError, match="managed-disk snapshot support is not implemented"):
-        client.delete_snapshot(VpsSnapshotId("mngr-snap-irrelevant"))
-
-
-def test_list_snapshots_raises_unavailable() -> None:
-    client = _make_client()
-    with pytest.raises(VpsDockerError, match="managed-disk snapshot support is not implemented"):
-        client.list_snapshots()
-
-
-def test_ssh_key_lifecycle_in_memory() -> None:
-    client = _make_client()
-    client.upload_ssh_key("k1", "pub1")
-    client.upload_ssh_key("k2", "pub2")
-    assert {key.id for key in client.list_ssh_keys()} == {"k1", "k2"}
-    client.delete_ssh_key("k1")
-    assert {key.id for key in client.list_ssh_keys()} == {"k2"}
-    # Deleting an absent key is a tolerant no-op.
-    client.delete_ssh_key("missing")

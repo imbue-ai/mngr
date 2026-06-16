@@ -1252,8 +1252,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         self._create_shutdown_script(host)
         with log_span("Starting activity watcher"):
-            start_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
-            exec_in_container(outer, container_name, start_watcher_cmd)
+            self._start_activity_watcher(outer, container_name)
 
         host_record = VpsDockerHostRecord(
             certified_host_data=host_data,
@@ -1363,6 +1362,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         create_snapshot: bool = True,
         timeout_seconds: float = 60.0,
+        stop_reason: HostState | None = None,
     ) -> None:
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
@@ -1385,18 +1385,35 @@ class VpsDockerProvider(BaseProviderInstance):
             with log_span("Stopping container on VPS"):
                 stop_container(outer, host_record.config.container_name, timeout_seconds=int(timeout_seconds))
 
-            # Update host record
+            # Update the host record (bump updated_at). A subclass that stops more
+            # than the container -- e.g. AWS stopping the EC2 instance -- passes a
+            # ``stop_reason`` so the offline-state derivation reports it correctly
+            # (STOPPED, not CRASHED) while the host is down; this single write
+            # carries it, so the subclass needs no second write. The write must
+            # land before any deeper stop, since the volume is unreachable after.
             host_store = open_host_store(outer, host_record.config.volume_name)
-            now = datetime.now(timezone.utc)
-            updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
+            record_updates: dict[str, object] = {"updated_at": datetime.now(timezone.utc)}
+            if stop_reason is not None:
+                record_updates["stop_reason"] = stop_reason.value
+            updated_data = host_record.certified_host_data.model_copy(update=record_updates)
             updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
             host_store.write_host_record(updated_record)
 
+        self._host_record_cache[host_id] = updated_record
         logger.info("Host {} stopped", host_id)
 
     # =========================================================================
     # Core Lifecycle: start_host
     # =========================================================================
+
+    def _start_activity_watcher(self, outer: OuterHostInterface, container_name: str) -> None:
+        """Launch the in-container activity watcher (the idle/auto-shutdown driver).
+
+        The watcher is a backgrounded process inside the agent container (not part
+        of its entrypoint), so it does not survive a container stop/start. It is
+        started here at create time and re-started by ``start_host`` on resume.
+        """
+        exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
 
     def start_host(
         self,
@@ -1413,21 +1430,46 @@ class VpsDockerProvider(BaseProviderInstance):
                 start_container(outer, host_record.config.container_name)
             # sshd is launched via `docker exec`, not the container's entrypoint, so a
             # `docker start` brings the container back WITHOUT sshd (the idle watcher's
-            # container stop, a manual `mngr stop`, or a VPS reboot all land here). Re-exec
-            # it before waiting, or `_wait_for_container_sshd` would block until timeout and
-            # the agent would be unrecoverable via `mngr start`/`conn`. `docker start` is a
-            # no-op on an already-running container, so this also repairs the
+            # container stop, a manual `mngr stop`, a VPS reboot, or an AWS instance
+            # stop/start all land here). Re-exec it before waiting, or
+            # `_wait_for_container_sshd` would block until timeout and the agent would be
+            # unrecoverable via `mngr start`/`conn`. `docker start` is a no-op on an
+            # already-running container, so this also repairs the
             # container-up-but-sshd-down state.
             with log_span("Restarting sshd in container"):
                 start_container_sshd(outer, host_record.config.container_name)
 
-        # Wait for sshd in container
-        with log_span("Waiting for container SSH"):
-            self._wait_for_container_sshd(host_record.vps_ip)
+            with log_span("Waiting for container SSH"):
+                self._wait_for_container_sshd(host_record.vps_ip)
 
-        host_obj = self._create_host_object(
-            host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip
-        )
+            host_obj = self._create_host_object(
+                host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip
+            )
+
+            # A resume is itself activity: refresh the BOOT activity file (whose
+            # mtime is what the idle watcher reads) so the watcher relaunched just
+            # below starts a fresh idle window. Without this, a resumed-but-idle
+            # host keeps the pre-stop activity mtimes and the watcher re-stops it
+            # within one poll -- so e.g. `mngr start` on an idle host would race a
+            # near-immediate auto-stop. Must happen before the watcher relaunch.
+            host_obj.record_activity(ActivitySource.BOOT)
+
+            # The in-container activity watcher is a backgrounded process that does
+            # not survive the container restart, so relaunch it -- else auto-stop-
+            # on-idle would silently stop working after the first resume (for every
+            # vps_docker provider, not just AWS). Best-effort: a resumed host that
+            # can't auto-stop is better than a failed resume.
+            with log_span("Relaunching activity watcher"):
+                try:
+                    self._start_activity_watcher(outer, host_record.config.container_name)
+                except MngrError as e:
+                    logger.warning(
+                        "Failed to relaunch the activity watcher on resume for host {} ({}); "
+                        "this host will not auto-stop on idle until it is recreated",
+                        host_id,
+                        e,
+                    )
+
         logger.info("Host {} started", host_id)
         return host_obj
 
@@ -1712,14 +1754,13 @@ class VpsDockerProvider(BaseProviderInstance):
             # Cache the host record for later use by get_host_and_agent_details
             self._host_record_cache[host_id] = record
 
-            # Running status came from the same live listing read. A VPS that
-            # was reachable during discovery has an entry here even when its
-            # container is stopped (the live listing reports CONTAINER_STATE for
-            # a stopped container via docker cp). A VPS that was unreachable has
-            # no entry, so it falls through to the offline-state derivation rather
-            # than crashing the listing -- one bad VPS must not drop the other
-            # VPSes' hosts. The presence of an entry is thus the "outer VPS was
-            # reachable" signal the cleanly-stopped distinction below needs.
+            # Running status came from the same live listing read. An entry in
+            # is_running_by_host_id exists only when that read succeeded, which
+            # requires the VPS to have been reachable -- so its presence doubles
+            # as the reachability signal. A VPS that was unreachable during
+            # discovery has no entry here, so it falls through to the
+            # offline-state derivation rather than crashing the listing -- one
+            # bad VPS must not drop the other VPSes' hosts.
             is_running = discovery.is_running_by_host_id.get(host_id, False)
             is_outer_reachable = host_id in discovery.is_running_by_host_id
 
@@ -1727,9 +1768,9 @@ class VpsDockerProvider(BaseProviderInstance):
             is_failed = record.certified_host_data.failure_reason is not None
             # A reachable VPS whose container is simply stopped (idle-watcher shutdown,
             # a manual `mngr stop`, or a VPS reboot) is cleanly STOPPED and restartable
-            # via `mngr start` -- NOT crashed. The live listing only produced a running-state
-            # entry because the VPS was up, so this is never a host crash. Keep such
-            # hosts visible to `mngr conn`/`start` (which pass include_destroyed=False)
+            # via `mngr start` -- NOT crashed. The live listing read only succeeded
+            # because the VPS is up, so this is never a host crash. Keep such hosts
+            # visible to `mngr conn`/`start` (which pass include_destroyed=False)
             # instead of hiding them as if destroyed. An *unreachable* VPS with no
             # recorded stop_reason still derives to CRASHED below -- there the host
             # itself is down, which is the genuine failure case.
