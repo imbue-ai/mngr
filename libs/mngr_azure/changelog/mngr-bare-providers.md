@@ -15,3 +15,7 @@ Enabled bare placement (`isolation=NONE`): an Azure OS shutdown does not halt
 compute billing, so the bare agent's idle `shutdown.sh` runs the ARM
 self-deallocate directly (the same call the container idle watcher uses), keeping
 the self-deallocate role assignment and skipping the host-side sentinel watcher.
+
+Added bare-placement (`isolation=NONE`) release tests, and fixed a resume bug they
+caught: `start_host` read the host record via the Docker volume, which a bare host
+does not have, so it now resolves the store through the realizer.

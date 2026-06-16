@@ -74,3 +74,8 @@ change.
 
 A bare create also rejects container-only inputs up front (an image override, a
 Dockerfile build, or docker run start-args) rather than silently ignoring them.
+
+Bugfix (found by the new bare release tests): on resume, the aws/gcp/azure
+`start_host` read the host record through the Docker volume (`docker volume
+inspect`), which does not exist for a bare host, so `mngr start` failed. It now
+resolves the store through the realizer (the fixed root-disk path for bare).

@@ -48,11 +48,9 @@ from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
-from imbue.mngr_vps.container_setup import host_volume_name_for
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
-from imbue.mngr_vps.host_store import open_host_store
 from imbue.mngr_vps.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps.instance import AGENT_TAG_PREFIX
 from imbue.mngr_vps.instance import IDLE_SENTINEL_FILENAME
@@ -647,7 +645,7 @@ class AzureProvider(TagMirrorVpsProvider):
         with log_span("Waiting for VPS SSH after start"):
             self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
         with self._make_outer_for_vps_ip(vps_ip) as outer:
-            host_store = open_host_store(outer, host_volume_name_for(host_id))
+            host_store = self._realizer.open_host_store(outer, host_id)
             record = host_store.read_host_record()
             if record is None or record.config is None:
                 raise HostNotFoundError(self.name, host_id)

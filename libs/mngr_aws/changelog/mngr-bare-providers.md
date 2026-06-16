@@ -14,3 +14,7 @@ change.
 Enabled bare placement (`isolation=NONE`): the idle agent runs `shutdown -P now`
 as the VM's root, which stops the EC2 instance via InstanceInitiatedShutdownBehavior,
 so the container-only sentinel + host-side systemd watcher is skipped for bare.
+
+Added bare-placement (`isolation=NONE`) release tests, and fixed a resume bug they
+caught: `start_host` read the host record via the Docker volume, which a bare host
+does not have, so it now resolves the store through the realizer.

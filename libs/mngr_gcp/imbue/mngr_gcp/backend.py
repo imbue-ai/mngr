@@ -47,10 +47,8 @@ from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
-from imbue.mngr_vps.container_setup import host_volume_name_for
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.host_store import VpsHostRecord
-from imbue.mngr_vps.host_store import open_host_store
 from imbue.mngr_vps.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps.instance import OfflineCapableVpsProvider
 from imbue.mngr_vps.instance import ParsedVpsBuildOptions
@@ -445,7 +443,7 @@ class GcpProvider(OfflineCapableVpsProvider):
         with log_span("Waiting for VPS SSH after start"):
             self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
         with self._make_outer_for_vps_ip(new_ip) as outer:
-            host_store = open_host_store(outer, host_volume_name_for(host_id))
+            host_store = self._realizer.open_host_store(outer, host_id)
             record = host_store.read_host_record()
             if record is None or record.config is None:
                 raise HostNotFoundError(self.name, host_id)
