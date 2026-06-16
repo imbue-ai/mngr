@@ -15,3 +15,5 @@ Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentitie
 Internal refactor (no behavior change): `AzureProvider` now extends the shared `TagMirrorVpsDockerProvider` and consumes the shared `state_keys` layout, generic `BucketHostStateStore`, and hoisted instance-lookup / path helpers, rather than carrying Azure-local copies.
 
 Internal refactor (no behavior change): `AzureProvider` no longer overrides `discover_hosts_and_agents` / `list_persisted_agent_data_for_host`; it now implements only the shared `_offline_agent_dicts_for` hook (reading the Blob bucket or VM tag mirror via `_state_store`). Validated end-to-end on a real Azure VM (create / stop / list-while-stopped / start).
+
+Internal refactor (no behavior change): `AzureProvider` no longer overrides `persist_agent_data` / `remove_persisted_agent_data` / `_persist_host_record_externally` / `_delete_host_record_externally`; these are now the shared base envelope plus the `_state_store`-backed steps on `TagMirrorVpsDockerProvider`. Azure keeps only `_state_store`, `_persist_agent_to_tags`, and provider specifics. Validated on a real Azure VM.

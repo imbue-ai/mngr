@@ -115,6 +115,7 @@ from imbue.mngr_vps_docker.container_setup import start_container
 from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.container_setup import stop_container
 from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -2505,6 +2506,52 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
                 return []
         return self._persisted_agent_dicts_from_instance(instance)
 
+    @abstractmethod
+    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        """Mirror one agent record into the offline store (instance tags/metadata, or an external store)."""
+        ...
+
+    @abstractmethod
+    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        """Remove one agent's mirrored record from the offline store. Idempotent."""
+        ...
+
+    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
+        """Persist an agent's record on the host volume *and* mirror it for offline reads.
+
+        The base ``VpsDockerProvider`` writes the authoritative on-volume record
+        (read by the SSH-based discovery for *running* hosts), so this keeps doing
+        that via ``super()``. That write is best-effort: a *stopped* host raises
+        ``HostNotFoundError`` (no reachable ``vps_ip``), in which case only the
+        offline mirror is written, so e.g. an offline ``mngr label`` still updates
+        the record a stopped host lists from. ``_mirror_agent_record`` is the only
+        per-provider step (instance tags/metadata, or an external store).
+        """
+        try:
+            super().persist_agent_data(host_id, agent_data)
+        except HostNotFoundError:
+            logger.debug("Host {} unreachable; mirroring agent data to the offline store only", host_id)
+        agent_id = agent_data.get("id")
+        if agent_id is None:
+            logger.warning("Cannot mirror agent data without an id (name={!r})", agent_data.get("name"))
+            return
+        self._mirror_agent_record(host_id, str(agent_id), agent_data)
+
+    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
+        """Remove the agent's on-volume record *and* its offline mirror.
+
+        Mirrors ``persist_agent_data``: the base removes the authoritative on-volume
+        record (best-effort -- ``HostNotFoundError`` when the host is stopped) and
+        ``_remove_mirrored_agent_record`` drops the offline copy, so a destroyed
+        agent stops appearing in both running- and stopped-host discovery. Both
+        removals are idempotent.
+        """
+        try:
+            super().remove_persisted_agent_data(host_id, agent_id)
+        except HostNotFoundError:
+            logger.debug("Host {} unreachable; removing agent data from the offline store only", host_id)
+        self._remove_mirrored_agent_record(host_id, str(agent_id))
+
     def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
@@ -2633,6 +2680,50 @@ class TagMirrorVpsDockerProvider(OfflineCapableVpsDockerProvider):
     def _host_name_tag_key(self) -> str:
         """Tag key whose value holds ``mngr-<host_name>`` (EC2: ``Name``; Azure: ``mngr-host-name``)."""
         ...
+
+    @property
+    @abstractmethod
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror: the object-storage bucket when present, else the tag store.
+
+        Selecting one store here lets the offline read/write paths below stop
+        branching on bucket-vs-tags. Implemented as a cached property by the
+        concrete providers (the bucket-existence probe runs at most once).
+        """
+        ...
+
+    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        self._state_store.persist_agent_record(host_id, agent_id, agent_data)
+
+    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        self._state_store.remove_agent_record(host_id, agent_id)
+
+    def _offline_agent_dicts_for(self, host_id: HostId, instance: Mapping[str, Any] | None = None) -> list[dict]:
+        """Read a stopped host's agent records from the external store (bucket or tag mirror).
+
+        Overrides the base tag/metadata reconstruction so a bucket-mode host --
+        whose agents live in the bucket, not in tags -- still surfaces its agents
+        offline. ``_state_store`` selects bucket vs tags; ``instance`` is unused (the
+        store is keyed by ``host_id``).
+        """
+        del instance
+        return self._state_store.list_agent_records(host_id)
+
+    def _persist_host_record_externally(self, record: VpsDockerHostRecord) -> None:
+        """Mirror the full host record into the external store (best-effort).
+
+        The bucket writes the full record; the tag store is a no-op (the instance's
+        own tags carry it).
+        """
+        self._state_store.persist_host_record(record)
+
+    def _delete_host_record_externally(self, host_id: HostId) -> None:
+        """Delete the host's state from the external store (best-effort, idempotent).
+
+        The bucket deletes the host's prefix; the tag store is a no-op (destroying
+        the instance drops its tags).
+        """
+        self._state_store.delete_host_state(host_id)
 
     def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
         """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
