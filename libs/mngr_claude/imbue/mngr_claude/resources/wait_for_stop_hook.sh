@@ -32,6 +32,14 @@ GRACE_PERIOD="${HOOK_GRACE_PERIOD:-3}"      # seconds before first check
 POLL_INTERVAL="${HOOK_POLL_INTERVAL:-1}"    # seconds between polls
 MAX_WAIT="${HOOK_MAX_WAIT:-120}"            # max seconds to wait for other hooks
 
+# Lock-acquire timeout (seconds) handed to the transcript flush in mark_inactive.
+# The flush's only potentially-slow step is waiting for the converter lock, so
+# this bounds how long mark_inactive can block. The signal handler uses a short
+# bound so SIGTERM/SIGINT exit promptly; every other path can afford the normal
+# bound (which matches the converter's own default).
+FLUSH_LOCK_TIMEOUT_NORMAL="${HOOK_FLUSH_LOCK_TIMEOUT:-30}"
+FLUSH_LOCK_TIMEOUT_SIGNAL="${HOOK_FLUSH_LOCK_TIMEOUT_SIGNAL:-2}"
+
 # Session guard: exit early if not a managed session
 [ -z "${MAIN_CLAUDE_SESSION_ID:-}" ] && exit 0
 
@@ -113,16 +121,21 @@ get_other_stop_hooks() {
 
 # --- Mark agent as inactive and emit activity event ---
 # $1 (optional): reason for marking inactive (e.g. "signal:SIGTERM")
+# $2 (optional): lock-acquire timeout (seconds) for the transcript flush
+#                (default FLUSH_LOCK_TIMEOUT_NORMAL)
 mark_inactive() {
     local reason="${1:-}"
+    local flush_lock_timeout="${2:-$FLUSH_LOCK_TIMEOUT_NORMAL}"
     # Flush the transcript pipeline before clearing the marker (see the comment
     # above the lib source below). This lives in mark_inactive -- not
     # run_post_completion -- so it runs on EVERY turn-end path, including the
     # no-/proc fast path and the SIGTERM/SIGINT handler, both of which clear the
     # marker without going through run_post_completion. Best-effort and guarded
     # so a missing lib or flush failure can never strand the turn-end signal.
+    # The lock-acquire timeout bounds how long the flush can block; the signal
+    # handler passes a short value so interrupts exit promptly.
     if command -v mngr_common_transcript_flush >/dev/null 2>&1; then
-        mngr_common_transcript_flush
+        mngr_common_transcript_flush "$flush_lock_timeout"
     fi
     rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
     mkdir -p "$MNGR_HOST_DIR/events/mngr/activity"
@@ -198,7 +211,7 @@ run_post_completion() {
 on_signal() {
     local sig="$1"
     echo "wait_for_stop_hook: received SIG${sig}, marking inactive" >&2
-    mark_inactive "signal:SIG${sig}"
+    mark_inactive "signal:SIG${sig}" "$FLUSH_LOCK_TIMEOUT_SIGNAL"
     exit 0
 }
 

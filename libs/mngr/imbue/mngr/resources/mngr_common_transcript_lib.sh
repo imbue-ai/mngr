@@ -21,13 +21,19 @@
 #   - mngr_common_transcript_release_lock
 #       Drop the lock (idempotent).
 #
-#   - mngr_common_transcript_flush
+#   - mngr_common_transcript_flush [lock_timeout_seconds]
 #       Run one synchronous `--single-pass` of the raw streamer then the
 #       common-transcript converter, in pipeline order, so a turn-end / WAITING
 #       signal can't outrun the converter. Best-effort: gated on each script
 #       existing (the common transcript is opt-in) and `|| true` so a flush
 #       failure can never strand the caller's turn-end signal. The converter's
 #       lock keeps this pass from racing the background daemon.
+#       The optional lock_timeout_seconds (default: MNGR_CONVERT_LOCK_TIMEOUT or
+#       30) bounds how long each pass waits for the convert lock -- the only
+#       potentially-slow step -- so a latency-sensitive caller (e.g. a
+#       SIGTERM/SIGINT handler) can cap how long the flush blocks. Implemented
+#       as a per-pass MNGR_CONVERT_LOCK_TIMEOUT rather than a `timeout(1)`
+#       wrapper so it stays portable to macOS, which has no `timeout` binary.
 #
 # Requires MNGR_AGENT_STATE_DIR. The lock is per-agent (exactly one converter
 # runs per agent), so a single lock dir under the state dir is sufficient.
@@ -63,11 +69,14 @@ mngr_common_transcript_release_lock() {
 }
 
 mngr_common_transcript_flush() {
+    local lock_timeout="${1:-${MNGR_CONVERT_LOCK_TIMEOUT:-30}}"
     local cmds="${MNGR_AGENT_STATE_DIR}/commands"
     if [ -x "$cmds/stream_transcript.sh" ]; then
-        bash "$cmds/stream_transcript.sh" --single-pass >/dev/null 2>&1 || true
+        MNGR_CONVERT_LOCK_TIMEOUT="$lock_timeout" \
+            bash "$cmds/stream_transcript.sh" --single-pass >/dev/null 2>&1 || true
     fi
     if [ -x "$cmds/common_transcript.sh" ]; then
-        bash "$cmds/common_transcript.sh" --single-pass >/dev/null 2>&1 || true
+        MNGR_CONVERT_LOCK_TIMEOUT="$lock_timeout" \
+            bash "$cmds/common_transcript.sh" --single-pass >/dev/null 2>&1 || true
     fi
 }
