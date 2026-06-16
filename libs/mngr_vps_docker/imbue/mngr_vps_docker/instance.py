@@ -2584,7 +2584,7 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
 # keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the tag key), so a
 # stopped instance still surfaces its agents in discovery and resolves by name.
 AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
-_AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
+AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
 # Max length of a single instance/VM tag value (EC2 and Azure both cap at 256).
 _MAX_TAG_VALUE_LEN: Final[int] = 256
 # The host-name tag value is stored as ``mngr-<host_name>``; strip the prefix to
@@ -2646,7 +2646,7 @@ class TagMirrorVpsDockerProvider(OfflineCapableVpsDockerProvider):
         """
         set_tags: dict[str, str] = {}
         delete_keys: list[str] = []
-        for field in _AGENT_TAG_FIELDS:
+        for field in AGENT_TAG_FIELDS:
             if field not in agent_data:
                 continue
             key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
@@ -2683,7 +2683,7 @@ class TagMirrorVpsDockerProvider(OfflineCapableVpsDockerProvider):
             if not key.startswith(AGENT_TAG_PREFIX):
                 continue
             agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
-            if not sep or field not in _AGENT_TAG_FIELDS:
+            if not sep or field not in AGENT_TAG_FIELDS:
                 continue
             record = by_id.setdefault(agent_id, {"id": agent_id})
             if field == "labels":

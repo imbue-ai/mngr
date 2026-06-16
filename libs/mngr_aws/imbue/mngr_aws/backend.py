@@ -54,12 +54,12 @@ from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
 from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import _AGENT_TAG_FIELDS
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -1112,7 +1112,7 @@ class _Ec2TagHostStateStore(HostStateStore):
         instance = self.provider._find_instance_for_host(host_id)
         if instance is None:
             return
-        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
+        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in AGENT_TAG_FIELDS]
         self.provider.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
     def list_agent_records(self, host_id: HostId) -> list[dict]:
