@@ -26,9 +26,13 @@ from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
 from imbue.mngr_vps_docker.container_setup import redact_secret_env
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.container_setup import resolve_dockerfile_paths
+from imbue.mngr_vps_docker.instance import IDLE_WATCHER_UNIT_NAME
 from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import _wait_for_cloud_init_marker
+from imbue.mngr_vps_docker.instance import build_idle_watcher_path_unit
+from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
+from imbue.mngr_vps_docker.instance import build_sentinel_shutdown_script
 from imbue.mngr_vps_docker.instance import build_vps_tags
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import parse_vps_build_args
@@ -615,3 +619,46 @@ def test_create_host_runs_pre_create_validation_before_any_provider_write(
     )
     with pytest.raises(MngrError, match="SENTINEL: pre-create validation ran"):
         provider.create_host(HostName("test-host"))
+
+
+# =============================================================================
+# Shared idle-watcher / sentinel builders (used by the AWS/GCP/Azure providers)
+# =============================================================================
+
+
+def test_build_sentinel_shutdown_script_touches_the_sentinel_path() -> None:
+    """The in-container shutdown script signals idle by touching the sentinel, not killing pid 1.
+
+    The sentinel path is the only contract tying the in-container write to the
+    host-side ``.path`` unit's ``PathExists``, so it must appear verbatim (quoted
+    against spaces).
+    """
+    sentinel = "/mngr-vol/host_dir/commands/stop-instance-requested"
+    script = build_sentinel_shutdown_script(sentinel)
+    assert script.startswith("#!/bin/bash\n")
+    assert f'touch "{sentinel}"' in script
+    assert "kill -TERM 1" not in script
+
+
+def test_build_idle_watcher_path_unit_watches_sentinel_and_targets_service() -> None:
+    """The systemd ``.path`` unit fires the paired ``.service`` when the sentinel appears."""
+    sentinel = "/mngr-btrfs/abc123/host_dir/commands/stop-instance-requested"
+    unit = build_idle_watcher_path_unit(sentinel)
+    assert f"PathExists={sentinel}" in unit
+    assert f"Unit={IDLE_WATCHER_UNIT_NAME}.service" in unit
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_build_poweroff_idle_watcher_service_unit_removes_sentinel_then_powers_off() -> None:
+    """The oneshot ``.service`` (AWS/GCP) removes the sentinel, then powers the host off.
+
+    The ``rm -f`` must precede the power-off so a later resume isn't immediately
+    re-paused by the re-armed path unit; powering off (not an API call) means no
+    IAM/CLI is needed on the box.
+    """
+    sentinel = "/mngr-btrfs/deadbeef/host_dir/commands/stop-instance-requested"
+    unit = build_poweroff_idle_watcher_service_unit(sentinel)
+    assert "Type=oneshot" in unit
+    assert "shutdown -P now" in unit
+    assert f"rm -f {sentinel}" in unit
+    assert unit.index("rm -f") < unit.index("shutdown -P now")

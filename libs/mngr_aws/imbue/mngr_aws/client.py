@@ -411,6 +411,7 @@ class AwsVpsClient(VpsClientInterface):
         tags: Mapping[str, str],
         ami_id_override: str | None = None,
         spot: bool = False,
+        iam_instance_profile_override: str | None = None,
     ) -> VpsInstanceId:
         """Provision an EC2 instance.
 
@@ -513,12 +514,16 @@ class AwsVpsClient(VpsClientInterface):
         }
         if ssh_key_ids:
             run_kwargs["KeyName"] = ssh_key_ids[0]
-        # Attach an explicit operator-supplied IAM instance profile if configured.
-        # mngr's idle self-stop no longer needs one: the watcher powers the host
-        # off and InstanceInitiatedShutdownBehavior decides stop-vs-terminate, so
-        # there is no default profile to attach (and no iam:PassRole requirement).
-        if self.iam_instance_profile is not None:
-            run_kwargs["IamInstanceProfile"] = {"Name": self.iam_instance_profile}
+        # Attach an IAM instance profile when one applies. The operator-supplied
+        # ``self.iam_instance_profile`` takes precedence; otherwise the caller may
+        # pass the host-dir-sync identity provisioned by ``mngr aws prepare`` via
+        # ``iam_instance_profile_override``. Either way, attaching a profile to
+        # RunInstances requires the caller to hold ``iam:PassRole`` for it. mngr's
+        # idle self-stop does NOT need a profile (it powers the host off rather
+        # than calling the EC2 API), so when neither applies, no profile is set.
+        effective_iam_profile = self.iam_instance_profile or iam_instance_profile_override
+        if effective_iam_profile is not None:
+            run_kwargs["IamInstanceProfile"] = {"Name": effective_iam_profile}
         if spot:
             # Default spot config: AWS sets max price to the on-demand price
             # automatically; the dev-host use case accepts any non-zero capacity.
@@ -696,6 +701,21 @@ class AwsVpsClient(VpsClientInterface):
         if not ip:
             raise VpsProvisioningError(f"Instance {instance_id} does not have a public IP yet")
         return ip
+
+    def get_instance_iam_profile_arn(self, instance_id: VpsInstanceId) -> str | None:
+        """Return the ARN of the instance's attached IAM instance profile, or None if none is attached.
+
+        Reads ``DescribeInstances``' ``IamInstanceProfile`` association. Used by
+        the offline host_dir path to detect an instance that was never granted
+        the bucket-write identity (Decision 7), so it can tell the user to re-run
+        ``mngr aws prepare --use-offline-host-dir yes``. Returns None for a
+        nonexistent instance too (no association to report).
+        """
+        instance = self._describe_instance(instance_id)
+        if instance is None:
+            return None
+        profile = instance.get("IamInstanceProfile")
+        return profile.get("Arn") if profile else None
 
     def list_instances(self, provider_tag: str | None = None) -> list[dict[str, Any]]:
         """List instances in this region. Optionally filtered by ``mngr-provider=<value>`` tag.

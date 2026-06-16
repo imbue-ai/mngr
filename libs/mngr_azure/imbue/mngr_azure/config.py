@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,17 @@ from pydantic import Field
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
+from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+
+# Storage-account names are globally unique, 3-24 chars, lowercase alphanumeric
+# only (no hyphens). The derived name is ``mngrst<hash>`` where ``<hash>`` is a
+# deterministic short digest of subscription + resource group, truncated to keep
+# the whole name within the 24-char cap.
+_STATE_ACCOUNT_NAME_PREFIX: Final[str] = "mngrst"
+_STATE_ACCOUNT_NAME_MAX_LENGTH: Final[int] = 24
+_STATE_ACCOUNT_HASH_LENGTH: Final[int] = _STATE_ACCOUNT_NAME_MAX_LENGTH - len(_STATE_ACCOUNT_NAME_PREFIX)
 
 # Tag written on the resource group by ``mngr azure prepare`` so the inverse
 # ``mngr azure cleanup`` can prove the group is mngr-owned before deleting it
@@ -194,6 +205,28 @@ class AzureProviderConfig(VpsDockerProviderConfig):
             "mngr-from-developer-laptop SSH access model."
         ),
     )
+    state_storage_account_name: str | None = Field(
+        default=None,
+        description=(
+            "Name of the storage account holding mngr control-plane state (the full host record and "
+            "per-agent records in a Blob container) so a deallocated VM's state is readable without SSH "
+            "and without the 256-char Azure tag limit. When None, the effective name is derived as "
+            "'mngrst<hash>' from the subscription + resource group (3-24 lowercase alnum). When the "
+            "account+container exist (created by `mngr azure prepare`), the per-agent VM tag mirror is "
+            "dropped in favor of the bucket; without it, mngr falls back to the tag mirror."
+        ),
+    )
+    is_host_dir_synced_to_bucket: bool = Field(
+        default=True,
+        description=(
+            "Whether the VM syncs its host_dir to the Blob state bucket so it is readable while the VM "
+            "is deallocated (a Lima-style offline host_dir; mirrors Lima's is_host_data_volume_exposed). "
+            "On by default. When on (and a bucket exists), the create path attaches the prepare-provisioned "
+            "user-assigned managed identity, an on-box daemon periodically `azcopy sync`s host_dir "
+            "to hosts/<host_id>/host_dir/, and get_volume_for_host serves offline reads from the bucket. Set "
+            "False to disable the host_dir sync entirely (offline host metadata still works via the bucket)."
+        ),
+    )
 
     def get_credential(self) -> Any:
         """Return a ``DefaultAzureCredential`` for the management clients.
@@ -237,4 +270,51 @@ class AzureProviderConfig(VpsDockerProviderConfig):
             "  - run `az login` (optionally `az account set --subscription <id>`) to use the active subscription;\n"
             "  - `mngr config set providers.azure.subscription_id <id>`;\n"
             "  - the AZURE_SUBSCRIPTION_ID environment variable."
+        )
+
+    def resolve_state_storage_account_name(self, subscription_id: str) -> str:
+        """Return the effective state-storage-account name.
+
+        ``state_storage_account_name`` wins when set. Otherwise derive
+        ``mngrst<hash>`` from a deterministic short digest of the subscription +
+        resource group (lowercase alphanumeric, within the 24-char Azure cap).
+        Storage-account names are globally unique, so the derivation is anchored on
+        the (subscription, resource-group) scope -- the same scope the bucket is
+        shared across.
+        """
+        if self.state_storage_account_name:
+            return self.state_storage_account_name
+        digest = hashlib.sha256(f"{subscription_id}/{self.resource_group}".encode("utf-8")).hexdigest()
+        return f"{_STATE_ACCOUNT_NAME_PREFIX}{digest[:_STATE_ACCOUNT_HASH_LENGTH]}"
+
+    def build_state_bucket(self, subscription_id: str) -> BlobStateBucket:
+        """Build a ``BlobStateBucket`` from this config + the resolved subscription.
+
+        The account name is always derivable (unlike AWS, which needs an STS call
+        to learn the account id), so this never returns None -- the provider gates
+        on whether the account+container actually *exist* (i.e. whether
+        ``mngr azure prepare`` created them), not on whether a name can be built.
+        """
+        return BlobStateBucket(
+            credential=self.get_credential(),
+            subscription_id=subscription_id,
+            resource_group=self.resource_group,
+            region=self.default_region,
+            account_name=self.resolve_state_storage_account_name(subscription_id),
+        )
+
+    def build_host_identity(self, subscription_id: str) -> BlobStateHostIdentity:
+        """Build the bucket-write ``BlobStateHostIdentity`` from this config + the resolved subscription.
+
+        The identity name is derived from the state-account name, so it shares the
+        account's per-(subscription, resource-group) scope. The account name is
+        always derivable, so (like ``build_state_bucket``) this never returns None;
+        the provider gates on whether the identity actually *exists*.
+        """
+        return BlobStateHostIdentity(
+            credential=self.get_credential(),
+            subscription_id=subscription_id,
+            resource_group=self.resource_group,
+            region=self.default_region,
+            account_name=self.resolve_state_storage_account_name(subscription_id),
         )

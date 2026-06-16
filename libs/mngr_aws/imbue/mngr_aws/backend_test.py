@@ -22,12 +22,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.backend import AwsProviderBackend
-from imbue.mngr_aws.backend import IDLE_SENTINEL_FILENAME
-from imbue.mngr_aws.backend import IDLE_WATCHER_UNIT_NAME
 from imbue.mngr_aws.backend import ParsedAwsBuildOptions
-from imbue.mngr_aws.backend import _build_idle_watcher_path_unit
-from imbue.mngr_aws.backend import _build_idle_watcher_service_unit
-from imbue.mngr_aws.backend import _build_sentinel_shutdown_script
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -36,6 +31,7 @@ from imbue.mngr_aws.testing import clear_aws_env
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.testing import seed_stopped_host_record
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -114,26 +110,6 @@ def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber
 
 def _describe_instances_response(instances: list[dict]) -> dict:
     return {"Reservations": [{"Instances": instances}]}
-
-
-def _seed_stopped_host_record(provider: AwsProvider, host_id: HostId) -> None:
-    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits.
-
-    The agent-data hooks call ``super()`` first (the authoritative on-volume
-    store) and only fall back to / additionally write EC2 tags. For a *stopped*
-    host the base raises ``HostNotFoundError`` (no reachable ``vps_ip``); seeding
-    such a record makes the base short-circuit immediately without any SSH or
-    discovery sweep, so these tag-path tests exercise the stopped-host fallback
-    without standing up a fake VPS.
-    """
-    certified = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="myhost",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        stop_reason=HostState.STOPPED.value,
-    )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
 
 
 def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
@@ -273,7 +249,7 @@ def test_persist_agent_data_writes_per_field_agent_tags(temp_mngr_ctx: MngrConte
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     stubber.add_response(
         "describe_instances",
         _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
@@ -304,7 +280,7 @@ def test_persist_agent_data_writes_labels_in_their_own_tag(temp_mngr_ctx: MngrCo
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     stubber.add_response(
         "describe_instances",
         _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
@@ -598,7 +574,7 @@ def test_discover_hosts_and_agents_skips_instance_with_malformed_host_id_tag(
         stubber.deactivate()
     host_ids = {host.host_id for host in result}
     assert good_host_id in host_ids, "well-formed stopped host should still surface"
-    assert any("malformed mngr host tag" in w.lower() for w in log_warnings), log_warnings
+    assert any("malformed mngr host identity" in w.lower() for w in log_warnings), log_warnings
 
 
 def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
@@ -962,51 +938,3 @@ def test_create_vps_instance_raises_mngr_error_when_no_ami_configured(
 
     with pytest.raises(MngrError, match="No AMI configured"):
         provider._create_vps_instance(parsed=parsed, label="test", user_data="", ssh_key_ids=(), tags={})
-
-
-def test_build_sentinel_shutdown_script_touches_the_sentinel_path() -> None:
-    """The in-container shutdown script signals idle by touching the given sentinel file.
-
-    The sentinel path is the only contract that ties the in-container write to
-    the host-side path unit's ``PathExists``, so it must appear verbatim (quoted
-    against spaces) and the script must ``touch`` it rather than kill pid 1.
-    """
-    sentinel = f"/mngr-vol/host_dir/commands/{IDLE_SENTINEL_FILENAME}"
-    script = _build_sentinel_shutdown_script(sentinel)
-    assert script.startswith("#!/bin/bash\n")
-    assert f'touch "{sentinel}"' in script
-    assert "kill -TERM 1" not in script, "AWS shutdown must NOT kill the container; it signals via a sentinel"
-
-
-def test_build_idle_watcher_path_unit_watches_sentinel_and_targets_service() -> None:
-    """The systemd .path unit fires the watcher service when the sentinel appears.
-
-    ``PathExists`` must point at the outer-filesystem sentinel location and
-    ``Unit`` must name the paired ``.service`` so the trigger is wired correctly.
-    """
-    sentinel = f"/mngr-btrfs/abc123/host_dir/commands/{IDLE_SENTINEL_FILENAME}"
-    unit = _build_idle_watcher_path_unit(sentinel)
-    assert f"PathExists={sentinel}" in unit
-    assert f"Unit={IDLE_WATCHER_UNIT_NAME}.service" in unit
-    assert "WantedBy=multi-user.target" in unit
-
-
-def test_build_idle_watcher_service_unit_removes_sentinel_then_powers_off() -> None:
-    """The oneshot .service removes the sentinel, then powers the host off via ``shutdown -P now``.
-
-    Powering off (rather than calling the EC2 API) means no IAM role or awscli is
-    needed: EC2's ``InstanceInitiatedShutdownBehavior`` decides stop-vs-terminate.
-    The sentinel ``rm -f`` must run BEFORE the power-off so a later resume isn't
-    immediately re-stopped by the path unit.
-    """
-    sentinel = "/mngr-btrfs/deadbeef/host_dir/commands/stop-instance-requested"
-    unit = _build_idle_watcher_service_unit(sentinel)
-    assert "Type=oneshot" in unit
-    assert "shutdown -P now" in unit
-    assert f"rm -f {sentinel}" in unit
-    # rm must precede the power-off so resume gets a clean slate.
-    assert unit.index("rm -f") < unit.index("shutdown -P now")
-    # No IAM/awscli path: the watcher powers the host off, it does not call the EC2 API.
-    assert "stop-instances" not in unit
-    assert "--instance-ids" not in unit
-    assert "--region" not in unit

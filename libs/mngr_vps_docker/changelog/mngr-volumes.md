@@ -1,0 +1,19 @@
+Added two no-op extension hooks to `VpsDockerProvider` -- `_persist_host_record_externally` and `_delete_host_record_externally` -- so a provider can mirror the authoritative on-volume host record to an external store (e.g. an object-storage bucket) for offline reads. The base provider calls them right after every on-volume host-record write (create, stop, snapshot, rename, certified-data sync) and on host destroy/delete. Default behavior is unchanged for providers that do not override them (Vultr, OVH, imbue_cloud).
+
+Added a `HostStateStore` abstract base (`host_state_store.py`): the uniform interface for a provider's external host/agent-record mirror (persist/delete host record, persist/remove/list agent records, read host record). The AWS and Azure providers select one implementation -- bucket-backed or instance/VM-tag-backed -- and call it instead of branching on bucket-vs-tags at every site. This is an internal refactor; an operational store error during offline discovery still propagates to the existing per-provider `--on-error` handling rather than being swallowed.
+
+Unified the AWS/Azure/GCP offline-capable providers' shared machinery into `mngr_vps_docker` (internal refactor, no behavior change):
+
+- `_find_instance_for_host` and the idle-sentinel / host_dir outer-path helpers (`_idle_sentinel_path_on_outer`, `_host_dir_path_on_outer`) now live on `OfflineCapableVpsDockerProvider`, with `IDLE_SENTINEL_FILENAME` as one shared constant.
+
+- New `state_keys` module holds the object-key layout (`hosts/<id>/host_state.json`, `agents/`, `host_dir/`) shared by the S3 and Azure Blob buckets.
+
+- New generic `BucketHostStateStore` (over a `StateBucket` protocol) replaces the per-provider bucket-backed `HostStateStore` implementations.
+
+- New intermediate `TagMirrorVpsDockerProvider` holds the tag-based host/agent reconstruction shared by AWS and Azure (the only per-provider knob is `_host_name_tag_key`); GCP keeps its metadata-based reconstruction by extending `OfflineCapableVpsDockerProvider` directly.
+
+- New `testing.seed_stopped_host_record` helper, shared by the provider test suites.
+
+Further unified the offline discovery/listing path: `OfflineCapableVpsDockerProvider.discover_hosts_and_agents` and `list_persisted_agent_data_for_host` now read a stopped host's agent records through a single `_offline_agent_dicts_for(host_id, instance=None)` hook. The default reassembles from the instance's own tags/metadata; a provider with an external store overrides it to read the store by `host_id`. This lets AWS/Azure drop their duplicated discover/list overrides while keeping bucket-aware behavior, with no change for tag/metadata-only providers (e.g. GCP).
+
+Unified the offline *write* path too (C1b): `OfflineCapableVpsDockerProvider` now owns the shared `persist_agent_data` / `remove_persisted_agent_data` envelope (best-effort authoritative on-volume write + id check), delegating the single per-provider step to abstract `_mirror_agent_record` / `_remove_mirrored_agent_record` hooks. The `_state_store`-backed implementations (those hooks, `_offline_agent_dicts_for`, and `_persist_host_record_externally` / `_delete_host_record_externally`) plus the abstract `_state_store` now live on `TagMirrorVpsDockerProvider`, so AWS/Azure carry only `_state_store` + provider specifics; GCP implements the two mirror hooks with its GCE-metadata writes.

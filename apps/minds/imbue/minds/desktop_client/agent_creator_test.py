@@ -990,8 +990,14 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
     )
 
 
-def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 10.0) -> None:
-    """Poll ``get_creation_info`` until status is DONE or FAILED, then return."""
+def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 30.0) -> None:
+    """Poll ``get_creation_info`` until status is DONE or FAILED, then return.
+
+    The deadline is only a ceiling -- the loop returns the instant the status is
+    terminal, so a passing test never waits for it. It is set to 30s (matching the
+    ``@pytest.mark.timeout(30)`` on the litellm-key tests) so heavy setup under
+    offload CI contention does not trip a spurious timeout at the old 10s.
+    """
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
         info = creator.get_creation_info(creation_id)
@@ -1026,11 +1032,9 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
 
 
-# Flaky under heavy CI load: this is a sync unit test but its setup spins up
-# fresh ConcurrencyGroups and a recording http-server fixture; the combined
-# work occasionally exceeds the 10s pytest-timeout when offload sandboxes are
-# contended. Offload retries flaky tests automatically.
-@pytest.mark.flaky
+# Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a
+# recording http-server fixture, which can exceed the default 10s pytest-timeout.
+@pytest.mark.timeout(30)
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
@@ -1052,10 +1056,9 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     assert cli.create_calls == []
 
 
-# Same timeout flake as its API_KEY twin above: the creation work occasionally
-# exceeds the 10s pytest-timeout when offload sandboxes are contended. Offload
-# retries flaky tests automatically.
-@pytest.mark.flaky
+# Same timeout flake as its litellm-key siblings above: the creation work
+# occasionally exceeds the default 10s pytest-timeout.
+@pytest.mark.timeout(30)
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""

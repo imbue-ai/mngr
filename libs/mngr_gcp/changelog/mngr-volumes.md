@@ -1,0 +1,3 @@
+Internal refactor (no behavior change): the byte-identical `_find_instance_for_host` and `_idle_sentinel_path_on_outer` that `GcpProvider` shared with the AWS/Azure providers are now inherited from `OfflineCapableVpsDockerProvider` in `mngr_vps_docker`; GCP keeps a one-line `_instances_matching_host_id` override for its GCE label encoding and its metadata-based offline reconstruction.
+
+Internal refactor (no behavior change): `GcpProvider` no longer overrides the full `persist_agent_data` / `remove_persisted_agent_data`; it now implements just the `_mirror_agent_record` / `_remove_mirrored_agent_record` hooks (its GCE-metadata writes), inheriting the shared persist/remove envelope from `OfflineCapableVpsDockerProvider`.
