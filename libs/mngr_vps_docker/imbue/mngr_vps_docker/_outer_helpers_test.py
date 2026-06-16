@@ -54,9 +54,9 @@ from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_out
 from imbue.mngr_vps_docker.container_setup import start_container
 from imbue.mngr_vps_docker.container_setup import stop_container
 from imbue.mngr_vps_docker.container_setup import translate_outer_concurrency_errors
+from imbue.mngr_vps_docker.docker_realizer import _read_host_id_label_from_vps
 from imbue.mngr_vps_docker.errors import ContainerSetupError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.instance import _read_host_id_label_from_vps
 
 
 class _Recorded(MutableModel):

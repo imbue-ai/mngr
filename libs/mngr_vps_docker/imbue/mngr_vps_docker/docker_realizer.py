@@ -1,16 +1,21 @@
 import json
+import shlex
 import time
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from loguru import logger
 
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
+from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
@@ -28,6 +33,7 @@ from imbue.mngr_vps_docker.container_setup import build_image_on_outer_from_buil
 from imbue.mngr_vps_docker.container_setup import commit_container
 from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
 from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
+from imbue.mngr_vps_docker.container_setup import docker_inspect_running
 from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import prepare_btrfs_on_outer
@@ -58,6 +64,62 @@ from imbue.mngr_vps_docker.interfaces import HostRealizer
 CONTAINER_SSH_KEY_NAME: Final[str] = "container_ssh_key"
 CONTAINER_HOST_KEY_NAME: Final[str] = "container_host_key"
 CONTAINER_KNOWN_HOSTS_NAME: Final[str] = "container_known_hosts"
+
+
+def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
+    """Return the host_id label of the (single) mngr container on this VPS, if any.
+
+    Each VPS hosts at most one mngr container (1:1 invariant), so the value of
+    the ``com.imbue.mngr.host-id`` label on any container with that label set
+    uniquely identifies the VPS's host. Returns ``None`` when no such container
+    exists yet. Includes stopped containers so a paused host is still discoverable.
+    """
+    fmt = "{{index .Config.Labels " + json.dumps(LABEL_HOST_ID) + "}}"
+    result = outer.execute_idempotent_command(
+        "docker ps -a -q "
+        f"--filter {shlex.quote('label=' + LABEL_HOST_ID)} | "
+        f"xargs -r docker inspect --format {shlex.quote(fmt)}",
+    )
+    if not result.success:
+        raise MngrError(
+            f"Failed to list mngr containers on VPS: stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+        )
+    for raw_line in result.stdout.splitlines():
+        value = raw_line.strip()
+        if not value:
+            continue
+        try:
+            return HostId(value)
+        except InvalidRandomIdError as e:
+            # A corrupted/manually-edited label must not crash discovery for the
+            # whole VPS; surface as MngrError so the provider's fallback path logs
+            # and continues.
+            raise MngrError(f"Container on VPS has malformed {LABEL_HOST_ID} label {value!r}: {e}") from e
+    return None
+
+
+def _read_live_listing_from_vps(
+    outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+) -> dict[str, Any]:
+    """Run the outer listing script on the VPS and return the parsed live listing.
+
+    Reads agent state directly from the running container's live ``host_dir`` (or,
+    for a stopped container, from a ``docker cp``-extracted copy), so agents
+    created *inside* the container are discovered.
+    """
+    script = build_outer_listing_collection_script(str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID)
+    result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
+    if not result.success:
+        raise MngrError(
+            f"Outer listing script failed on VPS for host {host_id}: "
+            f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+        )
+    return parse_listing_collection_output(result.stdout)
+
+
+def _agent_data_from_parsed_listing(parsed_listing: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull each agent's ``data.json`` dict out of a parsed listing."""
+    return [data for agent in parsed_listing.get("agents", []) if isinstance((data := agent.get("data")), dict)]
 
 
 class DockerRealizer(HostRealizer):
@@ -96,6 +158,33 @@ class DockerRealizer(HostRealizer):
 
     def open_host_store(self, outer: OuterHostInterface, host_id: HostId) -> VpsDockerHostStore:
         return open_host_store(outer, host_volume_name_for(host_id))
+
+    # --- discovery / listing ----------------------------------------------
+
+    def find_host_record(self, outer: OuterHostInterface) -> tuple[HostId, VpsDockerHostRecord] | None:
+        host_id = _read_host_id_label_from_vps(outer)
+        if host_id is None:
+            return None
+        record = self.open_host_store(outer, host_id).read_host_record()
+        if record is None:
+            return None
+        return host_id, record
+
+    def read_live_listing(
+        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        parsed = _read_live_listing_from_vps(outer, host_id, host_dir, prefix)
+        return _agent_data_from_parsed_listing(parsed), parsed.get("container_state") == "running"
+
+    def is_placement_running(self, outer: OuterHostInterface, record: VpsDockerHostRecord) -> bool:
+        assert record.config is not None and record.config.container_name is not None
+        return docker_inspect_running(outer, record.config.container_name)
+
+    def collect_listing_output(
+        self, outer: OuterHostInterface, record: VpsDockerHostRecord, script: str, timeout_seconds: float = 30.0
+    ) -> str:
+        assert record.config is not None and record.config.container_name is not None
+        return exec_in_container(outer, record.config.container_name, script, timeout_seconds=timeout_seconds)
 
     # --- placement creation ------------------------------------------------
 

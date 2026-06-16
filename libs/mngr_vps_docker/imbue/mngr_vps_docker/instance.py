@@ -1,4 +1,3 @@
-import json
 import os
 import shlex
 import time
@@ -24,7 +23,6 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
@@ -72,7 +70,6 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
-from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -85,9 +82,7 @@ from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps_docker.container_setup import check_file_exists_on_outer
 from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
-from imbue.mngr_vps_docker.container_setup import docker_inspect_running
 from imbue.mngr_vps_docker.container_setup import ensure_depot_token_available
-from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_container
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
@@ -241,64 +236,6 @@ def parse_vps_build_args(
         git_depth=git_depth,
         docker_build_args=tuple(docker_build_args),
     )
-
-
-def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
-    """Return the host_id label of the (single) mngr container on this VPS, if any.
-
-    Each VPS hosts at most one mngr container (1:1 invariant), so the value
-    of the ``com.imbue.mngr.host-id`` label on any container with that label
-    set uniquely identifies the VPS's host. Returns ``None`` when no such
-    container exists yet (e.g., the VPS is still being provisioned).
-
-    Includes stopped containers so a paused host is still discoverable.
-    """
-    fmt = "{{index .Config.Labels " + json.dumps(LABEL_HOST_ID) + "}}"
-    result = outer.execute_idempotent_command(
-        "docker ps -a -q "
-        f"--filter {shlex.quote('label=' + LABEL_HOST_ID)} | "
-        f"xargs -r docker inspect --format {shlex.quote(fmt)}",
-    )
-    if not result.success:
-        raise MngrError(
-            f"Failed to list mngr containers on VPS: stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
-        )
-    for raw_line in result.stdout.splitlines():
-        value = raw_line.strip()
-        if not value:
-            continue
-        try:
-            return HostId(value)
-        except InvalidRandomIdError as e:
-            # A corrupted/manually-edited label must not crash discovery for
-            # the whole VPS; surface as MngrError so the existing fallback
-            # path in _read_records_from_vps logs and continues.
-            raise MngrError(f"Container on VPS has malformed {LABEL_HOST_ID} label {value!r}: {e}") from e
-    return None
-
-
-def _read_live_listing_from_vps(
-    outer: OuterHostInterface,
-    host_id: HostId,
-    host_dir: str,
-    prefix: str,
-) -> dict[str, Any]:
-    """Run the outer listing script on the VPS and return the parsed live listing.
-
-    Reads agent state directly from the running container's live ``host_dir``
-    (or, for a stopped container, from a ``docker cp``-extracted copy), so
-    agents created *inside* the container -- which are never written to the
-    persisted outer store -- are discovered. This mirrors the read path
-    ``ImbueCloudProvider`` already uses.
-    """
-    script = build_outer_listing_collection_script(str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID)
-    result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
-    if not result.success:
-        raise MngrError(
-            f"Outer listing script failed on VPS for host {host_id}: "
-            f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
-        )
-    return parse_listing_collection_output(result.stdout)
 
 
 def _extract_live_agent_data(parsed_listing: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1410,8 +1347,8 @@ class VpsDockerProvider(BaseProviderInstance):
 
         if vps_ip is not None and host_record.config is not None:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # Check if container is running
-                if docker_inspect_running(outer, host_record.config.container_name):
+                # Check if the placement is running.
+                if self._realizer.is_placement_running(outer, host_record):
                     return self._create_host_object(
                         host_id, HostName(host_record.certified_host_data.host_name), vps_ip
                     )
@@ -1452,7 +1389,7 @@ class VpsDockerProvider(BaseProviderInstance):
             # Cache the host object
             if record.vps_ip is not None and record.config is not None:
                 with self._make_outer_for_vps_ip(record.vps_ip) as outer:
-                    if docker_inspect_running(outer, record.config.container_name):
+                    if self._realizer.is_placement_running(outer, record):
                         self._create_host_object(host_id, host_name, record.vps_ip)
                     else:
                         self._create_offline_host(record)
@@ -1622,24 +1559,20 @@ class VpsDockerProvider(BaseProviderInstance):
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                host_id = _read_host_id_label_from_vps(outer)
-                if host_id is None:
-                    logger.debug("No mngr container on VPS {} yet, skipping", vps_ip)
+                found = self._realizer.find_host_record(outer)
+                if found is None:
+                    logger.debug("No mngr host on VPS {} yet, skipping", vps_ip)
                     return _VpsDiscoveryData()
-                host_store = self._realizer.open_host_store(outer, host_id)
-                record = host_store.read_host_record()
-                if record is None:
-                    logger.debug("No host record on VPS {} volume yet, skipping", vps_ip)
-                    return _VpsDiscoveryData()
+                host_id, record = found
                 # The host record read above succeeded, so the host exists and
                 # must appear in the listing. A failure of the *live-listing*
-                # read alone (e.g. ``docker exec`` racing a container restart)
-                # must not drop the host -- degrade to no live agents and an
-                # offline (not-running) state instead. Genuine VPS-unreachable
-                # failures fail earlier (host-id probe / record read) and are
-                # handled by the outer cache-fallback branch.
+                # read alone (e.g. a script racing a placement restart) must not
+                # drop the host -- degrade to no live agents and an offline
+                # (not-running) state instead. Genuine VPS-unreachable failures
+                # fail earlier (in find_host_record) and are handled by the outer
+                # cache-fallback branch.
                 try:
-                    parsed_listing = _read_live_listing_from_vps(
+                    live_agent_data, is_running = self._realizer.read_live_listing(
                         outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
                     )
                 except MngrError as listing_exc:
@@ -1650,8 +1583,6 @@ class VpsDockerProvider(BaseProviderInstance):
                         listing_exc,
                     )
                     return _VpsDiscoveryData(records=(record,))
-                live_agent_data = _extract_live_agent_data(parsed_listing)
-                is_running = parsed_listing.get("container_state") == "running"
                 return _VpsDiscoveryData(
                     records=(record,),
                     live_agent_data_by_host_id={host_id: live_agent_data},
@@ -1786,9 +1717,9 @@ class VpsDockerProvider(BaseProviderInstance):
 
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
                 with log_span("Collecting listing data via single SSH command"):
-                    raw_output = exec_in_container(
+                    raw_output = self._realizer.collect_listing_output(
                         outer,
-                        host_record.config.container_name,
+                        host_record,
                         script,
                         timeout_seconds=30.0,
                     )

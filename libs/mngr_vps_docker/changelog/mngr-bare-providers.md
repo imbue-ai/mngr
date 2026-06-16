@@ -23,8 +23,17 @@ keeps the host record in a plain root-disk directory, and reports no snapshot
 support. Machine stop/start/destroy stays the substrate's job, so the bare
 placement lifecycle steps are no-ops.
 
+Discovery and listing also moved behind the realizer: finding the host on a
+VPS, reading its running state, and collecting the live agent listing are now
+realizer methods (`find_host_record`, `read_live_listing`, `is_placement_running`,
+`collect_listing_output`). The container realizer keeps the exact Docker probes
+(`docker ps` label lookup, `docker inspect`, `docker exec`); the bare realizer
+reads the record from the fixed store path and runs the listing script directly
+on the VM. Behavior-preserving for Docker.
+
 Selecting `isolation=NONE` is still accepted by config but currently raises
 `BareIsolationNotYetSupportedError`: the realizer is implemented and unit-tested,
-but provider-level discovery and listing are still Docker-specific, so bare is
-not yet wired end-to-end on aws/gcp/azure. No user-visible behavior changes for
+but the bare idle-shutdown script and the cloud wiring (flipping the realizer
+selection, rejecting Docker-only inputs) are not done yet, so bare is not yet
+runnable end-to-end on aws/gcp/azure. No user-visible behavior changes for
 existing aws/gcp/azure/vultr/ovh/imbue_cloud providers.

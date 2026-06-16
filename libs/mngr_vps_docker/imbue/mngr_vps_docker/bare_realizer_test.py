@@ -10,6 +10,7 @@ from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -28,11 +29,13 @@ from imbue.mngr_vps_docker.primitives import VPS_SSH_KEY_NAME
 
 
 class _RecordingOuter(MutableModel):
-    """Outer host that records every command and reports success."""
+    """Outer host that records every command and returns a canned result."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     commands: list[str] = Field(default_factory=list, description="Commands issued, in order")
+    response_stdout: str = Field(default="", description="stdout returned for every command")
+    response_success: bool = Field(default=True, description="success flag returned for every command")
 
     def execute_idempotent_command(
         self,
@@ -43,7 +46,7 @@ class _RecordingOuter(MutableModel):
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         self.commands.append(command)
-        return CommandResult(stdout="", stderr="", success=True)
+        return CommandResult(stdout=self.response_stdout, stderr="", success=self.response_success)
 
 
 def _recording_outer() -> tuple[OuterHostInterface, _RecordingOuter]:
@@ -161,3 +164,40 @@ def test_snapshot_operations_are_unsupported(temp_mngr_ctx: MngrContext, tmp_pat
         realizer.snapshot_placement(outer, _STUB_RECORD)
     with pytest.raises(SnapshotsNotSupportedError):
         realizer.delete_snapshot_placement(outer, SnapshotId("snap-x"))
+
+
+def test_is_placement_running_is_true_when_vm_reachable(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """For bare the agent IS the VM, so a reachable VM is a running host."""
+    realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
+    outer, _stub = _recording_outer()
+    assert realizer.is_placement_running(outer, _STUB_RECORD) is True
+
+
+def test_read_live_listing_runs_inner_script_directly_on_the_vm(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The inner listing script runs on the VM (no docker), and the host is reported running."""
+    realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
+    outer, stub = _recording_outer()
+
+    agent_data, is_running = realizer.read_live_listing(outer, HostId.generate(), "/mngr/hosts/test", "mngr-")
+
+    assert is_running is True
+    # An empty listing output yields no agents.
+    assert agent_data == []
+    issued = "\n".join(stub.commands)
+    # The inner listing script reads the host_dir directly; there is no docker.
+    assert "/mngr/hosts/test/data.json" in issued
+    assert "docker" not in issued
+
+
+def test_collect_listing_output_returns_stdout_and_raises_on_failure(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
+    ok_outer, ok_stub = _recording_outer()
+    ok_stub.response_stdout = "LISTING_OUTPUT"
+    assert realizer.collect_listing_output(ok_outer, _STUB_RECORD, "echo hi") == "LISTING_OUTPUT"
+
+    fail_outer, fail_stub = _recording_outer()
+    fail_stub.response_success = False
+    with pytest.raises(MngrError):
+        realizer.collect_listing_output(fail_outer, _STUB_RECORD, "echo hi")

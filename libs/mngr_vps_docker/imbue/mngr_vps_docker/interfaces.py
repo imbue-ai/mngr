@@ -1,6 +1,7 @@
 from abc import ABC
 from abc import abstractmethod
 from pathlib import Path
+from typing import Any
 
 from pydantic import ConfigDict
 from pydantic import Field
@@ -74,6 +75,35 @@ class HostRealizer(MutableModel, ABC):
     @abstractmethod
     def start_activity_watcher(self, outer: OuterHostInterface, container_name: str | None) -> None:
         """Launch the idle/auto-shutdown activity watcher for the placement."""
+
+    @abstractmethod
+    def find_host_record(self, outer: OuterHostInterface) -> tuple[HostId, VpsDockerHostRecord] | None:
+        """Find the single host on this VPS and read its record, or None if absent.
+
+        The container realizer locates the agent container by its host-id label;
+        the bare realizer reads the record straight from the fixed store path.
+        """
+
+    @abstractmethod
+    def read_live_listing(
+        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read live agent data and the running state of the placement.
+
+        Returns ``(agent_data_dicts, is_running)``. Reads agent state from the
+        live host_dir (container realizer: via the outer/container script; bare:
+        directly on the VM), so in-host-created agents are discovered.
+        """
+
+    @abstractmethod
+    def is_placement_running(self, outer: OuterHostInterface, record: VpsDockerHostRecord) -> bool:
+        """Whether the placement is currently running (container up / VM reachable)."""
+
+    @abstractmethod
+    def collect_listing_output(
+        self, outer: OuterHostInterface, record: VpsDockerHostRecord, script: str, timeout_seconds: float = 30.0
+    ) -> str:
+        """Run the inner listing script against the placement and return raw output."""
 
     @abstractmethod
     def stop_placement(self, outer: OuterHostInterface, record: VpsDockerHostRecord, timeout_seconds: float) -> None:

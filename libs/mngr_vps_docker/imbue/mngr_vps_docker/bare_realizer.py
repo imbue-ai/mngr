@@ -1,5 +1,6 @@
 import shlex
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from imbue.imbue_common.logging import log_span
@@ -8,6 +9,8 @@ from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
@@ -78,6 +81,43 @@ class BareRealizer(HostRealizer):
     def open_host_store(self, outer: OuterHostInterface, host_id: HostId) -> VpsDockerHostStore:
         # One host per VM, so the store lives at a fixed root-disk path.
         return VpsDockerHostStore(outer=outer, mountpoint=BARE_HOST_STORE_DIR)
+
+    # --- discovery / listing ----------------------------------------------
+
+    def find_host_record(self, outer: OuterHostInterface) -> tuple[HostId, VpsDockerHostRecord] | None:
+        # No container to probe: read the record straight from the fixed store
+        # path; the record carries its own host_id.
+        record = VpsDockerHostStore(outer=outer, mountpoint=BARE_HOST_STORE_DIR).read_host_record()
+        if record is None:
+            return None
+        return HostId(record.certified_host_data.host_id), record
+
+    def read_live_listing(
+        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        # The agent's host_dir is on the VM, so the inner listing script runs
+        # directly on the outer -- no container indirection. Reaching the VM at
+        # all means the agent (the VM) is running.
+        raw = self._run_listing_script(outer, build_listing_collection_script(host_dir, prefix), timeout_seconds=60.0)
+        parsed = parse_listing_collection_output(raw)
+        agent_data = [data for agent in parsed.get("agents", []) if isinstance((data := agent.get("data")), dict)]
+        return agent_data, True
+
+    def is_placement_running(self, outer: OuterHostInterface, record: VpsDockerHostRecord) -> bool:
+        # No container: the agent IS the VM, so a reachable VM is a running host.
+        return True
+
+    def collect_listing_output(
+        self, outer: OuterHostInterface, record: VpsDockerHostRecord, script: str, timeout_seconds: float = 30.0
+    ) -> str:
+        return self._run_listing_script(outer, script, timeout_seconds=timeout_seconds)
+
+    @staticmethod
+    def _run_listing_script(outer: OuterHostInterface, script: str, *, timeout_seconds: float) -> str:
+        result = outer.execute_idempotent_command(script, timeout_seconds=timeout_seconds)
+        if not result.success:
+            raise MngrError(f"Bare listing read failed: stderr={result.stderr.strip()!r}")
+        return result.stdout
 
     def realize_placement(self, outer: OuterHostInterface, ctx: RealizePlacementContext) -> RealizedPlacement:
         host_dir_on_disk = BARE_HOST_STORE_DIR / HOST_DIR_SUBPATH
