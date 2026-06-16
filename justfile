@@ -841,39 +841,22 @@ bake-pool-host-prod region tag count="1" *extra_args:
 # bake "slices": lima/QEMU VMs carved on a bare-metal box you already ordered,
 # `mngr imbue_cloud admin server register`ed, and `... prep`ped (status `ready`).
 # Slices land in the SAME pool_hosts table as OVH VPSes (backend_kind=slice) and
-# lease identically.
-#
-# Why a separate recipe (not a --backend flag on bake-pool-host-*): the env-aware
-# `minds pool create` wrapper only drives the `ovh_vps` backend, so slices go
-# straight to `mngr imbue_cloud admin pool create --backend slice`. These recipes
-# add the env-awareness that wrapper would have provided: from the activated
-# tier's Vault entries they export POOL_SSH_PRIVATE_KEY (used to SSH the box and
-# carve the VM) and, for shared tiers, the host_pool DSN.
+# lease identically. They are thin wrappers over `minds pool create --backend
+# slice`, which resolves the tier's pool key (+ host_pool DSN for shared tiers)
+# from Vault just like the OVH path -- so the only manual difference from
+# bake-pool-host-* is the backend.
 #
 # Prereqs: activate a minds env first (`eval "$(uv run minds env activate <name>)"`)
-# AND `vault login -method=oidc` (the Vault reads below need a live token).
+# AND `vault login -method=oidc` (the wrapper's Vault reads need a live token).
 #
 # `region` is the lease-region LABEL stamped on each row (what the connector
 # region-matches at lease time, e.g. US-EAST-VA) -- NOT the box's raw OVH
 # datacenter code. Server selection picks the `ready` box with the most free
 # slots and is not region-filtered today, so the box must have a free slot.
 
-# Dev slice bake from a working tree (identity = its origin remote + current
-# branch). The host_pool DSN auto-resolves from the activated env's secrets.toml,
-# so only the pool key is pulled from Vault here.
+# Dev slice bake from a working tree (identity = its origin remote + current branch).
 bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
-    #!/bin/bash
-    set -ueo pipefail
-    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
-        echo "error: no minds env activated -- run \`eval \"\$(uv run minds env activate <name>)\"\` first." >&2
-        exit 2
-    fi
-    # Reuse the minds resolver (the same one `minds pool create` uses) for the
-    # activated tier's Vault prefix instead of re-deriving tier->prefix here.
-    vault_prefix=$(uv run python -c "from imbue.minds.cli._activated_env import require_activated_env_name, tier_for_env_name; from imbue.minds.config.loader import load_deploy_config; print(str(load_deploy_config(tier_for_env_name(require_activated_env_name())).vault_path_prefix).rstrip('/'))")
-    pool_key=$(vault kv get -format=json "${vault_prefix}/pool-ssh" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["data"]["POOL_SSH_PRIVATE_KEY"])')
-    export POOL_SSH_PRIVATE_KEY="$pool_key"
-    uv run mngr imbue_cloud admin pool create \
+    uv run minds pool create \
         --backend slice \
         --count "{{count}}" \
         --region "{{region}}" \
@@ -882,24 +865,10 @@ bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" coun
         {{extra_args}}
 
 # Production slice bake from an exact FCT tag (strict; content provably equals the
-# tag). Pulls BOTH the pool key and the host_pool DSN from the shared tier's Vault
-# entries (production/staging keep no local secrets.toml). Pass `--dry-run` through
-# extra args first to confirm server selection + per-slice sizing without baking.
+# tag). Pass `--dry-run` through extra args first to confirm server selection +
+# per-slice sizing without baking.
 bake-slice-prod region tag count="1" *extra_args:
-    #!/bin/bash
-    set -ueo pipefail
-    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
-        echo "error: no minds env activated -- run \`eval \"\$(uv run minds env activate <name>)\"\` first." >&2
-        exit 2
-    fi
-    vault_prefix=$(uv run python -c "from imbue.minds.cli._activated_env import require_activated_env_name, tier_for_env_name; from imbue.minds.config.loader import load_deploy_config; print(str(load_deploy_config(tier_for_env_name(require_activated_env_name())).vault_path_prefix).rstrip('/'))")
-    pool_key=$(vault kv get -format=json "${vault_prefix}/pool-ssh" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["data"]["POOL_SSH_PRIVATE_KEY"])')
-    dsn=$(vault kv get -format=json "${vault_prefix}/neon" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["data"]["DATABASE_URL"])')
-    export POOL_SSH_PRIVATE_KEY="$pool_key"
-    # DSN goes via env (not a --flag) so the Neon password never lands on the
-    # command line / in logs; the admin slice path reads MINDS_HOST_POOL_DSN.
-    export MINDS_HOST_POOL_DSN="$dsn"
-    uv run mngr imbue_cloud admin pool create \
+    uv run minds pool create \
         --backend slice \
         --count "{{count}}" \
         --region "{{region}}" \

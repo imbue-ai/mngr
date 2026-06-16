@@ -1,0 +1,3 @@
+`minds pool create` now supports a `--backend {ovh_vps,slice}` option (default `ovh_vps`, unchanged behavior). With `--backend slice` it bakes a bare-metal slice (a lima VM carved on a pre-registered, prepped bare-metal box) instead of ordering an OVH VPS.
+
+Both backends resolve the activated tier's secrets from Vault so the operator never exports them by hand: the slice path reads the tier's `pool-ssh` private key and injects it as `POOL_SSH_PRIVATE_KEY` for the carve (mirroring how the OVH path injects the OVH AK/AS/CK and the management public key). The slice path also accepts `--dry-run` (report the chosen server + per-slice sizing without baking) and rejects the OVH-only flags (`--management-public-key-file`, `--no-recycle`) with a clear error.
