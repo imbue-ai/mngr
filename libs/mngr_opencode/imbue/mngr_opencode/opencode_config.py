@@ -133,6 +133,10 @@ COMMON_TRANSCRIPT_SOURCE: str = "opencode/common_transcript"
 NATIVE_DB_RELATIVE_PATH: str = "/".join((*_DATA_HOME_RELATIVE_PATH, _OPENCODE_APP_DIR_NAME, _DB_FILENAME))
 NATIVE_DB_WAL_RELATIVE_PATH: str = f"{NATIVE_DB_RELATIVE_PATH}-wal"
 NATIVE_DB_SHM_RELATIVE_PATH: str = f"{NATIVE_DB_RELATIVE_PATH}-shm"
+# ``storage/`` is a pre-SQLite-migration layout: on current opencode (verified 1.17.7) all
+# conversation content lives in the db, and ``storage/`` is empty -- so preserving it is a
+# no-op there. Kept (and skipped when absent) for back-compat with older opencode versions
+# that did file the message parts under it.
 NATIVE_STORAGE_RELATIVE_PATH: str = "/".join((*_DATA_HOME_RELATIVE_PATH, _OPENCODE_APP_DIR_NAME, _STORAGE_DIR_NAME))
 
 
