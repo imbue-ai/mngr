@@ -308,6 +308,43 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     assert "disabled" in body
 
 
+def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path: Path) -> None:
+    """The catch-all ``any`` permission is shown to users as ``all``.
+
+    The underlying checkbox value stays ``any`` (Detent's wildcard that
+    is actually stored / submitted), but the user-facing label reads
+    ``all`` for clarity. The wildcard checkbox is also tagged with
+    ``data-wildcard`` so the inbox shell can make it mutually exclusive
+    with the specific permissions.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/inbox/detail/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # The checkbox keeps the wildcard value and is tagged so the shell's
+    # exclusivity JS can find it.
+    any_idx = body.find('value="any"')
+    assert any_idx != -1
+    any_tag_start = body.rfind("<input", 0, any_idx)
+    any_tag_end = body.find(">", any_idx)
+    assert 'data-wildcard="true"' in body[any_tag_start:any_tag_end]
+    # The wildcard is labelled ``all`` (in a <code> element), and never
+    # surfaced to the user as the raw ``any`` value.
+    assert ">all</code>" in body
+    assert ">any</code>" not in body
+
+
 def test_inbox_page_renders_as_modal(tmp_path: Path) -> None:
     """The inbox page renders as a dismissable modal overlay.
 
