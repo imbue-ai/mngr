@@ -13,6 +13,10 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.api.list import ListResult
+from imbue.mngr.cli.field_render import _format_value_as_string
+from imbue.mngr.cli.field_render import _parse_slice_spec
+from imbue.mngr.cli.field_render import get_field_value as _get_field_value
+from imbue.mngr.cli.field_render import render_format_template_for_model as _render_format_template
 from imbue.mngr.cli.list import _StreamingHumanRenderer
 from imbue.mngr.cli.list import _StreamingTemplateEmitter
 from imbue.mngr.cli.list import _compute_column_widths
@@ -20,12 +24,8 @@ from imbue.mngr.cli.list import _emit_human_output
 from imbue.mngr.cli.list import _emit_template_output
 from imbue.mngr.cli.list import _format_streaming_agent_row
 from imbue.mngr.cli.list import _format_streaming_header_row
-from imbue.mngr.cli.list import _format_value_as_string
-from imbue.mngr.cli.list import _get_field_value
 from imbue.mngr.cli.list import _get_header_label
 from imbue.mngr.cli.list import _is_streaming_eligible
-from imbue.mngr.cli.list import _parse_slice_spec
-from imbue.mngr.cli.list import _render_format_template
 from imbue.mngr.cli.list import _should_use_streaming_mode
 from imbue.mngr.cli.list import _sort_agents_by_cel
 from imbue.mngr.cli.list import _truncate_to_width

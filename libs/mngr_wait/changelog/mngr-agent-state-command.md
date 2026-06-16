@@ -1,0 +1,1 @@
+Internal refactor: `mngr wait`'s target resolution and lifecycle poll now live in core (`imbue.mngr.api.agent_state`) and are shared with the new `mngr state` command. `CombinedState`, `ResolvedTarget`, the address resolution, and the per-iteration state poll moved out of the plugin; the wait poll loop is unchanged and no slower. No user-visible change to `mngr wait`.

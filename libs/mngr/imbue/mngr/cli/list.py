@@ -1,9 +1,6 @@
-import re
 import shutil
-import string
 import sys
 from collections.abc import Sequence
-from enum import Enum
 from threading import Lock
 from typing import Any
 from typing import Final
@@ -29,6 +26,9 @@ from imbue.mngr.cli.field_catalog import FieldContext
 from imbue.mngr.cli.field_catalog import build_list_field_catalog
 from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
 from imbue.mngr.cli.field_catalog import render_catalog_help_markdown
+from imbue.mngr.cli.field_render import get_field_value
+from imbue.mngr.cli.field_render import render_format_template_for_model
+from imbue.mngr.cli.field_render import resolve_field_alias
 from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
 from imbue.mngr.cli.filter_opts import add_agent_filter_options
 from imbue.mngr.cli.filter_opts import build_agent_filter_cel
@@ -37,7 +37,6 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
-from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.agent_alias_registry import list_agent_aliases
@@ -77,22 +76,6 @@ _HEADER_LABELS: Final[dict[str, str]] = {
     "idle_timeout_seconds": "IDLE TIMEOUT",
     "activity_sources": "ACTIVITY",
 }
-
-# Aliases that let users reference fields by the same name in --fields/--format
-# templates as they do in CEL filters and --sort. host.provider is the short form
-# documented for CEL; the underlying attribute is host.provider_name.
-_FIELD_ALIASES: Final[dict[str, str]] = {
-    "host.provider": "host.provider_name",
-    # `project` is the documented short form for the project label, mirroring
-    # the `--project` filter flag; the underlying data lives in labels.project.
-    "project": "labels.project",
-}
-
-
-@pure
-def _resolve_field_alias(field: str) -> str:
-    """Map a user-supplied field name to its canonical form for attribute/dict lookups."""
-    return _FIELD_ALIASES.get(field, field)
 
 
 @pure
@@ -515,7 +498,7 @@ class _StreamingTemplateEmitter(MutableModel):
     _count: int = PrivateAttr(default=0)
 
     def __call__(self, agent: AgentDetails) -> None:
-        line = _render_format_template(self.format_template, agent)
+        line = render_format_template_for_model(self.format_template, agent)
         with self._lock:
             if self.limit is not None and self._count >= self.limit:
                 return
@@ -622,7 +605,7 @@ def _get_header_label(field: str, custom_headers: dict[str, str] | None = None) 
     """Get the display label for a column header."""
     if custom_headers and field in custom_headers:
         return custom_headers[field]
-    canonical_field = _resolve_field_alias(field)
+    canonical_field = resolve_field_alias(field)
     if canonical_field in _HEADER_LABELS:
         return _HEADER_LABELS[canonical_field]
     return field.upper().replace(".", " ")
@@ -639,7 +622,7 @@ def _compute_column_widths(
     # Column-width tables are keyed by canonical field names, so resolve aliases before lookup.
     width_by_field: dict[str, int] = {}
     for field in fields:
-        canonical_field = _resolve_field_alias(field)
+        canonical_field = resolve_field_alias(field)
         min_data_width = _MIN_COLUMN_WIDTHS.get(canonical_field, _DEFAULT_MIN_COLUMN_WIDTH)
         header_width = len(_get_header_label(field, custom_headers))
         width_by_field[field] = max(min_data_width, header_width)
@@ -651,14 +634,14 @@ def _compute_column_widths(
     # Process columns sorted by tightest max cap first so capped leftovers flow to less
     # constrained columns in a single pass.
     if fields and extra_space > 0:
-        sorted_fields = sorted(fields, key=lambda f: _MAX_COLUMN_WIDTHS.get(_resolve_field_alias(f), float("inf")))
+        sorted_fields = sorted(fields, key=lambda f: _MAX_COLUMN_WIDTHS.get(resolve_field_alias(f), float("inf")))
         remaining = extra_space
         for idx, field in enumerate(sorted_fields):
             fields_left = len(sorted_fields) - idx
             per_column = remaining // fields_left
             extra = 1 if (remaining % fields_left) > 0 else 0
             bonus = per_column + extra
-            max_width = _MAX_COLUMN_WIDTHS.get(_resolve_field_alias(field))
+            max_width = _MAX_COLUMN_WIDTHS.get(resolve_field_alias(field))
             if max_width is not None and width_by_field[field] + bonus > max_width:
                 bonus = max(max_width - width_by_field[field], 0)
             width_by_field[field] = width_by_field[field] + bonus
@@ -703,7 +686,7 @@ def _format_streaming_agent_row(
     parts: list[str] = []
     for field in fields:
         width = column_widths.get(field, _DEFAULT_MIN_COLUMN_WIDTH)
-        value = _get_field_value(agent, field)
+        value = get_field_value(agent, field)
         formatted = _truncate_to_width(value, width) if is_truncate else value.ljust(width)
         parts.append(formatted)
     return _COLUMN_SEPARATOR.join(parts)
@@ -836,7 +819,7 @@ def _emit_human_output(
     for agent in agents:
         row = []
         for field in fields:
-            value = _get_field_value(agent, field)
+            value = get_field_value(agent, field)
             row.append(value)
         rows.append(row)
 
@@ -848,68 +831,9 @@ def _emit_human_output(
 def _emit_template_output(agents: list[AgentDetails], template: str, output: Any) -> None:
     """Emit template-formatted output, one line per agent."""
     for agent in agents:
-        line = _render_format_template(template, agent)
+        line = render_format_template_for_model(template, agent)
         output.write(line + "\n")
     output.flush()
-
-
-def _parse_slice_spec(spec: str) -> int | slice | None:
-    """Parse a bracket slice specification like '0', '-1', ':3', '1:3', or '1:'.
-
-    Returns an int for single index, slice object for ranges, or None if invalid.
-    """
-    spec = spec.strip()
-
-    try:
-        # Check if it's a slice (contains ':')
-        if ":" in spec:
-            parts = spec.split(":")
-            if len(parts) == 2:
-                start_str, stop_str = parts
-                start = int(start_str) if start_str else None
-                stop = int(stop_str) if stop_str else None
-                return slice(start, stop)
-            elif len(parts) == 3:
-                start_str, stop_str, step_str = parts
-                start = int(start_str) if start_str else None
-                stop = int(stop_str) if stop_str else None
-                step = int(step_str) if step_str else None
-                return slice(start, stop, step)
-            else:
-                # Invalid slice format (too many colons)
-                return None
-        else:
-            # Simple index
-            return int(spec)
-    except ValueError:
-        # Could not parse integers in the spec
-        return None
-
-
-def _format_value_as_string(value: Any) -> str:
-    """Convert a value to string representation for display."""
-    if value is None:
-        return ""
-    elif isinstance(value, dict):
-        if not value:
-            return ""
-        return ", ".join(f"{k}={v}" for k, v in value.items())
-    elif isinstance(value, Enum):
-        return str(value.value)
-    elif hasattr(value, "name") and hasattr(value, "id"):
-        # For objects like SnapshotInfo that have both name and id, prefer name
-        return str(value.name)
-    elif isinstance(value, (tuple, list)) and not isinstance(value, str):
-        return ", ".join(_format_value_as_string(item) for item in value)
-    elif isinstance(value, str):
-        return value
-    else:
-        return str(value)
-
-
-# Pattern to match a field part with optional bracket notation
-# Matches: "fieldname", "fieldname[0]", "fieldname[-1]", "fieldname[:3]", "fieldname[1:3]", etc.
-_BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
 
 
 class _CelSortKeyExtractor:
@@ -1010,80 +934,6 @@ def _emit_field_schema(output_opts: OutputOptions) -> None:
                 write_human_line("  {} : {}{} - {}", row.key, row.type, marker, row.description)
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def _get_field_value(agent: AgentDetails, field: str) -> str:
-    """Extract a field value from an AgentDetails object and return as string.
-
-    Supports nested fields like "host.name" and list slicing syntax like
-    "host.snapshots[0]" or "host.snapshots[:3]".
-    """
-    # Resolve aliases first so a user-supplied alias (e.g. host.provider) maps to the
-    # canonical attribute name (host.provider_name) before walking the agent object.
-    field = _resolve_field_alias(field)
-    # Handle nested fields (e.g., "host.name") with optional bracket notation
-    # Also supports dict key access for plugin fields (e.g., "host.plugin.aws.iam_user")
-    parts = field.split(".")
-    value: Any = agent
-
-    try:
-        for part in parts:
-            # Parse the part for bracket notation
-            match = _BRACKET_PATTERN.match(part)
-            if not match:
-                return ""
-
-            field_name = match.group(1)
-            # bracket_spec may be None if no brackets present in the part
-            bracket_spec = match.group(2)
-
-            # Get the field value: try object attribute first, then dict key
-            if hasattr(value, field_name):
-                value = getattr(value, field_name)
-            elif isinstance(value, dict) and field_name in value:
-                value = value[field_name]
-            else:
-                return ""
-
-            # Apply bracket indexing/slicing if present
-            if bracket_spec is not None:
-                if not isinstance(value, (list, tuple, Sequence)) or isinstance(value, str):
-                    return ""
-
-                index_or_slice = _parse_slice_spec(bracket_spec)
-                if index_or_slice is None:
-                    return ""
-
-                try:
-                    value = value[index_or_slice]
-                except (IndexError, ValueError):
-                    # IndexError: out of bounds index
-                    # ValueError: slice step cannot be zero
-                    return ""
-
-                # If the result is a list (from slicing), format each element
-                if isinstance(value, (list, tuple)) and not isinstance(value, str):
-                    return ", ".join(_format_value_as_string(item) for item in value)
-
-        return _format_value_as_string(value)
-    except (AttributeError, KeyError):
-        return ""
-
-
-@pure
-def _render_format_template(template: str, agent: AgentDetails) -> str:
-    """Expand a str.format()-style template using agent field values.
-
-    Pre-resolves field names via _get_field_value() (which supports nested
-    attribute access and bracket notation on AgentDetails), then delegates
-    template expansion to the shared render_format_template helper.
-    """
-    # Pre-resolve all referenced field names using the agent-specific field resolver
-    field_values: dict[str, str] = {}
-    for _, field_name, _, _ in string.Formatter().parse(template):
-        if field_name is not None:
-            field_values[field_name] = _get_field_value(agent, field_name)
-    return render_format_template(template, field_values)
 
 
 # Register help metadata for git-style help formatting

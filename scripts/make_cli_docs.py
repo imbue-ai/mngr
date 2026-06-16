@@ -51,6 +51,7 @@ PRIMARY_COMMANDS = {
     "rename",
     "rsync",
     "start",
+    "state",
     "stop",
 }
 SECONDARY_COMMANDS = {

@@ -1,5 +1,6 @@
 """Shared test fixtures for API tests."""
 
+import json
 import shlex
 import shutil
 import subprocess
@@ -16,11 +17,34 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.git import LocalGitContext
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostName
+
+
+def create_agent_data_json(per_host_dir: Path, agent_name: str, command: str = "sleep 1") -> AgentId:
+    """Write an agent ``data.json`` so the agent (and its host) appear in discovery.
+
+    A lightweight way to make a discoverable agent without launching a real
+    process. Returns the generated :class:`AgentId`.
+    """
+    agent_id = AgentId.generate()
+    agent_dir = get_agent_state_dir_path(per_host_dir, agent_id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "id": str(agent_id),
+        "name": agent_name,
+        "type": "generic",
+        "command": command,
+        "work_dir": "/tmp/test",
+        "create_time": "2026-01-01T00:00:00+00:00",
+    }
+    (agent_dir / "data.json").write_text(json.dumps(data))
+    return agent_id
 
 
 @contextmanager

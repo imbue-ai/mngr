@@ -7,6 +7,8 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.api.address_parsers import parse_agent_or_host_address
+from imbue.mngr.api.agent_state import poll_combined_state
+from imbue.mngr.api.agent_state import resolve_target
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
@@ -24,16 +26,16 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
-from imbue.mngr_wait.api import poll_target_state
-from imbue.mngr_wait.api import resolve_wait_target
 from imbue.mngr_wait.api import wait_for_state
 from imbue.mngr_wait.data_types import StateChange
 from imbue.mngr_wait.data_types import WaitResult
+from imbue.mngr_wait.data_types import WaitTarget
 from imbue.mngr_wait.data_types import check_state_match
 from imbue.mngr_wait.data_types import compute_default_target_states
 from imbue.mngr_wait.data_types import describe_combined_state
 from imbue.mngr_wait.data_types import validate_state_strings
 from imbue.mngr_wait.primitives import ALL_VALID_STATE_STRINGS
+from imbue.mngr_wait.primitives import WaitTargetType
 
 
 class WaitCliOptions(CommonCliOptions):
@@ -191,14 +193,16 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
         target_address = parse_agent_or_host_address(target_identifier)
     except UserInputError as e:
         raise click.BadParameter(str(e)) from e
-    resolved = resolve_wait_target(target_address, mngr_ctx)
+    resolved = resolve_target(target_address, mngr_ctx)
+    target_type = WaitTargetType.AGENT if resolved.is_agent_target else WaitTargetType.HOST
+    wait_target = WaitTarget(identifier=resolved.identifier, target_type=target_type)
 
     # Combine positional states and --state option values
     all_state_args = list(opts.states) + list(opts.state)
     if all_state_args:
         target_states = validate_state_strings(all_state_args, ALL_VALID_STATE_STRINGS)
     else:
-        target_states = compute_default_target_states(resolved.target.target_type)
+        target_states = compute_default_target_states(target_type)
 
     # Parse timeout
     timeout_seconds: float | None = None
@@ -209,18 +213,18 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
     interval_seconds = parse_duration_to_seconds(opts.interval)
 
     # Poll the initial state
-    initial_state = poll_target_state(resolved)
-    current_state_description = describe_combined_state(initial_state, resolved.target.target_type)
+    initial_state = poll_combined_state(resolved)
+    current_state_description = describe_combined_state(initial_state, target_type)
 
     # Check if already in a target state
     already_matched = check_state_match(
         combined_state=initial_state,
-        target_type=resolved.target.target_type,
+        target_type=target_type,
         target_states=target_states,
     )
     if already_matched is not None:
         result = WaitResult(
-            target=resolved.target,
+            target=wait_target,
             is_matched=True,
             is_timed_out=False,
             final_state=initial_state,
@@ -229,7 +233,7 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
             state_changes=(),
         )
         emit_info(
-            f"Target '{resolved.target.identifier}' is already in state {already_matched} ({current_state_description})",
+            f"Target '{resolved.identifier}' is already in state {already_matched} ({current_state_description})",
             output_opts.output_format,
         )
         _output_result(result, output_opts)
@@ -239,7 +243,7 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
     # Log what we're waiting for
     sorted_states = ", ".join(sorted(target_states))
     emit_info(
-        f"Waiting for {resolved.target.target_type.value.lower()} '{resolved.target.identifier}' "
+        f"Waiting for {target_type.value.lower()} '{resolved.identifier}' "
         f"to transition from {current_state_description} to one of: {sorted_states}",
         output_opts.output_format,
     )
@@ -251,8 +255,8 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
     captured_output_format = output_opts.output_format
     try:
         result = wait_for_state(
-            target=resolved.target,
-            poll_fn=lambda: poll_target_state(resolved),
+            target=wait_target,
+            poll_fn=lambda: poll_combined_state(resolved),
             target_states=target_states,
             timeout_seconds=timeout_seconds,
             interval_seconds=interval_seconds,
