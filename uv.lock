@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-01T00:00:00Z"
+exclude-newer = "2026-06-02T00:00:00Z"
 
 [manifest]
 members = [
@@ -18,6 +18,7 @@ members = [
     "imbue-mngr",
     "imbue-mngr-antigravity",
     "imbue-mngr-aws",
+    "imbue-mngr-azure",
     "imbue-mngr-claude",
     "imbue-mngr-claude-subagent-proxy",
     "imbue-mngr-claude-usage",
@@ -308,6 +309,60 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c5/0e/3a63efb48aa4a5ae2cfca61ee152fbcb668092134d3eb8bfda472dd5c617/azure_identity-1.25.3.tar.gz", hash = "sha256:ab23c0d63015f50b630ef6c6cf395e7262f439ce06e5d07a64e874c724f8d9e6", size = 286304, upload-time = "2026-03-13T01:12:20.892Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/9a/417b3a533e01953a7c618884df2cb05a71e7b68bdbce4fbdb62349d2a2e8/azure_identity-1.25.3-py3-none-any.whl", hash = "sha256:f4d0b956a8146f30333e071374171f3cfa7bdb8073adb8c3814b65567aa7447c", size = 192138, upload-time = "2026-03-13T01:12:22.951Z" },
+]
+
+[[package]]
+name = "azure-mgmt-compute"
+version = "38.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-mgmt-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4f/ee/a143c8395267aea8d735c5336519ef94eeaa45f235c89c06f417d1d2ce60/azure_mgmt_compute-38.0.0.tar.gz", hash = "sha256:46cb0864f943b88463ed50ad006738023120cf7e53f50f7e4a740ccd5337abaf", size = 468888, upload-time = "2026-04-28T19:44:20.051Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/21/fc/b048242e79b14dd58a1dbede501ea2bfd3a43cac4aad4c0d76a81416a6e8/azure_mgmt_compute-38.0.0-py3-none-any.whl", hash = "sha256:6307edc4d1dabb540dadf11204be7663565d3108e16bcd253494457300cb3609", size = 438192, upload-time = "2026-04-28T19:44:22.124Z" },
+]
+
+[[package]]
+name = "azure-mgmt-core"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3e/99/fa9e7551313d8c7099c89ebf3b03cd31beb12e1b498d575aa19bb59a5d04/azure_mgmt_core-1.6.0.tar.gz", hash = "sha256:b26232af857b021e61d813d9f4ae530465255cb10b3dde945ad3743f7a58e79c", size = 30818, upload-time = "2025-07-03T02:02:24.093Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/26/c79f962fd3172b577b6f38685724de58b6b4337a51d3aad316a43a4558c6/azure_mgmt_core-1.6.0-py3-none-any.whl", hash = "sha256:0460d11e85c408b71c727ee1981f74432bc641bb25dfcf1bb4e90a49e776dbc4", size = 29310, upload-time = "2025-07-03T02:02:25.203Z" },
+]
+
+[[package]]
+name = "azure-mgmt-network"
+version = "30.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-mgmt-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9a/e5/31cf174ef67087532f159083e2e007507fe163f58c58fbd0e08d05209cf4/azure_mgmt_network-30.2.0.tar.gz", hash = "sha256:9b17c259e6344808aaa80a34bbc4b13f16bc01185dd9db137eaa0ae26664861a", size = 708178, upload-time = "2026-02-13T03:45:39.617Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/5a/14c8cfb1655267dfed7529d35e5dd6581746238c9f50d4307b9e2faaacf8/azure_mgmt_network-30.2.0-py3-none-any.whl", hash = "sha256:a87edffd7c38aa9d3494daa8d42914213b0863a9072cf8c7c7e48018b12b6532", size = 631894, upload-time = "2026-02-13T03:45:41.738Z" },
+]
+
+[[package]]
+name = "azure-mgmt-resource"
+version = "25.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-mgmt-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d7/7e/b3f9d544a94782be9c5ab8123d2fa7fb20cbdf3f5a16b883f308865e1406/azure_mgmt_resource-25.0.0.tar.gz", hash = "sha256:dc123a9f6509c37299d7716c9090cff0a9d73309b228cc094ea950ce3cca3603", size = 92837, upload-time = "2026-02-06T06:00:39.699Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/41/ce12546aa2a20c4f37d061bfa7df3bf8fa72ff01e7557ec330929c72ec7d/azure_mgmt_resource-25.0.0-py3-none-any.whl", hash = "sha256:f6f17b2305abe9bf6ec6c92a9410af21a2b0d805cc98e94d80c07220924a045b", size = 83670, upload-time = "2026-02-06T06:00:41.317Z" },
 ]
 
 [[package]]
@@ -1897,7 +1952,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "imbue-mngr"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "libs/mngr" }
 dependencies = [
     { name = "cel-python" },
@@ -1958,7 +2013,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-antigravity"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "libs/mngr_antigravity" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1969,7 +2024,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-aws"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "libs/mngr_aws" }
 dependencies = [
     { name = "boto3" },
@@ -1989,8 +2044,33 @@ requires-dist = [
 ]
 
 [[package]]
+name = "imbue-mngr-azure"
+version = "0.1.0"
+source = { editable = "libs/mngr_azure" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "azure-identity" },
+    { name = "azure-mgmt-compute" },
+    { name = "azure-mgmt-network" },
+    { name = "azure-mgmt-resource" },
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-vps-docker" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "azure-core", specifier = ">=1.41" },
+    { name = "azure-identity", specifier = ">=1.25" },
+    { name = "azure-mgmt-compute", specifier = ">=37" },
+    { name = "azure-mgmt-network", specifier = ">=30" },
+    { name = "azure-mgmt-resource", specifier = ">=25" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
+]
+
+[[package]]
 name = "imbue-mngr-claude"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "libs/mngr_claude" }
 dependencies = [
     { name = "anthropic" },
@@ -2040,7 +2120,7 @@ dev = [{ name = "imbue-mngr-modal", editable = "libs/mngr_modal" }]
 
 [[package]]
 name = "imbue-mngr-claude-usage"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_claude_usage" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2057,7 +2137,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-codex"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "libs/mngr_codex" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2068,7 +2148,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-file"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "libs/mngr_file" }
 dependencies = [
     { name = "click-option-group" },
@@ -2085,7 +2165,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-forward"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_forward" }
 dependencies = [
     { name = "click" },
@@ -2147,14 +2227,16 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-imbue-cloud"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_imbue_cloud" }
 dependencies = [
     { name = "click" },
     { name = "click-option-group" },
+    { name = "concurrency-group" },
     { name = "httpx" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
+    { name = "imbue-mngr-lima" },
     { name = "imbue-mngr-vps-docker" },
     { name = "loguru" },
     { name = "paramiko" },
@@ -2167,9 +2249,11 @@ dependencies = [
 requires-dist = [
     { name = "click" },
     { name = "click-option-group" },
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-lima", editable = "libs/mngr_lima" },
     { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
     { name = "loguru" },
     { name = "paramiko", specifier = ">=3.0" },
@@ -2180,7 +2264,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-kanpan"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "libs/mngr_kanpan" }
 dependencies = [
     { name = "click" },
@@ -2199,7 +2283,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-latchkey"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_latchkey" }
 dependencies = [
     { name = "click" },
@@ -2232,7 +2316,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-lima"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_lima" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2258,7 +2342,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-modal"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "libs/mngr_modal" }
 dependencies = [
     { name = "dockerfile-parse" },
@@ -2277,7 +2361,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-notifications"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "libs/mngr_notifications" }
 dependencies = [
     { name = "click-option-group" },
@@ -2292,7 +2376,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-opencode"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "libs/mngr_opencode" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2303,7 +2387,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-ovh"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_ovh" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2320,7 +2404,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-pair"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "libs/mngr_pair" }
 dependencies = [
     { name = "click-option-group" },
@@ -2335,7 +2419,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-pi-coding"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "libs/mngr_pi_coding" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2346,7 +2430,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-recursive"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "libs/mngr_recursive" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2361,7 +2445,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-robinhood"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_robinhood" }
 dependencies = [
     { name = "claude-agent-sdk" },
@@ -2386,7 +2470,7 @@ dev = [{ name = "pytest-asyncio", specifier = ">=0.24.0" }]
 
 [[package]]
 name = "imbue-mngr-schedule"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_schedule" }
 dependencies = [
     { name = "click-option-group" },
@@ -2432,7 +2516,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-ttyd"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "libs/mngr_ttyd" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2443,7 +2527,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-tutor"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "libs/mngr_tutor" }
 dependencies = [
     { name = "click" },
@@ -2460,7 +2544,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-usage"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mngr_usage" }
 dependencies = [
     { name = "click" },
@@ -2479,7 +2563,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-vps-docker"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_vps_docker" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2490,7 +2574,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-vultr"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mngr_vultr" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2507,7 +2591,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-wait"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "libs/mngr_wait" }
 dependencies = [
     { name = "click-option-group" },
@@ -3084,7 +3168,7 @@ requires-dist = [
 
 [[package]]
 name = "modal-proxy"
-version = "0.1.15"
+version = "0.1.16"
 source = { editable = "libs/modal_proxy" }
 dependencies = [
     { name = "concurrency-group" },

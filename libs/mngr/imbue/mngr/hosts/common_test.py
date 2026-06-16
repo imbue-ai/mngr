@@ -8,6 +8,8 @@ from datetime import timezone
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
@@ -16,6 +18,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import check_agent_type_known
+from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import determine_lifecycle_state
@@ -28,6 +31,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import WaitingReason
 
 # =========================================================================
 # timestamp_to_datetime tests
@@ -444,3 +448,24 @@ def test_get_ssh_known_hosts_file_returns_none_for_dev_null() -> None:
     host = _make_host_with_known_hosts("/dev/null")
     result = get_ssh_known_hosts_file(host)
     assert result is None
+
+
+# classify_waiting_reason tests
+
+
+@pytest.mark.parametrize(
+    "is_active, is_blocked, expected",
+    [
+        # Idle (turn over): END_OF_TURN regardless of a stranded permission marker.
+        (False, False, WaitingReason.END_OF_TURN),
+        (False, True, WaitingReason.END_OF_TURN),
+        # In a turn: PERMISSIONS only while genuinely blocked, else actively running.
+        (True, True, WaitingReason.PERMISSIONS),
+        (True, False, None),
+    ],
+)
+def test_classify_waiting_reason(is_active: bool, is_blocked: bool, expected: WaitingReason | None) -> None:
+    """The shared gating rule used by every agent plugin's lifecycle promotion and
+    waiting_reason field generator: PERMISSIONS is gated on is_active, so a stranded
+    permission marker (active absent) never yields PERMISSIONS."""
+    assert classify_waiting_reason(is_active, is_blocked) == expected

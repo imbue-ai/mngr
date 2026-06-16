@@ -9,9 +9,12 @@ runs cannot leak EC2 cost:
 2. ``pytest_sessionfinish`` here scans for leaked EC2 instances tagged
    ``mngr-pytest-launched=true`` at the end of the session, force-
    terminates any matches older than the TTL, and fails the session.
-3. Cloud-init in each test instance runs ``shutdown -P +N`` with
-   ``InstanceInitiatedShutdownBehavior=terminate``, which self-
-   terminates the instance even if pytest itself is killed.
+3. Cloud-init in each test instance runs ``shutdown -P +N``. With the
+   release default ``terminate_on_shutdown = true``
+   (``InstanceInitiatedShutdownBehavior=terminate``) this self-terminates
+   the instance even if pytest itself is killed; the resumable-idle-stop
+   test overrides the flag to ``false`` (the cap stops, not terminates,
+   the instance) and leans on layer 2 to reap any leak.
 
 Layer 2 relies solely on a tag scan because the current release-test
 path spawns ``mngr create`` in a subprocess, so there is no Python
