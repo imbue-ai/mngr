@@ -23,6 +23,7 @@ from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
+from imbue.mngr.interfaces.agent import InteractiveTuiMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 
 # The key that an agent_field_generators hookimpl uses for the waiting-reason field;
@@ -92,6 +93,11 @@ class CapabilityScope(UpperCaseStrEnum):
     # command runners. CLI-specific concerns (install, version, usage, per-tool policy,
     # an agent-native transcript) do not apply to a generic shell command.
     CLI_BACKED_ONLY = auto()
+    # Applies only to TUI-driven agents that are not headless -- i.e. agents mngr drives by
+    # sending keystrokes into a rendered TUI pane. Pane-scraping capabilities (the streaming
+    # snapshot) are only meaningful here; server/extension-driven agents read the same info
+    # from their API, and headless agents have no pane.
+    TUI_DRIVEN_ONLY = auto()
 
 
 class AgentCapability(FrozenModel):
@@ -142,6 +148,9 @@ class AgentClassInfo(FrozenModel):
     # Whether this is a bare command runner (GenericCommandAgentMixin) rather than a
     # CLI-backed agent. Drives CLI_BACKED_ONLY applicability.
     is_generic_command: bool = Field(description="Whether the agent is a bare command runner, not CLI-backed")
+    # Whether mngr drives this agent by sending keystrokes into a rendered TUI pane
+    # (InteractiveTuiMixin), vs. a server/extension API. Drives TUI_DRIVEN_ONLY applicability.
+    is_tui_driven: bool = Field(description="Whether the agent is driven by keystrokes into a TUI pane")
 
 
 def is_capability_applicable(capability: AgentCapability, info: AgentClassInfo) -> bool:
@@ -154,6 +163,9 @@ def is_capability_applicable(capability: AgentCapability, info: AgentClassInfo) 
             return not info.is_generic_command and not info.is_headless
         case CapabilityScope.CLI_BACKED_ONLY:
             return not info.is_generic_command
+        case CapabilityScope.TUI_DRIVEN_ONLY:
+            # Pane scraping = a keystroke-driven TUI agent that is not headless.
+            return info.is_tui_driven and not info.is_headless
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -192,6 +204,7 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         key="raw_transcript",
         description="Copies the agent's native session JSONL verbatim into the agent state dir. Baseline; every port wants it.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
         mixin=HasTranscriptMixin,
     ),
     AgentCapability(
@@ -211,12 +224,14 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         key="streaming_snapshot",
         description="Publishes a live, in-progress view of the agent's assistant text. Lowest-priority; only needed if a consuming UI wants live streaming.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.TUI_DRIVEN_ONLY,
         mixin=HasStreamingSnapshotMixin,
     ),
     AgentCapability(
         key="session_preservation",
         description="Preserves session/transcript files when the agent is destroyed, so the conversation is not lost. Baseline; every port wants it.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.CLI_BACKED_ONLY,
         mixin=HasSessionPreservationMixin,
     ),
     AgentCapability(
@@ -302,9 +317,15 @@ def render_capability_matrix(
 def _render_cell(capability: AgentCapability, info: AgentClassInfo) -> str:
     """Render one matrix cell: `Y` (present), `-` (applicable but absent), or `n/a`."""
     if not is_capability_applicable(capability, info):
-        # A capability outside an agent's scope must not also be detected as present;
-        # if it is, the scope and the detection disagree and the matrix would be a lie.
-        if is_capability_present(capability, info):
+        # A mixin can legitimately be inherited by a sub-kind for which the capability is
+        # n/a (e.g. a headless variant of a TUI agent inherits the streaming-snapshot
+        # mixin but has no pane to scrape), so out-of-scope CLASS_MIXIN detection just
+        # renders n/a. The other detection kinds register a capability deliberately per
+        # agent type/owner, so an out-of-scope hit there means the scope is wrong -- raise.
+        if (
+            is_capability_present(capability, info)
+            and capability.detection_kind != CapabilityDetectionKind.CLASS_MIXIN
+        ):
             raise AgentCapabilityError(
                 f"Capability '{capability.key}' is n/a for '{info.agent_type_name}' (scope "
                 f"{capability.scope}) yet is detected as present; the scope and detection disagree."
@@ -371,6 +392,7 @@ def build_agent_class_infos(
                 is_usage_source_claimed=(owner + _USAGE_PLUGIN_SUFFIX) in usage_plugin_names,
                 is_headless=issubclass(agent_class, HeadlessAgentMixin),
                 is_generic_command=issubclass(agent_class, GenericCommandAgentMixin),
+                is_tui_driven=issubclass(agent_class, InteractiveTuiMixin),
             )
         )
     return tuple(infos)

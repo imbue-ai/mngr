@@ -12,8 +12,10 @@ from imbue.mngr.agents.agent_capabilities import render_capability_matrix
 from imbue.mngr.interfaces.agent import GenericCommandAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
+from imbue.mngr.interfaces.agent import InteractiveTuiMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 
 
@@ -25,12 +27,18 @@ class _FakeTranscriptAgent(HasCommonTranscriptMixin): ...
 class _FakeStreamingHeadlessAgent(StreamingHeadlessAgentMixin): ...
 
 
+# A TUI-driven agent that publishes a streaming snapshot (HasStreamingSnapshotMixin
+# extends InteractiveTuiMixin, so this is tui-driven and not headless).
+class _FakeTuiSnapshotAgent(HasStreamingSnapshotMixin): ...
+
+
+# A headless agent that still structurally inherits the snapshot mixin (like headless_claude
+# inheriting it from ClaudeAgent): tui-driven by inheritance, but headless, so snapshot is n/a.
+class _FakeHeadlessSnapshotAgent(HasStreamingSnapshotMixin, StreamingHeadlessAgentMixin): ...
+
+
 # A bare command runner (carries the generic-command marker, hence also unattended).
 class _FakeGenericCommandAgent(GenericCommandAgentMixin): ...
-
-
-# A misconfigured generic command runner that also claims a CLI-only capability.
-class _FakeGenericCommandWithTranscript(GenericCommandAgentMixin, HasCommonTranscriptMixin): ...
 
 
 # A bare agent with none of the capability mixins.
@@ -44,8 +52,8 @@ def _info(
     plugin_hook_names: frozenset[str] = frozenset(),
     is_usage_source_claimed: bool = False,
 ) -> AgentClassInfo:
-    # is_headless / is_generic_command are derived from the class exactly as
-    # build_agent_class_infos does, so fakes behave like real agent classes.
+    # The kind traits are derived from the class exactly as build_agent_class_infos does,
+    # so fakes behave like real agent classes.
     return AgentClassInfo(
         agent_type_name=agent_type_name,
         agent_class=agent_class,
@@ -54,6 +62,7 @@ def _info(
         is_usage_source_claimed=is_usage_source_claimed,
         is_headless=issubclass(agent_class, HeadlessAgentMixin),
         is_generic_command=issubclass(agent_class, GenericCommandAgentMixin),
+        is_tui_driven=issubclass(agent_class, InteractiveTuiMixin),
     )
 
 
@@ -133,24 +142,35 @@ def test_capability_applicability_by_scope() -> None:
         scope=CapabilityScope.CLI_BACKED_ONLY,
         mixin=HasAutoInstallMixin,
     )
+    tui_driven_only = AgentCapability(
+        key="streaming_snapshot",
+        description="x",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.TUI_DRIVEN_ONLY,
+        mixin=HasStreamingSnapshotMixin,
+    )
     applies_to_all = AgentCapability(
         key="raw_transcript",
         description="x",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasTranscriptMixin,
     )
-    interactive = _info("claude", _FakeTranscriptAgent)
+    tui_driven = _info("claude", _FakeTuiSnapshotAgent)
     headless = _info("headless_claude", _FakeStreamingHeadlessAgent)
     command = _info("command", _FakeGenericCommandAgent)
 
     # INTERACTIVE_ONLY: only the non-headless, non-command agent prompts.
-    assert is_capability_applicable(interactive_only, interactive) is True
+    assert is_capability_applicable(interactive_only, tui_driven) is True
     assert is_capability_applicable(interactive_only, headless) is False
     assert is_capability_applicable(interactive_only, command) is False
     # CLI_BACKED_ONLY: applies to everything except the bare command runner.
-    assert is_capability_applicable(cli_backed_only, interactive) is True
+    assert is_capability_applicable(cli_backed_only, tui_driven) is True
     assert is_capability_applicable(cli_backed_only, headless) is True
     assert is_capability_applicable(cli_backed_only, command) is False
+    # TUI_DRIVEN_ONLY: only the keystroke-driven, non-headless TUI agent.
+    assert is_capability_applicable(tui_driven_only, tui_driven) is True
+    assert is_capability_applicable(tui_driven_only, headless) is False
+    assert is_capability_applicable(tui_driven_only, command) is False
     # ALL: applies to every agent kind.
     assert is_capability_applicable(applies_to_all, command) is True
 
@@ -198,11 +218,27 @@ def test_render_capability_matrix_marks_command_runner_cells_na() -> None:
     assert unattended_row == "| unattended_operation | - | Y |"
 
 
-def test_render_capability_matrix_raises_when_na_capability_is_present() -> None:
-    # A capability outside an agent's scope must not also be detected as present; if it is,
-    # the scope and the detection disagree and the matrix would be a lie.
-    infos = [_info("command", _FakeGenericCommandWithTranscript)]
-    with pytest.raises(AgentCapabilityError, match="common_transcript"):
+def test_render_capability_matrix_renders_na_for_inherited_out_of_scope_mixin() -> None:
+    # A headless agent that structurally inherits the tui-driven snapshot mixin (as
+    # headless_claude inherits it from ClaudeAgent) renders n/a -- not a raise -- because a
+    # CLASS_MIXIN can legitimately be inherited by a kind that cannot use it.
+    infos = [
+        _info("claude", _FakeTuiSnapshotAgent),
+        _info("headless_claude", _FakeHeadlessSnapshotAgent),
+    ]
+    matrix = render_capability_matrix(AGENT_CAPABILITIES, infos)
+    snapshot_row = next(line for line in matrix.splitlines() if line.startswith("| streaming_snapshot |"))
+    # claude is tui-driven and has the mixin -> Y; headless_claude inherits the mixin but is
+    # headless, so the pane-scraping snapshot is n/a.
+    assert snapshot_row == "| streaming_snapshot | Y | n/a |"
+
+
+def test_render_capability_matrix_raises_when_genuine_capability_is_out_of_scope() -> None:
+    # Unlike an inherited mixin, a field generator is registered deliberately per agent type.
+    # If such a genuine capability is present but the scope says n/a, the scope is wrong --
+    # so rendering raises rather than silently hiding the contradiction.
+    infos = [_info("command", _FakeGenericCommandAgent, field_generator_agent_type_names=frozenset({"command"}))]
+    with pytest.raises(AgentCapabilityError, match="waiting_reason_field"):
         render_capability_matrix(AGENT_CAPABILITIES, infos)
 
 

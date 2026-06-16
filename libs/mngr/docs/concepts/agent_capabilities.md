@@ -11,11 +11,11 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 
 | Capability | claude | headless_claude | antigravity | codex | opencode | pi-coding | command | headless_command |
 |---|---|---|---|---|---|---|---|---|
-| raw_transcript | Y | Y | Y | Y | Y | Y | - | - |
+| raw_transcript | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | common_transcript | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | waiting_reason_field | Y | n/a | - | Y | Y | Y | n/a | n/a |
-| streaming_snapshot | Y | Y | - | - | - | - | - | - |
-| session_preservation | Y | Y | Y | Y | Y | Y | - | - |
+| streaming_snapshot | Y | n/a | - | - | n/a | n/a | n/a | n/a |
+| session_preservation | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | auto_install | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | unattended_operation | Y | Y | Y | Y | Y | Y | Y | Y |
 | permission_policy | - | - | Y | Y | Y | - | n/a | n/a |

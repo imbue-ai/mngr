@@ -16,6 +16,16 @@ Architecture-review refinements: excluded the task-specialized skill variants (c
 
 Gave the capability matrix a fixed column order (claude, headless_claude, antigravity, codex, opencode, pi-coding, command, headless_command) instead of alphabetical, and excluded the internal `mngr-proxy-child` agent. Rendering now raises if a registered agent type is neither in the fixed order nor the exclusion list, so a newly added agent can never be silently dropped from the table. Moved the two headless-output rows to the bottom of the matrix.
 
-Added a third matrix state, `n/a`, for capabilities that do not apply to an agent kind (distinct from `-`, which means applicable but absent). Each capability now declares a code-derived scope: interactive-only capabilities (`waiting_reason_field`) are `n/a` for headless and bare-command agents, and CLI-specific capabilities (`common_transcript`, `auto_install`, `permission_policy`, `version_management`, `usage_tracking`) are `n/a` for the bare command runners. The renderer raises if a capability is both out-of-scope and detected as present, keeping the scope and the code in agreement.
+Added a third matrix state, `n/a`, for capabilities that do not apply to an agent kind (distinct from `-`, which means applicable but absent). Each capability now declares a code-derived scope based on the agent's kind:
+
+- CLI-backed-only (`raw_transcript`, `common_transcript`, `auto_install`, `permission_policy`, `version_management`, `usage_tracking`): `n/a` for the bare command runners.
+
+- Interactive-only (`waiting_reason_field`): `n/a` for headless and bare-command agents.
+
+- TUI-driven-only (`streaming_snapshot`): `n/a` for everything except the keystroke-driven TUI agents (claude, codex, antigravity), since the snapshot works by scraping the rendered pane -- server/extension-driven agents (opencode, pi) get the same information from their API, and headless agents have no pane.
+
+A genuinely-registered capability (field generator, usage source, deploy hook) that lands out of scope raises, keeping the matrix honest; an inherited capability mixin that lands out of scope (e.g. a headless variant of a TUI agent inheriting the snapshot mixin) just renders `n/a`.
 
 Introduced `GenericCommandAgentMixin` to mark the bare command-running agent types (`command`, `headless_command`); it records that they are not CLI-backed and makes them inherently unattended (so `unattended_operation` now shows as present for them). The `command` type is now registered as a small `CommandAgent` subclass of `BaseAgent` carrying this marker.
+
+Extracted `InteractiveTuiMixin`, a bare marker for TUI-driven agents (mngr sends keystrokes into the rendered pane). `InteractiveTuiAgent` now inherits it (unchanged otherwise), and `HasStreamingSnapshotMixin` subclasses it so the streaming-snapshot capability is, by construction, only declarable on a TUI-driven agent.
