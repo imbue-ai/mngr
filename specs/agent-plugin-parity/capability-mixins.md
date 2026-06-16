@@ -257,8 +257,12 @@ in the parity spec, because their content is how-not-whether.
    (detected by owning-plugin entry-point name); and **auto-install** as a base capability (`HasAutoInstallMixin`
    + shared `ensure_cli_installed`) added to agy/opencode/codex, pi routed through the helper,
    claude keeping its version-aware flow. One changelog entry per touched project.
-4. **(done)** `agents/test_capability_coverage.py`: the coverage forcing test (every capability
-   must point at the test(s) exercising it) + a per-agent "declares >=1 capability" check.
+4. **(follow-up PR)** The registry-driven **release** harness: walk each agent's declared
+   capabilities and run a real `exercise_fn` per capability against a live agent (the
+   behavioral check detection cannot give). Detection itself is already covered in CI by the
+   drift guard + the builder integration test, so a CI-cheap "coverage forcing" test over prose
+   pointers was deliberately *not* shipped -- it would force a sentence, not a test. The real
+   forcing function (a capability cannot ship without an `exercise_fn`) lands with the harness.
 
 Verified opencode and agy auto-install end-to-end on real Modal hosts (which ship without the
 CLIs): both printed "<cli> installed successfully" during provision.
