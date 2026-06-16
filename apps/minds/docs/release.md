@@ -23,6 +23,12 @@ Both repos release from **`main`** via **two PRs that both target `main`** (one 
 
 > The Apple-Silicon lima-VZ `cryptography` SIGILL is handled in the FCT template by `OPENSSL_armcap=0` (`.mngr/settings.toml` `host_env__extend` + `scripts/build_workspace.sh`), which skips OpenSSL's SVE CPU-cap probe. mngr does not pin `cryptography`.
 
+**Reviewing the FCT PR.** Two kinds of change land on the same branch: the mechanical `vendor/mngr` snapshot (hundreds of files) and reviewable code (e.g. a `system_interface` fix). CI needs the *full* branch — the binary clones the ref and imports the committed `vendor/mngr` — but reviewers should read only the code. Keep them separable:
+
+1. **Isolate the vendor refresh in its own commit** (`vendor/mngr: refresh from mngr <sha>`), distinct from the reviewable commits, so review can be done per-commit.
+2. **`vendor/mngr/**` is `linguist-generated` in `.gitattributes`**, so GitHub collapses it in the PR "Files changed" view by default — reviewers see only the real changes.
+3. **The snapshot is verified by reproduction, not review**: `git archive <sha> | diff -r vendor/mngr` (the vendor-match check) proves it equals the tagged mngr SHA. A clean diff *is* the review.
+
 ## File reference
 
 | What | Where |
@@ -78,34 +84,41 @@ Still branch refs; nothing tagged yet.
 
 ### 6. Merge both PRs to `main`
 
-Then confirm the pair still matches before tagging:
+**Merge the mngr PR with a merge commit, not a squash.** `main` can advance past the SHA you built and verified in step 4 (`$GREEN_MNGR_SHA`) while you were verifying; a merge commit keeps that exact SHA reachable on `main` as a parent (a squash replaces it with a new commit whose tree also contains the drift — and the binary you verified was built from neither).
+
+The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and FCT's `vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the vendor still matches *that* SHA:
 
 ```bash
-TMP=$(mktemp -d); (cd "$MNGR" && git archive main) | tar -x -C "$TMP"
-diff -r "$TMP" /Users/weishi/Developer/imbue/forever-claude-template/vendor/mngr && echo OK || echo "MISMATCH — re-run step 3"
+GREEN_MNGR_SHA=<the SHA from step 4>
+TMP=$(mktemp -d); (cd "$MNGR" && git archive "$GREEN_MNGR_SHA") | tar -x -C "$TMP"
+diff -r "$TMP" /Users/weishi/Developer/imbue/forever-claude-template/vendor/mngr && echo OK || echo "MISMATCH — FCT vendor was not archived from $GREEN_MNGR_SHA (re-run step 3)"
 ```
 
-### 7. Tag both `main`s at the merged commits
+`git archive main` (HEAD) failing to match while `git archive $GREEN_MNGR_SHA` matches is **expected drift** (unrelated PRs landed on `main`), not an error — tag `$GREEN_MNGR_SHA`, not HEAD.
+
+### 7. Tag the verified pair — *not* `main` HEAD
+
+Tag mngr at **`$GREEN_MNGR_SHA`** (the built+verified SHA; reachable on `main` as the merge parent) and FCT at the commit whose `vendor/mngr` is that SHA's archive (the FCT PR's merge into `main`):
 
 ```bash
 export GH_TOKEN=$(gh auth token --user weishi-imbue)
 export MNGR=/Users/weishi/Developer/imbue/mngr FCT=/Users/weishi/Developer/imbue/forever-claude-template
 VERSION=minds-v0.3.1
+GREEN_MNGR_SHA=<the SHA from step 4>
+git -C "$FCT" fetch origin --quiet; FCT_SHA=$(git -C "$FCT" rev-parse origin/main)   # its vendor/mngr == archive $GREEN_MNGR_SHA
 
-cd "$FCT" && git switch main && git pull --ff-only origin main
-git tag -a "$VERSION" HEAD -m "minds $VERSION: FCT $(git rev-parse --short HEAD) / mngr $(git -C "$MNGR" rev-parse --short main)"
-git push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git refs/tags/"$VERSION"
+git -C "$MNGR" tag -a "$VERSION" "$GREEN_MNGR_SHA" -m "minds $VERSION: mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) / FCT $(git -C "$FCT" rev-parse --short $FCT_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
+git -C "$MNGR" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/mngr.git refs/tags/"$VERSION"
 
-cd "$MNGR" && git switch main && git pull --ff-only origin main
-git tag -a "$VERSION" HEAD -m "minds $VERSION: mngr $(git rev-parse --short HEAD) / FCT $(git -C "$FCT" rev-parse --short main)"
-git push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/mngr.git refs/tags/"$VERSION"
+git -C "$FCT" tag -a "$VERSION" "$FCT_SHA" -m "minds $VERSION: FCT $(git -C "$FCT" rev-parse --short $FCT_SHA) / mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
+git -C "$FCT" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git refs/tags/"$VERSION"
 ```
 
-Tags must be annotated (`-a`). To re-cut during iteration: `git tag -d "$VERSION"` then `git push --force ... refs/tags/"$VERSION"`.
+Tags must be annotated (`-a`). **Tag the verified SHA, never `main` HEAD** — between step 4 and the merge, `main` can pick up unrelated commits never built into the binary or run through launch-to-msg (e.g. `main` HEAD once sat +58 such files past the tagged SHA). To re-cut during iteration: `git tag -d "$VERSION"` then `git push --force ... refs/tags/"$VERSION"`.
 
 ### 8. Close the loop: CI on the two tags
 
-Both refs = the tag, exercising the binary's baked `FALLBACK_BRANCH` end to end (repackages if the merge changed the SHA):
+Both refs = the tag, exercising the binary's baked `FALLBACK_BRANCH` end to end. Because the mngr tag is the step-4 SHA, `build` reuses the bundle you already verified:
 
 ```bash
 cd "$MNGR"; VERSION=minds-v0.3.1
