@@ -19,6 +19,7 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
@@ -189,7 +190,7 @@ def stop_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
     """Best-effort: stop the agent (leaving its state on disk), swallowing cleanup errors."""
     try:
         host.stop_agents([agent.id])
-    except (OSError, MngrError) as exc:
+    except (OSError, MngrError, CleanupFailedGroup) as exc:
         logger.warning("Failed to stop agent {}: {}", agent.name, exc)
 
 
@@ -198,5 +199,5 @@ def destroy_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
     stop_agent(agent, host)
     try:
         host.destroy_agent(agent)
-    except (OSError, MngrError) as exc:
+    except (OSError, MngrError, CleanupFailedGroup) as exc:
         logger.warning("Failed to destroy agent {}: {}", agent.name, exc)

@@ -5,3 +5,5 @@ A concise, human-friendly summary of changes for the `mngr_gcp` library. Entries
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
+
+## [v0.1.0] - 2026-06-16

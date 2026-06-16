@@ -13,6 +13,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
@@ -25,6 +26,8 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
+from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
@@ -1225,3 +1228,51 @@ def test_provision_writes_supervisor_even_when_common_transcript_disabled(
         antigravity_agent_without_common_transcript._get_agent_dir() / "commands" / "antigravity_background_tasks.sh"
     )
     assert expected.exists()
+
+
+# =============================================================================
+# Preservation on destroy
+# =============================================================================
+
+
+def test_antigravity_config_preserves_on_destroy_by_default() -> None:
+    assert AntigravityAgentConfig().preserve_on_destroy is True
+
+
+def _populate_antigravity_transcripts(agent: AntigravityAgent) -> None:
+    """Write the raw/common transcripts and the conversation-id history into the state dir."""
+    agent_dir = agent._get_agent_dir()
+    (agent_dir / "logs" / "antigravity_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "logs" / "antigravity_transcript" / "events.jsonl").write_text('{"type":"raw"}\n')
+    (agent_dir / "events" / "antigravity" / "common_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "events" / "antigravity" / "common_transcript" / "events.jsonl").write_text('{"type":"common"}\n')
+    (agent_dir / ROOT_CONVERSATION_FILENAME).write_text("conv-root\n")
+    (agent_dir / CONVERSATION_IDS_FILENAME).write_text("conv-root\nconv-sub\n")
+
+
+@pytest.mark.rsync
+def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy copies transcripts and conversation-id history to the mirrored preserved layout."""
+    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(preserve_on_destroy=True))
+    _populate_antigravity_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert (dest_dir / "logs" / "antigravity_transcript" / "events.jsonl").read_text() == '{"type":"raw"}\n'
+    assert (
+        dest_dir / "events" / "antigravity" / "common_transcript" / "events.jsonl"
+    ).read_text() == '{"type":"common"}\n'
+    assert (dest_dir / ROOT_CONVERSATION_FILENAME).read_text() == "conv-root\n"
+    assert (dest_dir / CONVERSATION_IDS_FILENAME).read_text() == "conv-root\nconv-sub\n"
+
+
+def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy preserves nothing when preserve_on_destroy is False."""
+    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(preserve_on_destroy=False))
+    _populate_antigravity_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert not dest_dir.exists()

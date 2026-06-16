@@ -7,31 +7,11 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.rsync import RsyncEndpointError
-from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.api.rsync import _build_rsync_command
 from imbue.mngr.api.rsync import rsync
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
-
-# =============================================================================
-# RsyncResult model
-# =============================================================================
-
-
-def test_rsync_result_can_be_created_with_all_fields() -> None:
-    result = RsyncResult(
-        files_transferred=10,
-        bytes_transferred=1024,
-        source_path="/source",
-        destination_path="/dest",
-    )
-
-    assert result.files_transferred == 10
-    assert result.bytes_transferred == 1024
-    assert result.source_path == "/source"
-    assert result.destination_path == "/dest"
-
 
 # =============================================================================
 # rsync command builder

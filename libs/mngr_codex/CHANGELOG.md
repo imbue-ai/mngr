@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.2] - 2026-06-16
+
+### Added
+
+- Added: `waiting_reason` field in `mngr list` for codex agents (matching `mngr_claude`): `PERMISSIONS` while blocked on a tool-approval dialog, `END_OF_TURN` when idle. A `PermissionRequest` hook touches a `permissions_waiting` marker (cleared by `PostToolUse` and root `Stop`/`UserPromptSubmit`); the reason is gated on the agent's `active` marker so a stranded marker reports `END_OF_TURN` rather than `PERMISSIONS`. Supervised mode only.
+
+## [v0.1.1] - 2026-06-15
+
 ## [v0.1.0] - 2026-06-13
 
 ### Added

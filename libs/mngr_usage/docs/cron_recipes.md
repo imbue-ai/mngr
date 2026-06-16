@@ -192,7 +192,7 @@ alive="$(mngr list --include 'labels.queue == "live" && state == "RUNNING"' --id
 # Only launch if there's spare capacity going unused.
 "$(dirname "$0")/spare-capacity.sh" || exit 0
 
-# Grab the oldest queued task, if any.
+# Grab the oldest queued task, if any. (For a random order, use `sort -R`.)
 task_file="$(find "$TODO_DIR" -maxdepth 1 -name '*.md' -type f | sort | head -n1)"
 [[ -n "$task_file" ]] || exit 0
 
@@ -207,10 +207,12 @@ mv "$task_file" "$claimed" || exit 0
 name="$(basename "$claimed" .md | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
 [[ -n "$name" ]] || name="task-$(date +%s)"
 
-# Create the agent in the project repo we cd'd into, tag it into the live pool,
-# and hand it the task file as its first message. --no-connect keeps it
-# non-interactive (cron has no TTY to attach a tmux session to).
-mngr create "$name" claude --label queue=live \
+# Create the agent, tag it into the live pool, and hand it the task file as its
+# first message. --no-connect keeps it non-interactive (cron has no TTY to attach
+# a tmux session to). --from ":$PROJECT_DIR" sources from the project repo, and
+# --branch main: gives each agent its own fresh branch off main (empty NEW ->
+# mngr/<name>) so concurrent tasks never share a working branch.
+mngr create "$name" claude --from ":$PROJECT_DIR" --branch main: --label queue=live \
   --message-file "$claimed" --no-connect
 ```
 

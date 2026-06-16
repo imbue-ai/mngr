@@ -13,6 +13,7 @@ from fastapi.responses import Response
 from pydantic import Field
 from starlette.testclient import TestClient
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -61,6 +62,9 @@ def _parse_input_attrs(html: str, element_id: str) -> dict[str, str]:
 class _RecordingMessageSender(MngrMessageSender):
     """Test double for ``MngrMessageSender`` that records calls instead of running mngr."""
 
+    # This double overrides ``send`` entirely and never dispatches to a
+    # concurrency group, so relax the base class's required field.
+    concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
     def send(self, agent_id: AgentId, text: str) -> None:

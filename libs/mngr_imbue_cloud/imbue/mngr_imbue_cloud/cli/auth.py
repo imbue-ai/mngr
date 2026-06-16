@@ -11,7 +11,6 @@ from typing import Any
 
 import click
 
-from imbue.mngr_imbue_cloud.auth_helper import force_refresh
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import handle_imbue_cloud_errors
@@ -19,12 +18,13 @@ from imbue.mngr_imbue_cloud.cli._common import make_connector_client
 from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import parse_account
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
-from imbue.mngr_imbue_cloud.client import AuthRawResponse
+from imbue.mngr_imbue_cloud.connector.auth_helper import force_refresh
+from imbue.mngr_imbue_cloud.connector.client import AuthRawResponse
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
-from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
-from imbue.mngr_imbue_cloud.session_store import make_session_from_tokens
 
 _OAUTH_LISTEN_TIMEOUT_SECONDS = 300.0
 _OAUTH_CALLBACK_PATH = "/oauth/callback"
