@@ -140,9 +140,10 @@ class AgentCapabilityError(Exception):
     ...
 
 
-# The ordered capability registry. New capabilities are appended here; the
-# generated matrix and its drift guard read directly from this list, so the
-# matrix can never silently disagree with the code.
+# The ordered capability registry, in the row order the generated matrix uses. New
+# capabilities are appended here, except that the two headless-output rows are kept last
+# (they apply only to headless agent variants). The generated matrix and its drift guard
+# read directly from this list, so the matrix can never silently disagree with the code.
 AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
     AgentCapability(
         key="raw_transcript",
@@ -155,18 +156,6 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         description="Emits the agent-agnostic common transcript that `mngr transcript` renders. Baseline; every port wants it.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasCommonTranscriptMixin,
-    ),
-    AgentCapability(
-        key="headless_output",
-        description="Runs non-interactively and exposes its output via output(). Only for headless agent variants.",
-        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
-        mixin=HeadlessAgentMixin,
-    ),
-    AgentCapability(
-        key="streaming_headless_output",
-        description="A headless agent that also streams output incrementally. Only for headless agent variants.",
-        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
-        mixin=StreamingHeadlessAgentMixin,
     ),
     AgentCapability(
         key="waiting_reason_field",
@@ -219,6 +208,19 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         key="usage_tracking",
         description="Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.",
         detection_kind=CapabilityDetectionKind.USAGE_SOURCE,
+    ),
+    # Headless-output rows are kept last: they apply only to headless agent variants.
+    AgentCapability(
+        key="headless_output",
+        description="Runs non-interactively and exposes its output via output(). Only for headless agent variants.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=HeadlessAgentMixin,
+    ),
+    AgentCapability(
+        key="streaming_headless_output",
+        description="A headless agent that also streams output incrementally. Only for headless agent variants.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=StreamingHeadlessAgentMixin,
     ),
 )
 
