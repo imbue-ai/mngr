@@ -5,6 +5,20 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.file_utils import read_json_dict
+from imbue.mngr.utils.testing import capture_loguru
+
+
+def test_read_json_dict_returns_empty_for_empty_file(tmp_path: Path) -> None:
+    """An empty file is not valid JSON (json.loads("") raises), so it warns and reads as empty."""
+    path = tmp_path / "settings.json"
+    path.write_text("")
+
+    with capture_loguru() as log_output:
+        result = read_json_dict(path)
+
+    assert result == {}
+    assert "Could not parse" in log_output.getvalue()
 
 
 def test_atomic_write_creates_file(tmp_path: Path) -> None:
@@ -84,7 +98,11 @@ def test_atomic_write_cleans_up_temp_file_on_replace_failure(tmp_path: Path) -> 
     IsADirectoryError. The temp file should be cleaned up.
     """
     target = tmp_path / "output.txt"
-    # Place a non-empty directory at the target path so os.replace fails
+    # Place a *non-empty* directory at the target path so os.replace fails.
+    # os.replace can overwrite an empty directory with a file on some
+    # platforms, but replacing a non-empty directory reliably raises OSError
+    # (ENOTEMPTY/EEXIST) on both macOS and Linux, which is what we need to
+    # exercise the cleanup-and-reraise branch portably.
     target.mkdir()
     (target / "blocker").write_text("prevents replace")
 

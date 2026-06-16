@@ -56,9 +56,7 @@ def test_ansi_to_html_standard_foreground_color_30() -> None:
 
 def test_ansi_to_html_standard_foreground_color_31() -> None:
     """ANSI code 31 (red) maps to the second 16-color palette entry."""
-    result = ansi_to_html("\x1b[31mred\x1b[0m")
-    assert "color:#c00" in result
-    assert "red" in result
+    assert ansi_to_html("\x1b[31mred\x1b[0m") == snapshot('<span style="color:#c00">red</span>')
 
 
 def test_ansi_to_html_standard_foreground_color_37() -> None:
@@ -133,18 +131,17 @@ def test_ansi_to_html_reset_closes_open_spans() -> None:
 
 def test_ansi_to_html_multiple_sequential_colors_open_multiple_spans() -> None:
     """Each color code opens a new span; reset closes all open spans at once."""
-    result = ansi_to_html("\x1b[31mred\x1b[32mgreen\x1b[0mplain")
     # Two open spans (one per color), then two closes from the single reset.
-    assert result.count("<span") == 2
-    assert result.count("</span>") == 2
+    assert ansi_to_html("\x1b[31mred\x1b[32mgreen\x1b[0mplain") == snapshot(
+        '<span style="color:#c00">red<span style="color:#0a0">green</span></span>plain'
+    )
 
 
 def test_ansi_to_html_bold_and_color_combined_in_single_span() -> None:
     """Bold + color in one ESC sequence produces a single span with both styles."""
-    result = ansi_to_html("\x1b[1;31mbold-red\x1b[0m")
-    assert result.count("<span") == 1
-    assert "font-weight:bold" in result
-    assert "color:#c00" in result
+    assert ansi_to_html("\x1b[1;31mbold-red\x1b[0m") == snapshot(
+        '<span style="font-weight:bold;color:#c00">bold-red</span>'
+    )
 
 
 def test_ansi_to_html_unknown_code_is_ignored_silently() -> None:
@@ -177,14 +174,16 @@ def test_ansi_to_html_text_before_and_after_escape_is_preserved() -> None:
 
 def test_render_tutorial_block_comment_lines_get_comment_class() -> None:
     """Lines starting with a hash character are wrapped in a comment span."""
-    result = render_tutorial_block("# This is a comment")
-    assert '<span class="comment"># This is a comment</span>' in result
+    assert render_tutorial_block("# This is a comment") == snapshot(
+        '<pre class="transcript"><span class="comment"># This is a comment</span></pre>'
+    )
 
 
 def test_render_tutorial_block_command_lines_get_prompt_class() -> None:
     """Non-empty, non-comment lines are wrapped in a prompt span."""
-    result = render_tutorial_block("mngr list")
-    assert '<span class="prompt">mngr list</span>' in result
+    assert render_tutorial_block("mngr list") == snapshot(
+        '<pre class="transcript"><span class="prompt">mngr list</span></pre>'
+    )
 
 
 def test_render_tutorial_block_blank_lines_are_not_wrapped() -> None:
@@ -207,10 +206,10 @@ def test_render_tutorial_block_output_is_wrapped_in_pre_tag() -> None:
 
 def test_render_tutorial_block_html_special_chars_are_escaped() -> None:
     """HTML-special characters inside comment and command lines are escaped."""
-    result = render_tutorial_block("# a < b & c\necho <hello>")
-    assert "&lt;" in result
-    assert "&amp;" in result
-    assert "&gt;" in result
+    assert render_tutorial_block("# a < b & c\necho <hello>") == snapshot(
+        '<pre class="transcript"><span class="comment"># a &lt; b &amp; c</span>\n'
+        '<span class="prompt">echo &lt;hello&gt;</span></pre>'
+    )
 
 
 def test_render_tutorial_block_leading_whitespace_comment_still_matches() -> None:
@@ -239,9 +238,11 @@ def test_render_tutorial_block_mixed_content_preserves_order() -> None:
 
 
 def test_render_transcript_command_line_gets_prompt_class() -> None:
-    """Lines starting with '$ ' are wrapped in a prompt span."""
-    result = render_transcript("$ mngr list\n? 0")
-    assert '<span class="prompt">$ mngr list</span>' in result
+    """A simple command + exit-code transcript renders one cmd-block with prompt and exit-code spans."""
+    assert render_transcript("$ mngr list\n? 0") == snapshot(
+        '<pre class="transcript"><div class="cmd-block"><span class="prompt">$ mngr list</span>\n'
+        '<span class="exit-code">exit code: 0</span></div></pre>'
+    )
 
 
 def test_render_transcript_comment_line_gets_comment_class() -> None:
@@ -257,10 +258,12 @@ def test_render_transcript_exit_code_line_gets_exit_code_class() -> None:
 
 
 def test_render_transcript_stderr_line_gets_stderr_prefix_class() -> None:
-    """Lines starting with '! ' render the prefix in stderr-prefix span."""
-    result = render_transcript("$ cmd\n! error message\n? 1")
-    assert '<span class="stderr-prefix">! </span>' in result
-    assert "error message" in result
+    """Lines starting with '! ' render the prefix in a stderr-prefix span followed by the rest."""
+    assert render_transcript("$ cmd\n! error message\n? 1") == snapshot(
+        '<pre class="transcript"><div class="cmd-block"><span class="prompt">$ cmd</span>\n'
+        '<span class="stderr-prefix">! </span>error message\n'
+        '<span class="exit-code">exit code: 1</span></div></pre>'
+    )
 
 
 def test_render_transcript_output_is_wrapped_in_pre_transcript() -> None:
@@ -298,9 +301,11 @@ def test_render_transcript_stderr_rest_goes_through_ansi_to_html() -> None:
 
 def test_render_transcript_html_chars_in_comment_are_escaped() -> None:
     """HTML-special characters in comment lines are properly escaped."""
-    result = render_transcript("# <b>bold</b>\n$ x\n? 0")
-    assert "&lt;b&gt;" in result
-    assert "<b>" not in result
+    assert render_transcript("# <b>bold</b>\n$ x\n? 0") == snapshot(
+        '<pre class="transcript"><div class="cmd-block"><span class="comment"># &lt;b&gt;bold&lt;/b&gt;</span>\n'
+        '<span class="prompt">$ x</span>\n'
+        '<span class="exit-code">exit code: 0</span></div></pre>'
+    )
 
 
 def test_render_transcript_cast_stem_linkified_when_in_cast_stems() -> None:
@@ -327,6 +332,23 @@ def test_render_transcript_cast_stem_linkification_uses_html_escaped_stem() -> N
     result = render_transcript("$ cmd\na&b output\n? 0", cast_stems=["a&b"])
     # The escaped form should appear as the link href target.
     assert 'href="#cast-a&amp;b"' in result
+
+
+def test_render_transcript_multiple_cast_stems_are_all_linkified() -> None:
+    """Each distinct stem in cast_stems is linkified to its own anchor."""
+    result = render_transcript("$ cmd\nrec-1 then rec-2 output\n? 0", cast_stems=["rec-1", "rec-2"])
+    assert 'href="#cast-rec-1"' in result
+    assert 'href="#cast-rec-2"' in result
+
+
+def test_render_transcript_repeated_stem_only_first_occurrence_linkified() -> None:
+    """A stem appearing twice is linkified only at its first occurrence (replace(..., 1))."""
+    result = render_transcript("$ cmd\nrec-1 and rec-1 again\n? 0", cast_stems=["rec-1"])
+    # Exactly one anchor is produced even though the stem appears twice.
+    assert result.count('href="#cast-rec-1"') == 1
+    # The second, un-linkified occurrence of the bare stem remains in the output.
+    assert result.count(">rec-1<") == 1
+    assert "rec-1 again" in result
 
 
 def test_render_transcript_empty_text_produces_only_transcript_wrapper() -> None:
@@ -453,8 +475,10 @@ def test_render_test_detail_multiple_cast_files_indexed_correctly(tmp_path: Path
     assert "TUI recording: beta" in result
 
 
-def test_render_test_detail_empty_directory_returns_empty_string(tmp_path: Path) -> None:
-    """An empty test directory produces an empty string."""
+def test_render_test_detail_returns_empty_string_when_no_renderable_files(tmp_path: Path) -> None:
+    """A directory with no recognized files (even if it has other files) produces an empty string."""
+    # An unrelated file present in the directory must be ignored entirely.
+    (tmp_path / "ignored.log").write_text("some log output")
     result = render_test_detail(tmp_path)
     assert result == ""
 

@@ -1,5 +1,6 @@
 """Unit tests for the editor module."""
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.editor import get_editor_command
+from imbue.mngr.utils.polling import poll_until
 
 
 def _create_executable_script(tmp_path: Path, name: str, content: str) -> Path:
@@ -117,15 +119,19 @@ def test_editor_session_wait_for_result_raises_if_not_started() -> None:
 
 
 def test_editor_session_wait_for_result_returns_content_on_success(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that wait_for_result() returns content when editor exits successfully."""
-    # Use 'true' which exits immediately with code 0
-    monkeypatch.setenv("EDITOR", "true")
+    """Test that wait_for_result() returns the content the editor wrote to its file argument."""
+    # A fake editor that actually writes to its $1 file argument, proving the
+    # result is read from what the editor produced (not pre-seeded into the file).
+    editor = _create_executable_script(
+        tmp_path,
+        "writing_editor.sh",
+        '#!/bin/bash\necho "Edited content" > "$1"\n',
+    )
+    monkeypatch.setenv("EDITOR", str(editor))
     with EditorSession.create() as session:
-        # Write content to temp file before starting
-        # (simulates what the user would do in the editor)
-        session.temp_file_path.write_text("Edited content")
         session.start()
         result = session.wait_for_result()
         assert result == "Edited content"
@@ -145,27 +151,38 @@ def test_editor_session_wait_for_result_returns_none_on_non_zero_exit(
 
 
 def test_editor_session_wait_for_result_returns_none_on_empty_content(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that wait_for_result() returns None when content is empty."""
-    # Use 'true' which exits with code 0 but doesn't modify the file
-    monkeypatch.setenv("EDITOR", "true")
-    with EditorSession.create() as session:
-        # File is empty by default after create
+    """Test that wait_for_result() returns None when the editor leaves only whitespace."""
+    # A fake editor that writes only whitespace/newlines to its file argument;
+    # after rstrip this is empty and should yield None.
+    editor = _create_executable_script(
+        tmp_path,
+        "whitespace_only_editor.sh",
+        '#!/bin/bash\nprintf "   \\n\\n" > "$1"\n',
+    )
+    monkeypatch.setenv("EDITOR", str(editor))
+    with EditorSession.create(initial_content="seed") as session:
         session.start()
         result = session.wait_for_result()
         assert result is None
 
 
 def test_editor_session_wait_for_result_strips_trailing_whitespace(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that wait_for_result() strips trailing whitespace."""
-    # Use 'true' which exits with code 0 but doesn't modify the file
-    monkeypatch.setenv("EDITOR", "true")
+    """Test that wait_for_result() strips trailing whitespace the editor wrote."""
+    # A fake editor that writes content with trailing whitespace/newlines to its
+    # file argument; wait_for_result should return the rstripped content.
+    editor = _create_executable_script(
+        tmp_path,
+        "trailing_whitespace_editor.sh",
+        '#!/bin/bash\nprintf "Content with whitespace  \\n\\n" > "$1"\n',
+    )
+    monkeypatch.setenv("EDITOR", str(editor))
     with EditorSession.create() as session:
-        # Write content with trailing whitespace
-        session.temp_file_path.write_text("Content with whitespace  \n\n")
         session.start()
         result = session.wait_for_result()
         assert result == "Content with whitespace"
@@ -245,3 +262,66 @@ def test_editor_session_is_finished_returns_true_after_wait(
         session.start()
         session.wait_for_result()
         assert session.is_finished() is True
+
+
+def test_editor_session_on_exit_callback_runs_and_result_is_cached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that the on_exit callback fires once when the editor exits, and that
+    wait_for_result() then returns the content cached by the monitor thread."""
+    editor = _create_executable_script(
+        tmp_path,
+        "callback_editor.sh",
+        '#!/bin/bash\necho "Async edited" > "$1"\nexit 0\n',
+    )
+    monkeypatch.setenv("EDITOR", str(editor))
+
+    callback_done = threading.Event()
+    call_count = 0
+
+    def on_exit() -> None:
+        nonlocal call_count
+        call_count += 1
+        callback_done.set()
+
+    with EditorSession.create() as session:
+        session.start(on_exit=on_exit)
+        # The monitor thread should detect the editor exit and invoke the callback.
+        assert poll_until(callback_done.is_set), "on_exit callback did not fire within timeout"
+        # The callback ran, and the monitor thread cached the result, so
+        # is_finished() should already be True before we call wait_for_result().
+        assert poll_until(session.is_finished), "monitor thread did not mark session finished"
+        # wait_for_result() should now hit the early-return cached-result branch.
+        result = session.wait_for_result()
+        assert result == "Async edited"
+        # The callback must have run exactly once.
+        assert call_count == 1
+
+
+def test_editor_session_cleanup_after_finished_removes_temp_file_and_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that cleanup() after the editor finishes removes the temp file, and
+    that a second cleanup() is a harmless no-op."""
+    editor = _create_executable_script(
+        tmp_path,
+        "finishing_editor.sh",
+        '#!/bin/bash\necho "Done editing" > "$1"\nexit 0\n',
+    )
+    monkeypatch.setenv("EDITOR", str(editor))
+
+    session = EditorSession.create()
+    temp_path = session.temp_file_path
+    session.start()
+    result = session.wait_for_result()
+    assert result == "Done editing"
+    assert temp_path.exists()
+
+    session.cleanup()
+    assert not temp_path.exists()
+
+    # A second cleanup must not raise even though the temp file is already gone.
+    session.cleanup()
+    assert not temp_path.exists()

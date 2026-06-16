@@ -5,6 +5,7 @@ import json
 import logging
 import sys
 import threading
+import traceback
 import types
 from collections.abc import Callable
 from pathlib import Path
@@ -42,14 +43,14 @@ from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.testing import FakeTtyStream
 
 
-def test_resolve_log_dir_uses_absolute_path(mngr_test_prefix: str) -> None:
+def test_resolve_log_dir_uses_absolute_path() -> None:
     """Absolute log_dir should be used as-is."""
     resolved = _resolve_log_dir(Path("/absolute/path/logs"), Path("/custom/mngr"))
 
     assert resolved == Path("/absolute/path/logs")
 
 
-def test_resolve_log_dir_uses_default_host_dir_for_relative(mngr_test_prefix: str) -> None:
+def test_resolve_log_dir_uses_default_host_dir_for_relative() -> None:
     """Relative log_dir should be resolved relative to default_host_dir."""
     resolved = _resolve_log_dir(Path("my_logs"), Path("/custom/mngr"))
 
@@ -83,6 +84,7 @@ def test_setup_logging_creates_events_jsonl_file(temp_mngr_ctx: MngrContext) -> 
 
     events_file = log_dir / "logs" / "mngr" / "events.jsonl"
     assert events_file.exists()
+    assert "test log message" in events_file.read_text()
 
 
 def test_setup_logging_writes_flat_jsonl_with_envelope_and_loguru_fields(temp_mngr_ctx: MngrContext) -> None:
@@ -112,13 +114,15 @@ def test_setup_logging_writes_flat_jsonl_with_envelope_and_loguru_fields(temp_mn
     assert "pid" in parsed
     assert parsed["command"] == "list"
 
-    # Verify flattened loguru metadata
-    assert "function" in parsed
-    assert "line" in parsed
-    assert "module" in parsed
-    assert "logger_name" in parsed
-    assert "file_name" in parsed
-    assert "file_path" in parsed
+    # Verify flattened loguru metadata. The deterministic fields are pinned to
+    # exact values so a regression that drops or mis-maps a field is caught;
+    # pid/thread_id/elapsed are runtime-dependent and only checked for presence.
+    assert parsed["function"] == "test_setup_logging_writes_flat_jsonl_with_envelope_and_loguru_fields"
+    assert isinstance(parsed["line"], int)
+    assert parsed["module"] == "logging_test"
+    assert parsed["logger_name"] == "mngr.utils.logging_test"
+    assert parsed["file_name"] == "logging_test.py"
+    assert parsed["file_path"].endswith("logging_test.py")
     assert "elapsed_seconds" in parsed
     assert "process_name" in parsed
     assert "thread_name" in parsed
@@ -139,6 +143,7 @@ def test_setup_logging_uses_custom_log_file_path(tmp_path: Path, temp_mngr_ctx: 
     # Log a message to create the file
     logger.info("custom path test")
     assert custom_log_path.exists()
+    assert "custom path test" in custom_log_path.read_text()
 
 
 def test_setup_logging_creates_parent_dirs_for_custom_log_path(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -184,6 +189,7 @@ def test_setup_logging_expands_user_in_custom_log_path(tmp_path: Path, temp_mngr
     # Log something so loguru creates the file
     logger.info("expanded test")
     assert expanded_path.exists()
+    assert "expanded test" in expanded_path.read_text()
 
 
 # =============================================================================
@@ -251,6 +257,36 @@ def test_log_call_handles_kwargs() -> None:
 
     result = greet("World", greeting="Hi")
     assert result == "Hi, World!"
+
+
+def test_log_call_emits_entry_and_exit_trace_records() -> None:
+    """log_call should emit a DEBUG record on entry and a TRACE record on exit.
+
+    The exit record carries the formatted return value as a structured `result`
+    field (not in the message text), so we assert on the captured records'
+    levels, messages, and extras rather than only on the returned value.
+    """
+    records: list[Any] = []
+    sink_id = logger.add(lambda msg: records.append(msg.record), level="TRACE", format="{message}")
+    try:
+
+        @log_call
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        assert add(3, 5) == 8
+    finally:
+        logger.remove(sink_id)
+
+    entry_records = [r for r in records if r["message"] == "Calling add"]
+    assert len(entry_records) == 1
+    assert entry_records[0]["level"].name == "DEBUG"
+    assert entry_records[0]["extra"] == {"a": "3", "b": "5"}
+
+    exit_records = [r for r in records if r["message"].startswith("Calling add [done in")]
+    assert len(exit_records) == 1
+    assert exit_records[0]["level"].name == "TRACE"
+    assert exit_records[0]["extra"] == {"result": "8"}
 
 
 # =============================================================================
@@ -468,6 +504,40 @@ def test_logging_suppressor_buffers_messages() -> None:
         LoggingSuppressor.disable_and_replay(clear_screen=False)
 
 
+def test_logging_suppressor_withholds_console_output_until_replay(temp_mngr_ctx: MngrContext) -> None:
+    """Suppression should keep console output off the real stream until replay.
+
+    Replaces sys.stderr with a StringIO before enabling suppression so we can
+    observe the actual console destination. The suppressor captures sys.stderr
+    at enable time and restores it on disable_and_replay, so the StringIO is the
+    stream that buffered messages are ultimately replayed to. We assert it stays
+    empty while suppressed and receives the message only after replay -- proving
+    suppression genuinely prevents real console output rather than merely
+    populating an internal buffer.
+    """
+    setup_logging(
+        LoggingConfig(console_level=LogLevel.INFO),
+        default_host_dir=temp_mngr_ctx.config.default_host_dir,
+        command="test",
+    )
+
+    saved_stderr = sys.stderr
+    console_stream = io.StringIO()
+    sys.stderr = console_stream
+    try:
+        LoggingSuppressor.enable(LogLevel.INFO)
+        try:
+            logger.info("withheld console message")
+            # While suppressed, nothing should have reached the console stream.
+            assert console_stream.getvalue() == ""
+        finally:
+            LoggingSuppressor.disable_and_replay(clear_screen=False)
+        # After replay, the buffered message is flushed to the real console stream.
+        assert "withheld console message" in console_stream.getvalue()
+    finally:
+        sys.stderr = saved_stderr
+
+
 def test_logging_suppressor_respects_buffer_size() -> None:
     """Suppressor should limit buffer to specified size."""
     try:
@@ -580,9 +650,11 @@ def test_remove_console_handlers_is_idempotent(temp_mngr_ctx: MngrContext) -> No
 
     setup_logging(logging_config, default_host_dir=temp_mngr_ctx.config.default_host_dir, command="test")
     remove_console_handlers()
+    assert mngr_logging_module._console_handler_id is None
 
-    # Second call should not raise an error
+    # Second call should be a no-op and leave the handler ID cleared.
     remove_console_handlers()
+    assert mngr_logging_module._console_handler_id is None
 
 
 def test_remove_console_handlers_when_no_handlers_exist() -> None:
@@ -649,8 +721,31 @@ def _emit_paramiko_record(handler: _ParamikoToLoguruHandler, message: str, level
     handler.emit(record)
 
 
+def _capture_paramiko_emission(
+    handler: _ParamikoToLoguruHandler, message: str, input_level: int
+) -> list[tuple[str, str]]:
+    """Emit one record through the handler and return (level_name, message) pairs.
+
+    A TRACE-level callable sink receives every record regardless of routed level,
+    so the recorded ``level.name`` reflects the level the handler actually emitted
+    at (e.g. DEBUG vs WARNING vs TRACE), letting tests assert on routing -- a
+    higher-level sink could not distinguish a WARNING from a DEBUG.
+    """
+    captured: list[tuple[str, str]] = []
+    sink_id = logger.add(
+        lambda msg: captured.append((msg.record["level"].name, str(msg))),
+        level="TRACE",
+        format="{message}",
+    )
+    try:
+        _emit_paramiko_record(handler, message, input_level)
+    finally:
+        logger.remove(sink_id)
+    return captured
+
+
 @pytest.mark.parametrize(
-    "message, input_level, expected_substring, sink_level",
+    "message, input_level, expected_substring, expected_level",
     [
         pytest.param(
             "Exception (client): Error reading SSH protocol banner",
@@ -674,13 +769,6 @@ def _emit_paramiko_record(handler: _ParamikoToLoguruHandler, message: str, level
             id="eof_to_debug",
         ),
         pytest.param(
-            "Some paramiko warning",
-            logging.WARNING,
-            "warning",
-            "DEBUG",
-            id="warning_level_to_debug",
-        ),
-        pytest.param(
             "starting thread (client mode)",
             logging.DEBUG,
             "starting thread",
@@ -689,26 +777,53 @@ def _emit_paramiko_record(handler: _ParamikoToLoguruHandler, message: str, level
         ),
     ],
 )
-@pytest.mark.allow_warnings(match=r"^\[paramiko\] Some paramiko warning")
 def test_paramiko_handler_routes_expected_messages(
     message: str,
     input_level: int,
     expected_substring: str,
-    sink_level: str,
-    monkeypatch: pytest.MonkeyPatch,
+    expected_level: str,
+    temp_mngr_ctx: MngrContext,
 ) -> None:
-    # Enable paramiko TRACE forwarding. The toggle is a module-level flag set
-    # by setup_logging() from LoggingConfig.enable_paramiko_logging; bypass the
-    # full setup for this test by overriding the module attribute directly.
-    monkeypatch.setattr(mngr_logging_module, "_paramiko_logging_enabled", True)
-    handler = _ParamikoToLoguruHandler()
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg), level=sink_level)
+    """Expected paramiko records are routed to the quiet levels (DEBUG/TRACE).
+
+    setup_logging() with enable_paramiko_logging=True is the production path that
+    flips the module-level forwarding toggle; the DEBUG-input case relies on it.
+    """
+    setup_logging(
+        LoggingConfig(console_level=LogLevel.INFO, enable_paramiko_logging=True),
+        default_host_dir=temp_mngr_ctx.config.default_host_dir,
+        command="test",
+    )
     try:
-        _emit_paramiko_record(handler, message, input_level)
-        assert any("[paramiko]" in m and expected_substring in m for m in messages)
+        captured = _capture_paramiko_emission(_ParamikoToLoguruHandler(), message, input_level)
     finally:
-        logger.remove(handler_id)
+        # Reset the module-level forwarding toggle (a global) back to its default
+        # via the same production path so it does not leak to later tests.
+        setup_logging(
+            LoggingConfig(console_level=LogLevel.INFO, enable_paramiko_logging=False),
+            default_host_dir=temp_mngr_ctx.config.default_host_dir,
+            command="test",
+        )
+
+    matching = [(level, text) for level, text in captured if "[paramiko]" in text and expected_substring in text]
+    assert len(matching) == 1
+    assert matching[0][0] == expected_level
+
+
+@pytest.mark.allow_warnings(match=r"^\[paramiko\] Some paramiko warning")
+def test_paramiko_handler_routes_warning_level_to_warning() -> None:
+    """A paramiko record emitted at WARNING level stays visible at WARNING.
+
+    The handler's elif-WARNING branch routes logging.WARNING -> logger.warning,
+    so the record is emitted at WARNING (not downgraded to debug). This case is
+    split out from the DEBUG/TRACE routing cases because it both expects a
+    different level and must opt out of the autouse no-warnings check.
+    """
+    captured = _capture_paramiko_emission(_ParamikoToLoguruHandler(), "Some paramiko warning", logging.WARNING)
+
+    matching = [(level, text) for level, text in captured if "[paramiko]" in text and "warning" in text]
+    assert len(matching) == 1
+    assert matching[0][0] == "WARNING"
 
 
 def test_paramiko_handler_routes_joined_traceback_body_to_debug() -> None:
@@ -809,11 +924,24 @@ def test_paramiko_transport_log_patch_joins_list_messages() -> None:
 
 
 def _get_paramiko_traceback() -> types.TracebackType:
+    """Return a real traceback whose frames pass through paramiko's own code.
+
+    Calling the unbound ``Channel._send`` with ``None`` as ``self`` raises an
+    AttributeError from inside paramiko/channel.py, giving us a genuine
+    paramiko-framed traceback. We assert the traceback actually contains a
+    paramiko frame so that ``_is_expected_paramiko_thread_exception`` (which
+    requires one) is exercised against a faithful traceback rather than a
+    misleading one that happens to lack a /paramiko/ frame.
+    """
     try:
         cast(Any, paramiko.channel.Channel._send)(None, b"test", None)  # ty: ignore[unresolved-attribute]
-    except (AttributeError, TypeError, OSError) as e:
-        assert e.__traceback__ is not None
-        return e.__traceback__
+    except AttributeError as e:
+        tb = e.__traceback__
+        assert tb is not None
+        assert any("/paramiko/" in frame.filename for frame in traceback.extract_tb(tb)), (
+            "expected the captured traceback to pass through a paramiko frame"
+        )
+        return tb
     raise AssertionError("should not reach here")
 
 

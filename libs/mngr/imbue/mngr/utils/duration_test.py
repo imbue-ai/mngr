@@ -37,6 +37,7 @@ def test_parse_duration_case_insensitive() -> None:
     assert parse_duration_to_seconds("24H") == 86400.0
     assert parse_duration_to_seconds("30M") == 1800.0
     assert parse_duration_to_seconds("90S") == 90.0
+    assert parse_duration_to_seconds("1H30M") == 5400.0
 
 
 def test_parse_duration_with_whitespace() -> None:
@@ -48,9 +49,22 @@ def test_parse_duration_empty_string_raises() -> None:
         parse_duration_to_seconds("")
 
 
+def test_parse_duration_whitespace_only_raises() -> None:
+    with pytest.raises(UserInputError, match="empty string"):
+        parse_duration_to_seconds("   ")
+
+
 def test_parse_duration_invalid_format_raises() -> None:
     with pytest.raises(UserInputError, match="Invalid duration"):
         parse_duration_to_seconds("abc")
+
+
+@pytest.mark.parametrize("bad_input", ["7x", "1d extra", "d", "5 weeks", "1h foo"])
+def test_parse_duration_trailing_garbage_raises(bad_input: str) -> None:
+    """The duration pattern is anchored only at the end, so unit-less or trailing-garbage
+    inputs that the optional groups don't consume must be rejected."""
+    with pytest.raises(UserInputError, match="Invalid duration"):
+        parse_duration_to_seconds(bad_input)
 
 
 def test_parse_duration_zero_raises() -> None:
