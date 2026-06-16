@@ -1,0 +1,1 @@
+minds: bump test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key timeout to 30s (from the implicit 10s pytest-timeout + 10s _wait_until_finished deadline). The test occasionally exceeds 10s under heavy CI load -- same root cause as its already-@pytest.mark.flaky sibling.
