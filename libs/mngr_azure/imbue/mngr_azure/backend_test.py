@@ -1,10 +1,12 @@
 from pathlib import Path
 
 import pytest
+from pydantic import Field
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.backend import AzureProvider
 from imbue.mngr_azure.backend import AzureProviderBackend
@@ -167,3 +169,41 @@ def test_parse_build_args_rejects_unknown_azure_flag(temp_mngr_ctx: MngrContext)
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=3600)
     with pytest.raises(MngrError, match="Unknown azure build arg"):
         provider._parse_build_args(["--azure-bogus=1"])
+
+
+class _RecordingReclaimClient(_SubnetStubClient):
+    """Client that records reclaim_orphaned_network_resources calls."""
+
+    reclaim_calls: list[tuple[str, bool]] = Field(default_factory=list)
+
+    def reclaim_orphaned_network_resources(
+        self, provider_name: ProviderInstanceName, dry_run: bool = False
+    ) -> list[ProviderResourceInfo]:
+        self.reclaim_calls.append((str(provider_name), dry_run))
+        return [ProviderResourceInfo(provider_name=provider_name, kind="network_interface", name="old-nic")]
+
+
+def test_gc_provider_resources_delegates_to_client(temp_mngr_ctx: MngrContext) -> None:
+    """AzureProvider.gc_provider_resources forwards to the client with its own name + dry_run."""
+    config = AzureProviderConfig(subscription_id="sub-123", auto_shutdown_seconds=3600)
+    client = _RecordingReclaimClient(
+        credential=object(),
+        subscription_id="sub-123",
+        region=config.default_region,
+        resource_group=config.resource_group,
+        vnet_name=config.vnet_name,
+        subnet_name=config.subnet_name,
+        nsg_name=config.nsg_name,
+    )
+    provider = AzureProvider(
+        name=ProviderInstanceName("azure-test"),
+        host_dir=config.host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=config,
+        vps_client=client,
+        azure_client=client,
+        azure_config=config,
+    )
+    reclaimed = provider.gc_provider_resources(dry_run=True)
+    assert client.reclaim_calls == [("azure-test", True)]
+    assert [(r.kind, r.name) for r in reclaimed] == [("network_interface", "old-nic")]

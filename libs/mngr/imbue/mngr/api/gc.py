@@ -140,6 +140,17 @@ def gc(
                 result=result,
             )
 
+    if resource_types.is_provider_resources:
+        if on_resource_type_start:
+            on_resource_type_start("provider_resources")
+        with log_span("Garbage collecting orphaned provider resources"):
+            gc_provider_resources(
+                providers=providers,
+                dry_run=dry_run,
+                error_behavior=error_behavior,
+                result=result,
+            )
+
     return result
 
 
@@ -683,6 +694,35 @@ def gc_build_cache(
                 error_msg = f"Failed to delete cache entry {cache_entry}: {e}"
                 result.errors.append(error_msg)
                 _handle_error(error_msg, error_behavior, exc=e)
+
+
+def gc_provider_resources(
+    providers: Sequence[ProviderInstanceInterface],
+    dry_run: bool,
+    error_behavior: ErrorBehavior,
+    result: GcResult,
+) -> None:
+    """Reclaim orphaned provider-level cloud resources (e.g. Azure NICs/public IPs).
+
+    Delegates to each provider's ``gc_provider_resources`` hook (a no-op for most
+    providers). Operates per-provider rather than per-host: these resources are
+    orphans precisely because no host owns them. Best-effort -- a provider that is
+    unavailable is skipped, and other failures are reported but do not abort the
+    rest of GC unless ``error_behavior`` says so.
+    """
+    for provider in providers:
+        try:
+            reclaimed = provider.gc_provider_resources(dry_run=dry_run)
+        except ProviderUnavailableError as e:
+            # Provider is offline -- discover_hosts already warned the user.
+            logger.debug("Skipped provider-resource GC for provider {} (unavailable): {}", provider.name, e)
+            continue
+        except MngrError as e:
+            error_msg = f"Failed to reclaim provider resources for {provider.name}: {e}"
+            result.errors.append(error_msg)
+            _handle_error(error_msg, error_behavior, exc=e)
+            continue
+        result.provider_resources_destroyed.extend(reclaimed)
 
 
 def _get_orphaned_work_dirs(host: OnlineHostInterface, provider_name: ProviderInstanceName) -> list[WorkDirInfo]:

@@ -735,8 +735,10 @@ def _run_post_destroy_gc(
 ) -> None:
     """Run garbage collection after destroying agents.
 
-    This cleans up orphaned host-level resources (machines, work dirs, snapshots, volumes).
-    Errors are logged but don't prevent destroy from reporting success.
+    This cleans up orphaned host-level resources (machines, work dirs, snapshots,
+    volumes) and orphaned provider-level resources (e.g. Azure NICs/public IPs left
+    by a failed create). Errors are logged but don't prevent destroy from reporting
+    success.
 
     ``include_work_dirs`` follows the destroy command's --allow-worktree-removal
     flag.  When False, GC skips work-dir cleanup so the user's worktree stays
@@ -754,6 +756,7 @@ def _run_post_destroy_gc(
             is_volumes=True,
             is_logs=False,
             is_build_cache=False,
+            is_provider_resources=True,
         )
 
         result = api_gc(
