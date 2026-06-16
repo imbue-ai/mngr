@@ -106,6 +106,7 @@ from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -288,7 +289,12 @@ class CodexAgentConfig(AgentTypeConfig):
     )
 
 
-class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin):
+class CodexAgent(
+    InteractiveTuiAgent[CodexAgentConfig],
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
+):
     """Agent implementation for the OpenAI Codex CLI (``codex``)."""
 
     # Stable substring of codex's header box, which renders together with the
@@ -370,6 +376,9 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         preserve_agent_state(_codex_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""

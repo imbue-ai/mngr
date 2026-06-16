@@ -16,6 +16,7 @@ absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 | waiting_reason_field | - | Y | - | Y | - | - | - | - | - | Y | - |
 | streaming_snapshot | - | Y | Y | - | - | Y | Y | - | Y | - | - |
 | session_preservation | Y | Y | Y | Y | - | Y | Y | - | Y | Y | Y |
+| unattended_operation | Y | Y | Y | Y | - | Y | Y | - | Y | Y | Y |
 
 ## Capabilities
 
@@ -26,3 +27,4 @@ absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 - **waiting_reason_field** -- Surfaces why a WAITING agent is blocked (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.
 - **streaming_snapshot** -- Publishes a live, in-progress view of the agent's assistant text. Lowest-priority; only needed if a consuming UI wants live streaming.
 - **session_preservation** -- Preserves session/transcript files when the agent is destroyed, so the conversation is not lost. Baseline; every port wants it.
+- **unattended_operation** -- Can complete a run with no human by auto-allowing in-run tool prompts. The load-bearing capability for remote / scheduled / headless agents.

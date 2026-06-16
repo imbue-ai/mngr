@@ -15,6 +15,7 @@ from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 
@@ -142,6 +143,12 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         description="Preserves session/transcript files when the agent is destroyed, so the conversation is not lost. Baseline; every port wants it.",
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         mixin=HasSessionPreservationMixin,
+    ),
+    AgentCapability(
+        key="unattended_operation",
+        description="Can complete a run with no human by auto-allowing in-run tool prompts. The load-bearing capability for remote / scheduled / headless agents.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=HasUnattendedModeMixin,
     ),
 )
 

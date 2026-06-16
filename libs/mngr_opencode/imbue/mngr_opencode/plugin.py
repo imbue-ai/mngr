@@ -79,6 +79,7 @@ from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -221,7 +222,9 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
 
 
-class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin):
+class OpenCodeAgent(
+    BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin, HasUnattendedModeMixin
+):
     """Agent implementation for OpenCode (driven via its server, not TUI keystrokes)."""
 
     # How long send_message waits for the launch script to have written the
@@ -530,6 +533,9 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin, Ha
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         preserve_agent_state(_opencode_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""

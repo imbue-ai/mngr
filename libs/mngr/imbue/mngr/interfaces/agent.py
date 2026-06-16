@@ -608,3 +608,20 @@ class HasSessionPreservationMixin(ABC):
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         """Copy this agent's session/transcript files to the preserved location before cleanup."""
         ...
+
+
+class HasUnattendedModeMixin(ABC):
+    """Mixin for agent types that can run with no human (auto-allow in-run tool prompts).
+
+    This is what makes remote / scheduled / headless agents work: every in-run
+    tool-approval prompt is auto-approved when the agent is configured for
+    unattended operation. (First-launch dialogs are handled separately, by the
+    universal mngr-owned-dialogs path.) How the auto-allow is applied differs per
+    CLI (a permission hook, a skip flag, a config write); this contract reports
+    whether unattended operation is enabled for this instance.
+    """
+
+    @abstractmethod
+    def is_unattended_enabled(self) -> bool:
+        """Whether this agent instance is configured to run unattended (auto-allow tool prompts)."""
+        ...

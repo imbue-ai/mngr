@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 from loguru import logger
 from pydantic import Field
+from pydantic import field_validator
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
@@ -29,6 +30,7 @@ from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -166,6 +168,12 @@ def _get_pi_home_dir(home_dir: Path | None = None) -> Path:
     return home_dir / _PI_HOME_DIR_NAME / _PI_AGENT_SUBDIR
 
 
+class PiAutoAllowRequiredError(PluginMngrError, ValueError):
+    """Raised when pi's auto_allow_permissions is set to False, which pi cannot honor."""
+
+    ...
+
+
 class PiCodingAgentConfig(AgentTypeConfig):
     """Config for the pi-coding agent type."""
 
@@ -185,6 +193,22 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=True,
         description="Check if pi is installed (if False, assumes it is already present)",
     )
+    auto_allow_permissions: bool = Field(
+        default=True,
+        description="pi runs every tool without an approval prompt, so it always operates unattended; "
+        "setting this to False is an error because pi cannot enforce a deny.",
+    )
+
+    @field_validator("auto_allow_permissions")
+    @classmethod
+    def _require_auto_allow(cls, value: bool) -> bool:
+        if not value:
+            raise PiAutoAllowRequiredError(
+                "pi runs every tool without an approval prompt, so it cannot honor "
+                "auto_allow_permissions=False; pi always operates unattended."
+            )
+        return value
+
     resume_session: bool = Field(
         default=True,
         description=(
@@ -282,7 +306,9 @@ def _has_api_credentials_available(
     return False
 
 
-class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin):
+class PiCodingAgent(
+    BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin, HasUnattendedModeMixin
+):
     """Agent implementation for the pi coding agent.
 
     pi's only lifecycle-event surface is its TypeScript extension API (no
@@ -762,6 +788,11 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin, Ha
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         preserve_agent_state(_pi_coding_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        # pi has no tool-approval gate, so it always runs unattended; the config
+        # field is pinned True (False is rejected at validation).
+        return self.agent_config.auto_allow_permissions
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and the session-file pointer before the state dir is deleted.

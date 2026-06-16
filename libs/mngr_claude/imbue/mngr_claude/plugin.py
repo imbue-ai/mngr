@@ -60,6 +60,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import RelativePath
@@ -1389,6 +1390,7 @@ class ClaudeAgent(
     HasCommonTranscriptMixin,
     HasStreamingSnapshotMixin,
     HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
 ):
     """Agent implementation for Claude with session resumption support."""
 
@@ -2402,6 +2404,9 @@ class ClaudeAgent(
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         preserve_agent_state(_claude_preserved_items(self.agent_config.use_env_config_dir), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve session files and clean up per-agent credentials and trust entries.

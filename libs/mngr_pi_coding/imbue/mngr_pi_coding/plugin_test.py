@@ -12,6 +12,7 @@ from typing import Any
 
 import pluggy
 import pytest
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
@@ -866,3 +867,15 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
 
     dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
     assert not dest_dir.exists()
+
+
+def test_pi_config_defaults_to_unattended() -> None:
+    # pi has no tool-approval gate, so auto_allow_permissions is pinned on.
+    assert PiCodingAgentConfig().auto_allow_permissions is True
+
+
+def test_pi_config_rejects_disabling_auto_allow() -> None:
+    # pi cannot enforce a deny, so explicitly disabling auto-allow is an error
+    # (pydantic wraps the PiAutoAllowRequiredError raised by the field validator).
+    with pytest.raises(ValidationError, match="cannot honor"):
+        PiCodingAgentConfig(auto_allow_permissions=False)

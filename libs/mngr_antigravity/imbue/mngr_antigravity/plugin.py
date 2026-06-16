@@ -122,6 +122,7 @@ from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -360,7 +361,10 @@ class AntigravityAgentConfig(AgentTypeConfig):
 
 
 class AntigravityAgent(
-    InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTranscriptMixin, HasSessionPreservationMixin
+    InteractiveTuiAgent[AntigravityAgentConfig],
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
 ):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
@@ -526,6 +530,9 @@ class AntigravityAgent(
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         preserve_agent_state(_antigravity_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and conversation-id history before the state dir is deleted."""
