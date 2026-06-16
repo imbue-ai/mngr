@@ -57,16 +57,6 @@ _RESPONSE_TIMEOUT_SECONDS = 300.0
 _RUNNING_TIMEOUT_SECONDS = 90.0
 _LIFECYCLE_TIMEOUT_SECONDS = 150.0
 
-# Interim seam for driving session adoption end-to-end before a public ``--adopt-session``
-# flag exists for these agents. When this env var is set on a ``mngr create``, the agent
-# plugin being created resolves its value (a session/conversation id or a path to the
-# agent's native session store) against its preserved / live-agent / user-native session
-# stores and rebinds it into the new agent so its first launch resumes that session. The
-# adopt-from-preserved arc step below sets it on the adopting create. Once the central
-# adopt-session mixin lands, the plugins read ``plugin_data["adopt_session"]`` from the
-# real flag and this env var becomes a thin fallback (or goes away).
-ADOPT_SESSION_ENV_VAR = "MNGR_ADOPT_SESSION"
-
 
 class AgentReleaseContext(BaseModel):
     """Per-run plumbing produced by a profile's ``setup`` and consumed by the harness.
@@ -122,9 +112,9 @@ class AgentReleaseProfile(abc.ABC):
     # pre-destroy secret -- proving the preserved store actually resumes, not merely that
     # its bytes landed on disk. Off by default; an agent flips it on once its plugin
     # implements adoption of a preserved session (resolve the native store, rebind it to
-    # the new agent's work_dir, write the resume pointer), triggered via the
-    # ``ADOPT_SESSION_ENV_VAR`` seam. Requires ``preserves_on_destroy`` and a non-empty
-    # ``native_session_preserved_relpaths`` (the store the fresh agent adopts).
+    # the new agent's work_dir, write the resume pointer) behind ``--adopt-session``.
+    # Requires ``preserves_on_destroy`` and a non-empty ``native_session_preserved_relpaths``
+    # (the store the fresh agent adopts).
     adopts_preserved_session: bool = False
 
     @abc.abstractmethod
@@ -161,7 +151,7 @@ class AgentReleaseProfile(abc.ABC):
         return "What was the exact secret I asked you to remember earlier? Reply with just the secret."
 
     def adopt_session_arg(self, preserved_dir: Path) -> str:
-        """Return the value to hand the adopting create via ``ADOPT_SESSION_ENV_VAR``.
+        """Return the value to hand the adopting create via ``--adopt-session``.
 
         Computed from the just-preserved agent dir (``preserved/<name>--<id>/``): either a
         session/conversation id the plugin can resolve, or an absolute path to the agent's
@@ -325,18 +315,13 @@ def _adopt_preserved_and_recall(
     Runs after the source agent is destroyed (so its live state dir is gone and the only
     agent under ``agents/`` is this adopting one). The adopting agent is created against a
     *new* worktree -- exercising the per-agent original-cwd rebind -- with the resolved
-    adopt argument passed via ``ADOPT_SESSION_ENV_VAR``. No secret is seeded: recall must
-    succeed purely from the adopted session's restored context.
+    adopt argument passed via ``--adopt-session``. No secret is seeded: recall must succeed
+    purely from the adopted session's restored context.
     """
     host_dir = ctx.host_dir
     adopt_work = tmp_path / "adopt_work"
     profile.prepare_adoption_workspace(adopt_work)
-    adopt_ctx = ctx.model_copy(
-        update={
-            "workspace": adopt_work,
-            "env": {**ctx.env, ADOPT_SESSION_ENV_VAR: profile.adopt_session_arg(preserved_dir)},
-        }
-    )
+    adopt_ctx = ctx.model_copy(update={"workspace": adopt_work})
     adopt_name = f"{profile.agent_type.replace('-', '')}-adopt-{get_short_random_string()}"
     created = False
     try:
@@ -347,6 +332,8 @@ def _adopt_preserved_and_recall(
             profile.agent_type,
             "--no-connect",
             "--yes",
+            "--adopt-session",
+            profile.adopt_session_arg(preserved_dir),
             *profile.create_extra_args(adopt_ctx),
             timeout=_CREATE_TIMEOUT_SECONDS,
         )

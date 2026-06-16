@@ -2659,20 +2659,25 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem]] | None:
-    """Register the --adopt-session CLI option for the create command."""
+    """Register the --adopt-session CLI option for the create command.
+
+    Registered here (the claude plugin) but agent-agnostic: it applies to any agent
+    type that supports session adoption (``HasSessionAdoptionMixin``). The
+    per-agent-type validation/handling lives in each such plugin's
+    ``on_before_create``/``adopt_session``; this hookimpl only declares the option.
+    """
     if command_name == "create":
         return {
             "Behavior": [
                 OptionStackItem(
                     param_decls=("--adopt-session",),
                     multiple=True,
-                    help="Adopt an existing Claude Code session into this agent. "
-                    "Accepts a session ID or a path to a .jsonl file. A session ID is "
-                    "searched in the current and user-scope Claude config dirs, every "
-                    "live local mngr agent, and preserved sessions from destroyed agents. "
-                    "Repeatable: every named session is made available in the new agent, "
-                    "but only the last one is resumed on startup (Claude can only resume "
-                    "one session at a time).",
+                    help="Adopt an existing session into this newly created agent so it resumes "
+                    "that conversation. The agent type must support session adoption. Accepts a "
+                    "session id or a path to the session file; a session id is searched across the "
+                    "relevant user/config store, every live local mngr agent, and preserved "
+                    "sessions from destroyed agents. Repeatable: the last named session is the one "
+                    "resumed on startup.",
                 ),
             ]
         }
@@ -2681,25 +2686,27 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Validate create args when --adopt-session is used: the agent type must
-    be an interactive Claude agent (claude or an interactive subtype of it), and
-    the option is incompatible with cloning via ``--from <agent>`` (both adopt a
-    session into the new agent).
+    """Validate ``--adopt-session`` at the agent-agnostic level, then claude's specifics.
+
+    Agent-agnostic (applies to any adoption-capable agent type): the type must support
+    session adoption (``HasSessionAdoptionMixin``), and the option is incompatible with
+    cloning via ``--from <agent>`` (both adopt a session into the new agent). The
+    claude-specific fail-fast pre-resolution below runs only for ``ClaudeAgent`` types;
+    other adoption-capable plugins validate their own session in their own
+    ``on_before_create`` (or at provisioning).
     """
     adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
     if not adopt_session:
         return None
 
-    # Resolve through the centralized agent-type registry so any interactive
-    # subtype of the claude agent is accepted, not just the literal "claude"
-    # type name. Session adoption resumes a live session, so it is gated to the
-    # interactive ``ClaudeAgent`` -- ``headless_claude`` (which runs
-    # ``claude --print`` and never resumes) does not qualify.
+    # Session adoption resumes a live session, so it is gated to interactive,
+    # adoption-capable agents. ``headless_claude`` (which runs ``claude --print`` and
+    # never resumes) does not carry the mixin and is correctly rejected here.
     resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, ClaudeAgent):
+    if not issubclass(resolved.agent_class, HasSessionAdoptionMixin):
         raise UserInputError(
-            f"--adopt-session can only be used with an interactive Claude agent type "
-            f"(claude or an interactive subtype of it), not '{args.agent_options.agent_type}'."
+            f"--adopt-session can only be used with an agent type that supports session adoption, "
+            f"not '{args.agent_options.agent_type}'."
         )
 
     if args.agent_options.source_agent_state_location is not None:
@@ -2708,12 +2715,16 @@ def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBefor
             "adopt a session into the new agent. Pick one."
         )
 
-    # Validate that every named session resolves *now* -- before any host or worktree
-    # is created. The real resolution happens again later in on_after_provisioning, but
-    # that runs inside provision_agent's ConcurrencyGroup, whose __exit__ would re-wrap a
-    # bad-ID UserInputError in a ConcurrencyExceptionGroup and surface it as an
-    # "Unexpected error" with a traceback. Resolving here (the session source is always
-    # local, so the result matches) makes a bad ID a clean, fail-fast user error.
+    # Claude-specific fail-fast resolution: validate that every named session resolves
+    # *now* -- before any host or worktree is created. The real resolution happens again
+    # later in on_after_provisioning, but that runs inside provision_agent's
+    # ConcurrencyGroup, whose __exit__ would re-wrap a bad-ID UserInputError in a
+    # ConcurrencyExceptionGroup and surface it as an "Unexpected error" with a traceback.
+    # Resolving here (the session source is always local, so the result matches) makes a
+    # bad ID a clean, fail-fast user error. Other adoption-capable agents resolve against
+    # their own native stores, so claude's resolver does not apply to them.
+    if not issubclass(resolved.agent_class, ClaudeAgent):
+        return None
     for session_arg in adopt_session:
         _resolve_adopt_session(session_arg, mngr_ctx)
 
