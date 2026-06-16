@@ -213,11 +213,11 @@ the Docker realizer rather than reimplement them.
 
 ### Agent placement
 
-- The agent runs as a process tree on the VM's OS, reached over SSH at
+- The agent runs as a process tree on the VM's OS as `root`, reached over SSH at
   `vps_ip:22` -- i.e. the outer host *is* the agent host. `Host` construction
   reuses the existing `_create_host_object` path, pointed at port 22 with the VPS
-  key instead of `container_ssh_port` with the container key. A dedicated
-  non-root agent user is a future option; v1 may run as the existing SSH user.
+  key instead of `container_ssh_port` with the container key. (A dedicated non-root
+  agent user / separate `sshd` is a deliberate non-goal for v1.)
 - `host_dir` becomes a path on the VM's root disk (e.g. `/var/lib/mngr`) instead
   of `/mngr` inside a container-mounted volume.
 - A **bare host store** reads/writes `host_state.json` and agent records directly
@@ -230,15 +230,20 @@ the Docker realizer rather than reimplement them.
 
 `BareRealizer` controls the host-level provisioning steps:
 
-- **Add**: install the mngr agent runtime + its dependencies on the VM (a new
-  `HostSetupStep`, run via the existing cloud-init / `apply_host_setup_on_outer`
-  machinery). This is the substantive new provisioning work.
-- **Add**: a systemd unit that owns the agent's `sshd`-for-the-agent (if separate)
-  and the **idle/activity watcher**, so the agent survives an instance stop/start
-  and a reboot. This replaces the Docker realizer's `docker exec`-backgrounded
-  watcher. The host-side systemd `.path` poweroff unit from the lifecycle specs is
-  reused unchanged; only the sentinel *writer* moves from the container to this
-  unit.
+- **Add**: install mngr's own host needs on the VM -- the `ssh_host_setup` packages
+  (tmux, etc.), `sshd` config, the activity watcher, and the shutdown script -- as a
+  `HostSetupStep` run via the existing cloud-init / `apply_host_setup_on_outer`
+  machinery. (Agent-specific deps come from the VM image and/or the post-create
+  setup script, not from this base step -- see Decisions.)
+- **Add**: run the user's optional **post-create setup script** on the VM after the
+  base setup, via the same `apply_host_setup_on_outer` path. This is the bare analog
+  of a `Dockerfile`.
+- **Add**: a systemd unit that owns the **idle/activity watcher**, so it survives an
+  instance stop/start and a reboot. This replaces the Docker realizer's `docker
+  exec`-backgrounded watcher. The agent reuses the VM's existing port-22 `sshd`
+  (no separate agent `sshd`). The host-side systemd `.path` poweroff unit from the
+  lifecycle specs is reused unchanged; only the sentinel *writer* moves from the
+  container to this unit.
 - **Remove**: the Docker Engine install step, the gVisor step, the btrfs loop FS +
   per-host subvolume + bind-volume, the snapshot helper, and the
   snapshot-trigger volume. None are needed without a container or v1 snapshots.
@@ -261,14 +266,15 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):  # name TBD; see Open Que
 ```
 
 `mode` is per provider-instance, so a user can configure both an `aws` (docker)
-and an `aws-bare` instance. Docker-only inputs must fail fast and clearly in bare
-mode:
+and an `aws-bare` instance. Inputs whose meaning is Docker-specific must fail fast
+and clearly in bare mode:
 
-- `image` / `build_args` change meaning. In Docker mode `image` is a Docker image;
-  in bare mode the agent runs on the VM's base OS image, so a Docker image
-  reference or `docker build` args are rejected with a clear error pointing at the
-  VM-image knob (`--aws-ami=`, etc.). Selecting the *VM* image stays a
-  cloud-specific build arg, exactly as today.
+- `image` changes meaning: in Docker mode it is a Docker image; in bare mode there
+  is no container, so a Docker image reference or `docker build` args are rejected
+  with a clear error. The bare analog is the **VM image** (a cloud-specific build
+  arg such as `--aws-ami=`, exactly as today) optionally layered with a
+  **post-create setup script** (see Decisions) -- together the bare equivalent of
+  "base image + `Dockerfile`".
 - gVisor / `docker_runtime` / `default_start_args` (passed to `docker run`) are
   rejected in bare mode.
 
@@ -338,20 +344,34 @@ realizer seam is proven by Stage 1.
 - **Stage 2 is not promised by Stage 1.** Stage 1 must leave `local`/`docker`/
   `lima`/`ssh` untouched and working.
 
+## Decisions
+
+- **Rename `mngr_vps_docker` -> `mngr_vps`.** "docker" no longer names the shared
+  VPS substrate once a bare realizer exists. Done **bundled with the realizer
+  work** (the package dir, imports across every cloud provider,
+  `VpsDockerProviderConfig` -> `VpsProviderConfig`, entry points, and docs all move
+  in the Stage 1 PR alongside the seam).
+- **Bare agent identity: `root` over the VM's existing port-22 `sshd`.** The agent
+  host is the outer host; no dedicated agent user or second `sshd` in v1. Matches
+  the container's root and keeps placement to "construct a `Host` at `vps_ip:22`
+  with the VPS key."
+- **Bare dependency provisioning: prebaked image *and* a post-create setup
+  script.** The two together are the bare analog of "base image + `Dockerfile`":
+  - The user may point at a prebaked VM image (`--aws-ami=` etc.) with their
+    agent's deps baked in (fast boot).
+  - A user-supplied post-create **setup script** runs on the VM via the existing
+    host-setup machinery (`apply_host_setup_on_outer`) after the base setup -- the
+    bare analog of a `Dockerfile`, layerable on top of any base image.
+  - Base host setup still installs only mngr's own needs (`sshd`, tmux, the
+    activity watcher + shutdown script via `ssh_host_setup`); everything
+    agent-specific comes from the image and/or the setup script.
+
 ## Open questions
 
-1. **Naming.** `VpsDockerProviderConfig` / `mngr_vps_docker` bake "docker" into the
-   name of what is becoming the shared VPS substrate. Renaming to `mngr_vps`
-   (or similar) is cleaner but a wide rename touching every cloud provider. Decide
-   whether to rename in Stage 1 or leave the name and add `mode`.
-2. **Agent user.** Run the bare agent as `root` (simplest, matches the container's
-   root) or provision a dedicated non-root agent user (better hygiene, more setup)?
-3. **`sshd` for the agent.** Reuse the VM's existing `sshd` on port 22 (agent host
-   == outer host, simplest) or run a second `sshd` for the agent on a dedicated
-   port/user to keep agent access separable from machine-admin access?
-4. **Snapshot follow-up shape.** When snapshots arrive for bare, prefer cloud disk
-   snapshots (durable, slow, per-cloud) or btrfs-on-root (fast, local, lost on VM
-   destroy)? Affects whether bare provisions a separate data disk up front.
+1. **Snapshot follow-up shape** (not a Stage 1 blocker -- snapshots are deferred).
+   When snapshots arrive for bare, prefer cloud disk snapshots (durable, slow,
+   per-cloud) or btrfs-on-root (fast, local, lost on VM destroy)? Affects whether
+   bare provisions a separate data disk up front.
 
 ## Related specs
 

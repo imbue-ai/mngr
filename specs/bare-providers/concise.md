@@ -44,5 +44,8 @@ container cleanup); snapshots deferred (`supports_snapshots = False`).
 - Stage 2 (follow-up): promote substrate to an interface; fold `local`/`lima`/`ssh`
   into the grid; consolidate the two Docker implementations into one `DockerRealizer`.
 
-See `spec.md` for detail and open questions (naming `mngr_vps_docker` -> `mngr_vps`,
-agent user/root, agent `sshd`, snapshot shape).
+**Decisions:** rename `mngr_vps_docker` -> `mngr_vps` bundled into the Stage 1 PR;
+bare agent runs as `root` on the VM's port-22 `sshd` (no separate agent user); bare
+deps come from a prebaked VM image and/or an optional post-create setup script (the
+bare analog of "base image + Dockerfile"). **Only open question:** the bare snapshot
+shape (cloud disk vs btrfs-on-root), deferred past v1. See `spec.md` for detail.
