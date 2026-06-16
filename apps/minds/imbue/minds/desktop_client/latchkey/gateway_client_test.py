@@ -14,6 +14,7 @@ import pytest
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientNotInitializedError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 
 
@@ -341,18 +342,27 @@ def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: ht
     cached the previous one).
     """
 
+    call_count = {"value": 0}
+
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
+        call_count["value"] += 1
         raise transport_error
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
         client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
-    # ``_require_base_url`` now raises ``LatchkeyGatewayClientNotInitializedError``
-    # (a subclass of ``LatchkeyGatewayClientError``) because the cache
-    # was cleared by the connect-error handler.
-    with pytest.raises(LatchkeyGatewayClientError):
+    # The cache was cleared by the connect-error handler, so the second
+    # call cannot build a URL and fails fast at ``ensure_initialized``
+    # *without* reaching the transport. Asserting the specific
+    # not-initialized subclass (and that the handler ran only once)
+    # is what actually pins invalidation: a base ``LatchkeyGatewayClientError``
+    # would also be raised if the cache were *not* cleared (the handler
+    # would just raise the connect error again), so it could not catch
+    # a regression that stopped invalidating.
+    with pytest.raises(LatchkeyGatewayClientNotInitializedError):
         client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
+    assert call_count["value"] == 1
 
 
 def test_non_connect_transport_errors_do_not_invalidate() -> None:
@@ -392,13 +402,21 @@ def test_iter_permission_requests_invalidates_on_connect_error() -> None:
     from the supervisor record instead of pounding the stale port.
     """
 
+    call_count = {"value": 0}
+
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
+        call_count["value"] += 1
         raise httpx.ConnectError("connection refused")
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
         list(client.iter_permission_requests())
-    # State cleared -- next call cannot build a URL.
-    with pytest.raises(LatchkeyGatewayClientError):
+    # State cleared -- the next call fails fast at ``ensure_initialized``
+    # with the not-initialized subclass and never reaches the transport.
+    # Asserting the subclass (and call_count == 1) is what proves the
+    # connect error invalidated; a base ``LatchkeyGatewayClientError``
+    # assertion would pass even if invalidation regressed.
+    with pytest.raises(LatchkeyGatewayClientNotInitializedError):
         list(client.iter_permission_requests())
+    assert call_count["value"] == 1
