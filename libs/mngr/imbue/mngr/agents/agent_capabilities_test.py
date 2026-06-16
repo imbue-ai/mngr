@@ -38,6 +38,11 @@ class _FakeTuiSnapshotAgent(CliBackedAgentMixin, HasStreamingSnapshotMixin): ...
 class _FakeAdoptingAgent(CliBackedAgentMixin, HasSessionAdoptionMixin): ...
 
 
+# A headless CLI agent that structurally inherits the adoption mixin (as headless_claude
+# inherits it from ClaudeAgent): session_resume is interactive-only, so it is n/a here.
+class _FakeHeadlessAdoptingAgent(CliBackedAgentMixin, StreamingHeadlessAgentMixin, HasSessionAdoptionMixin): ...
+
+
 # A bare command runner: not CLI-backed, unattended by construction.
 class _FakeCommandAgent(HasUnattendedModeMixin): ...
 
@@ -264,16 +269,18 @@ def test_render_capability_matrix_raises_when_genuine_capability_is_out_of_scope
 
 
 def test_render_capability_matrix_session_resume_tracks_adoption_mixin() -> None:
-    # session_resume is CLI-backed-only and detected by HasSessionAdoptionMixin: Y for the
-    # adopting CLI agent, - for a CLI agent that does not adopt, n/a for the command runner.
+    # session_resume is interactive-only and detected by HasSessionAdoptionMixin: Y for the
+    # adopting interactive agent, - for an interactive CLI agent that does not adopt, n/a for
+    # the headless variant (inherits the mixin but is out of scope) and the command runner.
     infos = [
         _info("claude", _FakeAdoptingAgent),
+        _info("headless_claude", _FakeHeadlessAdoptingAgent),
         _info("codex", _FakeTranscriptAgent),
         _info("command", _FakeCommandAgent),
     ]
     matrix = render_capability_matrix(AGENT_CAPABILITIES, infos)
     resume_row = next(line for line in matrix.splitlines() if line.startswith("| session_resume |"))
-    assert resume_row == "| session_resume | Y | - | n/a |"
+    assert resume_row == "| session_resume | Y | n/a | - | n/a |"
 
 
 def test_render_capability_matrix_rejects_unlisted_agent_type() -> None:
