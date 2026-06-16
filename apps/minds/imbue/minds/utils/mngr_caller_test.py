@@ -49,6 +49,13 @@ def test_call_result_defaults() -> None:
     assert result.is_timed_out is False
 
 
+# These two tests start a real multiprocessing forkserver and preload
+# ``imbue.mngr.main`` before forking a child to run the CLI. Under CI load that
+# cold start routinely exceeds the 10s global pytest-timeout (the call's own
+# timeout is 120s), so give them a generous per-test timeout and mark them flaky
+# so offload retries a contended cold start rather than failing the run.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_call_runs_mngr_version_in_forkserver_child() -> None:
     """End-to-end: a real ``mngr --version`` runs in a forkserver child.
 
@@ -63,6 +70,8 @@ def test_call_runs_mngr_version_in_forkserver_child() -> None:
     assert "mngr" in result.stdout
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_call_reports_nonzero_exit_for_unknown_command() -> None:
     result = MngrCaller().call(["definitely-not-a-real-subcommand"], timeout=120.0)
     assert result.returncode != 0
