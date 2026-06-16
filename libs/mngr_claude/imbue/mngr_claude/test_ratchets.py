@@ -17,7 +17,12 @@ _DIR = Path(__file__).parent.parent.parent
 
 # Standalone resource scripts run outside the mngr process and can only use
 # Python stdlib, so ratchets that require mngr abstractions do not apply.
-_STANDALONE_RESOURCE_SCRIPTS: tuple[str, ...] = ("sync_keychain_credentials.py", "stream_snapshot.py")
+_STANDALONE_RESOURCE_SCRIPTS: tuple[str, ...] = (
+    "sync_keychain_credentials.py",
+    "stream_snapshot.py",
+    # Prints its appended-event count to stdout for common_transcript.sh to capture.
+    "common_transcript_convert.py",
+)
 _RATCHET_SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py", "standard_ratchet_checks.py")
 
 pytestmark = pytest.mark.xdist_group(name="ratchets")

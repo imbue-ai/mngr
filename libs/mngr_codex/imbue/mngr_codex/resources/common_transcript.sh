@@ -56,9 +56,20 @@ _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/common_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
+# Shared common-transcript primitives: the convert lock that serializes this
+# converter's read-modify-write against the turn-end --single-pass flush (see
+# the library header for why duplicates would result without it).
+# shellcheck source=mngr_common_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+
 convert_new_events() {
     if [ ! -f "$INPUT_FILE" ]; then
         log_debug "Input file not found: $INPUT_FILE"
+        return
+    fi
+
+    if ! mngr_common_transcript_acquire_lock; then
+        log_warn "could not acquire convert lock; skipping pass"
         return
     fi
 
@@ -71,12 +82,15 @@ convert_new_events() {
     result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" \
         python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
+    # The read-modify-write is done; drop the lock before the (lock-free)
+    # logging below so a concurrent pass can proceed immediately.
+    mngr_common_transcript_release_lock
+
     if [ -s "$convert_stderr" ]; then
-        # Forward the converter's stderr to both the structured log (via
-        # log_warn) and the process's stderr -- the latter is what tests and
-        # operators read when something has gone wrong with conversion.
+        # A genuine converter error is logged (to events/logs/common_transcript)
+        # but never echoed to this watcher's stdout/stderr -- that would surface
+        # in the agent's pane.
         log_warn "convert error: $(cat "$convert_stderr")"
-        cat "$convert_stderr" >&2
     fi
     rm -f "$convert_stderr"
 

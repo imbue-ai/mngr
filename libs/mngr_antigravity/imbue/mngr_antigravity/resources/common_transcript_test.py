@@ -132,11 +132,11 @@ def _write_raw_transcript(state_dir: Path, lines: list[str]) -> None:
 def _run_converter(state_dir: Path) -> str:
     """Run common_transcript.sh in single-pass mode against the seeded raw transcript.
 
-    Returns the converter's combined stderr (from both the bash main script
-    and the heredoc Python) so callers can assert on loud-error messages
-    emitted by the conversion pass. The shared logging library also writes
-    structured warnings to events/logs/common_transcript/events.jsonl --
-    stderr is the easier surface to inspect in tests.
+    A clean run stays silent: the converter's count is captured by the shell and
+    any genuine error is logged to events/logs/common_transcript, never echoed to
+    stdout/stderr. Returns stderr so the guard below can flag anything the script
+    unexpectedly writes there (e.g. a shell-level failure that drops events and
+    would otherwise fail a downstream assertion mysteriously).
     """
     env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)}
     result = subprocess.run(
@@ -146,10 +146,6 @@ def _run_converter(state_dir: Path) -> str:
         text=True,
         check=True,
     )
-    # A Python traceback in the converter would mean the conversion pass
-    # crashed mid-loop and dropped subsequent events. Surface it in the
-    # failure message rather than letting a downstream assertion fail
-    # mysteriously.
     assert "Traceback" not in result.stderr, result.stderr
     return result.stderr
 
