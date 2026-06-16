@@ -79,9 +79,14 @@ def _field_label(field: str) -> str:
     return field.upper().replace(".", " ")
 
 
+def _label_column_width(fields: Sequence[str]) -> int:
+    """Width to which ``LABEL`` columns are aligned in the human view."""
+    return max((len(_field_label(f)) for f in fields), default=0)
+
+
 def _emit_vertical(model: BaseModel, fields: Sequence[str]) -> None:
     """Print one ``LABEL  value`` line per field, label-aligned (single-target human view)."""
-    width = max((len(_field_label(f)) for f in fields), default=0)
+    width = _label_column_width(fields)
     for field in fields:
         write_human_line("{}  {}", _field_label(field).ljust(width), get_field_value(model, field))
 
@@ -130,7 +135,8 @@ def _output_host(
     # In the default human view, also list the agents on the host (names only).
     if output_opts.output_format == OutputFormat.HUMAN and output_opts.format_template is None and fields is None:
         agent_names = ", ".join(str(ref.agent_name) for ref in agent_refs)
-        write_human_line("{}  {}", "AGENTS".ljust(len(_field_label("provider_name"))), agent_names or "(none)")
+        # Align the AGENTS label to the same column width as the host fields above.
+        write_human_line("{}  {}", "AGENTS".ljust(_label_column_width(_HOST_HUMAN_FIELDS)), agent_names or "(none)")
 
 
 def _output_quick(identifier: str, is_agent_target: bool, state: CombinedState, output_format: OutputFormat) -> None:
