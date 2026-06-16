@@ -16,6 +16,7 @@ around a sync operation.
 
 import os
 import shlex
+import subprocess
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterator
@@ -377,9 +378,15 @@ def _default_push_refspec(
 
 
 def _run_git_command(cmd: list[str], env: dict[str, str] | None, cg: ConcurrencyGroup, run_in_terminal: bool) -> None:
-    """Run ``cmd`` either via cg (captured) or with terminal-stdio passthrough."""
+    """Run ``cmd`` either via cg (captured) or with terminal-stdio passthrough.
+
+    In the terminal-passthrough path, stdin is redirected to /dev/null so git
+    can't block waiting for input it shouldn't be asking for (e.g. a credential
+    prompt against an SSH-keyed remote); stdout/stderr still flow to the
+    terminal so progress and error output remain visible.
+    """
     if run_in_terminal:
-        result = run_interactive_subprocess(cmd, env=env)
+        result = run_interactive_subprocess(cmd, stdin=subprocess.DEVNULL, env=env)
         if result.returncode != 0:
             raise GitSyncError(f"git exited with status {result.returncode}")
         return
@@ -407,9 +414,12 @@ def git_push(
     works on mngr's worktree-style agents (where the agent has its own branch).
 
     With ``run_in_terminal=True``, ``git`` is run as a plain subprocess with the
-    user's stdin/stdout/stderr (no redirection), so progress and errors flow
-    directly to the terminal -- intended for use from ``mngr git push``.
-    Raises :class:`GitSyncError` on a non-zero exit either way.
+    user's stdout/stderr (no redirection), so progress and errors flow directly
+    to the terminal -- intended for use from ``mngr git push``. stdin is
+    redirected to /dev/null: any push-time prompt (credential, host-key
+    confirmation, etc.) is a misconfiguration, not something the user should
+    be asked to resolve interactively. Raises :class:`GitSyncError` on a
+    non-zero exit either way.
     """
     add_safe_directory_on_remote(remote_host, remote_path)
     _configure_push_destination(remote_host, remote_path)
@@ -437,9 +447,11 @@ def git_pull(
     so they're parsed as options; the rest go after the URL as refspecs.
 
     With ``run_in_terminal=True``, ``git`` is run as a plain subprocess with the
-    user's stdin/stdout/stderr (no redirection), so merge prompts and pager
-    output flow directly to the terminal -- intended for use from
-    ``mngr git pull``. Raises :class:`GitSyncError` on a non-zero exit either way.
+    user's stdout/stderr (no redirection), so progress, merge-prompt text, and
+    pager output flow directly to the terminal -- intended for use from
+    ``mngr git pull``. stdin is redirected to /dev/null: any prompt is a
+    misconfiguration we'd rather fail fast on than leave the agent hanging.
+    Raises :class:`GitSyncError` on a non-zero exit either way.
     """
     add_safe_directory_on_remote(remote_host, remote_path)
     url, env = _build_git_url_and_env(remote_host, remote_path, is_push=False)

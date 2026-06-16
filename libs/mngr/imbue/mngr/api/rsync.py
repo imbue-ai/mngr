@@ -11,6 +11,7 @@ the defaults and the source/destination args.
 """
 
 import shlex
+import subprocess
 from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
@@ -122,9 +123,12 @@ def _do_rsync(
     destination").
 
     With ``run_in_terminal=True``, ``rsync`` is run as a plain subprocess with
-    the user's stdin/stdout/stderr (no redirection), so progress and errors
-    flow directly to the terminal. The function still waits for rsync to exit,
-    so destination-side cleanup (stash pop on MERGE) runs as usual.
+    the user's stdout/stderr (no redirection), so progress and errors flow
+    directly to the terminal. stdin is redirected to /dev/null -- rsync
+    shouldn't need to read from it, and leaving stdin connected to the
+    terminal would let it consume keystrokes meant for whatever runs after.
+    The function still waits for rsync to exit, so destination-side cleanup
+    (stash pop on MERGE) runs as usual.
 
     Raises :class:`MngrError` on non-zero exit.
     """
@@ -189,7 +193,7 @@ def _do_rsync(
         if run_in_terminal:
             with log_span("{} files from {} to {}", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", shlex.join(rsync_cmd))
-                terminal_result = run_interactive_subprocess(rsync_cmd)
+                terminal_result = run_interactive_subprocess(rsync_cmd, stdin=subprocess.DEVNULL)
             if terminal_result.returncode != 0:
                 raise MngrError(f"rsync exited with status {terminal_result.returncode}")
         elif remote_host.is_local:
