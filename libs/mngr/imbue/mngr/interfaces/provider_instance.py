@@ -397,6 +397,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
         Providers that support snapshots should preserve snapshot records and
         mark the host as DESTROYED so that gc_snapshots can age-gate their
         deletion.
+
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes (a resource that was already absent is not a failure); raises
+        ``CleanupFailedGroup`` if any real infrastructure resource was left behind. See
+        specs/cleanup-error-aggregation.md.
         """
         ...
 
