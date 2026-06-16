@@ -16,6 +16,7 @@ from imbue.mngr_vps_docker.data_types import AgentEndpoint
 from imbue.mngr_vps_docker.data_types import RealizePlacementContext
 from imbue.mngr_vps_docker.data_types import RealizedPlacement
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 
 
 class HostRealizer(MutableModel, ABC):
@@ -50,6 +51,16 @@ class HostRealizer(MutableModel, ABC):
     @abstractmethod
     def agent_endpoint(self, vps_ip: str) -> AgentEndpoint:
         """Where (and how) to SSH to the agent placed on ``vps_ip``."""
+
+    @abstractmethod
+    def open_host_store(self, outer: OuterHostInterface, host_id: HostId) -> VpsDockerHostStore:
+        """Open the host-record / agent-data store for ``host_id`` on the VPS.
+
+        The container realizer resolves a per-host Docker volume; the bare
+        realizer points at a plain directory on the VM's root disk. Either way
+        the returned store reads/writes the same ``host_state.json`` + ``agents/``
+        layout, so the provider treats persistence uniformly.
+        """
 
     @abstractmethod
     def realize_placement(self, outer: OuterHostInterface, ctx: RealizePlacementContext) -> RealizedPlacement:

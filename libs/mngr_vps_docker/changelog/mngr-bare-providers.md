@@ -10,6 +10,11 @@ endpoint, placement lifecycle, and snapshots are now realizer concerns, while th
 machine (provisioning, boot, instance lifecycle, host record, discovery) stays
 with the provider.
 
+Host-record store resolution also moved behind the realizer
+(`realizer.open_host_store(outer, host_id)`), so a non-Docker placement can
+persist its host record without a Docker volume. The container realizer
+resolves the per-host Docker volume exactly as before.
+
 Selecting `isolation=NONE` is accepted by config but currently raises
 `BareIsolationNotYetSupportedError`; the bare realizer lands in a follow-up. No
 user-visible behavior changes for existing aws/gcp/azure/vultr/ovh/imbue_cloud

@@ -103,7 +103,6 @@ from imbue.mngr_vps_docker.errors import BareIsolationNotYetSupportedError
 from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.interfaces import HostRealizer
 from imbue.mngr_vps_docker.primitives import IsolationMode
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -664,7 +663,7 @@ class VpsDockerProvider(BaseProviderInstance):
         """Callback when host data.json is updated -- sync to the unified host volume."""
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                host_store = open_host_store(outer, host_volume_name_for(host_id))
+                host_store = self._realizer.open_host_store(outer, host_id)
                 existing = host_store.read_host_record()
                 if existing is not None:
                     updated = existing.model_copy(update={"certified_host_data": certified_data})
@@ -1123,7 +1122,7 @@ class VpsDockerProvider(BaseProviderInstance):
             ),
             container_id=realized.container_id,
         )
-        host_store = open_host_store(outer, volume_name)
+        host_store = self._realizer.open_host_store(outer, host_id)
         host_store.write_host_record(host_record)
         self._persist_host_record_externally(host_record)
 
@@ -1238,7 +1237,7 @@ class VpsDockerProvider(BaseProviderInstance):
             # (STOPPED, not CRASHED) while the host is down; this single write
             # carries it, so the subclass needs no second write. The write must
             # land before any deeper stop, since the volume is unreachable after.
-            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store = self._realizer.open_host_store(outer, host_id)
             record_updates: dict[str, object] = {"updated_at": datetime.now(timezone.utc)}
             if stop_reason is not None:
                 record_updates["stop_reason"] = stop_reason.value
@@ -1624,7 +1623,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 if host_id is None:
                     logger.debug("No mngr container on VPS {} yet, skipping", vps_ip)
                     return _VpsDiscoveryData()
-                host_store = open_host_store(outer, host_volume_name_for(host_id))
+                host_store = self._realizer.open_host_store(outer, host_id)
                 record = host_store.read_host_record()
                 if record is None:
                     logger.debug("No host record on VPS {} volume yet, skipping", vps_ip)
@@ -2030,7 +2029,7 @@ class VpsDockerProvider(BaseProviderInstance):
             updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
 
             # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
-            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store = self._realizer.open_host_store(outer, host_id)
             host_store.write_host_record(updated_record)
             self._persist_host_record_externally(updated_record)
 
@@ -2100,7 +2099,7 @@ class VpsDockerProvider(BaseProviderInstance):
                     "cannot determine unified volume name to rename"
                 )
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-                host_store = open_host_store(outer, host_record.config.volume_name)
+                host_store = self._realizer.open_host_store(outer, host_id)
                 host_store.write_host_record(updated_record)
                 self._persist_host_record_externally(updated_record)
 
@@ -2148,7 +2147,7 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store = self._realizer.open_host_store(outer, host_id)
             return host_store.list_persisted_agent_data()
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
@@ -2157,7 +2156,7 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store = self._realizer.open_host_store(outer, host_id)
             host_store.persist_agent_data(agent_data)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
@@ -2166,7 +2165,7 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store = self._realizer.open_host_store(outer, host_id)
             host_store.remove_persisted_agent_data(agent_id)
 
 

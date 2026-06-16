@@ -47,6 +47,8 @@ from imbue.mngr_vps_docker.data_types import AgentEndpoint
 from imbue.mngr_vps_docker.data_types import RealizePlacementContext
 from imbue.mngr_vps_docker.data_types import RealizedPlacement
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
+from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.interfaces import HostRealizer
 
 # Key-file names under ``key_dir`` for the container's client/host keys and its
@@ -91,6 +93,9 @@ class DockerRealizer(HostRealizer):
             private_key_path=container_key_path,
             known_hosts_path=self._container_known_hosts_path(),
         )
+
+    def open_host_store(self, outer: OuterHostInterface, host_id: HostId) -> VpsDockerHostStore:
+        return open_host_store(outer, host_volume_name_for(host_id))
 
     # --- placement creation ------------------------------------------------
 
