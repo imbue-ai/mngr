@@ -88,6 +88,18 @@ def test_supports_snapshots_is_false(temp_mngr_ctx: MngrContext, tmp_path: Path)
     assert _bare_realizer(temp_mngr_ctx, tmp_path).supports_snapshots is False
 
 
+def test_idle_shutdown_powers_off_the_vm_directly(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The bare agent is the VM root, so idle powers the machine off -- no host-side watcher."""
+    realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
+    assert realizer.idle_shutdown_command == "shutdown -P now"
+    assert realizer.idle_shutdown_stops_host is True
+
+
+def test_host_dir_path_on_outer_is_under_the_fixed_store_dir(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
+    assert realizer.host_dir_path_on_outer(HostId.generate()) == BARE_HOST_STORE_DIR / "host_dir"
+
+
 def test_agent_endpoint_is_vps_port_22_with_vps_key(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """The agent IS the VM root account: the endpoint reuses the VPS keypair on port 22."""
     endpoint = _bare_realizer(temp_mngr_ctx, tmp_path).agent_endpoint("203.0.113.7")

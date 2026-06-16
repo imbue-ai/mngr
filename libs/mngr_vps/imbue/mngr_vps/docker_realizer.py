@@ -132,6 +132,22 @@ class DockerRealizer(HostRealizer):
     def supports_snapshots(self) -> bool:
         return True
 
+    @property
+    def idle_shutdown_command(self) -> str:
+        # Signal the container's PID 1 to stop the container. On a self-stopping
+        # cloud substrate (aws/gcp/azure) the provider overrides the shutdown
+        # handling with a sentinel + host-side watcher, since a container can't
+        # power off its host from the inside.
+        return "kill -TERM 1"
+
+    @property
+    def idle_shutdown_stops_host(self) -> bool:
+        return False
+
+    def host_dir_path_on_outer(self, host_id: HostId) -> Path:
+        # The per-host host_dir lives on the btrfs subvolume the unified volume binds to.
+        return self.config.btrfs_mount_path / host_id.get_uuid().hex / HOST_DIR_SUBPATH
+
     # --- container identity (keys + known_hosts) ---------------------------
 
     def _container_ssh_keypair(self) -> tuple[Path, str]:

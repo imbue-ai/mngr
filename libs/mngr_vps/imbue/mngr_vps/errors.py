@@ -2,7 +2,7 @@ from imbue.mngr.errors import MngrError
 
 
 class VpsError(MngrError):
-    """Base error for VPS Docker provider operations."""
+    """Base error for VPS provider operations."""
 
 
 class VpsProvisioningError(VpsError):
@@ -17,13 +17,13 @@ class VpsApiError(VpsError):
         super().__init__(f"VPS API error {status_code}: {message}")
 
 
-class BareIsolationNotYetSupportedError(VpsError):
-    """Raised when ``isolation=NONE`` is selected before the bare realizer ships.
+class BareIsolationNotSupportedError(VpsError):
+    """Raised when ``isolation=NONE`` is selected on a provider that does not support it.
 
-    The realizer seam lands first with only the Docker path implemented; the
-    bare (no-container) realizer arrives in a later step. Until then, selecting
-    ``IsolationMode.NONE`` fails fast with this error rather than silently
-    falling back to the container path.
+    Bare placement needs a substrate that can stop and later restart the machine
+    (the bare agent's idle action powers the VM off). Providers without a
+    machine stop/start lifecycle (e.g. vultr/ovh) would strand the VM, so they
+    reject ``isolation=NONE`` up front rather than create an unrecoverable host.
     """
 
 

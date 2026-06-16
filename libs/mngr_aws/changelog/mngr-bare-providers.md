@@ -9,3 +9,8 @@ accompanying class renames (`VpsDockerProvider` -> `VpsProvider`,
 `VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
 `VpsHostRecord`, `VpsDockerError` -> `VpsError`, etc.). Import-only; no behavior
 change.
+
+
+Enabled bare placement (`isolation=NONE`): the idle agent runs `shutdown -P now`
+as the VM's root, which stops the EC2 instance via InstanceInitiatedShutdownBehavior,
+so the container-only sentinel + host-side systemd watcher is skipped for bare.

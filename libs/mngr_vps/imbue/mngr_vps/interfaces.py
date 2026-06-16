@@ -76,6 +76,39 @@ class HostRealizer(MutableModel, ABC):
     def start_activity_watcher(self, outer: OuterHostInterface, container_name: str | None) -> None:
         """Launch the idle/auto-shutdown activity watcher for the placement."""
 
+    @property
+    @abstractmethod
+    def idle_shutdown_command(self) -> str:
+        """Shell command the host's ``shutdown.sh`` runs when the agent goes idle.
+
+        The container realizer signals the container's PID 1 (``kill -TERM 1``);
+        the bare realizer powers the VM off directly (``shutdown -P now``), since
+        the agent is the VM's root. On a self-stopping cloud substrate the
+        container path can't power off its host from inside a container, so those
+        providers override the shutdown handling (sentinel + host-side watcher);
+        a bare placement needs no such indirection.
+        """
+
+    @abstractmethod
+    def host_dir_path_on_outer(self, host_id: HostId) -> Path:
+        """Outer-filesystem path of this host's ``host_dir`` tree.
+
+        Container realizer: the per-host btrfs subvolume's ``host_dir``; bare
+        realizer: ``host_dir`` under the fixed root-disk store. Used by the
+        host-side sentinel path and the host_dir-to-bucket offline sync.
+        """
+
+    @property
+    @abstractmethod
+    def idle_shutdown_stops_host(self) -> bool:
+        """Whether ``idle_shutdown_command`` already stops the whole machine.
+
+        True for bare (the command powers the VM off), False for container (it
+        only stops the container). Cloud providers whose substrate self-stops use
+        this to decide whether the container path needs a host-side sentinel
+        watcher to stop the instance -- a bare placement does not.
+        """
+
     @abstractmethod
     def find_host_record(self, outer: OuterHostInterface) -> tuple[HostId, VpsHostRecord] | None:
         """Find the single host on this VPS and read its record, or None if absent.

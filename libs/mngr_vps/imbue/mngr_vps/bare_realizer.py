@@ -63,6 +63,21 @@ class BareRealizer(HostRealizer):
     def supports_snapshots(self) -> bool:
         return False
 
+    @property
+    def idle_shutdown_command(self) -> str:
+        # The agent is the VM's root, so it powers the machine off directly. On a
+        # self-stopping cloud substrate (aws/gcp/azure) this stops the instance via
+        # the OS-shutdown behavior -- no sentinel or host-side watcher needed.
+        return "shutdown -P now"
+
+    @property
+    def idle_shutdown_stops_host(self) -> bool:
+        return True
+
+    def host_dir_path_on_outer(self, host_id: HostId) -> Path:
+        # The agent's host_dir is the symlink target on the VM's root disk.
+        return BARE_HOST_STORE_DIR / HOST_DIR_SUBPATH
+
     def _vps_ssh_keypair(self) -> tuple[Path, str]:
         return load_or_create_ssh_keypair(self.key_dir, VPS_SSH_KEY_NAME)
 

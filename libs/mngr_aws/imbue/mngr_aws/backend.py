@@ -667,6 +667,12 @@ class AwsProvider(TagMirrorVpsProvider):
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
     # =========================================================================
 
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        # EC2 supports stop/start, and the bare idle path self-stops the instance
+        # via InstanceInitiatedShutdownBehavior, so bare placement is supported.
+        return True
+
     def _create_shutdown_script(self, host: Host) -> None:
         """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
 
@@ -679,7 +685,13 @@ class AwsProvider(TagMirrorVpsProvider):
         it and powers the host off (EC2 then stops or terminates per
         ``InstanceInitiatedShutdownBehavior``). Mirrors the base's
         mkdir/write/chmod, swapping only the script body.
+
+        A bare placement has no container -- the agent (the VM's root) powers the
+        instance off directly -- so it uses the base shutdown script instead.
         """
+        if self._realizer.idle_shutdown_stops_host:
+            super()._create_shutdown_script(host)
+            return
         sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
         shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
         commands_dir = host.host_dir / "commands"
@@ -701,20 +713,26 @@ class AwsProvider(TagMirrorVpsProvider):
         Any failure (record lookup, SSH, unit install) is caught and logged at
         WARNING; the only consequence is that the agent will not auto-stop on
         idle (manual ``mngr stop --stop-host`` still works).
+
+        A bare placement self-stops the instance directly (its idle ``shutdown.sh``
+        runs ``shutdown -P now`` as the VM's root), so it needs no host-side
+        watcher; the watcher install is skipped for bare. The host_dir-to-bucket
+        sync still runs for both shapes.
         """
-        try:
-            self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            # The install only issues SSH / file-write / command operations, which
-            # surface as MngrError (HostConnectionError is a MngrError subclass);
-            # a failure just means no auto-stop on idle, so log and move on rather
-            # than fail create_host after the host record is already durable.
-            logger.warning(
-                "AWS idle watcher install failed for host {} ({}); the agent will not "
-                "auto-stop on idle, but `mngr stop --stop-host` still works",
-                host_id,
-                e,
-            )
+        if not self._realizer.idle_shutdown_stops_host:
+            try:
+                self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
+            except MngrError as e:
+                # The install only issues SSH / file-write / command operations, which
+                # surface as MngrError (HostConnectionError is a MngrError subclass);
+                # a failure just means no auto-stop on idle, so log and move on rather
+                # than fail create_host after the host record is already durable.
+                logger.warning(
+                    "AWS idle watcher install failed for host {} ({}); the agent will not "
+                    "auto-stop on idle, but `mngr stop --stop-host` still works",
+                    host_id,
+                    e,
+                )
         try:
             self._install_host_dir_sync(host_id=host_id, vps_ip=vps_ip)
         except MngrError as e:

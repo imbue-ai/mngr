@@ -527,6 +527,12 @@ class GcpProvider(OfflineCapableVpsProvider):
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
     # =========================================================================
 
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        # GCE supports stop/start, and the bare idle path powers the instance off
+        # (which on GCE stops it), so bare placement is supported.
+        return True
+
     def _create_shutdown_script(self, host: Host) -> None:
         """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
 
@@ -536,7 +542,13 @@ class GcpProvider(OfflineCapableVpsProvider):
         watcher touches a sentinel on the shared volume; a host-side systemd path
         unit (installed in ``_on_host_finalized``) observes it and powers the host
         off, which on GCE stops the instance. Mirrors ``AwsProvider._create_shutdown_script``.
+
+        A bare placement has no container -- the agent (the VM's root) powers the
+        instance off directly -- so it uses the base shutdown script instead.
         """
+        if self._realizer.idle_shutdown_stops_host:
+            super()._create_shutdown_script(host)
+            return
         sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
         shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
         commands_dir = host.host_dir / "commands"
@@ -550,7 +562,13 @@ class GcpProvider(OfflineCapableVpsProvider):
         Best-effort (the base contract says this MUST NOT raise): any failure just
         means no auto-stop on idle (manual ``mngr stop`` still works). Mirrors
         ``AwsProvider._on_host_finalized``.
+
+        A bare placement self-stops the instance directly (its idle ``shutdown.sh``
+        runs ``shutdown -P now`` as the VM's root), so the watcher install is
+        skipped for bare.
         """
+        if self._realizer.idle_shutdown_stops_host:
+            return
         try:
             self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
         except MngrError as e:

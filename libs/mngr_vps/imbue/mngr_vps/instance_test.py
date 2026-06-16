@@ -20,6 +20,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.container_setup import emit_docker_build_output
 from imbue.mngr_vps.container_setup import is_retryable_rsync_error
@@ -27,7 +28,7 @@ from imbue.mngr_vps.container_setup import redact_secret_env
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import resolve_dockerfile_paths
 from imbue.mngr_vps.docker_realizer import DockerRealizer
-from imbue.mngr_vps.errors import BareIsolationNotYetSupportedError
+from imbue.mngr_vps.errors import BareIsolationNotSupportedError
 from imbue.mngr_vps.instance import MinimalVpsProvider
 from imbue.mngr_vps.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps.instance import _wait_for_cloud_init_marker
@@ -647,8 +648,20 @@ def test_provider_builds_docker_realizer_for_container_isolation(temp_mngr_ctx: 
     assert provider.supports_snapshots is True
 
 
-def test_provider_rejects_bare_isolation_until_supported(temp_mngr_ctx: MngrContext) -> None:
-    """``isolation=NONE`` fails fast with a dedicated error until the bare realizer ships."""
+def test_provider_builds_bare_realizer_for_none_isolation(temp_mngr_ctx: MngrContext) -> None:
+    """``isolation=NONE`` yields a BareRealizer, which reports no snapshot support."""
     provider = _minimal_provider(temp_mngr_ctx, IsolationMode.NONE)
-    with pytest.raises(BareIsolationNotYetSupportedError, match="bare"):
-        provider._build_realizer()
+    assert isinstance(provider._realizer, BareRealizer)
+    assert provider.supports_snapshots is False
+
+
+def test_create_host_rejects_bare_on_a_provider_without_machine_lifecycle(temp_mngr_ctx: MngrContext) -> None:
+    """A provider with no stop/start substrate refuses ``isolation=NONE`` before provisioning.
+
+    ``MinimalVpsProvider`` does not override ``_supports_bare_isolation`` (default
+    False), so a bare create must fail fast with the dedicated error rather than
+    strand a VM the substrate can't restart.
+    """
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.NONE)
+    with pytest.raises(BareIsolationNotSupportedError, match="does not support isolation=NONE"):
+        provider.create_host(HostName("test-host"))

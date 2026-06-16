@@ -78,9 +78,9 @@ from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps.config import VpsProviderConfig
-from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.container_setup import check_file_exists_on_outer
 from imbue.mngr_vps.container_setup import delete_btrfs_subvolume_on_outer
@@ -96,7 +96,7 @@ from imbue.mngr_vps.docker_realizer import CONTAINER_HOST_KEY_NAME
 from imbue.mngr_vps.docker_realizer import CONTAINER_KNOWN_HOSTS_NAME
 from imbue.mngr_vps.docker_realizer import CONTAINER_SSH_KEY_NAME
 from imbue.mngr_vps.docker_realizer import DockerRealizer
-from imbue.mngr_vps.errors import BareIsolationNotYetSupportedError
+from imbue.mngr_vps.errors import BareIsolationNotSupportedError
 from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
@@ -364,9 +364,12 @@ class VpsProvider(BaseProviderInstance):
                     provider_name=self.name,
                 )
             case IsolationMode.NONE:
-                raise BareIsolationNotYetSupportedError(
-                    "isolation=NONE (bare, no Docker container) is not yet supported; "
-                    "the bare realizer ships in a later step."
+                return BareRealizer(
+                    config=self.config,
+                    mngr_ctx=self.mngr_ctx,
+                    key_dir=self._key_dir(),
+                    host_dir=self.host_dir,
+                    provider_name=self.name,
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -392,6 +395,16 @@ class VpsProvider(BaseProviderInstance):
 
     @property
     def supports_mutable_tags(self) -> bool:
+        return False
+
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        """Whether this provider can run ``isolation=NONE`` (bare) placements.
+
+        Default False: bare needs a machine stop/start lifecycle (the idle agent
+        powers the VM off and ``mngr start`` boots it again). Providers with that
+        substrate -- aws/gcp/azure -- override this to True.
+        """
         return False
 
     def reset_caches(self) -> None:
@@ -633,7 +646,17 @@ class VpsProvider(BaseProviderInstance):
         snapshot: SnapshotName | None = None,
     ) -> Host:
         host_id = HostId.generate()
-        logger.info("Creating VPS Docker host {} ({}) ...", name, host_id)
+        logger.info("Creating VPS host {} ({}) ...", name, host_id)
+
+        # Bare placement needs a substrate that can stop and restart the machine
+        # (the idle agent powers the VM off); reject it up front on providers
+        # that would strand the VM, before any billable provisioning.
+        if self.config.isolation is IsolationMode.NONE and not self._supports_bare_isolation:
+            raise BareIsolationNotSupportedError(
+                f"Provider {self.name!r} does not support isolation=NONE (bare placement); "
+                "it has no machine stop/start lifecycle, so a bare agent would strand the VM. "
+                "Use isolation=CONTAINER, or an aws/gcp/azure provider for bare."
+            )
 
         parsed = self._parse_build_args(build_args)
 
@@ -1115,8 +1138,14 @@ class VpsProvider(BaseProviderInstance):
         )
 
     def _create_shutdown_script(self, host: Host) -> None:
-        """Create the shutdown script that stops the container on idle."""
-        shutdown_script = "#!/bin/bash\nkill -TERM 1\n"
+        """Create the shutdown script the idle watcher runs to stop the host.
+
+        The action comes from the realizer: the container realizer signals the
+        container's PID 1; the bare realizer powers the VM off directly. Cloud
+        providers whose container path must stop the whole instance override this
+        (sentinel + host-side watcher), early-returning here for the bare case.
+        """
+        shutdown_script = f"#!/bin/bash\n{self._realizer.idle_shutdown_command}\n"
         commands_dir = host.host_dir / "commands"
         host.execute_idempotent_command(f"mkdir -p {commands_dir}")
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
@@ -2166,12 +2195,13 @@ class OfflineCapableVpsProvider(VpsProvider):
         return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
 
     def _host_dir_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of this host's host_dir (the btrfs subvolume's host_dir tree).
+        """Outer-filesystem path of this host's host_dir tree, per the active realizer.
 
-        The per-host host_dir lives at ``<btrfs_mount_path>/<host_id_hex>/host_dir``
-        on the outer (the same subvolume layout the idle sentinel path uses).
+        Container realizer: ``<btrfs_mount_path>/<host_id_hex>/host_dir`` (the
+        subvolume layout the idle sentinel path uses). Bare realizer: ``host_dir``
+        under the fixed root-disk store.
         """
-        return self.config.btrfs_mount_path / host_id.get_uuid().hex / HOST_DIR_SUBPATH
+        return self._realizer.host_dir_path_on_outer(host_id)
 
     def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
         """Outer-filesystem path of the in-container idle sentinel for this host.

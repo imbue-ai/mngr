@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps.config import VpsProviderConfig
@@ -26,6 +27,22 @@ def _realizer(temp_mngr_ctx: MngrContext, key_dir: Path, container_ssh_port: int
 
 def test_supports_snapshots_is_true(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     assert _realizer(temp_mngr_ctx, tmp_path).supports_snapshots is True
+
+
+def test_idle_shutdown_signals_container_pid1_and_needs_a_host_watcher(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """A container can't power off its host, so idle signals PID 1 and a host-side watcher is needed."""
+    realizer = _realizer(temp_mngr_ctx, tmp_path)
+    assert realizer.idle_shutdown_command == "kill -TERM 1"
+    assert realizer.idle_shutdown_stops_host is False
+
+
+def test_host_dir_path_on_outer_is_under_the_btrfs_subvolume(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    realizer = _realizer(temp_mngr_ctx, tmp_path)
+    host_id = HostId.generate()
+    expected = realizer.config.btrfs_mount_path / host_id.get_uuid().hex / "host_dir"
+    assert realizer.host_dir_path_on_outer(host_id) == expected
 
 
 def test_agent_endpoint_targets_container_port_with_container_key(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:

@@ -40,14 +40,22 @@ record (which has no container or Docker volume) is representable, and the
 agent-sshd wait now targets the realizer's endpoint port (the container port
 for Docker, port 22 for bare) instead of hard-coding the container port.
 
-Selecting `isolation=NONE` is still accepted by config but currently raises
-`BareIsolationNotYetSupportedError`. The realizer is fully implemented and
-unit-tested (placement, store, discovery, listing), but the cloud wiring
-remains: the bare idle-shutdown path (the aws/gcp/azure sentinel + systemd
-poweroff watcher assumes the Docker volume layout and needs bare-awareness),
-flipping the realizer selection, and rejecting Docker-only create inputs. So
-bare is not yet runnable end-to-end. No user-visible behavior changes for
-existing aws/gcp/azure/vultr/ovh/imbue_cloud providers.
+`isolation=NONE` now builds the `BareRealizer`. The idle-shutdown action is a
+realizer concern: the container realizer signals the container's PID 1
+(`kill -TERM 1`), while the bare realizer powers the VM off directly
+(`shutdown -P now`) -- so on a self-stopping cloud substrate a bare placement
+needs no host-side sentinel/systemd watcher. The host_dir's outer-filesystem
+path is also realizer-driven now (the btrfs subvolume for container; the fixed
+root-disk store for bare), so the offline host_dir sync targets the right path
+in both shapes.
+
+Bare placement is gated to providers with a machine stop/start lifecycle: a
+provider without one rejects `isolation=NONE` at create time
+(`BareIsolationNotSupportedError`) rather than strand a VM it cannot restart.
+AWS and GCP enable it (their bare idle path self-stops the instance via the
+OS-shutdown behavior); Azure stays gated off until its self-deallocate wiring
+lands (an Azure OS shutdown does not halt compute billing). No user-visible
+behavior change for existing container hosts on any provider.
 
 Renamed the package from `mngr_vps_docker` to `mngr_vps` (the distribution
 `imbue-mngr-vps-docker` to `imbue-mngr-vps`), since Docker is now one of two
