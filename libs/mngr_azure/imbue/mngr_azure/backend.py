@@ -13,6 +13,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
@@ -85,6 +86,17 @@ class AzureProvider(VpsDockerProvider):
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List Azure VMs tagged with this provider's name."""
         return self.azure_client.list_instances(provider_tag=str(self.name))
+
+    def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
+        """Reclaim NIC/public-IP orphans left by failed VM creates (Azure-specific).
+
+        Azure provisions a per-VM public IP + NIC before the VM and reserves them
+        for 180s after a capacity-failed create, so they cannot be cleaned up
+        synchronously on the failure path. They are reaped here at GC time instead
+        of on the next create. Age-gated and best-effort -- see
+        ``AzureVpsClient.reclaim_orphaned_network_resources``.
+        """
+        return self.azure_client.reclaim_orphaned_network_resources(provider_name=self.name, dry_run=dry_run)
 
     def _validate_provider_args_for_create(self) -> None:
         """Pre-create hook: enforce the pytest safety net, then require the prepared subnet.
