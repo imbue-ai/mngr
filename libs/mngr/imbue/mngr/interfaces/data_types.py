@@ -191,6 +191,42 @@ class CommandResult(FrozenModel):
     success: bool = Field(description="True if the command succeeded (had an expected exit code)")
 
 
+class CleanupFailureCategory(UpperCaseStrEnum):
+    """The cause of a real cleanup failure (a resource that was left behind).
+
+    See ``cli.exit_codes.exit_code_for_failures`` for the explicit severity ranking
+    used to pick a process exit code, and ``specs/cleanup-error-aggregation.md``.
+    """
+
+    # A cleanup command timed out; the resource's state is unknown / likely incomplete.
+    TIMEOUT = auto()
+    # Agent PIDs were collected but could not be killed, or could not be enumerated;
+    # processes may still be running.
+    PROCESSES_REMAIN = auto()
+    # A tmux session or the agent's on-host state directory could not be removed though present.
+    LOCAL_STATE_REMAINS = auto()
+    # An infrastructure resource (container, VM, droplet, volume, disk, SSH key) could not be
+    # destroyed though present. May incur ongoing cost.
+    HOST_RESOURCE_REMAINS = auto()
+    # Cleanup could not even be attempted: host record missing, provider unreachable, host not
+    # destroyable / unsupported.
+    PROVIDER_INACCESSIBLE = auto()
+    # Uncategorized real failure (e.g. a plugin hook raised, an unexpected exception).
+    OTHER = auto()
+
+
+class CleanupFailure(FrozenModel):
+    """A single real cleanup failure: a resource that could not be cleaned up.
+
+    Benign "already gone" outcomes are not represented here -- they are not failures.
+    """
+
+    category: CleanupFailureCategory = Field(description="The cause of the failure")
+    message: str = Field(description="Human-readable description of what could not be cleaned up")
+    agent_name: AgentName | None = Field(default=None, description="The agent this failure pertains to, if any")
+    host_id: HostId | None = Field(default=None, description="The host this failure pertains to, if any")
+
+
 class CpuResources(FrozenModel):
     """CPU resource information for a host."""
 

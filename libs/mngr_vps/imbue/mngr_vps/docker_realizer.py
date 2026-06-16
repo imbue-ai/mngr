@@ -10,6 +10,9 @@ from loguru import logger
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import LogLevel
@@ -358,36 +361,73 @@ class DockerRealizer(HostRealizer):
     def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, record: VpsHostRecord) -> None:
         assert record.config is not None
         vps_config = record.config
-        # Stop and remove the agent container; removing the volume below
-        # will fail otherwise because the container still holds it open.
-        if vps_config.container_name is not None:
+        with collecting_cleanup_failures() as failures:
+            # Stop and remove the agent container; removing the volume below will
+            # fail otherwise because the container still holds it open.
+            # ``tolerate_missing`` makes an already-gone container a no-op, so any
+            # error raised here means a container that exists but could not be removed.
+            if vps_config.container_name is not None:
+                try:
+                    remove_container(outer, vps_config.container_name, force=True, tolerate_missing=True)
+                except MngrError as e:
+                    logger.warning("Failed to remove container: {}", e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to remove container {vps_config.container_name} for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
+
+            # Delete the per-host btrfs subvolume before the named volume. The
+            # VPS-destroy that follows takes the whole loop file with it, so this is
+            # primarily belt-and-suspenders for a destroy retried on a still-existing
+            # VPS. ``delete_btrfs_subvolume_on_outer`` already no-ops on an absent
+            # subvolume, so any raised error means a present subvolume remains.
+            subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
             try:
-                remove_container(outer, vps_config.container_name, force=True)
+                delete_btrfs_subvolume_on_outer(outer, subvolume_path)
             except MngrError as e:
-                logger.warning("Failed to remove container: {}", e)
+                logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to delete btrfs subvolume {subvolume_path} for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
 
-        # Delete the per-host btrfs subvolume before the named volume. The
-        # VPS-destroy that follows takes the whole loop file with it, so this is
-        # primarily belt-and-suspenders for a destroy retried on a still-existing VPS.
-        subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
-        try:
-            delete_btrfs_subvolume_on_outer(outer, subvolume_path)
-        except MngrError as e:
-            logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+            # Remove the unified host volume (the named entry; the data lived on the
+            # subvolume above). ``docker volume rm -f`` no-ops on a missing volume,
+            # so any raised error means the named volume entry remains.
+            if vps_config.volume_name is not None:
+                try:
+                    remove_volume(outer, vps_config.volume_name)
+                except MngrError as e:
+                    logger.warning("Failed to remove host volume: {}", e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to remove host volume {vps_config.volume_name} for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
-        # Remove the unified host volume (the named entry; the data lived on the subvolume above).
-        if vps_config.volume_name is not None:
+            # Remove the per-host snapshot-trigger volume (the named entry; the shared
+            # bind source at OUTER_SNAPSHOT_TRIGGER_DIR is left alone). Same ``-f``
+            # no-op-on-missing semantics as the host volume above.
+            trigger_volume_name = snapshot_trigger_volume_name_for(host_id)
             try:
-                remove_volume(outer, vps_config.volume_name)
+                remove_volume(outer, trigger_volume_name)
             except MngrError as e:
-                logger.warning("Failed to remove host volume: {}", e)
-
-        # Remove the per-host snapshot-trigger volume (the named entry; the shared
-        # bind source at OUTER_SNAPSHOT_TRIGGER_DIR is left alone).
-        try:
-            remove_volume(outer, snapshot_trigger_volume_name_for(host_id))
-        except MngrError as e:
-            logger.warning("Failed to remove snapshot trigger volume: {}", e)
+                logger.warning("Failed to remove snapshot trigger volume: {}", e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to remove snapshot trigger volume {trigger_volume_name} for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
 
     def snapshot_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> SnapshotId:
         assert record.config is not None and record.config.container_name is not None

@@ -148,7 +148,14 @@ class HostRealizer(MutableModel, ABC):
 
     @abstractmethod
     def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, record: VpsHostRecord) -> None:
-        """Remove the placement and its per-host storage (makes no VPS-client calls)."""
+        """Remove the placement and its per-host storage (makes no VPS-client calls).
+
+        Best-effort cleanup: attempts every step, records a ``CleanupFailure`` for
+        any resource that exists but could not be removed, and raises a
+        ``CleanupFailedGroup`` at the end if any were collected (the provider's
+        ``destroy_host`` absorbs it into its aggregate). A realizer with no
+        per-host storage (bare) tears nothing down and raises nothing.
+        """
 
     @abstractmethod
     def snapshot_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> SnapshotId:

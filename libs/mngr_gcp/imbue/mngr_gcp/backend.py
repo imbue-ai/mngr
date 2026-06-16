@@ -29,7 +29,6 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -610,41 +609,25 @@ class GcpProvider(OfflineCapableVpsProvider):
     # Offline metadata via instance metadata (so STOPPED hosts list + resolve by name)
     # =========================================================================
 
-    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
-        """Persist an agent's record on the host volume *and* mirror it into instance metadata.
+    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        """Mirror an agent record into the instance's ``mngr-agent-<id>-*`` GCE metadata.
 
-        The base writes the authoritative on-volume record (read by SSH-based
-        discovery for *running* hosts); this override additionally mirrors a compact
-        record into instance metadata so a *stopped* instance (volume unreadable)
-        still surfaces its agents and resolves for ``mngr start``. The on-volume
-        write is best-effort (``HostNotFoundError`` when stopped). Mirrors
-        ``AwsProvider.persist_agent_data`` but writes metadata, not tags.
+        GCE metadata (not tags/labels) holds the per-agent mirror so a stopped
+        instance still surfaces its agents and resolves for ``mngr start``; the
+        shared persist envelope on ``OfflineCapableVpsProvider`` handles the
+        authoritative on-volume write.
         """
-        try:
-            super().persist_agent_data(host_id, agent_data)
-        except HostNotFoundError:
-            logger.debug("Host {} unreachable; persisting agent data to GCE metadata only", host_id)
-        agent_id = agent_data.get("id")
-        if agent_id is None:
-            logger.warning(
-                "Cannot mirror agent data to GCE metadata without an id (name={!r})", agent_data.get("name")
-            )
-            return
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             logger.warning("No GCE instance found for host {}; cannot persist agent metadata", host_id)
             return
-        updates, delete_keys = self._agent_metadata_items(str(agent_id), agent_data, instance)
+        updates, delete_keys = self._agent_metadata_items(agent_id, agent_data, instance)
         # One setMetadata round-trip (it is a whole-object read-modify-write) carries
         # both the upserts and the stale deletes, unlike AWS's two tag calls.
         self.gcp_client.set_instance_metadata(VpsInstanceId(instance["id"]), updates, delete_keys)
 
-    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>-*`` metadata."""
-        try:
-            super().remove_persisted_agent_data(host_id, agent_id)
-        except HostNotFoundError:
-            logger.debug("Host {} unreachable; removing agent data from GCE metadata only", host_id)
+    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        """Remove the agent's ``mngr-agent-<id>-*`` GCE metadata. Idempotent."""
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             return

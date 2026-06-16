@@ -51,8 +51,13 @@ from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -2076,32 +2081,107 @@ log "=== Shutdown script completed ==="
         ``mngr create --snapshot``).  The host is marked DESTROYED via
         stop_reason so the state derivation returns DESTROYED even when
         snapshot records still exist.
+
+        Best-effort: each teardown step is attempted, and a real failure (a
+        resource that exists but could not be removed) is recorded and raised as a
+        ``CleanupFailedGroup`` rather than aborting or being silently swallowed. A
+        resource that was already gone (``ModalProxyNotFoundError``) is benign. See
+        specs/cleanup-error-aggregation.md.
         """
-        self.stop_host(host, create_snapshot=False)
         host_id = host.id if isinstance(host, HostInterface) else host
-        self._destroy_agents_on_host(host_id)
-        self._mark_host_destroyed(host_id)
-        # FOLLOWUP: once Modal enables deleting Images, this will be the place to do it
-        if self.config.is_host_volume_created:
-            self._delete_host_volume(host_id)
+
+        with collecting_cleanup_failures() as failures:
+            # Terminate the sandbox (without creating a snapshot since we're destroying).
+            # An already-gone sandbox is benign; any other Modal error leaves it behind.
+            try:
+                self.stop_host(host, create_snapshot=False)
+            except ModalProxyNotFoundError:
+                # Sandbox already gone -- benign.
+                pass
+            except ModalProxyError as e:
+                # ModalProxyInvalidError / ModalProxyInternalError and any other Modal
+                # failure mean the resource may still exist.
+                logger.warning("Failed to terminate sandbox for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to terminate sandbox for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # Remove the agent records from the state volume. A missing record is
+            # benign; any other Modal error leaves the records behind.
+            try:
+                self._destroy_agents_on_host(host_id)
+            except ModalProxyNotFoundError:
+                pass
+            except ModalProxyError as e:
+                logger.warning("Failed to remove agent records for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to remove agent records for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # Mark the host record DESTROYED. A failure here leaves the record inconsistent.
+            try:
+                self._mark_host_destroyed(host_id)
+            except (ModalProxyError, MngrError) as e:
+                logger.warning("Failed to mark host {} destroyed: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.OTHER,
+                        message=f"failed to mark host {host_id} destroyed: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # FOLLOWUP: once Modal enables deleting Images, this will be the place to do it
+            if self.config.is_host_volume_created:
+                try:
+                    self._delete_host_volume(host_id)
+                except CleanupFailedGroup as group:
+                    collect_cleanup_failures(failures, group)
 
     @handle_modal_auth_error
     def delete_host(self, host: HostInterface) -> None:
         self._destroy_agents_on_host(host.id)
         self._delete_host_record(host.id)
         if self.config.is_host_volume_created:
-            self._delete_host_volume(host.id)
+            # delete_host returns None per the interface; a volume that could not be removed
+            # is surfaced through destroy_host, not here (GC calls delete_host after the grace
+            # period and must not abort the sweep). Log and swallow the CleanupFailedGroup.
+            try:
+                self._delete_host_volume(host.id)
+            except CleanupFailedGroup as group:
+                logger.warning("Cleanup left resources behind while deleting host {}: {}", host.id, group)
 
     def _delete_host_volume(self, host_id: HostId) -> None:
-        """Delete the persistent host volume, logging but not raising on failure."""
+        """Delete the persistent host volume.
+
+        A real cleanup failure (a volume that exists but could not be deleted) is
+        raised as a ``CleanupFailedGroup``. An already-deleted volume is benign and
+        produces no failure. See specs/cleanup-error-aggregation.md.
+        """
         host_volume_name = self._get_host_volume_name(host_id)
-        try:
-            self._modal_interface.volume_delete(host_volume_name, environment_name=self.environment_name)
-            logger.debug("Deleted host volume: {}", host_volume_name)
-        except ModalProxyNotFoundError:
-            logger.trace("Host volume {} already deleted", host_volume_name)
-        except (ModalProxyInvalidError, ModalProxyInternalError) as e:
-            logger.warning("Failed to delete host volume {}: {}", host_volume_name, e)
+        with collecting_cleanup_failures() as failures:
+            try:
+                self._modal_interface.volume_delete(host_volume_name, environment_name=self.environment_name)
+                logger.debug("Deleted host volume: {}", host_volume_name)
+            except ModalProxyNotFoundError:
+                logger.trace("Host volume {} already deleted", host_volume_name)
+            except (ModalProxyInvalidError, ModalProxyInternalError) as e:
+                logger.warning("Failed to delete host volume {}: {}", host_volume_name, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to delete host volume {host_volume_name}: {e}",
+                        host_id=host_id,
+                    )
+                )
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Remove all caches if we notice a connection to the host fail"""

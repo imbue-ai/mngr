@@ -40,8 +40,13 @@ from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -97,7 +102,9 @@ from imbue.mngr_vps.docker_realizer import CONTAINER_KNOWN_HOSTS_NAME
 from imbue.mngr_vps.docker_realizer import CONTAINER_SSH_KEY_NAME
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.errors import BareIsolationNotSupportedError
+from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.interfaces import HostRealizer
@@ -282,6 +289,24 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
         key, _, value = stripped.partition("=")
         tags[key.strip()] = value.strip()
     return tags
+
+
+# HTTP status codes from the VPS provider API that mean the resource the teardown
+# step targeted was already gone -- a benign outcome that should not be recorded as
+# a cleanup failure.
+_VPS_RESOURCE_ALREADY_GONE_STATUS_CODES: Final = (404, 410)
+
+
+def _is_vps_resource_already_gone(error: MngrError) -> bool:
+    """Return True iff ``error`` is a VPS API "already gone" (not-found) response.
+
+    Both the Vultr and OVH clients raise ``VpsApiError`` carrying the HTTP
+    ``status_code`` (OVH maps its SDK's ``ResourceNotFoundError`` to 404), so we
+    classify by that status rather than fragile error-text matching. A real
+    failure (the resource exists but could not be destroyed) carries some other
+    status and is recorded.
+    """
+    return isinstance(error, VpsApiError) and error.status_code in _VPS_RESOURCE_ALREADY_GONE_STATUS_CODES
 
 
 def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | None:
@@ -1292,6 +1317,19 @@ class VpsProvider(BaseProviderInstance):
     # =========================================================================
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
+        """Destroy a VPS-backed host permanently.
+
+        Best-effort: every teardown step is attempted. A failure that means a
+        resource is already gone is benign (dropped). A failure that means a
+        resource exists but could not be removed is real -- it is recorded as a
+        ``CleanupFailure`` and collected, and the remaining steps still run. The
+        collected failures are raised as a ``CleanupFailedGroup`` rather than
+        aborting early or being silently swallowed. See
+        specs/cleanup-error-aggregation.md.
+
+        A missing host record still raises ``HostNotFoundError``; the
+        orchestration layer classifies that abort.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
 
         # Disconnect SSH before destroying (also disconnect the passed-in host
@@ -1307,43 +1345,70 @@ class VpsProvider(BaseProviderInstance):
         vps_config = host_record.config
         vps_ip = host_record.vps_ip
 
-        if vps_ip is not None:
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # Remove the agent placement and its per-host storage (container,
-                # btrfs subvolume, named volumes). The VPS-destroy below takes the
-                # whole loop file with it, so this is primarily belt-and-suspenders
-                # for a destroy retried on a still-existing VPS.
-                self._realizer.teardown_placement(outer, host_id, host_record)
+        with collecting_cleanup_failures() as failures:
+            if vps_ip is not None:
+                with self._make_outer_for_vps_ip(vps_ip) as outer:
+                    # Remove the agent placement and its per-host storage (container,
+                    # btrfs subvolume, named volumes for the container realizer; a no-op
+                    # for bare). The VPS-destroy below takes the whole loop file with it,
+                    # so this is primarily belt-and-suspenders for a destroy retried on a
+                    # still-existing VPS. The realizer records its own per-resource
+                    # cleanup failures and raises a ``CleanupFailedGroup``, which we
+                    # absorb into this destroy's aggregate.
+                    try:
+                        self._realizer.teardown_placement(outer, host_id, host_record)
+                    except CleanupFailedGroup as group:
+                        collect_cleanup_failures(failures, group)
 
-        # Destroy the VPS instance
-        with log_span("Destroying VPS instance"):
-            try:
-                self.vps_client.destroy_instance(vps_config.vps_instance_id)
-            except Exception as e:
-                logger.warning("Failed to destroy VPS: {}", e)
+            # Destroy the VPS instance. An "already gone" (HTTP 404/410) response is benign;
+            # any other error means a VPS instance that may still exist (and incur cost).
+            with log_span("Destroying VPS instance"):
+                try:
+                    self.vps_client.destroy_instance(vps_config.vps_instance_id)
+                except MngrError as e:
+                    logger.warning("Failed to destroy VPS: {}", e)
+                    if not _is_vps_resource_already_gone(e):
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to destroy VPS instance {vps_config.vps_instance_id} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
 
-        # Clean up SSH key from provider
-        if vps_config.vps_ssh_key_id is not None:
-            try:
-                self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
-            except Exception as e:
-                logger.warning("Failed to delete SSH key from provider: {}", e)
+            # Clean up SSH key from provider. An "already gone" (HTTP 404/410) response is
+            # benign; any other error means a key that may still be registered.
+            if vps_config.vps_ssh_key_id is not None:
+                try:
+                    self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
+                except MngrError as e:
+                    logger.warning("Failed to delete SSH key from provider: {}", e)
+                    if not _is_vps_resource_already_gone(e):
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to delete SSH key {vps_config.vps_ssh_key_id} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
 
-        # Clean up local known_hosts
-        if vps_ip is not None:
-            try:
-                remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
-            except Exception as e:
-                logger.trace("Failed to clean up VPS known_hosts: {}", e)
-            try:
-                remove_host_from_known_hosts(
-                    self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
-                )
-            except Exception as e:
-                logger.trace("Failed to clean up container known_hosts: {}", e)
+            # Clean up local known_hosts. These are cosmetic local-file edits; a
+            # missing file or OS error here leaves no infrastructure behind, so it is
+            # always benign and never recorded as a failure.
+            if vps_ip is not None:
+                try:
+                    remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.trace("Failed to clean up VPS known_hosts: {}", e)
+                try:
+                    remove_host_from_known_hosts(
+                        self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
+                    )
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.trace("Failed to clean up container known_hosts: {}", e)
 
-        self._delete_host_record_externally(host_id)
-        logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
+            self._delete_host_record_externally(host_id)
+            logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
 
     def delete_host(self, host: HostInterface) -> None:
         """Delete all local records for a destroyed host (does not destroy VPS)."""
@@ -2281,6 +2346,52 @@ class OfflineCapableVpsProvider(VpsProvider):
                 return []
         return self._persisted_agent_dicts_from_instance(instance)
 
+    @abstractmethod
+    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        """Mirror one agent record into the offline store (instance tags/metadata, or an external store)."""
+        ...
+
+    @abstractmethod
+    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        """Remove one agent's mirrored record from the offline store. Idempotent."""
+        ...
+
+    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
+        """Persist an agent's record on the host volume *and* mirror it for offline reads.
+
+        The base ``VpsProvider`` writes the authoritative on-volume record
+        (read by the SSH-based discovery for *running* hosts), so this keeps doing
+        that via ``super()``. That write is best-effort: a *stopped* host raises
+        ``HostNotFoundError`` (no reachable ``vps_ip``), in which case only the
+        offline mirror is written, so e.g. an offline ``mngr label`` still updates
+        the record a stopped host lists from. ``_mirror_agent_record`` is the only
+        per-provider step (instance tags/metadata, or an external store).
+        """
+        try:
+            super().persist_agent_data(host_id, agent_data)
+        except HostNotFoundError:
+            logger.debug("Host {} unreachable; mirroring agent data to the offline store only", host_id)
+        agent_id = agent_data.get("id")
+        if agent_id is None:
+            logger.warning("Cannot mirror agent data without an id (name={!r})", agent_data.get("name"))
+            return
+        self._mirror_agent_record(host_id, str(agent_id), agent_data)
+
+    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
+        """Remove the agent's on-volume record *and* its offline mirror.
+
+        Mirrors ``persist_agent_data``: the base removes the authoritative on-volume
+        record (best-effort -- ``HostNotFoundError`` when the host is stopped) and
+        ``_remove_mirrored_agent_record`` drops the offline copy, so a destroyed
+        agent stops appearing in both running- and stopped-host discovery. Both
+        removals are idempotent.
+        """
+        try:
+            super().remove_persisted_agent_data(host_id, agent_id)
+        except HostNotFoundError:
+            logger.debug("Host {} unreachable; removing agent data from the offline store only", host_id)
+        self._remove_mirrored_agent_record(host_id, str(agent_id))
+
     def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
@@ -2409,6 +2520,50 @@ class TagMirrorVpsProvider(OfflineCapableVpsProvider):
     def _host_name_tag_key(self) -> str:
         """Tag key whose value holds ``mngr-<host_name>`` (EC2: ``Name``; Azure: ``mngr-host-name``)."""
         ...
+
+    @property
+    @abstractmethod
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror: the object-storage bucket when present, else the tag store.
+
+        Selecting one store here lets the offline read/write paths below stop
+        branching on bucket-vs-tags. Implemented as a cached property by the
+        concrete providers (the bucket-existence probe runs at most once).
+        """
+        ...
+
+    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        self._state_store.persist_agent_record(host_id, agent_id, agent_data)
+
+    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        self._state_store.remove_agent_record(host_id, agent_id)
+
+    def _offline_agent_dicts_for(self, host_id: HostId, instance: Mapping[str, Any] | None = None) -> list[dict]:
+        """Read a stopped host's agent records from the external store (bucket or tag mirror).
+
+        Overrides the base tag/metadata reconstruction so a bucket-mode host --
+        whose agents live in the bucket, not in tags -- still surfaces its agents
+        offline. ``_state_store`` selects bucket vs tags; ``instance`` is unused (the
+        store is keyed by ``host_id``).
+        """
+        del instance
+        return self._state_store.list_agent_records(host_id)
+
+    def _persist_host_record_externally(self, record: VpsHostRecord) -> None:
+        """Mirror the full host record into the external store (best-effort).
+
+        The bucket writes the full record; the tag store is a no-op (the instance's
+        own tags carry it).
+        """
+        self._state_store.persist_host_record(record)
+
+    def _delete_host_record_externally(self, host_id: HostId) -> None:
+        """Delete the host's state from the external store (best-effort, idempotent).
+
+        The bucket deletes the host's prefix; the tag store is a no-op (destroying
+        the instance drops its tags).
+        """
+        self._state_store.delete_host_state(host_id)
 
     def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
         """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
