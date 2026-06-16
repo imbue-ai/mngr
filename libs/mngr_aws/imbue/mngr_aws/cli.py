@@ -21,6 +21,7 @@ from typing import assert_never
 
 import click
 from botocore.exceptions import BotoCoreError
+from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
@@ -223,7 +224,8 @@ def aws_cli_group() -> None:
 
 
 @aws_cli_group.command(name="prepare")
-@click.option(
+@optgroup.group("Provider")
+@optgroup.option(
     "--provider",
     "provider",
     default="aws",
@@ -235,25 +237,25 @@ def aws_cli_group() -> None:
         "fallback. CLI options below override either source."
     ),
 )
-@click.option(
+@optgroup.option(
     "--region",
     "region",
     default=None,
     help="AWS region. Defaults to the resolved provider config's default_region.",
 )
-@click.option(
+@optgroup.option(
     "--sg-name",
     "sg_name",
     default=None,
     help="Security group name to create / reuse. Defaults to the provider config's SG name.",
 )
-@click.option(
+@optgroup.option(
     "--vpc-id",
     "vpc_id",
     default=None,
     help="VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise.",
 )
-@click.option(
+@optgroup.option(
     "--allowed-ssh-cidr",
     "allowed_ssh_cidrs",
     multiple=True,
@@ -297,7 +299,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
 
 
 @aws_cli_group.command(name="cleanup")
-@click.option(
+@optgroup.group("Provider")
+@optgroup.option(
     "--provider",
     "provider",
     default="aws",
@@ -308,19 +311,19 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         "AwsProviderConfig class defaults are used as the fallback."
     ),
 )
-@click.option(
+@optgroup.option(
     "--region",
     "region",
     default=None,
     help="AWS region. Defaults to the resolved provider config's default_region.",
 )
-@click.option(
+@optgroup.option(
     "--sg-name",
     "sg_name",
     default=None,
     help="Security group name to delete. Defaults to the provider config's SG name.",
 )
-@click.option(
+@optgroup.option(
     "--vpc-id",
     "vpc_id",
     default=None,
