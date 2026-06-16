@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Post-deploy `DirectFunction.get_web_url` lookup now retries with backoff on `NotFoundError`, riding through the brief deploy-then-lookup propagation delay instead of failing immediately.
+
 ## [v0.1.15] - 2026-06-15
 
 ## [v0.1.14] - 2026-06-13

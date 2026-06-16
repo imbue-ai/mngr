@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `prepare_btrfs_on_outer` now skips the loopback allocation/format/mount/fstab steps when the btrfs filesystem is already mounted at the configured mount path (e.g. on an OVH-slice's lima data disk), so a host whose btrfs is provided by an already-mounted real disk can reuse the shared vps_docker bake and slow-path rebuild unchanged.
+
+### Fixed
+
+- Fixed: `host_backup` btrfs snapshot helper (`snapshot_helper.sh`, the `OUTER_TRIGGER` mechanism) no longer re-processes a request it has already serviced; the spurious "snapshot path already exists" failure that masked a successful backup is gone. The helper now skips any request whose `request_id` already appears in `result.json`.
+
 ## [v0.1.7] - 2026-06-15
 
 ### Fixed

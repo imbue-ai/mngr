@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `mngr kanpan --help` synopsis now enumerates the commonly-used filter flags (`--include` / `--exclude` / `--running` / `--stopped` / `--archived` / `--active` / `--local` / `--remote` / `--project`) instead of showing `[OPTIONS]`.
+
 ## [v0.2.14] - 2026-06-15
 
 ### Fixed
