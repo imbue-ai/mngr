@@ -48,6 +48,7 @@ const MONOREPO_ROOT = path.resolve(ROOT, '../..');
 const WORKSPACE_PACKAGES = {
   'minds':                  'apps/minds',
   'imbue-mngr':             'libs/mngr',
+  'imbue-mngr-aws':         'libs/mngr_aws',
   'imbue-mngr-claude':      'libs/mngr_claude',
   'imbue-mngr-forward':     'libs/mngr_forward',
   'imbue-mngr-imbue-cloud': 'libs/mngr_imbue_cloud',

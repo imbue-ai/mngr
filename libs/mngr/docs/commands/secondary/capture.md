@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr capture [AGENT] [--full] [--start/--no-start]
+mngr capture [AGENT] [--full] [--window WINDOW] [--start/--no-start]
 ```
 
 Capture and display an agent's tmux pane content.
@@ -17,6 +17,9 @@ to the agent's terminal.
 
 By default, captures only the visible pane content. Use --full to capture
 the entire scrollback buffer.
+
+By default, captures the agent's primary window. Use --window to capture a
+different tmux window in the agent's session, by index (e.g. 1) or name.
 
 If no agent is specified and running interactively, shows a selector.
 
@@ -37,6 +40,7 @@ mngr capture [OPTIONS] [AGENT]
 | ---- | ---- | ----------- | ------- |
 | `--start`, `--no-start` | boolean | Automatically start the host and agent if offline/stopped | `True` |
 | `--full`, `--no-full` | boolean | Capture the full scrollback buffer instead of just the visible pane | `False` |
+| `--window`, `-w` | text | tmux window (index or name) to capture, instead of the agent's primary window | None |
 
 ## Common
 
@@ -71,6 +75,12 @@ $ mngr capture my-agent
 
 ```bash
 $ mngr capture my-agent --full
+```
+
+**Capture a specific tmux window**
+
+```bash
+$ mngr capture my-agent --window 1
 ```
 
 **Capture without auto-starting**

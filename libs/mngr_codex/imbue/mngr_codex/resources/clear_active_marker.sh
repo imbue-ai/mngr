@@ -5,7 +5,8 @@
 # with the session id (verified live: it also carries last_assistant_message,
 # stop_hook_active, etc.). It clears the `codex_root_active` flag and recomputes
 # the `active` marker -- but only for the root session recorded by
-# set_active_marker.sh in `codex_root_session`.
+# set_active_marker.sh in `codex_root_session`. On the root's Stop it also clears
+# any stranded `permissions_waiting` marker as a safety net (see below).
 #
 # Async-subagent model: codex subagents run ASYNCHRONOUSLY, so the root's Stop
 # fires (root model loop done) WHILE its subagents may still be running; their
@@ -66,5 +67,12 @@ fi
 # Clear the root-turn flag and recompute; in-flight subagents keep the marker.
 rm -f "$CODEX_ROOT_ACTIVE_FILE"
 codex_marker_recompute
+
+# Safety net: clear any stranded permission-waiting marker at turn end. Normally
+# PostToolUse clears it once the approved tool runs, but a dialog that was
+# cancelled/denied (or never resolved) before the turn ended would otherwise leave
+# the agent reporting PERMISSIONS-WAITING forever. Independent of the active-marker
+# recompute, so a simple remove is enough.
+rm -f "$CODEX_PERMISSIONS_WAITING_FILE"
 
 codex_marker_unlock
