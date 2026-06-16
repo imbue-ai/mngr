@@ -51,11 +51,12 @@ from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
-from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
+from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
@@ -94,7 +95,6 @@ _HOST_NAME_PREFIX: Final[str] = "mngr-"
 # billing on Azure, so falling back to ``shutdown`` would only strand the VM
 # unreachable while it keeps billing.
 IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-azure-idle-watcher"
-IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 # Where the host-side deallocate script is installed on the outer VM.
 _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
 
@@ -383,7 +383,9 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         """
         bucket = self._state_bucket
         if bucket is not None:
-            return _BlobBucketHostStateStore(bucket=bucket)
+            return BucketHostStateStore(
+                bucket=bucket, bucket_error_type=BlobStateBucketError, bucket_label="Azure state bucket"
+            )
         return _VmTagHostStateStore(provider=self)
 
     def _host_identity(self) -> BlobStateHostIdentity | None:
@@ -779,14 +781,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
                 outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
         logger.info("Azure host_dir sync daemon installed for host {} (target {})", host_id, blob_prefix_url)
 
-    def _host_dir_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of this host's host_dir (the btrfs subvolume's host_dir tree).
-
-        The per-host host_dir lives at ``<btrfs_mount_path>/<host_id_hex>/host_dir``
-        on the outer (the same subvolume layout the idle sentinel path uses).
-        """
-        return self.config.btrfs_mount_path / host_id.get_uuid().hex / HOST_DIR_SUBPATH
-
     def _trigger_final_host_dir_sync(self, host_id: HostId, vps_ip: str) -> None:
         """Run the host_dir sync once (best-effort) so the offline copy is current before deallocate.
 
@@ -845,16 +839,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
                 outer.execute_idempotent_command("systemctl daemon-reload")
                 outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
         logger.info("Azure idle self-deallocate watcher installed for host {}", host_id)
-
-    def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of the in-container idle sentinel for this host."""
-        return (
-            self.config.btrfs_mount_path
-            / host_id.get_uuid().hex
-            / HOST_DIR_SUBPATH
-            / "commands"
-            / IDLE_SENTINEL_FILENAME
-        )
 
     # =========================================================================
     # Offline metadata (so DEALLOCATED hosts list + resolve by name): the Blob
@@ -1256,54 +1240,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         if instance is None:
             return None
         return self._host_record_from_instance(instance)
-
-
-class _BlobBucketHostStateStore(HostStateStore):
-    """Bucket-backed host-state mirror: full host + agent records in Azure Blob (no size limit)."""
-
-    bucket: BlobStateBucket
-
-    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
-        host_id = HostId(record.certified_host_data.host_id)
-        try:
-            self.bucket.write_host_record(host_id, record.model_dump_json(indent=2))
-        except BlobStateBucketError as e:
-            logger.warning("Failed to mirror host record for {} to Azure state bucket: {}", host_id, e)
-
-    def delete_host_state(self, host_id: HostId) -> None:
-        try:
-            self.bucket.delete_host_state(host_id)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to delete host state for {} from Azure state bucket: {}", host_id, e)
-
-    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        try:
-            self.bucket.write_agent_record(host_id, agent_id, agent_data)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to mirror agent {} for host {} to Azure state bucket: {}", agent_id, host_id, e)
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        try:
-            self.bucket.remove_agent_record(host_id, agent_id)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to remove agent {} for host {} from Azure state bucket: {}", agent_id, host_id, e)
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        return self.bucket.list_agent_records(host_id)
-
-    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        try:
-            record_json = self.bucket.read_host_record(host_id)
-        except BlobStateBucketError as e:
-            logger.warning("Failed to read host record for {} from Azure state bucket: {}", host_id, e)
-            return None
-        if record_json is None:
-            return None
-        try:
-            return VpsDockerHostRecord.model_validate_json(record_json)
-        except ValueError as e:
-            logger.warning("Malformed host record for {} in Azure state bucket: {}", host_id, e)
-            return None
 
 
 class _VmTagHostStateStore(HostStateStore):

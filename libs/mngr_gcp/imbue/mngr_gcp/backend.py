@@ -47,11 +47,11 @@ from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
-from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import extract_git_depth
@@ -89,7 +89,6 @@ _HOST_NAME_PREFIX: Final[str] = "mngr-"
 # compute billing) by default -- there is no GCE analog to AWS's
 # ``InstanceInitiatedShutdownBehavior`` and none is needed (and no IAM/API call).
 IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-gcp-idle-watcher"
-IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 
 
 def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
@@ -590,16 +589,6 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
                 outer.execute_idempotent_command("systemctl daemon-reload")
                 outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
         logger.info("GCP idle self-stop watcher installed for host {}", host_id)
-
-    def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of the in-container idle sentinel for this host."""
-        return (
-            self.config.btrfs_mount_path
-            / host_id.get_uuid().hex
-            / HOST_DIR_SUBPATH
-            / "commands"
-            / IDLE_SENTINEL_FILENAME
-        )
 
     # =========================================================================
     # Offline metadata via instance metadata (so STOPPED hosts list + resolve by name)

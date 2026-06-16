@@ -23,6 +23,7 @@ from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.testing import seed_stopped_host_record
 
 _BUCKET_NAME = "mngr-state-test-bucket"
 
@@ -31,18 +32,6 @@ _BUCKET_NAME = "mngr-state-test-bucket"
 def aws_mock() -> Iterator[None]:
     with mock_aws():
         yield
-
-
-def _seed_stopped_host_record(provider: AwsProvider, host_id: HostId) -> None:
-    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits."""
-    certified = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="myhost",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        stop_reason=HostState.STOPPED.value,
-    )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
 
 
 def _build_bucket_provider(
@@ -95,7 +84,7 @@ def test_bucket_mode_persists_agent_to_bucket_and_writes_no_ec2_tags(
     provider, stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     big_labels = {"k": "v" * 1000}
     agent_data = {"id": str(agent_id), "name": "alpha", "type": "claude", "labels": big_labels}
 
@@ -152,7 +141,7 @@ def test_bucket_mode_remove_agent_clears_bucket_record(aws_mock: None, temp_mngr
     provider, stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
 
     stubber.activate()
     try:
@@ -209,7 +198,7 @@ def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
 
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     stubber.add_response(
         "describe_instances",
         {

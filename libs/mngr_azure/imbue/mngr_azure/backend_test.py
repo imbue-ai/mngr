@@ -10,7 +10,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -32,7 +31,7 @@ from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.testing import seed_stopped_host_record
 
 
 class _SubnetStubClient(AzureVpsClient):
@@ -272,25 +271,6 @@ def _set_power_state(compute: FakeComputeClient, power_suffix: str) -> None:
     )
 
 
-def _seed_stopped_host_record(provider: AzureProvider, host_id: HostId) -> None:
-    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits.
-
-    The agent-data hooks call ``super()`` first (the authoritative on-volume store)
-    and only additionally write VM tags. For a *deallocated* host the base raises
-    ``HostNotFoundError`` (no reachable ``vps_ip``); seeding such a record makes the
-    base short-circuit immediately without any SSH or discovery sweep, so these
-    tag-path tests exercise the deallocated-host fallback. Mirrors AWS's helper.
-    """
-    certified = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="myhost",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        stop_reason=HostState.STOPPED.value,
-    )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
-
-
 def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
     """``_find_instance_for_host`` resolves a (deallocated) VM by its mngr-host-id tag, no SSH."""
     provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
@@ -345,7 +325,7 @@ def test_persist_agent_data_mirrors_fields_into_vm_tags(temp_mngr_ctx: MngrConte
     provider, compute, resource = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     _seed_compute(compute, [_vm("vm-1", tags={"mngr-host-id": str(host_id)})])
     provider.persist_agent_data(
         host_id,

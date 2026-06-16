@@ -25,17 +25,16 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
+from imbue.mngr.cli.common_opts import add_use_offline_host_dir_option
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.primitives import AUTO_TOGGLE_HELP_SUFFIX
 from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import auto_toggle_choices
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
@@ -483,17 +482,7 @@ def aws_cli_group() -> None:
         "Defaults to the provider config's allowed_ssh_cidrs. Tighten for production."
     ),
 )
-@optgroup.option(
-    "--use-offline-host-dir",
-    "use_offline_host_dir",
-    type=click.Choice(auto_toggle_choices()),
-    default=AutoToggle.AUTO.value.lower(),
-    show_default=True,
-    help=(
-        "Enable offline host_dir -- reading a stopped host's files via `mngr file` / "
-        "`mngr event` / `mngr transcript` while the host is powered off. " + AUTO_TOGGLE_HELP_SUFFIX
-    ),
-)
+@add_use_offline_host_dir_option
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:

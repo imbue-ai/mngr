@@ -12,7 +12,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -33,7 +32,7 @@ from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.testing import seed_stopped_host_record
 
 
 class _StubAdcConfig(GcpProviderConfig):
@@ -371,26 +370,6 @@ def _instance(
     )
 
 
-def _seed_stopped_host_record(provider: GcpProvider, host_id: HostId) -> None:
-    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits.
-
-    The agent-data hooks call ``super()`` first (the authoritative on-volume
-    store) and only additionally write GCE metadata. For a *stopped* host the
-    base raises ``HostNotFoundError`` (no reachable ``vps_ip``); seeding such a
-    record makes the base short-circuit immediately without any SSH or discovery
-    sweep, so these metadata-path tests exercise the stopped-host fallback
-    without standing up a fake VPS. The GCP analog of AWS's helper.
-    """
-    certified = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="myhost",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        stop_reason=HostState.STOPPED.value,
-    )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
-
-
 def _host_id_label(host_id: HostId) -> str:
     """The GCE label value form of a host id (lowercased to the GCE charset)."""
     return str(host_id).lower()
@@ -483,7 +462,7 @@ def test_persist_agent_data_mirrors_fields_into_metadata(temp_mngr_ctx: MngrCont
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     listed = _instance("i-1", "TERMINATED", labels={"mngr-host-id": _host_id_label(host_id)})
     instances.list_result = [listed]
     # set_metadata reads the live instance first (whole-object read-modify-write).
@@ -508,7 +487,7 @@ def test_persist_agent_data_carries_deletes_in_single_call(temp_mngr_ctx: MngrCo
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     listed = _instance(
         "i-1",
         "TERMINATED",
