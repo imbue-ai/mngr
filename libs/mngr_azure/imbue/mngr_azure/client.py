@@ -940,10 +940,10 @@ class AzureVpsClient(VpsClientInterface):
         Idempotent (deterministic role-definition GUID). Returns the role
         definition's resource id, or ``None`` when the operator lacks
         ``Microsoft.Authorization/roleDefinitions/write`` (Owner / User Access
-        Administrator): in that case idle self-deallocate is disabled but ``mngr
-        stop``/``start`` and the in-VM ``shutdown -P`` circuit-breaker still work,
-        so the missing privilege is logged at WARNING and swallowed rather than
-        failing ``mngr azure prepare``. See specs/gcp-azure-stop-start-lifecycle.
+        Administrator): in that case idle self-deallocate is disabled and only
+        ``mngr stop``/``start`` will halt billing (an in-VM OS ``shutdown`` does not,
+        on Azure). The missing privilege is logged at WARNING and swallowed rather
+        than failing ``mngr azure prepare``. See specs/gcp-azure-stop-start-lifecycle.
         """
         subscription_scope = f"/subscriptions/{self.subscription_id}"
         role_definition = RoleDefinition(
@@ -971,8 +971,8 @@ class AzureVpsClient(VpsClientInterface):
             if self._is_authorization_error(e):
                 logger.warning(
                     "Could not create the {!r} custom role (needs Microsoft.Authorization/roleDefinitions/write -- "
-                    "Owner or User Access Administrator). Idle self-deallocate is disabled; `mngr stop`/`start` and "
-                    "the in-VM shutdown circuit-breaker still work. ({})",
+                    "Owner or User Access Administrator). Idle self-deallocate is disabled; only `mngr stop`/`start` "
+                    "will halt billing (an in-VM OS shutdown does not, on Azure). ({})",
                     SELF_DEALLOCATE_ROLE_NAME,
                     e,
                 )

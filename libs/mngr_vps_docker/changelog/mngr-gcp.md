@@ -6,11 +6,9 @@
 
 - The first-boot bootstrap (cloud-init `user-data` and the GCE `startup-script`) writes the provider SSH public key straight into root's `authorized_keys`, independent of the copy-from-default-user (`admin` / `ec2-user` / `ubuntu` / `debian` / ...) step, via an `authorized_user_public_key` parameter that `_provision_vps` always passes. This removes any reliance on a cloud image's default-user key landing in root. It is the deciding fix for GCE, where the google guest agent provisions the `ssh-keys` metadata into the `ubuntu` user asynchronously and races the default-user copy, intermittently leaving root without the key. Additive and idempotent for the AWS / Vultr / OVH backends (the key also lands in root via the default-user copy, so the extra line is a no-op duplicate).
 
-## startup-script bootstrap path (for GCP / Debian)
+## bootstrap: backend override hooks for non-cloud-init images
 
-- New `startup_script.generate_gce_startup_script`: the cloud-init analog for backends whose images run the google-guest-agent instead of cloud-init (GCP). It renders the same shared `host_setup.build_host_setup_steps` plus the first-boot pieces (host-key install, sshd hardening, root-key forwarding, the `mngr-ready` marker) as one bash script, with each host-setup step wrapped in a subshell so a step's early `exit` (e.g. the gVisor `exit 0`) can't skip the marker.
-
-- `VpsDockerProvider` gains two override hooks: `_generate_bootstrap_payload` (default cloud-init `user-data`; GCP overrides it to a GCE `startup-script`) and `_wait_for_expected_host_key` (default no-op; GCP overrides it to wait for its post-boot-installed host key before strict-checking). Provisioning is otherwise backend-agnostic -- both payloads render the same host-setup steps and write the same marker.
+- `VpsDockerProvider` gains two override hooks: `_generate_bootstrap_payload` (default cloud-init `user-data`; a backend whose images run the google-guest-agent instead of cloud-init, e.g. GCP, overrides it to render a `startup-script`) and `_wait_for_expected_host_key` (default no-op; overridden when the host key is installed post-boot, to wait for it before strict-checking). Provisioning is otherwise backend-agnostic -- both payloads render the same shared `host_setup.build_host_setup_steps` and write the same marker.
 
 - The `mngr-ready` first-boot completion marker path is now the single `host_setup.MNGR_READY_MARKER_PATH` constant, shared by both bootstrap renderers and the poller.
 

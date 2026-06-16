@@ -43,6 +43,7 @@ import pytest
 WORKSPACE_PACKAGES = [
     "minds",
     "imbue-mngr",
+    "imbue-mngr-aws",
     "imbue-mngr-claude",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",

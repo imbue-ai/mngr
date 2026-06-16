@@ -88,8 +88,10 @@ _HOST_NAME_PREFIX: Final[str] = "mngr-"
 # shutdown leaves the VM "Stopped (not deallocated)", STILL billing compute. So
 # the Azure ``.service`` runs a script that DEALLOCATES the VM via its
 # managed-identity IMDS token + the ARM API (the only in-guest way to halt compute
-# billing), falling back to ``shutdown -P now`` (unreachable but still billing) if
-# the deallocate is refused (no role assignment -- the graceful-degradation path).
+# billing). If the deallocate is refused (no role assignment -- the
+# graceful-degradation path) it just logs and exits: an OS poweroff would not halt
+# billing on Azure, so falling back to ``shutdown`` would only strand the VM
+# unreachable while it keeps billing.
 IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-azure-idle-watcher"
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 # Where the host-side deallocate script is installed on the outer VM.
@@ -245,11 +247,12 @@ def _build_self_deallocate_script(sentinel_on_outer: str) -> str:
     managed-identity token from IMDS (no az CLI needed -- plain curl), read this
     VM's ARM resource id from IMDS, then POST the ARM ``deallocate`` action (it
     returns 202 before the guest is torn down). ``curl -f`` makes a 403 (no role
-    assignment -- the low-privilege fallback) exit non-zero, so the
-    ``shutdown -P now`` circuit-breaker fires instead (the VM becomes unreachable
-    but, unlike a deallocate, still bills compute -- the best a VM without the
-    deallocate role can do). The sentinel is removed first so a resumed VM does not
-    immediately re-trigger.
+    assignment -- the graceful-degradation config) exit non-zero; the script then
+    just logs and exits non-zero. It deliberately does NOT poweroff on failure: an
+    Azure OS shutdown does not halt compute billing, so a fallback ``shutdown``
+    would only strand the VM unreachable while it keeps billing. The sentinel is
+    removed first so a resumed VM does not immediately re-trigger (and so the
+    ``.path`` unit re-fires this deallocate next time the watcher re-creates it).
     """
     token_url = (
         "http://169.254.169.254/metadata/identity/oauth2/token"
@@ -269,12 +272,16 @@ def _build_self_deallocate_script(sentinel_on_outer: str) -> str:
         "    exit 0\n"
         "fi\n"
         # The deallocate failed (no managed-identity token, no role assignment, or
-        # ARM unreachable). Log to the journal -- otherwise the fallback poweroff is
-        # silent, and an OS poweroff does NOT halt Azure compute billing, so the VM
-        # would keep billing while looking "stopped".
-        'echo "mngr: self-deallocate failed (missing token/role or ARM unreachable); '
-        'falling back to poweroff -- VM stays ALLOCATED and keeps billing compute" >&2\n'
-        "shutdown -P now\n"
+        # ARM unreachable). Log to the journal and exit non-zero. We deliberately do
+        # NOT poweroff: an Azure OS shutdown does not halt compute billing, so it
+        # would only make the VM unreachable while it keeps billing -- strictly worse
+        # than leaving it running and resumable. The sentinel was already removed, so
+        # the .path unit re-fires this deallocate when the idle watcher re-creates it
+        # on a later cycle (recovering from a transient ARM outage on its own).
+        'echo "mngr: self-deallocate refused (missing managed-identity token/role or ARM '
+        "unreachable). VM left running and STILL BILLING compute -- grant the deallocate "
+        'role or run mngr stop. Will retry on the next idle cycle." >&2\n'
+        "exit 1\n"
     )
 
 

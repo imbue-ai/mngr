@@ -683,8 +683,9 @@ def test_build_self_deallocate_script_fetches_token_resource_id_and_posts_deallo
     On Azure an OS shutdown leaves the VM Stopped-but-allocated (still billing), so
     the only in-guest way to halt compute billing is the ARM deallocate via the
     managed-identity IMDS token. The sentinel is removed first (so a resumed VM
-    isn't immediately re-deallocated), and a refused deallocate (no role) falls back
-    to ``shutdown -P now``.
+    isn't immediately re-deallocated), and a refused deallocate (no role) just logs
+    and exits non-zero -- it does NOT poweroff, since an Azure OS shutdown would not
+    halt billing and would only strand the VM unreachable.
     """
     sentinel = "/mngr-btrfs/deadbeef/host_dir/commands/stop-instance-requested"
     script = _build_self_deallocate_script(sentinel)
@@ -697,5 +698,7 @@ def test_build_self_deallocate_script_fetches_token_resource_id_and_posts_deallo
     # The sentinel is removed before anything else (so resume gets a clean slate).
     assert f'rm -f "{sentinel}"' in script
     assert script.index("rm -f") < script.index("deallocate?api-version")
-    # Circuit-breaker fallback when the deallocate is refused (no role assignment).
-    assert "shutdown -P now" in script
+    # On a refused deallocate the script logs and exits -- it must NOT poweroff,
+    # since an Azure OS shutdown does not halt billing.
+    assert "shutdown" not in script
+    assert "exit 1" in script

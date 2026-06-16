@@ -1,9 +1,14 @@
 """Unit tests for the connect CLI command."""
 
+from typing import Callable
+
+import pytest
+
 from imbue.mngr.cli.agent_selector import build_status_text
 from imbue.mngr.cli.agent_selector import filter_agents
 from imbue.mngr.cli.agent_selector import handle_search_key
 from imbue.mngr.cli.connect import ConnectCliOptions
+from imbue.mngr.cli.connect import _check_connect_future_options
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -197,3 +202,32 @@ def test_handle_search_key_printable_but_no_character() -> None:
 # =============================================================================
 # Tests for connect CLI command
 # =============================================================================
+
+
+# =============================================================================
+# Tests for [future] flag guard
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("flag", "build_opts"),
+    [
+        ("--session-command", lambda: _make_connect_opts(session_command="/bin/zsh")),
+        ("--no-reconnect", lambda: _make_connect_opts(reconnect=False)),
+    ],
+)
+def test_future_flags_raise_not_implemented_error(flag: str, build_opts: Callable[[], ConnectCliOptions]) -> None:
+    """`mngr connect`'s `[future]` flags must still raise NotImplementedError.
+
+    The synopsis at `mngr connect`'s ``CommandHelpMetadata`` intentionally
+    omits these flags because they're unimplemented stubs. When a case
+    below stops raising NotImplementedError, the flag has been
+    implemented. Please:
+        1. Add the flag to `mngr connect`'s ``CommandHelpMetadata.synopsis``
+           in ``connect.py``.
+        2. Drop the `[future]` suffix from the option's ``--help`` text.
+        3. Remove the offending case from this test (and the matching
+           branch in ``_check_connect_future_options``).
+    """
+    with pytest.raises(NotImplementedError):
+        _check_connect_future_options(build_opts())
