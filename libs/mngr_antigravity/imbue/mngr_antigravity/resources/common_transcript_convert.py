@@ -204,7 +204,11 @@ def convert(input_file: str, output_file: str) -> int:
                 event_id = f"{conv_id}-{step_index}-tool_result"
                 if event_id in existing_ids:
                     continue
-                output = _truncate(raw.get("content", ""), _MAX_OUTPUT_LENGTH)
+                # Coerce a non-string content (e.g. JSON null, or a list/dict) to ""
+                # before truncation, matching how USER_INPUT / PLANNER_RESPONSE guard
+                # their content -- _truncate calls len()/slices and assumes a str.
+                content = raw.get("content", "")
+                output = _truncate(content if isinstance(content, str) else "", _MAX_OUTPUT_LENGTH)
                 new_events.append(
                     (
                         timestamp,
