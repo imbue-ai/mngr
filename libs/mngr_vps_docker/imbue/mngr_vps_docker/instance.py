@@ -13,6 +13,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -73,7 +74,6 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
-from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
@@ -82,42 +82,30 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
-from imbue.mngr_vps_docker.container_setup import CONTAINER_ENTRYPOINT_CMD
-from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
-from imbue.mngr_vps_docker.container_setup import HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_vps_docker.container_setup import LABEL_HOST_ID
-from imbue.mngr_vps_docker.container_setup import LABEL_HOST_NAME
-from imbue.mngr_vps_docker.container_setup import LABEL_PROVIDER
-from imbue.mngr_vps_docker.container_setup import LABEL_TAGS
-from imbue.mngr_vps_docker.container_setup import SNAPSHOT_READ_MOUNT_PATH
-from imbue.mngr_vps_docker.container_setup import SNAPSHOT_TRIGGER_MOUNT_PATH
-from imbue.mngr_vps_docker.container_setup import build_image_on_outer_from_build_args
 from imbue.mngr_vps_docker.container_setup import check_file_exists_on_outer
-from imbue.mngr_vps_docker.container_setup import commit_container
-from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
 from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps_docker.container_setup import docker_inspect_running
 from imbue.mngr_vps_docker.container_setup import ensure_depot_token_available
 from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
-from imbue.mngr_vps_docker.container_setup import prepare_btrfs_on_outer
-from imbue.mngr_vps_docker.container_setup import provision_snapshot_helper_on_outer
-from imbue.mngr_vps_docker.container_setup import pull_image
 from imbue.mngr_vps_docker.container_setup import remove_container
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.container_setup import remove_volume
-from imbue.mngr_vps_docker.container_setup import run_container
-from imbue.mngr_vps_docker.container_setup import run_docker
-from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_outer
-from imbue.mngr_vps_docker.container_setup import setup_container_ssh
 from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_for
-from imbue.mngr_vps_docker.container_setup import start_container
-from imbue.mngr_vps_docker.container_setup import start_container_sshd
-from imbue.mngr_vps_docker.container_setup import stop_container
+from imbue.mngr_vps_docker.data_types import RealizePlacementContext
+from imbue.mngr_vps_docker.data_types import RealizedPlacement
+from imbue.mngr_vps_docker.docker_realizer import CONTAINER_HOST_KEY_NAME
+from imbue.mngr_vps_docker.docker_realizer import CONTAINER_KNOWN_HOSTS_NAME
+from imbue.mngr_vps_docker.docker_realizer import CONTAINER_SSH_KEY_NAME
+from imbue.mngr_vps_docker.docker_realizer import DockerRealizer
+from imbue.mngr_vps_docker.errors import BareIsolationNotYetSupportedError
 from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.interfaces import HostRealizer
+from imbue.mngr_vps_docker.primitives import IsolationMode
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 
@@ -426,10 +414,42 @@ class VpsDockerProvider(BaseProviderInstance):
 
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
     _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
+    _realizer_cache: HostRealizer | None = PrivateAttr(default=None)
+
+    def _build_realizer(self) -> HostRealizer:
+        """Construct the realizer selected by ``config.isolation``.
+
+        Internal to the base provider: subclasses are unchanged for the Docker
+        path and never pass a realizer. The default ``CONTAINER`` preserves the
+        original behavior.
+        """
+        match self.config.isolation:
+            case IsolationMode.CONTAINER:
+                return DockerRealizer(
+                    config=self.config,
+                    mngr_ctx=self.mngr_ctx,
+                    key_dir=self._key_dir(),
+                    host_dir=self.host_dir,
+                    provider_name=self.name,
+                )
+            case IsolationMode.NONE:
+                raise BareIsolationNotYetSupportedError(
+                    "isolation=NONE (bare, no Docker container) is not yet supported; "
+                    "the bare realizer ships in a later step."
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    @property
+    def _realizer(self) -> HostRealizer:
+        """The placement realizer for this provider, built once on first use."""
+        if self._realizer_cache is None:
+            self._realizer_cache = self._build_realizer()
+        return self._realizer_cache
 
     @property
     def supports_snapshots(self) -> bool:
-        return True
+        return self._realizer.supports_snapshots
 
     @property
     def supports_shutdown_hosts(self) -> bool:
@@ -499,8 +519,13 @@ class VpsDockerProvider(BaseProviderInstance):
         return load_or_create_ssh_keypair(self._key_dir(), "vps_ssh_key")
 
     def _get_container_ssh_keypair(self) -> tuple[Path, str]:
-        """Load or create the SSH keypair for authenticating to the container."""
-        return load_or_create_ssh_keypair(self._key_dir(), "container_ssh_key")
+        """Load or create the SSH keypair for authenticating to the container.
+
+        Kept on the provider (delegating to the same key-file name the
+        ``DockerRealizer`` uses) so the imbue_cloud slice provider's
+        ``_create_host_object`` override keeps reaching the container keypair.
+        """
+        return load_or_create_ssh_keypair(self._key_dir(), CONTAINER_SSH_KEY_NAME)
 
     def _get_vps_host_keypair(self) -> tuple[Path, str]:
         """Load or create the Ed25519 host keypair injected into VPS via cloud-init."""
@@ -508,7 +533,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _get_container_host_keypair(self) -> tuple[Path, str]:
         """Load or create the Ed25519 host keypair for the container's sshd."""
-        return load_or_create_host_keypair(self._key_dir(), "container_host_key")
+        return load_or_create_host_keypair(self._key_dir(), CONTAINER_HOST_KEY_NAME)
 
     def _vps_known_hosts_path(self) -> Path:
         return self._key_dir() / "vps_known_hosts"
@@ -529,7 +554,7 @@ class VpsDockerProvider(BaseProviderInstance):
         )
 
     def _container_known_hosts_path(self) -> Path:
-        return self._key_dir() / "container_known_hosts"
+        return self._key_dir() / CONTAINER_KNOWN_HOSTS_NAME
 
     # =========================================================================
     # Outer host helper
@@ -581,16 +606,18 @@ class VpsDockerProvider(BaseProviderInstance):
         host_name: HostName,
         vps_ip: str,
     ) -> Host:
-        """Create a Host object with direct SSH to the container via the VPS's exposed port."""
-        container_key_path, _container_pub = self._get_container_ssh_keypair()
+        """Create a Host object with direct SSH to the agent placement on the VPS.
 
-        # Container sshd port is exposed on the VPS's public IP.
-        # We connect directly to vps_ip:container_ssh_port.
+        The realizer decides where the agent sshd lives (container realizer:
+        ``vps_ip:container_ssh_port`` with the container keypair).
+        """
+        endpoint = self._realizer.agent_endpoint(vps_ip)
         pyinfra_host = create_pyinfra_host(
-            hostname=vps_ip,
-            port=self.config.container_ssh_port,
-            private_key_path=container_key_path,
-            known_hosts_path=self._container_known_hosts_path(),
+            hostname=endpoint.hostname,
+            port=endpoint.port,
+            private_key_path=endpoint.private_key_path,
+            known_hosts_path=endpoint.known_hosts_path,
+            ssh_user=endpoint.ssh_user if endpoint.ssh_user is not None else "root",
         )
 
         connector = PyinfraConnector(pyinfra_host)
@@ -657,55 +684,6 @@ class VpsDockerProvider(BaseProviderInstance):
     def _wait_for_sshd_on_vps(self, vps_ip: str, timeout_seconds: float) -> None:
         """Wait for sshd on the VPS to be ready."""
         wait_for_sshd(hostname=vps_ip, port=22, timeout_seconds=timeout_seconds)
-
-    # =========================================================================
-    # Container Setup
-    # =========================================================================
-
-    def _setup_container_ssh(
-        self,
-        outer: OuterHostInterface,
-        container_name: str,
-        host_volume_mount_path: str | None,
-        known_hosts_entries: tuple[str, ...],
-        authorized_keys_entries: tuple[str, ...],
-    ) -> None:
-        """Set up SSH inside the container via docker exec.
-
-        Delegates to the shared ``setup_container_ssh`` helper, supplying the
-        container client/host keypairs this provider manages. The container is
-        reached via <vps_ip>:<container_ssh_port> directly; the caller is
-        responsible for adding the matching known_hosts entry once the VPS IP
-        is known.
-        """
-        _container_key_path, container_public_key = self._get_container_ssh_keypair()
-        container_host_key_path, container_host_public_key = self._get_container_host_keypair()
-        setup_container_ssh(
-            outer,
-            container_name,
-            mngr_host_dir=str(self.host_dir),
-            host_volume_mount_path=host_volume_mount_path,
-            container_public_key=container_public_key,
-            container_host_private_key=container_host_key_path.read_text(),
-            container_host_public_key=container_host_public_key,
-            known_hosts_entries=known_hosts_entries,
-            authorized_keys_entries=authorized_keys_entries,
-        )
-
-    def _prepare_btrfs_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> Path:
-        """Ensure btrfs loop FS + per-host subvolume exist on the outer; return the subvolume path.
-
-        Thin wrapper around :func:`prepare_btrfs_on_outer` that pulls the
-        loop-file path, mount path, and reserved-GB knob out of
-        ``self.config``. See the free function for the full step-by-step.
-        """
-        return prepare_btrfs_on_outer(
-            outer,
-            host_id=host_id,
-            btrfs_mount_path=self.config.btrfs_mount_path,
-            loop_file_path=self.config.btrfs_loop_file_path,
-            outer_disk_reserved_gb=self.config.outer_disk_reserved_gb,
-        )
 
     # =========================================================================
     # Core Lifecycle: create_host
@@ -849,28 +827,36 @@ class VpsDockerProvider(BaseProviderInstance):
         effective_start_args = runtime_args + tuple(self.config.default_start_args) + tuple(start_args or ())
         parsed = self._parse_build_args(build_args)
 
-        container_name, container_id, volume_name = self._setup_container_on_vps(
-            outer=outer,
-            host_id=host_id,
-            name=name,
-            vps_ip=vps_ip,
-            base_image=base_image,
-            effective_start_args=effective_start_args,
-            docker_build_args=parsed.docker_build_args,
-            git_depth=parsed.git_depth,
-            tags=tags,
-            known_hosts=known_hosts,
-            authorized_keys=authorized_keys,
+        realized = self._realizer.realize_placement(
+            outer,
+            RealizePlacementContext(
+                host_id=host_id,
+                name=name,
+                vps_ip=vps_ip,
+                base_image=base_image,
+                effective_start_args=effective_start_args,
+                docker_build_args=parsed.docker_build_args,
+                git_depth=parsed.git_depth,
+                tags=tags,
+                known_hosts=known_hosts,
+                authorized_keys=authorized_keys,
+            ),
         )
+
+        # Wait for the agent sshd here (not in the realizer) so subclasses can
+        # override ``_wait_for_container_sshd`` to wait on a dynamically
+        # forwarded port (the imbue_cloud slice provider does this).
+        logger.log(LogLevel.BUILD.value, "Waiting for agent SSH to be ready...", source="vps")
+        with log_span("Waiting for agent SSH"):
+            self._wait_for_container_sshd(vps_ip)
+        logger.log(LogLevel.BUILD.value, "Agent SSH ready", source="vps")
 
         return self._finalize_host_creation(
             host_id=host_id,
             name=name,
             vps_ip=vps_ip,
             outer=outer,
-            container_name=container_name,
-            container_id=container_id,
-            volume_name=volume_name,
+            realized=realized,
             base_image=base_image,
             effective_start_args=effective_start_args,
             tags=tags,
@@ -1070,131 +1056,13 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return vps_instance_id, vps_ip
 
-    def _setup_container_on_vps(
-        self,
-        outer: OuterHostInterface,
-        host_id: HostId,
-        name: HostName,
-        vps_ip: str,
-        base_image: str,
-        effective_start_args: tuple[str, ...],
-        docker_build_args: tuple[str, ...],
-        git_depth: int | None,
-        tags: Mapping[str, str] | None,
-        known_hosts: Sequence[str] | None,
-        authorized_keys: Sequence[str] | None,
-    ) -> tuple[str, str, str]:
-        """Create the Docker container and configure SSH inside it.
-
-        If docker_build_args are provided, uploads the build context to the VPS
-        and runs docker build there. Otherwise pulls the base image directly.
-
-        Returns (container_name, container_id, volume_name).
-
-        The btrfs loop FS and the per-host unified docker named volume are
-        provisioned at the top of this method, before the (slow, failure-prone)
-        image pull/build, so the bind-source path always exists by the time
-        ``_finalize_host_creation`` writes ``host_state.json`` -- even if a
-        later step in this method fails.
-        """
-        volume_name = host_volume_name_for(host_id)
-        snapshot_trigger_volume_name = snapshot_trigger_volume_name_for(host_id)
-
-        with log_span("Provisioning unified host volume on btrfs subvolume"):
-            subvolume_path = self._prepare_btrfs_on_outer(outer, host_id)
-            seed_host_volume_layout_on_outer(outer, subvolume_path)
-            create_bind_volume_on_outer(outer, volume_name=volume_name, device_path=subvolume_path)
-
-        # Snapshot helper: lets the in-container host_backup service request
-        # `btrfs subvolume snapshot` against the per-host subvolume via a
-        # request.json / result.json file protocol in a dedicated docker
-        # volume. Both the systemd unit on the outer and the docker volume
-        # mounted at /mngr-snapshot/ in the container need to exist before
-        # the agent boots. The helper provisioning is internally a 2-phase
-        # parallel pipeline (see provision_snapshot_helper_on_outer) so
-        # the ~7 SSH round-trips it would otherwise serialize collapse to
-        # the latency of 2.
-        provision_snapshot_helper_on_outer(
-            outer,
-            self.mngr_ctx.concurrency_group,
-            host_id=host_id,
-            btrfs_mount_path=self.config.btrfs_mount_path,
-            subvolume_path=subvolume_path,
-            trigger_volume_name=snapshot_trigger_volume_name,
-        )
-
-        if docker_build_args:
-            base_image = self._build_image_on_vps(outer, host_id, base_image, docker_build_args, git_depth)
-        else:
-            logger.log(LogLevel.BUILD.value, "Pulling Docker image {} on VPS...", base_image, source="vps")
-            with log_span("Pulling Docker image on VPS"):
-                pull_image(outer, base_image, timeout_seconds=300.0)
-
-        container_name = f"{self.mngr_ctx.config.prefix}{name}"
-        labels = {
-            LABEL_HOST_ID: str(host_id),
-            LABEL_HOST_NAME: str(name),
-            LABEL_PROVIDER: str(self.name),
-            LABEL_TAGS: json.dumps(dict(tags) if tags else {}),
-        }
-        logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
-        snapshots_dir_on_outer = self.config.btrfs_mount_path / "snapshots"
-        with log_span("Starting Docker container"):
-            container_id = run_container(
-                outer,
-                image=base_image,
-                name=container_name,
-                port_mappings={f"0.0.0.0:{self.config.container_ssh_port}": "22"},
-                volumes=[
-                    f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw",
-                    # Snapshot helper IPC volume (bind-shared with the outer
-                    # at OUTER_SNAPSHOT_TRIGGER_DIR via the named volume created
-                    # above; host_backup writes request.json / reads result.json).
-                    f"{snapshot_trigger_volume_name}:{SNAPSHOT_TRIGGER_MOUNT_PATH}:rw",
-                    # Read-only view of the outer's <btrfs-mount>/snapshots/
-                    # directory so restic-in-container can read the per-request
-                    # snapshots the outer helper produces at
-                    # <btrfs-mount>/snapshots/<name>.
-                    f"{snapshots_dir_on_outer}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
-                ],
-                labels=labels,
-                extra_args=list(effective_start_args),
-                entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
-            )
-
-        logger.log(LogLevel.BUILD.value, "Setting up SSH in container...", source="vps")
-        with log_span("Setting up SSH in container"):
-            self._setup_container_ssh(
-                outer=outer,
-                container_name=container_name,
-                host_volume_mount_path=f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}",
-                known_hosts_entries=tuple(known_hosts or ()),
-                authorized_keys_entries=tuple(authorized_keys or ()),
-            )
-
-        _container_host_key_path, container_host_public_key = self._get_container_host_keypair()
-        add_host_to_known_hosts(
-            known_hosts_path=self._container_known_hosts_path(),
-            hostname=vps_ip,
-            port=self.config.container_ssh_port,
-            public_key=container_host_public_key,
-        )
-        logger.log(LogLevel.BUILD.value, "Waiting for container SSH to be ready...", source="vps")
-        with log_span("Waiting for container SSH"):
-            self._wait_for_container_sshd(vps_ip)
-        logger.log(LogLevel.BUILD.value, "Container SSH ready", source="vps")
-
-        return container_name, container_id, volume_name
-
     def _finalize_host_creation(
         self,
         host_id: HostId,
         name: HostName,
         vps_ip: str,
         outer: OuterHostInterface,
-        container_name: str,
-        container_id: str,
-        volume_name: str,
+        realized: RealizedPlacement,
         base_image: str,
         effective_start_args: tuple[str, ...],
         tags: Mapping[str, str] | None,
@@ -1206,6 +1074,11 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_host_public_key: str,
     ) -> Host:
         """Create the Host object, configure activity watching, and persist state."""
+        # The container realizer always sets these; a later step makes the
+        # corresponding ``VpsHostConfig`` fields nullable for bare records.
+        assert realized.container_name is not None and realized.volume_name is not None
+        container_name = realized.container_name
+        volume_name = realized.volume_name
         host = self._create_host_object(host_id, name, vps_ip)
 
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -1231,13 +1104,13 @@ class VpsDockerProvider(BaseProviderInstance):
 
         self._create_shutdown_script(host)
         with log_span("Starting activity watcher"):
-            self._start_activity_watcher(outer, container_name)
+            self._realizer.start_activity_watcher(outer, container_name)
 
         host_record = VpsDockerHostRecord(
             certified_host_data=host_data,
             vps_ip=vps_ip,
             ssh_host_public_key=vps_host_public_key,
-            container_ssh_host_public_key=self._get_container_host_keypair()[1],
+            container_ssh_host_public_key=realized.container_ssh_host_public_key,
             config=VpsHostConfig(
                 vps_instance_id=vps_instance_id,
                 region=region,
@@ -1248,7 +1121,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 volume_name=volume_name,
                 vps_ssh_key_id=vps_ssh_key_id,
             ),
-            container_id=container_id,
+            container_id=realized.container_id,
         )
         host_store = open_host_store(outer, volume_name)
         host_store.write_host_record(host_record)
@@ -1305,29 +1178,6 @@ class VpsDockerProvider(BaseProviderInstance):
             timeout_seconds=self.config.ssh_connect_timeout,
         )
 
-    def _build_image_on_vps(
-        self,
-        outer: OuterHostInterface,
-        host_id: HostId,
-        base_image: str,
-        docker_build_args: tuple[str, ...],
-        git_depth: int | None,
-    ) -> str:
-        """Build a Docker image on the VPS from the provided build args.
-
-        Thin wrapper around the shared ``build_image_on_outer_from_build_args``
-        helper, supplying this provider's configured docker builder. Returns the
-        image tag to use.
-        """
-        return build_image_on_outer_from_build_args(
-            outer,
-            self.mngr_ctx.concurrency_group,
-            host_id=host_id,
-            docker_build_args=docker_build_args,
-            git_depth=git_depth,
-            builder=self.config.builder,
-        )
-
     def _create_shutdown_script(self, host: Host) -> None:
         """Create the shutdown script that stops the container on idle."""
         shutdown_script = "#!/bin/bash\nkill -TERM 1\n"
@@ -1380,8 +1230,7 @@ class VpsDockerProvider(BaseProviderInstance):
         self._evict_cached_host(host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            with log_span("Stopping container on VPS"):
-                stop_container(outer, host_record.config.container_name, timeout_seconds=int(timeout_seconds))
+            self._realizer.stop_placement(outer, host_record, timeout_seconds)
 
             # Update the host record (bump updated_at). A subclass that stops more
             # than the container -- e.g. AWS stopping the EC2 instance -- passes a
@@ -1405,15 +1254,6 @@ class VpsDockerProvider(BaseProviderInstance):
     # Core Lifecycle: start_host
     # =========================================================================
 
-    def _start_activity_watcher(self, outer: OuterHostInterface, container_name: str) -> None:
-        """Launch the in-container activity watcher (the idle/auto-shutdown driver).
-
-        The watcher is a backgrounded process inside the agent container (not part
-        of its entrypoint), so it does not survive a container stop/start. It is
-        started here at create time and re-started by ``start_host`` on resume.
-        """
-        exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
-
     def start_host(
         self,
         host: HostInterface | HostId,
@@ -1425,18 +1265,7 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            with log_span("Starting container on VPS"):
-                start_container(outer, host_record.config.container_name)
-            # sshd is launched via `docker exec`, not the container's entrypoint, so a
-            # `docker start` brings the container back WITHOUT sshd (the idle watcher's
-            # container stop, a manual `mngr stop`, a VPS reboot, or an AWS instance
-            # stop/start all land here). Re-exec it before waiting, or
-            # `_wait_for_container_sshd` would block until timeout and the agent would be
-            # unrecoverable via `mngr start`/`conn`. `docker start` is a no-op on an
-            # already-running container, so this also repairs the
-            # container-up-but-sshd-down state.
-            with log_span("Restarting sshd in container"):
-                start_container_sshd(outer, host_record.config.container_name)
+            self._realizer.start_placement(outer, host_record)
 
             with log_span("Waiting for container SSH"):
                 self._wait_for_container_sshd(host_record.vps_ip)
@@ -1460,7 +1289,7 @@ class VpsDockerProvider(BaseProviderInstance):
             # can't auto-stop is better than a failed resume.
             with log_span("Relaunching activity watcher"):
                 try:
-                    self._start_activity_watcher(outer, host_record.config.container_name)
+                    self._realizer.start_activity_watcher(outer, host_record.config.container_name)
                 except MngrError as e:
                     logger.warning(
                         "Failed to relaunch the activity watcher on resume for host {} ({}); "
@@ -1494,40 +1323,11 @@ class VpsDockerProvider(BaseProviderInstance):
 
         if vps_ip is not None:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # Stop and remove the agent container; removing the volume below
-                # will fail otherwise because the container still holds it open.
-                try:
-                    remove_container(outer, vps_config.container_name, force=True)
-                except MngrError as e:
-                    logger.warning("Failed to remove container: {}", e)
-
-                # Delete the per-host btrfs subvolume before the named volume.
-                # The VPS-destroy that follows takes the whole loop file with it,
-                # so this is primarily belt-and-suspenders for the rare case of
-                # a destroy retried on a still-existing VPS (e.g. the operator
-                # re-runs `mngr destroy` after VPS termination has failed).
-                subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
-                try:
-                    delete_btrfs_subvolume_on_outer(outer, subvolume_path)
-                except MngrError as e:
-                    logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
-
-                # Remove the unified host volume. With bind options the volume
-                # itself holds no data (the subvolume above did), but the named
-                # entry still needs cleanup so a later create with the same
-                # volume name doesn't collide.
-                try:
-                    remove_volume(outer, vps_config.volume_name)
-                except MngrError as e:
-                    logger.warning("Failed to remove host volume: {}", e)
-
-                # Remove the per-host snapshot-trigger volume (the named entry;
-                # the bind source at OUTER_SNAPSHOT_TRIGGER_DIR is shared across
-                # all containers on this outer and is left alone).
-                try:
-                    remove_volume(outer, snapshot_trigger_volume_name_for(host_id))
-                except MngrError as e:
-                    logger.warning("Failed to remove snapshot trigger volume: {}", e)
+                # Remove the agent placement and its per-host storage (container,
+                # btrfs subvolume, named volumes). The VPS-destroy below takes the
+                # whole loop file with it, so this is primarily belt-and-suspenders
+                # for a destroy retried on a still-existing VPS.
+                self._realizer.teardown_placement(outer, host_id, host_record)
 
         # Destroy the VPS instance
         with log_span("Destroying VPS instance"):
@@ -2210,15 +2010,13 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         snapshot_name = name or SnapshotName(f"mngr-snapshot-{host_id}-{int(time.time())}")
-        image_tag = f"mngr-snapshot-{host_id.get_uuid().hex}-{int(time.time())}"
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            with log_span("Creating Docker snapshot"):
-                image_id = commit_container(outer, host_record.config.container_name, image_tag)
+            snapshot_id = self._realizer.snapshot_placement(outer, host_record)
 
             # Store snapshot record in host data
             snapshot_record = SnapshotRecord(
-                id=image_id,
+                id=str(snapshot_id),
                 name=str(snapshot_name),
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
@@ -2237,7 +2035,7 @@ class VpsDockerProvider(BaseProviderInstance):
             self._persist_host_record_externally(updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
-        return SnapshotId(image_id)
+        return snapshot_id
 
     def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -2262,10 +2060,7 @@ class VpsDockerProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            try:
-                run_docker(outer, ["rmi", str(snapshot_id)])
-            except MngrError as e:
-                logger.warning("Failed to delete snapshot image: {}", e)
+            self._realizer.delete_snapshot_placement(outer, snapshot_id)
 
     # =========================================================================
     # Tags

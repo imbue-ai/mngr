@@ -26,12 +26,15 @@ from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
 from imbue.mngr_vps_docker.container_setup import redact_secret_env
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.container_setup import resolve_dockerfile_paths
+from imbue.mngr_vps_docker.docker_realizer import DockerRealizer
+from imbue.mngr_vps_docker.errors import BareIsolationNotYetSupportedError
 from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps_docker.instance import build_vps_tags
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import parse_vps_build_args
+from imbue.mngr_vps_docker.primitives import IsolationMode
 from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
 
 _DEFAULT_REGION = "ewr"
@@ -615,3 +618,37 @@ def test_create_host_runs_pre_create_validation_before_any_provider_write(
     )
     with pytest.raises(MngrError, match="SENTINEL: pre-create validation ran"):
         provider.create_host(HostName("test-host"))
+
+
+# =========================================================================
+# Realizer selection (isolation axis)
+# =========================================================================
+
+
+def _minimal_provider(temp_mngr_ctx: MngrContext, isolation: IsolationMode) -> MinimalVpsDockerProvider:
+    return MinimalVpsDockerProvider(
+        name=ProviderInstanceName("test-vps-docker"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsDockerProviderConfig(backend=ProviderBackendName("test-vps-docker"), isolation=isolation),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+
+
+def test_default_isolation_is_container() -> None:
+    """The provider config defaults to container isolation, preserving the original behavior."""
+    assert VpsDockerProviderConfig(backend=ProviderBackendName("test-vps-docker")).isolation is IsolationMode.CONTAINER
+
+
+def test_provider_builds_docker_realizer_for_container_isolation(temp_mngr_ctx: MngrContext) -> None:
+    """``isolation=CONTAINER`` yields a DockerRealizer, and snapshot support reflects it."""
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    assert isinstance(provider._realizer, DockerRealizer)
+    assert provider.supports_snapshots is True
+
+
+def test_provider_rejects_bare_isolation_until_supported(temp_mngr_ctx: MngrContext) -> None:
+    """``isolation=NONE`` fails fast with a dedicated error until the bare realizer ships."""
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.NONE)
+    with pytest.raises(BareIsolationNotYetSupportedError, match="bare"):
+        provider._build_realizer()

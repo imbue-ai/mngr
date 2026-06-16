@@ -6,11 +6,20 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
+from imbue.mngr_vps_docker.primitives import IsolationMode
 
 
 class VpsDockerProviderConfig(ProviderInstanceConfig):
     """Base configuration for VPS Docker providers."""
 
+    isolation: IsolationMode = Field(
+        default=IsolationMode.CONTAINER,
+        description=(
+            "How the agent is isolated on its VPS. CONTAINER (the default) runs the agent in a "
+            "Docker container; NONE runs it directly on the VPS OS. Selects the realizer the "
+            "provider uses; the default preserves the original container behavior."
+        ),
+    )
     host_dir: Path = Field(
         default=Path("/mngr"),
         description="Base directory for mngr data inside containers",

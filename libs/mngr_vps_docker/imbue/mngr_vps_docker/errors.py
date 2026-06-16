@@ -17,6 +17,16 @@ class VpsApiError(VpsDockerError):
         super().__init__(f"VPS API error {status_code}: {message}")
 
 
+class BareIsolationNotYetSupportedError(VpsDockerError):
+    """Raised when ``isolation=NONE`` is selected before the bare realizer ships.
+
+    The realizer seam lands first with only the Docker path implemented; the
+    bare (no-container) realizer arrives in a later step. Until then, selecting
+    ``IsolationMode.NONE`` fails fast with this error rather than silently
+    falling back to the container path.
+    """
+
+
 class ContainerSetupError(VpsDockerError):
     """Raised when an outer-host container/image/snapshot setup step fails.
 

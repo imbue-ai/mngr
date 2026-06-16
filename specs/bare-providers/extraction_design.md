@@ -169,3 +169,34 @@ unaffected.
 Step 1 is the only one that touches the shared 2400-line file structurally; it is
 behavior-preserving and fully covered by the existing `mngr_vps_docker` unit tests
 plus each provider's suite.
+
+## Implementation notes (as landed in step 1)
+
+A few refinements over the sketch above, forced by the imbue_cloud override
+surface (the slice provider rebuilds containers on leased VMs through the base
+setup path and customizes the *connect* side via dynamically forwarded ports):
+
+- **`agent_endpoint` instead of `build_agent_host`.** The realizer returns an
+  `AgentEndpoint` (host/port/key/known_hosts/user); the provider still owns
+  `_create_host_object` (Host construction, the cache, and the certified-data
+  callback). This keeps `_create_host_object` an override point -- the imbue_cloud
+  slice provider overrides it for its forwarded port -- and avoids giving the
+  realizer a provider back-reference.
+- **`_wait_for_container_sshd` stays on the provider.** The wait moved *out* of the
+  realizer's `realize_placement` and up into `create_host_on_existing_vps`, so the
+  slice provider's override (which waits on a dynamically forwarded port) is still
+  honored. The container's `run_container` port mapping uses
+  `config.container_ssh_port` (VM-internal) even for slices, so that part moved
+  into the realizer safely.
+- **Host-record fields stayed required (step 2 deferred).** Making
+  `VpsHostConfig.container_name`/`volume_name` nullable cascades `str | None`
+  through every `open_host_store`/container call site, so it is kept as its own
+  step. `_finalize_host_creation` asserts the realizer set them (the Docker
+  realizer always does).
+- **`teardown_container_on_existing_vps` left on the provider** (Docker-only
+  imbue_cloud slow-path helper); routing it through the realizer is deferred to
+  when a bare equivalent is needed.
+- **Container key-file names** (`container_ssh_key` / `container_host_key` /
+  `container_known_hosts`) are now module constants in `docker_realizer.py`; the
+  provider's `_get_container_*` accessors (kept for the slice override) and the
+  realizer both reference them, so there is a single source of truth.
