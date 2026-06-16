@@ -48,7 +48,7 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.pure import pure
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -85,7 +85,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
-from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -98,10 +97,11 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
-from imbue.mngr_imbue_cloud.auth_helper import get_active_token
-from imbue.mngr_imbue_cloud.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
+from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
+from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
@@ -109,173 +109,45 @@ from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
-from imbue.mngr_imbue_cloud.host import ImbueCloudHost
+from imbue.mngr_imbue_cloud.errors import RepoIdentityError
+from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
-from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
+from imbue.mngr_imbue_cloud.providers.listing import derive_offline_note_from_raw
+from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provider
+from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
+from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
+from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
-from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
 
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
 
-# Path on every mngr_vps_docker-baked outer where the per-host btrfs loop
-# filesystem is mounted (matches ``VpsDockerProviderConfig.btrfs_mount_path``
-# default). The per-host subvolume is at ``<this>/<host_id_hex>``.
-_VPS_BTRFS_MOUNT_PATH: Final[str] = "/mngr-btrfs"
 
-# Container label that mngr_vps_docker tags the workspace container with;
-# also used as ``docker volume`` -name search prefix (the bind-options volume
-# is named ``mngr-host-vol-<host_id_hex>``).
-_LABEL_HOST_ID_KEY: Final[str] = "com.imbue.mngr.host-id"
-_HOST_VOLUME_NAME_PREFIX: Final[str] = "mngr-host-vol-"
+def _resolve_fast_path_attributes(attributes: LeaseAttributes) -> LeaseAttributes:
+    """Canonicalize repo_url and require repo_url + repo_branch_or_tag for the fast path.
 
-
-def build_pool_host_wipe_script(host_id: HostId) -> str:
-    """Render the bash script that wipes a leased pool VPS before release.
-
-    Runs as root on the outer (the leased VPS itself). Each step is
-    independently best-effort -- the script always exits 0 so a single
-    failed sub-step (e.g. ``docker stop`` on an already-stopped container)
-    doesn't abort the rest. The destroy-host caller still logs warnings
-    when this returns abnormally, but the privacy-relevant steps remain
-    unconditionally attempted.
-
-    Wipes:
-
-    * The workspace container (by label) and any named docker volume
-      whose name contains the host hex.
-    * The per-host btrfs subvolume backing the bind-options volume (the
-      bind source ``device=`` lives outside the container, so removing
-      the container alone leaves the data on disk).
-    * Everything docker still knows about (``system prune -a -f --volumes``).
-    * Everything under ``/root`` and ``/tmp`` except
-      ``/root/.ssh/authorized_keys`` (preserves the static pool-management
-      key the connector / cleanup_released_hosts.py needs for any
-      post-release SSH-driven maintenance).
-
-    Pure function so unit tests can assert the exact command shape
-    without standing up an SSH transport.
+    The fast path adopts a pre-baked host only when the request's repo and branch
+    genuinely match what was baked (decision 6 of the fast-path-matching spec): it
+    must never match on a subset. Any failure to establish a sound identity --
+    missing repo_url/branch, or a local path with no resolvable ``origin`` --
+    raises ``FastPathUnavailableError`` so the caller falls back to the slow path
+    (which rebuilds the user's exact spec) rather than adopting the wrong host.
     """
-    host_id_hex = host_id.get_uuid().hex
-    host_id_str = str(host_id)
-    label_filter = shlex.quote(f"label={_LABEL_HOST_ID_KEY}={host_id_str}")
-    volume_name_filter = shlex.quote(f"name={_HOST_VOLUME_NAME_PREFIX}{host_id_hex}")
-    subvolume_path = f"{_VPS_BTRFS_MOUNT_PATH}/{host_id_hex}"
-    return (
-        "set +e\n"
-        # Find + remove the workspace container by its host-id label.
-        f"container_id=$(docker ps -a --filter {label_filter} --format '{{{{.ID}}}}' | head -1)\n"
-        'if [ -n "$container_id" ]; then\n'
-        '    docker stop "$container_id" >/dev/null 2>&1\n'
-        '    docker rm -f -v "$container_id" >/dev/null 2>&1\n'
-        "fi\n"
-        # Drop the per-host named volume(s). docker volume rm -f tolerates
-        # the volume not existing.
-        f"for vol in $(docker volume ls -q --filter {volume_name_filter}); do\n"
-        '    docker volume rm -f "$vol" >/dev/null 2>&1\n'
-        "done\n"
-        # The bind-options volume's storage is a btrfs subvolume at
-        # /mngr-btrfs/<host_hex>; docker volume rm doesn't touch the bind
-        # source, so wipe it explicitly. Fall back to rm -rf if btrfs is
-        # absent (older non-btrfs hosts before the btrfs spec landed).
-        f"if [ -d {shlex.quote(subvolume_path)} ]; then\n"
-        f"    btrfs subvolume delete {shlex.quote(subvolume_path)} >/dev/null 2>&1 || "
-        f"rm -rf {shlex.quote(subvolume_path)} >/dev/null 2>&1\n"
-        "fi\n"
-        # Reclaim everything else docker holds: stopped containers, dangling
-        # images, networks, unused volumes, build cache.
-        "docker system prune -a -f --volumes >/dev/null 2>&1\n"
-        # Wipe /root content except .ssh/authorized_keys -- preserves the
-        # pool-management public key the connector relies on if it needs
-        # to reach the host again before cleanup_released_hosts.py runs.
-        "find /root -mindepth 1 -maxdepth 1 -not -name .ssh -exec rm -rf {} + 2>/dev/null\n"
-        "find /root/.ssh -mindepth 1 -not -name authorized_keys -exec rm -rf {} + 2>/dev/null\n"
-        # Wipe /tmp entirely.
-        "find /tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null\n"
-        # Always succeed: release is the gating step, individual wipe
-        # failures are surfaced via the script's stderr but must not
-        # block lease return.
-        "exit 0\n"
-    )
-
-
-def _certified_host_name(raw: Mapping[str, Any]) -> str | None:
-    """Pull the friendly host name out of the listing raw output, if present."""
-    certified = raw.get("certified_data") or {}
-    name = certified.get("host_name")
-    return name if isinstance(name, str) and name else None
-
-
-def _derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
-    """Map the outer-listing raw output to a HostState.
-
-    The outer listing script tags the output with ``CONTAINER_STATE``,
-    ``CONTAINER_EXIT_CODE``, and ``CONTAINER_MISSING`` so we don't have
-    to re-run docker inspect.
-    """
-    if raw.get("container_missing"):
-        return HostState.DESTROYED
-    container_state = raw.get("container_state")
-    if not container_state:
-        # Outer SSH succeeded but produced no state -- treat as crashed
-        # (no info to be more specific).
-        return HostState.CRASHED
-    exit_code = raw.get("container_exit_code") or 0
-    has_certified_data = bool(raw.get("certified_data"))
-    if container_state == "running" and has_certified_data:
-        return HostState.RUNNING
-    if container_state == "running":
-        # Container is up but docker exec didn't give us data -- we know
-        # the host exists but can't read its state from inside.
-        return HostState.UNAUTHENTICATED
-    state, _note = _map_docker_status_to_host_state(container_state, exit_code)
-    return state
-
-
-def _derive_offline_note_from_raw(raw: Mapping[str, Any]) -> str | None:
-    """Produce a short ``failure_reason`` note for non-running containers.
-
-    Returns None for running containers (no note needed) and for the
-    DESTROYED / missing case (the state itself is the message). For
-    stopped/paused/etc., returns the human-readable note that
-    ``_map_docker_status_to_host_state`` produced.
-    """
-    container_state = raw.get("container_state")
-    if not container_state or container_state == "running":
-        return None
-    if raw.get("container_missing"):
-        return None
-    exit_code = raw.get("container_exit_code") or 0
-    _state, note = _map_docker_status_to_host_state(container_state, exit_code)
-    return note
-
-
-def _map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostState, str | None]:
-    """Translate docker's container ``State.Status`` into a ``HostState``.
-
-    Returns ``(state, note)`` where ``note`` is a short human-readable
-    diagnostic appended to ``HostDetails.failure_reason``. If the docker
-    container is ``running`` but inner SSH was unreachable we treat that
-    as an authentication problem -- the host is up; we just can't get
-    inside it.
-    """
-    if status == "running":
-        return HostState.UNAUTHENTICATED, "container is running on outer host but inner SSH was unreachable"
-    if status == "exited":
-        if exit_code == 0:
-            return HostState.STOPPED, "container exited cleanly"
-        return HostState.CRASHED, f"container exited with code {exit_code}"
-    if status == "paused":
-        return HostState.PAUSED, "container is paused"
-    if status in ("created", "restarting"):
-        return HostState.STARTING, f"container in {status} state"
-    if status in ("dead", "removing"):
-        return HostState.CRASHED, f"container in {status} state"
-    return HostState.CRASHED, f"unrecognized docker status {status!r}"
+    if not attributes.repo_url or not attributes.repo_branch_or_tag:
+        raise FastPathUnavailableError(
+            "fast_mode=require needs both a repo_url and a repo_branch_or_tag to match a pool host; "
+            f"got repo_url={attributes.repo_url!r}, repo_branch_or_tag={attributes.repo_branch_or_tag!r}"
+        )
+    try:
+        canonical_repo_url = canonicalize_repo_source(attributes.repo_url)
+    except RepoIdentityError as exc:
+        raise FastPathUnavailableError(
+            f"cannot establish a canonical repo identity for fast_mode=require: {exc}"
+        ) from exc
+    return attributes.model_copy_update(to_update(attributes.field_ref().repo_url, canonical_repo_url))
 
 
 def _rewrite_container_host_name(
@@ -380,24 +252,6 @@ def _scan_ssh_host_key(host: str, port: int) -> str | None:
         except (OSError, paramiko.SSHException):
             pass
     return f"{host_key.get_name()} {host_key.get_base64()}"
-
-
-@pure
-def _build_delegated_vps_config(config: ImbueCloudProviderConfig) -> VpsDockerProviderConfig:
-    """Build the delegated vps_docker config for the slow-path rebuild.
-
-    Forwards the runtime knobs (``docker_runtime`` / ``install_gvisor_runtime`` /
-    ``default_start_args``) from the imbue_cloud config so the rebuilt container
-    runs under the configured runtime with the configured hardening args.
-    """
-    return VpsDockerProviderConfig(
-        backend=ProviderBackendName("vps_docker"),
-        host_dir=config.host_dir,
-        container_ssh_port=config.container_ssh_port,
-        docker_runtime=config.docker_runtime,
-        install_gvisor_runtime=config.install_gvisor_runtime,
-        default_start_args=config.default_start_args,
-    )
 
 
 class ImbueCloudProvider(BaseProviderInstance):
@@ -626,7 +480,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 result[host_ref] = agent_refs
                 continue
             self._listing_raw_cache[host_id] = raw
-            host_state = _derive_host_state_from_raw(raw)
+            host_state = derive_host_state_from_raw(raw)
             if host_state == HostState.DESTROYED and not include_destroyed:
                 continue
             # ``entry.host_name`` is the canonical user-supplied name from the
@@ -787,19 +641,22 @@ class ImbueCloudProvider(BaseProviderInstance):
         return host_details, agent_details_list
 
     def _ensure_outer_host_key_known(self, lease: LeasedHostInfo) -> None:
-        """Best-effort: scan the VPS root sshd's host key and add it to known_hosts.
+        """Best-effort: scan the outer (VPS-root) sshd's host key and add it to known_hosts.
 
         ``outer_host_for`` connects with strict host-key checking, but the
-        lease step only added the inner container's host key (port 2222)
-        to ``known_hosts``. Without this scan, the very first outer-SSH
-        connection always fails. The scan and add are both idempotent and
-        safe to run multiple times; on scan failure (e.g. the VPS itself
-        is unreachable) or on local disk failure we just leave
+        lease step only added the inner container's host key (the container
+        sshd port) to ``known_hosts``. Without this scan, the very first
+        outer-SSH connection always fails. The outer sshd is reached at
+        ``lease.ssh_port`` -- ``22`` for an OVH VPS (root sshd on :22) and
+        the box-forwarded VM-root port for a slice (where ``:22`` is the
+        bare-metal box's own sshd, not the VM). The scan and add are both
+        idempotent and safe to run multiple times; on scan failure (e.g. the
+        VPS itself is unreachable) or on local disk failure we just leave
         ``known_hosts`` alone and let the connection produce its natural
         error -- the caller's outer-SSH guard then maps that to the
         lease-only fallback.
         """
-        scanned_key = _scan_ssh_host_key(lease.vps_address, 22)
+        scanned_key = _scan_ssh_host_key(lease.vps_address, lease.ssh_port)
         if scanned_key is None:
             return
         host_id = HostId(lease.host_id)
@@ -808,7 +665,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
             if not known_hosts_path.exists():
                 known_hosts_path.touch()
-            add_host_to_known_hosts(known_hosts_path, lease.vps_address, 22, scanned_key)
+            add_host_to_known_hosts(known_hosts_path, lease.vps_address, lease.ssh_port, scanned_key)
         except OSError as exc:
             logger.warning(
                 "imbue_cloud[{}] could not update known_hosts for host {} (vps {}): {}",
@@ -881,8 +738,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         by ``build_outer_listing_collection_script``).
         """
         ssh_info = self._build_lease_ssh_info(host_ref.host_id, lease)
-        host_state = _derive_host_state_from_raw(raw)
-        failure_reason = _derive_offline_note_from_raw(raw)
+        host_state = derive_host_state_from_raw(raw)
+        failure_reason = derive_offline_note_from_raw(raw)
         boot_time = timestamp_to_datetime(raw.get("btime"))
         uptime_seconds = raw.get("uptime_seconds")
         lock_mtime = raw.get("lock_mtime")
@@ -1167,7 +1024,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                     )
                 return self._create_host_fast_path(
                     name=name,
-                    attributes=parsed.attributes,
+                    attributes=_resolve_fast_path_attributes(parsed.attributes),
                     token=token,
                     region=parsed.region,
                 )
@@ -1367,10 +1224,29 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``authorized_keys`` so the returned ``ImbueCloudHost`` (which uses the
         per-host key) can reach it.
         """
-        delegated_provider = self._build_delegated_vps_provider()
-        # The VPS root host key (port 22) feeds the rebuilt host's record; best
-        # effort -- it is bookkeeping the imbue_cloud paths do not read back.
+        # A slice's container is reached at a box-forwarded host port that differs
+        # from the in-VM publish port, so its rebuild must use the slice provider
+        # (which splits publish vs connect ports) rather than the plain vps_docker
+        # one. Detected by the lease's container port differing from the standard
+        # publish port -- true only for slices (forwarded ports), never OVH VPSes.
+        is_slice = lease_result.container_ssh_port != self.config.container_ssh_port
+        delegated_provider: VpsDockerProvider = (
+            build_slice_rebuild_provider(
+                name=self.name, config=self.config, mngr_ctx=self.mngr_ctx, lease_result=lease_result
+            )
+            if is_slice
+            else build_delegated_vps_provider(name=self.name, config=self.config, mngr_ctx=self.mngr_ctx)
+        )
+        # The VPS root host key (port 22 for OVH; the box-forwarded VM-root port
+        # for a slice) feeds the rebuilt host's record AND is pinned in the
+        # delegated provider's own known_hosts, so its outer connections -- e.g.
+        # the certified-data sync callback -- pass strict host-key checking
+        # instead of failing on a missing entry.
         vps_host_public_key = _scan_ssh_host_key(lease_result.vps_address, lease_result.ssh_port) or ""
+        if vps_host_public_key:
+            delegated_provider.record_outer_host_key(
+                lease_result.vps_address, lease_result.ssh_port, vps_host_public_key
+            )
         combined_authorized_keys = tuple(authorized_keys or ()) + (per_host_public_key,)
         with self._outer_for_leased_vps(host_id, lease_result) as outer:
             delegated_provider.teardown_container_on_existing_vps(outer, host_id)
@@ -1385,11 +1261,15 @@ class ImbueCloudProvider(BaseProviderInstance):
             # ``install_gvisor_runtime=true`` into the per-account block), so the
             # rebuilt container can run under ``--runtime runsc``. qemu purge is
             # enabled because the pool is OVH-backed (a no-op when no qemu).
-            apply_host_setup_on_outer(
-                outer,
-                install_gvisor_runtime=self.config.install_gvisor_runtime,
-                is_qemu_purge_enabled=True,
-            )
+            # Skipped for slices: the lima VM is already provisioned (Docker +
+            # sshd from the bake's provision script) and uses runc (the VM is the
+            # isolation boundary), so the OVH/runsc/qemu host-setup does not apply.
+            if not is_slice:
+                apply_host_setup_on_outer(
+                    outer,
+                    install_gvisor_runtime=self.config.install_gvisor_runtime,
+                    is_qemu_purge_enabled=True,
+                )
             delegated_provider.create_host_on_existing_vps(
                 outer=outer,
                 host_id=host_id,
@@ -1408,31 +1288,6 @@ class ImbueCloudProvider(BaseProviderInstance):
                 known_hosts=known_hosts,
                 authorized_keys=combined_authorized_keys,
             )
-
-    def _build_delegated_vps_provider(self) -> VpsDockerProvider:
-        """Construct a vps_docker provider bound to this instance's keys/config.
-
-        It only ever runs ``teardown_container_on_existing_vps`` /
-        ``create_host_on_existing_vps`` (which take a caller-supplied ``outer``
-        and make no VPS-API calls), so its ``vps_client`` is the
-        ``ExternallyManagedVpsClient`` stub that raises on any ordering call.
-
-        Forwards the runtime knobs from ``self.config`` (an
-        ``ImbueCloudProviderConfig``, which extends ``VpsDockerProviderConfig``)
-        so the rebuilt container runs under the configured runtime with the
-        configured hardening args -- e.g. ``docker_runtime='runsc'`` plus
-        ``--workdir=/`` / ``--security-opt=no-new-privileges`` from
-        ``default_start_args``, which minds bootstrap writes into the per-account
-        block.
-        """
-        vps_config = _build_delegated_vps_config(self.config)
-        return MinimalVpsDockerProvider(
-            name=self.name,
-            host_dir=self.config.host_dir,
-            mngr_ctx=self.mngr_ctx,
-            config=vps_config,
-            vps_client=ExternallyManagedVpsClient(),
-        )
 
     @contextmanager
     def _outer_for_leased_vps(self, host_id: HostId, lease_result: LeaseResult) -> Iterator[OuterHostInterface]:
@@ -1822,10 +1677,13 @@ class ImbueCloudProvider(BaseProviderInstance):
 
     @contextmanager
     def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
-        """Open the outer host (the leased VPS itself, root@vps_address:22).
+        """Open the outer host (the leased VPS itself, root@vps_address:ssh_port).
 
         Uses the per-host SSH key already on disk (the lease step authorized
-        this key on both the container's sshd and the VPS root account).
+        this key on both the container's sshd and the VPS root account). The
+        outer sshd port is ``lease.ssh_port`` -- ``22`` for an OVH VPS, and
+        the box-forwarded VM-root port for a slice (``:22`` on a slice's
+        ``vps_address`` is the bare-metal box's own sshd, not the VM).
         """
         leased = self._find_leased(host_id)
         if leased is None:
@@ -1841,7 +1699,7 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         pyinfra_host = create_pyinfra_host(
             hostname=leased.vps_address,
-            port=22,
+            port=leased.ssh_port,
             private_key_path=private_key_path,
             known_hosts_path=known_hosts_path,
             ssh_user="root",

@@ -367,7 +367,9 @@ def test_print_extras_status_runs_without_error() -> None:
     # and made it flaky under the 10s offload timeout (observed at 10.05s in CI;
     # ~0.4s locally). Report claude as available so the richer status-formatting
     # branch is still exercised. The other status paths are fast local reads.
-    _print_extras_status(claude_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}))
+    _print_extras_status(
+        claude_native_plugin_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS})
+    )
 
 
 # Probes plugin / shell-completion / claude-plugin status, which can stall on a

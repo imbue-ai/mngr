@@ -55,12 +55,16 @@ def test_build_create_admin_args_injects_minds_env_tag() -> None:
         env_name="alice",
         count=3,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json='{"cpus": 2}',
         workspace_dir="/path/to/workspace",
         management_public_key_file="/path/to/key.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     # The --tag injection is the whole reason for this layer's existence.
     tag_index = args.index("--tag")
@@ -72,12 +76,16 @@ def test_build_create_admin_args_forwards_all_other_flags_verbatim() -> None:
         env_name="alice",
         count=5,
         region="US-WEST-OR",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json='{"cpus": 4, "memory_gb": 16}',
         workspace_dir="/some/workspace",
         management_public_key_file="/path/to/key.pub",
         database_url="postgres://example",
         mngr_source="/path/to/mngr",
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     assert args[0] == "create"
     assert args[args.index("--count") + 1] == "5"
@@ -94,12 +102,16 @@ def test_build_create_admin_args_omits_mngr_source_when_none() -> None:
         env_name="alice",
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--mngr-source" not in args
 
@@ -109,12 +121,16 @@ def test_build_create_admin_args_omits_no_recycle_by_default() -> None:
         env_name="alice",
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--no-recycle" not in args
 
@@ -124,14 +140,56 @@ def test_build_create_admin_args_forwards_no_recycle_when_disabled() -> None:
         env_name="alice",
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=False,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--no-recycle" in args
+
+
+def test_build_create_admin_args_forwards_skip_deferred_install_wait_when_set() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        count=1,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=True,
+    )
+    assert "--skip-deferred-install-wait" in args
+
+
+def test_build_create_admin_args_omits_skip_deferred_install_wait_by_default() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        count=1,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert "--skip-deferred-install-wait" not in args
 
 
 def test_build_list_admin_args() -> None:
@@ -212,12 +270,16 @@ def test_pool_create_derives_production_from_default_root_name(
         env_name="production",
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir=str(_isolated_env),
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     tag_index = args.index("--tag")
     assert args[tag_index + 1] == "minds_env=production"

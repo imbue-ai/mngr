@@ -1,6 +1,8 @@
 """Unit tests for OpenCodeAgentConfig and OpenCodeAgent."""
 
 import json
+import shlex
+import shutil
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -16,12 +18,18 @@ from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import cleanup_tmux_session
+from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
@@ -31,6 +39,9 @@ from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
 from imbue.mngr_opencode.plugin import OpenCodeAgent
 from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
 from imbue.mngr_opencode.plugin import _build_prompt_post_command
+from imbue.mngr_opencode.plugin import _resolve_lifecycle_state_for_permission
+from imbue.mngr_opencode.plugin import _waiting_reason
+from imbue.mngr_opencode.plugin import agent_field_generators
 from imbue.mngr_opencode.plugin import register_agent_type
 
 
@@ -483,3 +494,112 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
 
     dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
     assert not dest_dir.exists()
+
+
+# =============================================================================
+# Lifecycle promotion + waiting_reason field generator
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "base_state, is_blocked, expected",
+    [
+        # Only a RUNNING base is promoted, and only while blocked on a prompt.
+        (AgentLifecycleState.RUNNING, True, AgentLifecycleState.WAITING),
+        (AgentLifecycleState.RUNNING, False, AgentLifecycleState.RUNNING),
+        # Every non-RUNNING base passes through unchanged, blocked or not.
+        (AgentLifecycleState.WAITING, True, AgentLifecycleState.WAITING),
+        (AgentLifecycleState.STOPPED, True, AgentLifecycleState.STOPPED),
+        (AgentLifecycleState.REPLACED, True, AgentLifecycleState.REPLACED),
+        (AgentLifecycleState.DONE, True, AgentLifecycleState.DONE),
+        (
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+            True,
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        ),
+    ],
+)
+def test_resolve_lifecycle_state_for_permission(
+    base_state: AgentLifecycleState, is_blocked: bool, expected: AgentLifecycleState
+) -> None:
+    assert _resolve_lifecycle_state_for_permission(base_state, is_blocked) == expected
+
+
+@pytest.mark.tmux
+def test_get_lifecycle_state_promotes_running_to_waiting_when_blocked_on_permission(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """End-to-end override against a live pane: the base state is RUNNING, and a
+    permissions_waiting marker promotes it to WAITING; removing the marker restores
+    RUNNING. (The promotion rule itself is unit-tested above without tmux.)"""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    # A long-lived process that ps reports as "opencode" (the expected process name)
+    # so the base lifecycle reads RUNNING -- the renamed-sleep trick.
+    sleep_bin = shutil.which("sleep")
+    assert sleep_bin is not None
+    fake_opencode = tmp_path / "opencode"
+    shutil.copy(sleep_bin, fake_opencode)
+    fake_opencode.chmod(0o755)
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / ACTIVE_MARKER_FILENAME).write_text("")
+    session_name = agent.session_name
+    agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s {shlex.quote(session_name)} {shlex.quote(str(fake_opencode))} 600",
+        timeout_seconds=5.0,
+    )
+    try:
+        wait_for(
+            lambda: agent.get_lifecycle_state() == AgentLifecycleState.RUNNING,
+            error_message="expected opencode agent to read RUNNING with a live pane",
+        )
+        (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
+        assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+        (agent_dir / PERMISSIONS_WAITING_FILENAME).unlink()
+        assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+    finally:
+        cleanup_tmux_session(session_name)
+
+
+def test_agent_field_generators_exposes_opencode_waiting_reason() -> None:
+    result = agent_field_generators()
+    assert result is not None
+    plugin_name, generators = result
+    assert plugin_name == "opencode"
+    assert "waiting_reason" in generators
+    assert callable(generators["waiting_reason"])
+
+
+def test_waiting_reason_returns_permissions_when_active_and_blocked(opencode_agent: OpenCodeAgent) -> None:
+    """A real open prompt: the active marker (set when the session went busy) is
+    present *and* permissions_waiting is present, so the agent is blocked on an
+    approval prompt."""
+    agent_dir = opencode_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / ACTIVE_MARKER_FILENAME).touch()
+    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
+    assert _waiting_reason(opencode_agent, opencode_agent.host) == WaitingReason.PERMISSIONS
+
+
+def test_waiting_reason_ignores_stranded_permissions_marker_after_turn(opencode_agent: OpenCodeAgent) -> None:
+    """A stranded permissions_waiting marker (active absent -> turn over) reports
+    END_OF_TURN, not PERMISSIONS. The PERMISSIONS verdict is gated on the active
+    marker, so correctness does not depend on the root-idle safety net having
+    deleted the file."""
+    agent_dir = opencode_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
+    assert _waiting_reason(opencode_agent, opencode_agent.host) == WaitingReason.END_OF_TURN
+
+
+def test_waiting_reason_returns_end_of_turn_when_idle(opencode_agent: OpenCodeAgent) -> None:
+    agent_dir = opencode_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    assert _waiting_reason(opencode_agent, opencode_agent.host) == WaitingReason.END_OF_TURN
+
+
+def test_waiting_reason_returns_none_when_active(opencode_agent: OpenCodeAgent) -> None:
+    agent_dir = opencode_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / ACTIVE_MARKER_FILENAME).touch()
+    assert _waiting_reason(opencode_agent, opencode_agent.host) is None
