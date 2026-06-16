@@ -90,11 +90,10 @@ convert_new_events() {
     mngr_common_transcript_release_lock
 
     if [ -s "$convert_stderr" ]; then
-        # Forward the converter's stderr to both the structured log (via
-        # log_warn) and the process's stderr -- the latter is what tests and
-        # operators read when something has gone wrong with conversion.
+        # A genuine converter error is logged (to events/logs/common_transcript)
+        # but never echoed to this watcher's stdout/stderr -- that would surface
+        # in the agent's pane.
         log_warn "convert error: $(cat "$convert_stderr")"
-        cat "$convert_stderr" >&2
     fi
     rm -f "$convert_stderr"
 

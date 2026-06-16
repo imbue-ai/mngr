@@ -79,6 +79,9 @@ convert_new_events() {
     mngr_common_transcript_release_lock
 
     if [ -s "$convert_stderr" ]; then
+        # A genuine converter error is logged (to events/logs/common_transcript)
+        # but never echoed to this watcher's stdout/stderr -- that would surface
+        # in the agent's pane.
         log_warn "convert error: $(cat "$convert_stderr")"
     fi
     rm -f "$convert_stderr"
