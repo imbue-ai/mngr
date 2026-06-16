@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `waiting_reason` field in `mngr list` for opencode agents (matching claude and codex): `PERMISSIONS` while blocked on an `ask` permission prompt, `END_OF_TURN` when idle. The in-process plugin tracks opencode's `permission.asked` / `permission.replied` events (concurrent prompts handled, accepting both the binary's and the SDK's event names). The reason is gated on the agent's `active` marker via a shared `classify_waiting_reason` in mngr core so claude / codex / opencode cannot drift.
+
 ## [v0.2.14] - 2026-06-15
 
 ## [v0.2.13] - 2026-06-13

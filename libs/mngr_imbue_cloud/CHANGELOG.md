@@ -6,6 +6,23 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: OVH bare-metal "slices" feature — carve VPS-like hosts (lima/QEMU VMs) out of rented OVH bare-metal servers as an alternative to ordering OVH VPSes. A slice is indistinguishable from a baked VPS pool host to minds and the imbue_cloud provider, with cleaner btrfs (the lima data disk, no loopback). Includes the slice data model + lifecycle (`bare_metal.py`), lima slice creation (`build_slice_lima_yaml`, `LimaSliceVpsClient`), and a `SliceVpsDockerProvider` that runs the shared vps_docker bake on the VM.
+- Added: `mngr imbue_cloud admin server` command group for the bare-metal lifecycle — `pricing` (per-slice OVH pricing table), `order` (places a real OVH eco order; **charges the account**), `await-delivery`, `setup` (resumable Debian reinstall + box prep), `register`, `list`, `set-status`. Codifies the full RAM-pricing → order → deliver → provision → slice flow that was previously done by hand.
+- Added: `mngr imbue_cloud admin pool create --backend [ovh_vps|slice]` unifies pool-host baking across backends — there is now a single command to bake a leasable pool host regardless of backend (the machine-provisioning step differs; the bake + row insert are shared). Slice rows go through the same lease-metadata path as OVH, carrying the operator's `--attributes` and `--region`.
+- Added: `--skip-deferred-install-wait` flag on `admin pool create` (slice + ovh_vps) for faster dev/throwaway pool bakes that skip the FCT deferred-install (heavy apt + Playwright/Chromium) wait; must not be used for production pool hosts.
+
+### Changed
+
+- Changed: Pool bake now waits for the FCT `deferred-install` service to finish before stopping the services agent, on both the OVH-VPS and slice paths. Stopping mid-apt previously corrupted dpkg, leaving the deferred install failing on every post-lease retry until repaired.
+- Changed: `admin pool create` no longer accepts hand-typed `repo_url` / `repo_branch_or_tag` in `--attributes`. The bake source is now exactly one of `--from-tag <tag>` (production — clones `--repo-url` at the tag into a fresh temp dir so the content provably equals the tag) or `--workspace-dir <dir>` (dev — bakes from a working tree). `--attributes` is now optional and rejects the `repo_url` / `repo_branch_or_tag` keys.
+- Changed: imbue_cloud fast path now matches on the **repository** as well as the branch/tag, so it can no longer adopt a pool host running different code than the request asked for. A new `repo_identity.canonicalize_repo_source` is the single source of truth applied identically at bake time and request time (normalizes ssh/https, `.git`, trailing slash, host case; resolves a local path to its `origin` remote). `fast_mode=require` now raises `FastPathUnavailableError` when canonical identity cannot be established, instead of matching on a subset.
+- Changed: Restructured the `mngr_imbue_cloud` plugin into layered sub-packages (`plugin`, `cli`, `bake`, `providers`, `hosts`, `slices`, `connector`) with an `import-linter` "mngr_imbue_cloud layers contract" enforcing the ordering. The slice/bare-metal subsystem is isolated in `slices/`, the provider-generic pool bake in `bake/`, and both provider backends are co-located in `plugin/backends.py`. Plugin entry points moved to `imbue.mngr_imbue_cloud.plugin.entrypoints` / `plugin.slice_entrypoints`. Pure refactor: no behavior, CLI, wire-format, or schema change.
+- Changed: Decomposed the oversized `providers/instance.py` (~2,000 lines) — extracted the pure listing-shaping helpers into `providers/listing.py`, the pre-release data-wipe script generator into `providers/wipe.py`, and the slow-path VPS-vs-slice rebuild provider/config builders into `providers/rebuild.py` (with their unit tests co-located).
+- Changed: The imbue_cloud provider now reaches a leased host's outer (VPS-root) sshd at the lease's `ssh_port` instead of a hardcoded 22, so `mngr list` / discovery and destroy-time wipe target the slice VM rather than the bare-metal box's own sshd.
+- Changed: The slow-path rebuild now pins the leased host's outer SSH host key in the rebuilding provider's known_hosts, so the certified-data sync over the outer connection passes strict host-key checking (applies to OVH VPSes and slices).
+
 ## [v0.1.3] - 2026-06-15
 
 ## [v0.1.2] - 2026-06-13
