@@ -300,7 +300,8 @@ def test_serialize_codex_hooks_round_trips_to_json() -> None:
     hooks = build_codex_hooks_config()
     serialized = serialize_codex_hooks(hooks)
     assert json.loads(serialized) == hooks
-    assert "  " in serialized  # two-space indent
+    # two-space indent
+    assert "  " in serialized
 
 
 # =============================================================================

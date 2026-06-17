@@ -90,6 +90,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
@@ -104,7 +105,13 @@ from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -233,6 +240,11 @@ class CodexAgentConfig(AgentTypeConfig):
         description="When True, set approval_policy='never' so codex never prompts for tool "
         "approval (the sandbox set by sandbox_mode still applies).",
     )
+    check_installation: bool = Field(
+        default=True,
+        description="Check whether codex is installed and install it if missing "
+        "(if False, assume it is already present).",
+    )
     # config_overrides is a free-form blob merged last (shallow) into the
     # per-agent config.toml. Covers anything not surfaced as a typed knob (extra
     # [notice] keys, a [profiles.*] table, model_provider, etc.).
@@ -285,7 +297,16 @@ class CodexAgentConfig(AgentTypeConfig):
     )
 
 
-class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin):
+class CodexAgent(
+    InteractiveTuiAgent[CodexAgentConfig],
+    CliBackedAgentMixin,
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
+    HasPermissionPolicyMixin,
+    HasVersionManagementMixin,
+    HasAutoInstallMixin,
+):
     """Agent implementation for the OpenAI Codex CLI (``codex``)."""
 
     # Stable substring of codex's header box, which renders together with the
@@ -365,10 +386,35 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         """
         return self._get_agent_dir() / ROOT_SESSION_FILENAME
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_codex_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
+
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        # codex's per-resource policy is its sandbox mode plus any approval_policy override.
+        policy: dict[str, Any] = {"sandbox_mode": self.agent_config.sandbox_mode}
+        if "approval_policy" in self.agent_config.config_overrides:
+            policy["approval_policy"] = self.agent_config.config_overrides["approval_policy"]
+        return policy
+
+    def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        # codex follows an update policy (ask / auto / never) rather than pinning a version: a
+        # network-free check of the installed codex against its own recorded latest, then the
+        # update_policy action. Best-effort and never fatal -- an outdated codex still runs.
+        self._maybe_check_for_codex_update(host, self._resolve_user_codex_home(host), mngr_ctx)
+
+    def get_install_binary_name(self) -> str:
+        return "codex"
+
+    def get_install_command(self) -> str:
+        return "npm i -g @openai/codex"
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_codex_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
     def _resolve_user_codex_home(self, host: OnlineHostInterface) -> Path:
         """Resolve the user's real ``CODEX_HOME`` over the host shell.
@@ -427,10 +473,12 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         5. Install the transcript scripts + background supervisor under
            ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
+        if self.agent_config.check_installation:
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
         user_codex_home = self._resolve_user_codex_home(host)
         canonical_work_dir = self._resolve_canonical_path(host, self.work_dir)
         self._ensure_source_repo_trusted(host, user_codex_home, mngr_ctx)
-        self._maybe_check_for_codex_update(host, user_codex_home, mngr_ctx)
+        self.reconcile_installed_version(host, mngr_ctx)
         self._provision_codex_home(host, user_codex_home, canonical_work_dir)
         with mngr_ctx.concurrency_group.make_concurrency_group("codex_provisioning") as concurrency_group:
             provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
@@ -469,7 +517,7 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         codex_home = self._get_codex_home()
         self._provision_auth_symlink(host, user_codex_home, codex_home)
 
-        approval_policy = _APPROVAL_POLICY_NEVER if self.agent_config.auto_allow_permissions else None
+        approval_policy = _APPROVAL_POLICY_NEVER if self.is_unattended_enabled() else None
         config = build_codex_config(
             model=self.agent_config.model,
             model_reasoning_effort=self.agent_config.model_reasoning_effort,

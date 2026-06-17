@@ -19,6 +19,7 @@ from pydantic import Field
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -155,11 +156,6 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     @abstractmethod
     def get_ready_timeout_seconds(self) -> float:
         """Return the timeout in seconds to wait for agent readiness."""
-        ...
-
-    @abstractmethod
-    def send_message(self, message: str) -> None:
-        """Send a message to the running agent via its stdin."""
         ...
 
     @abstractmethod
@@ -535,6 +531,17 @@ class HasCommonTranscriptMixin(HasTranscriptMixin):
         ...
 
 
+class SupportsLiveOutputMixin:
+    """Marker for agents that publish a live, in-progress view of their output before a turn completes.
+
+    A bare marker with no contract of its own -- the concrete surface differs by agent kind:
+    a TUI agent exposes a streaming snapshot file (``HasStreamingSnapshotMixin``), while a
+    headless agent yields incremental stdout chunks (``StreamingHeadlessAgentMixin``). Both
+    inherit this so capability detection can treat "can stream live output" as one capability
+    regardless of how the agent surfaces it.
+    """
+
+
 class HeadlessAgentMixin(ABC):
     """Mixin for agent types that run headlessly (no TUI, no interactive input).
 
@@ -550,7 +557,7 @@ class HeadlessAgentMixin(ABC):
         ...
 
 
-class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
+class StreamingHeadlessAgentMixin(SupportsLiveOutputMixin, HeadlessAgentMixin):
     """Headless agent that can also stream output incrementally."""
 
     @abstractmethod
@@ -581,3 +588,174 @@ class StreamingHeadlessAgentMixin(HeadlessAgentMixin):
             "stage_initial_message, so the --message content cannot be delivered.",
             type(self).__name__,
         )
+
+
+class HasStreamingSnapshotMixin(SupportsLiveOutputMixin, ABC):
+    """Mixin for agent types that publish a live, in-progress view of assistant text.
+
+    A consuming UI can read the buffer file to show output before a message
+    completes. The agent maintains the file (e.g. a background watcher that
+    periodically captures the rendered pane); this contract exposes where it
+    lives. Lowest-priority capability -- only needed if a UI wants live streaming.
+
+    This is the TUI agent's form of :class:`SupportsLiveOutputMixin`; a headless
+    agent streams the same kind of live output via ``StreamingHeadlessAgentMixin``.
+    """
+
+    @abstractmethod
+    def get_stream_buffer_path(self) -> Path:
+        """Return the path to this agent's response-streaming buffer file."""
+        ...
+
+
+class HasSessionPreservationMixin(ABC):
+    """Mixin for agent types that preserve their session/transcript files on destroy.
+
+    When the agent (or its host) is destroyed, its native session files, raw +
+    common transcripts, and resume pointers should be copied to a durable
+    preserved location before the state dir is removed, so the conversation is
+    not lost. The agent's ``on_destroy`` calls this, gated by its own config.
+    """
+
+    @abstractmethod
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        """Copy this agent's session/transcript files to the preserved location before cleanup."""
+        ...
+
+
+class HasSessionAdoptionMixin(ABC):
+    """Mixin for agent types that can adopt an existing conversation session into a new agent.
+
+    The read-side counterpart to :class:`HasSessionPreservationMixin`: it consumes an existing
+    session (a live agent's, a preserved one's, or a config dir's) so a freshly created agent
+    resumes that context. Covers both an explicitly named session (e.g. claude's
+    ``--adopt-session <id>``) and the source agent's session when cloning (``--from <agent>``).
+    The agent's ``on_after_provisioning`` calls this, gated by the relevant create options.
+    """
+
+    @abstractmethod
+    def adopt_session(self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
+        """Adopt the session(s) named in the create options into this newly provisioned agent."""
+        ...
+
+
+class HasUnattendedModeMixin(ABC):
+    """Mixin for agent types that can run with no human (auto-allow in-run tool prompts).
+
+    This is what makes remote / scheduled / headless agents work: every in-run
+    tool-approval prompt is auto-approved when the agent is configured for
+    unattended operation. (First-launch dialogs are handled separately, by the
+    universal mngr-owned-dialogs path.) How the auto-allow is applied differs per
+    CLI (a permission hook, a skip flag, a config write); this contract reports
+    whether unattended operation is enabled for this instance.
+    """
+
+    @abstractmethod
+    def is_unattended_enabled(self) -> bool:
+        """Whether this agent instance is configured to run unattended (auto-allow tool prompts)."""
+        ...
+
+
+class HasPermissionPolicyMixin(ABC):
+    """Mixin for agent types that support a per-resource allow/deny/ask permission policy.
+
+    A refinement on top of plain unattended auto-allow: the CLI can express a
+    per-tool / per-resource policy (e.g. allow ``git *`` but deny ``rm -rf *``).
+    Each CLI stores this differently (a settings block, a config-overrides key, a
+    sandbox mode); this contract returns the instance's configured policy in a
+    normalized form, empty when none is set.
+    """
+
+    @abstractmethod
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        """Return this agent instance's configured per-resource permission policy (empty if none)."""
+        ...
+
+
+class HasVersionManagementMixin(ABC):
+    """Mixin for agent types that control which version of their binary runs.
+
+    Either by pinning a specific version or by following an update policy (the
+    two faces of version control -- not pinning is itself a choice to track
+    upstream). CLIs that simply assume whatever binary is on PATH do not have
+    this capability. The agent calls ``reconcile_installed_version`` during
+    provisioning (once the binary is present) to enforce that intent: a pinning
+    agent verifies the installed version and raises on mismatch; an update-policy
+    agent runs its (best-effort) update check.
+    """
+
+    @abstractmethod
+    def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        """Enforce this agent's version intent against the already-present binary.
+
+        Called during provisioning after the binary is known to be installed.
+        Pinning agents verify the installed version matches (raising on
+        mismatch); update-policy agents run their (best-effort) update check.
+        """
+        ...
+
+
+class HasAutoInstallMixin(ABC):
+    """Mixin for agent types that can install their CLI binary if it is missing.
+
+    A base capability every real agent should have: provisioning checks whether
+    the binary is present and, if not, installs it (gated by consent on local
+    hosts and a config flag on remote hosts). The bare config-driven command
+    shells do not have it -- they run an arbitrary command, not a known binary.
+    This contract returns the per-CLI install command.
+    """
+
+    @abstractmethod
+    def get_install_binary_name(self) -> str:
+        """Return the name of the CLI binary to check for on PATH (e.g. 'claude')."""
+        ...
+
+    @abstractmethod
+    def get_install_command(self) -> str:
+        """Return the shell command that installs this agent's CLI binary."""
+        ...
+
+
+class InteractiveAgentMixin(ABC):
+    """Mixin for agent types that accept interactive user messages at runtime.
+
+    The contract is a single ``send_message`` method. Headless and bare-command-less
+    agents do not take interactive input and so do not inherit this; the ``mngr message``
+    command checks ``isinstance(agent, InteractiveAgentMixin)`` to decide whether an
+    agent type can be messaged at all (rather than every agent carrying a rejecting
+    stub). The send mechanism differs by agent: keystroke injection into a tmux pane
+    (``SendKeysAgent`` / ``InteractiveTuiAgent``, used by claude/codex/antigravity and the
+    bare ``command`` runner) or an agent-native API (opencode's server, pi's extension).
+    """
+
+    @abstractmethod
+    def send_message(self, message: str) -> None:
+        """Send an interactive message to the running agent."""
+        ...
+
+
+def require_interactive_agent(agent: AgentInterface[Any]) -> InteractiveAgentMixin:
+    """Return ``agent`` narrowed to :class:`InteractiveAgentMixin`, or raise if it takes no messages.
+
+    Used by the message-delivery paths (``mngr message`` and the initial/resume-message
+    flows) to refuse a headless agent type with a clear error rather than an attribute
+    error, now that ``send_message`` lives only on interactive agents.
+    """
+    if not isinstance(agent, InteractiveAgentMixin):
+        raise SendMessageError(
+            str(agent.name), f"agent type '{agent.agent_type}' does not accept interactive messages"
+        )
+    return agent
+
+
+class CliBackedAgentMixin:
+    """Marker for agents that wrap a specific external coding-model CLI (claude, codex,
+    antigravity, opencode, pi), as opposed to the bare ``command`` / ``headless_command``
+    runners that execute an arbitrary shell command.
+
+    A bare marker with no contract of its own. The CLI-oriented capabilities (a native
+    transcript, auto-install, version management, per-tool permission policy, usage tracking,
+    session adoption) only apply to these agents; the generic command runners, which do not
+    wrap a known CLI, render those rows as ``n/a``. Every real CLI-backed agent inherits this,
+    so the matrix scopes those rows positively rather than by the absence of a command marker.
+    """

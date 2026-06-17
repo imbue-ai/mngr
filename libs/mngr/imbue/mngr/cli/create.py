@@ -66,6 +66,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -995,7 +996,7 @@ def _create_agent(
                     elif setup.initial_message is not None:
                         # Send initial message directly (from --message or --message-file)
                         logger.info("Sending message to agent")
-                        agent.send_message(setup.initial_message)
+                        require_interactive_agent(agent).send_message(setup.initial_message)
                     else:
                         pass
 
@@ -1230,7 +1231,7 @@ def _handle_editor_message(
             return
 
         logger.info("Sending edited message...")
-        agent.send_message(edited_message)
+        require_interactive_agent(agent).send_message(edited_message)
         logger.debug("Message sent successfully")
 
 

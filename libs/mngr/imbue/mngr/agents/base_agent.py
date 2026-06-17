@@ -33,6 +33,7 @@ from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -331,30 +332,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-    def send_message(self, message: str) -> None:
-        """Send a message to the running agent.
-
-        Acquires an exclusive file lock to prevent concurrent sends from
-        interleaving tmux input. Runs preflight checks (e.g., dialog detection)
-        first -- errors from preflight indicate a condition that won't resolve
-        by resending (e.g., a blocking dialog).
-
-        BaseAgent uses a simple send (literal text + Enter). Interactive TUI
-        agents (Claude Code, Antigravity CLI, etc.) should subclass InteractiveTuiAgent
-        which overrides this with the paste-detection / submission-signal pipeline.
-        """
-        with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
-            self._preflight_send_message(self.tmux_target)
-            self._send_message_simple(self.tmux_target, message)
-
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Run preflight checks before sending a message.
-
-        Called at the start of send_message. Default is a no-op.
-        Subclasses can override to perform checks (e.g., dialog detection)
-        and raise an appropriate error to abort the send.
-        """
-
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
@@ -380,52 +357,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             self.tmux_target if window is None else TmuxWindowTarget(session_name=self.session_name, window=window)
         )
         return self._capture_pane_content(target, include_scrollback=include_scrollback)
-
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
-        """Send literal text to a tmux pane, choosing the best method by length.
-
-        For short messages (< 1024 chars), uses ``tmux send-keys -l``.
-        For long messages (>= 1024 chars), writes the text to a temp file on
-        the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
-        the tmux "command too long" error.
-        """
-        target_arg = tmux_target.as_shell_arg()
-        if len(message) < LONG_MESSAGE_THRESHOLD:
-            send_msg_cmd = f"tmux send-keys -t {target_arg} -l -- {shlex.quote(message)}"
-            result = self.host.execute_stateful_command(send_msg_cmd)
-            if not result.success:
-                raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
-        else:
-            tmp_path = Path(f"/tmp/mngr-msg-buffer-{self.session_name}.txt")
-            quoted_buffer = shlex.quote(f"mngr-{self.session_name}")
-            quoted_path = shlex.quote(str(tmp_path))
-            try:
-                self.host.write_text_file(tmp_path, message)
-                load_cmd = f"tmux load-buffer -b {quoted_buffer} {quoted_path}"
-                result = self.host.execute_stateful_command(load_cmd)
-                if not result.success:
-                    raise SendMessageError(
-                        str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
-                    )
-                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t {target_arg}"
-                result = self.host.execute_stateful_command(paste_cmd)
-                if not result.success:
-                    raise SendMessageError(
-                        str(self.name), f"tmux paste-buffer failed: {result.stderr or result.stdout}"
-                    )
-            finally:
-                self.host.execute_idempotent_command(
-                    f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}"
-                )
-
-    def _send_message_simple(self, tmux_target: TmuxWindowTarget, message: str) -> None:
-        """Send a message directly without waiting for paste confirmation."""
-        self._send_tmux_literal_keys(tmux_target, message)
-
-        send_enter_cmd = f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter"
-        result = self.host.execute_stateful_command(send_enter_cmd)
-        if not result.success:
-            raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
 
     def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
         """Capture the current pane content, returning None on failure."""
@@ -638,3 +569,85 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
         Subclasses can override to perform cleanup when the agent is destroyed.
         """
+
+
+class SendKeysAgent(InteractiveAgentMixin, BaseAgent[AgentConfigT]):
+    """A ``BaseAgent`` that delivers interactive messages by sending keystrokes into its tmux pane.
+
+    Shared by the keystroke-driven agents -- the interactive TUI coding agents
+    (via ``InteractiveTuiAgent``) and the bare ``command`` runner. Headless agents
+    and the server/extension-driven agents (opencode, pi) do not use this:
+    headless agents take no interactive input at all, and opencode/pi implement
+    ``send_message`` against their own APIs. Implements the
+    ``InteractiveAgentMixin`` contract with a literal-text-plus-Enter send.
+    """
+
+    def send_message(self, message: str) -> None:
+        """Send a message to the running agent.
+
+        Acquires an exclusive file lock to prevent concurrent sends from
+        interleaving tmux input. Runs preflight checks (e.g., dialog detection)
+        first -- errors from preflight indicate a condition that won't resolve
+        by resending (e.g., a blocking dialog).
+
+        This is the simple send (literal text + Enter). Interactive TUI agents
+        subclass ``InteractiveTuiAgent`` (itself a ``SendKeysAgent``), which
+        overrides this with the paste-detection / submission-signal pipeline.
+        """
+        with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
+            self._preflight_send_message(self.tmux_target)
+            self._send_message_simple(self.tmux_target, message)
+
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+        """Run preflight checks before sending a message.
+
+        Called at the start of send_message. Default is a no-op.
+        Subclasses can override to perform checks (e.g., dialog detection)
+        and raise an appropriate error to abort the send.
+        """
+
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
+        """Send literal text to a tmux pane, choosing the best method by length.
+
+        For short messages (< 1024 chars), uses ``tmux send-keys -l``.
+        For long messages (>= 1024 chars), writes the text to a temp file on
+        the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
+        the tmux "command too long" error.
+        """
+        target_arg = tmux_target.as_shell_arg()
+        if len(message) < LONG_MESSAGE_THRESHOLD:
+            send_msg_cmd = f"tmux send-keys -t {target_arg} -l -- {shlex.quote(message)}"
+            result = self.host.execute_stateful_command(send_msg_cmd)
+            if not result.success:
+                raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
+        else:
+            tmp_path = Path(f"/tmp/mngr-msg-buffer-{self.session_name}.txt")
+            quoted_buffer = shlex.quote(f"mngr-{self.session_name}")
+            quoted_path = shlex.quote(str(tmp_path))
+            try:
+                self.host.write_text_file(tmp_path, message)
+                load_cmd = f"tmux load-buffer -b {quoted_buffer} {quoted_path}"
+                result = self.host.execute_stateful_command(load_cmd)
+                if not result.success:
+                    raise SendMessageError(
+                        str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
+                    )
+                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t {target_arg}"
+                result = self.host.execute_stateful_command(paste_cmd)
+                if not result.success:
+                    raise SendMessageError(
+                        str(self.name), f"tmux paste-buffer failed: {result.stderr or result.stdout}"
+                    )
+            finally:
+                self.host.execute_idempotent_command(
+                    f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}"
+                )
+
+    def _send_message_simple(self, tmux_target: TmuxWindowTarget, message: str) -> None:
+        """Send a message directly without waiting for paste confirmation."""
+        self._send_tmux_literal_keys(tmux_target, message)
+
+        send_enter_cmd = f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter"
+        result = self.host.execute_stateful_command(send_enter_cmd)
+        if not result.success:
+            raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
