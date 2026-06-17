@@ -2355,23 +2355,29 @@ class ClaudeAgent(
         # sessions is copied only once.
         copied_project_dirs: set[str] = set()
 
-        def copy_explicit(arg: str) -> str:
-            session_id, source_project_dir = _resolve_adopt_session(arg, self.mngr_ctx)
-            if source_project_dir.name not in copied_project_dirs:
-                with log_span("Adopting session {}", session_id):
-                    host.copy_directory(host, source_project_dir, self._dest_adopted_project_dir())
-                copied_project_dirs.add(source_project_dir.name)
-            return session_id
-
         adopt_sessions(
             options.adopt_session,
             options.source_agent_state_location,
-            copy_explicit=copy_explicit,
+            copy_explicit=lambda arg: self._copy_explicit_session(host, arg, copied_project_dirs),
             copy_clone=lambda location: self._adopt_cloned_session(host, location),
             resume=lambda session_id: self._finalize_adopted_session(
                 host, self._dest_adopted_project_dir(), session_id
             ),
         )
+
+    def _copy_explicit_session(self, host: OnlineHostInterface, arg: str, copied_project_dirs: set[str]) -> str:
+        """Resolve one explicit ``--adopt`` value and copy its project dir into this agent.
+
+        ``copied_project_dirs`` is shared across calls so a project dir holding several
+        named sessions is copied only once. Returns the resolved session id; the
+        orchestrator decides which session is resumed.
+        """
+        session_id, source_project_dir = _resolve_adopt_session(arg, self.mngr_ctx)
+        if source_project_dir.name not in copied_project_dirs:
+            with log_span("Adopting session {}", session_id):
+                host.copy_directory(host, source_project_dir, self._dest_adopted_project_dir())
+            copied_project_dirs.add(source_project_dir.name)
+        return session_id
 
     def _dest_adopted_project_dir(self) -> Path:
         """Return the encoded project dir adopted sessions are placed under.
@@ -2453,32 +2459,51 @@ class ClaudeAgent(
         source_project_name = latest_path.parent.name
         adopted_session_id = latest_path.stem
 
-        # Rename source-encoded project subdir to the destination's encoded
-        # work_dir. Same host, so a plain ``mv`` is enough. Refuse to
-        # clobber a pre-existing target: collision means the source had a
-        # multi-cwd setup whose encoded name coincidentally matched ours,
-        # and silent clobber would risk losing data we don't realize is there.
+        # Rekey the source-encoded project subdir onto the destination's encoded
+        # work_dir. The target dir may already exist (e.g. an explicit ``--adopt``
+        # session was copied into it first), so merge the source subdir's *files*
+        # into the target rather than moving the whole dir. Refuse only on a
+        # per-file collision (same filename in both): that means real data would
+        # be lost, while distinct session JSONLs coexist cleanly in one project dir.
         dest_projects_dir = self._get_agent_dir() / _AGENT_CLAUDE_PROJECTS_RELPATH
         dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
         if source_project_name != dest_project_name:
             source_subdir = dest_projects_dir / source_project_name
             target_dir = dest_projects_dir / dest_project_name
-            if host.path_exists(target_dir):
-                raise AgentStartError(
-                    str(self.name),
-                    f"Refusing to rekey cloned project subdir {source_subdir} -> {target_dir}: "
-                    "target dir already exists, so the cloned agent cannot resume the source's session.",
-                )
-            rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
-            rename_result = host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
-            if not rename_result.success:
-                raise AgentStartError(
-                    str(self.name),
-                    f"Failed to rekey cloned project subdir {source_subdir} -> {target_dir}: "
-                    f"{rename_result.stderr.strip()}",
-                )
+            self._merge_project_subdir(host, source_subdir, target_dir)
 
         return adopted_session_id
+
+    def _merge_project_subdir(self, host: OnlineHostInterface, source_subdir: Path, target_dir: Path) -> None:
+        """Non-destructively merge ``source_subdir``'s files into ``target_dir``.
+
+        Moves each entry from the source subdir into the (possibly pre-existing)
+        target dir, then removes the now-empty source subdir. Raises
+        :class:`AgentStartError` on a per-file collision (same filename in both),
+        which would otherwise silently lose data.
+        """
+        entry_names = [Path(entry.path).name for entry in host.list_directory(source_subdir)]
+        collisions = sorted(name for name in entry_names if host.path_exists(target_dir / name))
+        if collisions:
+            raise AgentStartError(
+                str(self.name),
+                f"Refusing to merge cloned project subdir {source_subdir} into {target_dir}: "
+                f"file(s) {collisions} already exist in the target, so the cloned agent "
+                "cannot resume the source's session without overwriting existing data.",
+            )
+        # Move each entry by name (portable across BSD/GNU mv -- no -t/-n flags),
+        # then drop the now-empty source subdir.
+        move_steps = [f"mkdir -p {shlex.quote(str(target_dir))}"]
+        for name in entry_names:
+            move_steps.append(f"mv {shlex.quote(str(source_subdir / name))} {shlex.quote(str(target_dir / name))}")
+        move_steps.append(f"rmdir {shlex.quote(str(source_subdir))}")
+        merge_result = host.execute_idempotent_command(" && ".join(move_steps), timeout_seconds=10.0)
+        if not merge_result.success:
+            raise AgentStartError(
+                str(self.name),
+                f"Failed to merge cloned project subdir {source_subdir} into {target_dir}: "
+                f"{merge_result.stderr.strip()}",
+            )
 
 
 def _claude_preserved_items(is_shared_config: bool) -> list[PreservedItem]:

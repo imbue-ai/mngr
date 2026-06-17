@@ -556,18 +556,18 @@ def test_validate_session_adoption_rejects_agent_without_adoption_support(temp_m
         )
 
 
-def test_validate_session_adoption_rejects_adopt_with_clone_source(
+def test_validate_session_adoption_allows_adopt_with_clone_source(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    # --adopt and --from both seed the new agent's resume session, so combining them is rejected.
+    # --adopt may be combined with --from: every named session plus the clone is made available
+    # and the clone is the one resumed (handled by adopt_sessions), so the gate must not reject it.
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
-    with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
-        _validate_session_adoption(
-            CreateAgentOptions(
-                agent_type=AgentTypeName("claude"),
-                adopt_session=("some-id",),
-                source_agent_state_location=HostLocation(host=host, path=tmp_path / "src"),
-            ),
-            temp_mngr_ctx,
-        )
+    _validate_session_adoption(
+        CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            adopt_session=("some-id",),
+            source_agent_state_location=HostLocation(host=host, path=tmp_path / "src"),
+        ),
+        temp_mngr_ctx,
+    )

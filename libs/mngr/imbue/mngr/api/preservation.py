@@ -179,30 +179,6 @@ def require_unique_match(
     return matches[0]
 
 
-def dispatch_session_adoption(
-    adopt_session: tuple[str, ...],
-    source_location: HostLocation | None,
-    *,
-    on_explicit: Callable[[tuple[str, ...]], None],
-    on_clone: Callable[[HostLocation], None],
-) -> None:
-    """Route an agent's ``adopt_session`` to the explicit-``--adopt`` or ``--from``-clone path.
-
-    The two adoption sources are mutually exclusive (the core gate rejects combining them) and
-    explicit ``--adopt`` takes precedence; with neither set the agent starts fresh. This encodes
-    that one contract so every plugin's ``adopt_session`` is just two callbacks: ``on_explicit``
-    receives the full ``--adopt`` tuple (the plugin decides whether to use all of it or only the
-    last entry), ``on_clone`` receives the source agent's state location.
-    """
-    if adopt_session:
-        on_explicit(adopt_session)
-    elif source_location is not None:
-        on_clone(source_location)
-    else:
-        # Neither --adopt nor --from: the agent starts a fresh session (nothing to do).
-        return
-
-
 def adopt_sessions(
     adopt_session: tuple[str, ...],
     source_location: HostLocation | None,

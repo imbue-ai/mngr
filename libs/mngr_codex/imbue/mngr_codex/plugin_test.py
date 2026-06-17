@@ -1279,14 +1279,13 @@ def test_on_before_create_noop_without_adopt(local_provider: LocalProviderInstan
     assert on_before_create(args, local_provider.mngr_ctx) is None
 
 
-def test_on_before_create_noop_for_non_codex_type(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    args = OnBeforeCreateArgs(
-        target_host=cast(OnlineHostInterface, host),
-        agent_options=CreateAgentOptions(agent_type=AgentTypeName("generic"), adopt_session=("anything",)),
-        create_work_dir=True,
-    )
-    assert on_before_create(args, local_provider.mngr_ctx) is None
+# NOTE: the "on_before_create noops for a non-codex agent type" case is intentionally not
+# tested here. Post-gate, a non-codex create that reaches this hook is necessarily another
+# *adoption-capable* type (the core _validate_session_adoption gate rejects non-adoption types
+# before any on_before_create runs, which run_adopt_session_preflight asserts). That
+# noop-on-type-mismatch is core logic, covered by test_run_adopt_session_preflight_skips_for_
+# nonmatching_type in libs/mngr/.../preservation_test.py; reproducing it here would require
+# registering a fake adoptable agent type in the global class registry (no per-test reset).
 
 
 def test_on_before_create_resolves_a_valid_jsonl_adopt(local_provider: LocalProviderInstance, tmp_path: Path) -> None:

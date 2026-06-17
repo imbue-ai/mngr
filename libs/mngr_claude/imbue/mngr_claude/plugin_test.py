@@ -4115,17 +4115,15 @@ def test_adopt_and_from_resumes_clone(
 
 
 @pytest.mark.rsync
-def test_clone_adoption_refuses_to_clobber_existing_target(
+def test_clone_adoption_merges_into_existing_target(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """When the source has a project subdir whose name coincidentally matches
     the destination's encoded work_dir AND a separate, more-recently-active
-    source-encoded subdir, the rsync brings both over and the rekey ``mv``
-    would clobber the pre-existing target. _adopt_cloned_session refuses
-    the clobber and raises ``AgentStartError`` without writing claude_session_id,
-    leaving both subdirs intact for manual inspection. This guards a defensive
-    branch designed to prevent silent data loss when source has visited
-    multiple cwds.
+    source-encoded subdir, the rsync brings both over. With *distinct* session-id
+    filenames, the rekey merges the source-encoded subdir's files into the
+    pre-existing target rather than clobbering it: both sessions coexist under
+    the destination's encoded work_dir, and the latest is resumed.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     dest_dir = agent._get_agent_dir()
@@ -4144,7 +4142,8 @@ def test_clone_adoption_refuses_to_clobber_existing_target(
     older_jsonl.write_text('{"type":"older"}\n')
 
     # (b) A separate source-encoded subdir holding the most-recently-active
-    # session JSONL so ``ls -t`` picks it as latest_on_source.
+    # session JSONL so ``ls -t`` picks it as latest_on_source. Its filename
+    # differs from the target's, so the merge is non-destructive.
     src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
     src_project.mkdir(parents=True)
     newer_session_id = "11111111-2222-3333-4444-555555555555"
@@ -4156,13 +4155,60 @@ def test_clone_adoption_refuses_to_clobber_existing_target(
     os.utime(older_jsonl, (1_000_000_000, 1_000_000_000))
     os.utime(newer_jsonl, (2_000_000_000, 2_000_000_000))
 
-    with pytest.raises(AgentStartError, match="target dir already exists"):
+    _run_clone_adoption(agent, host, source_dir)
+
+    dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
+    # Both sessions now coexist under the destination's encoded work_dir.
+    assert (dest_projects / dest_project_name / f"{older_session_id}.jsonl").exists()
+    assert (dest_projects / dest_project_name / f"{newer_session_id}.jsonl").exists()
+    # The source-encoded subdir was emptied and removed by the merge.
+    assert not (dest_projects / "-Users-ev-some-source-workdir").exists()
+    # The most-recently-active session is the one resumed.
+    assert (dest_dir / "claude_session_id").read_text().strip() == newer_session_id
+
+
+@pytest.mark.rsync
+def test_clone_adoption_refuses_per_file_collision(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A genuine per-file collision -- the same session-id filename present in
+    both the source-encoded subdir and the pre-existing target -- would lose
+    data on merge. _adopt_cloned_session refuses and raises ``AgentStartError``
+    without writing claude_session_id, leaving both subdirs intact.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+
+    # Same session-id filename in both the target-named subdir and the
+    # source-encoded subdir -- merging would overwrite the target's copy.
+    colliding_session_id = "11111111-2222-3333-4444-555555555555"
+
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    coincident_subdir = plugin_dir / "projects" / dest_project_name
+    coincident_subdir.mkdir(parents=True)
+    target_jsonl = coincident_subdir / f"{colliding_session_id}.jsonl"
+    target_jsonl.write_text('{"type":"target"}\n')
+
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    source_jsonl = src_project / f"{colliding_session_id}.jsonl"
+    source_jsonl.write_text('{"type":"source"}\n')
+
+    # Make the source copy the most-recently-active so ``ls -t`` selects it.
+    os.utime(target_jsonl, (1_000_000_000, 1_000_000_000))
+    os.utime(source_jsonl, (2_000_000_000, 2_000_000_000))
+
+    with pytest.raises(AgentStartError, match="already exist in the target"):
         _run_clone_adoption(agent, host, source_dir)
 
     dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
-    # Both subdirs survive: the rekey was refused, no clobber happened.
-    assert (dest_projects / dest_project_name / f"{older_session_id}.jsonl").exists()
-    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{newer_session_id}.jsonl").exists()
+    # Both subdirs survive: the merge was refused, no clobber happened.
+    assert (dest_projects / dest_project_name / f"{colliding_session_id}.jsonl").exists()
+    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{colliding_session_id}.jsonl").exists()
     # claude_session_id was NOT written: the clone raised before finalize.
     assert not (dest_dir / "claude_session_id").exists()
 

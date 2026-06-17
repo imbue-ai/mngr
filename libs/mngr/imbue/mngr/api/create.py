@@ -99,10 +99,10 @@ def destroy_new_host_on_create_failure(
 def _validate_session_adoption(agent_options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
     """Agent-agnostic validation of the ``--adopt`` option, for every create path.
 
-    The target type must support session adoption (``HasSessionAdoptionMixin``), and adoption
-    is mutually exclusive with cloning via ``--from <agent>`` (both seed the new agent's resume
-    session). Each adoption-capable plugin still runs its own ``on_before_create`` to fail-fast
-    on a bad/ambiguous session id against its native store.
+    The target type must support session adoption (``HasSessionAdoptionMixin``). ``--adopt`` may
+    be combined with ``--from <agent>``: every named session plus the clone is copied into the new
+    agent and the clone is the one resumed (see ``adopt_sessions``). Each adoption-capable plugin
+    still runs its own ``on_before_create`` to fail-fast on a bad/ambiguous session id.
     """
     if not agent_options.adopt_session:
         return
@@ -111,11 +111,6 @@ def _validate_session_adoption(agent_options: CreateAgentOptions, mngr_ctx: Mngr
         raise UserInputError(
             f"--adopt can only be used with an agent type that supports session adoption, "
             f"not '{agent_options.agent_type}'."
-        )
-    if agent_options.source_agent_state_location is not None:
-        raise UserInputError(
-            "--adopt is incompatible with cloning via --from <agent>: both adopt a session "
-            "into the new agent. Pick one."
         )
 
 

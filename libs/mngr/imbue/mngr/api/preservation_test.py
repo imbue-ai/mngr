@@ -10,7 +10,6 @@ from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
-from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import get_preserved_agent_dir
@@ -396,41 +395,6 @@ def test_require_unique_match_raises_ambiguous_for_many_with_listing_last() -> N
     message = str(exc.value)
     # The single message comes first, then the candidate list last (one per indented line).
     assert message == "found in multiple stores; pass the full path:\n  /a\n  /b"
-
-
-def test_dispatch_session_adoption_routes_to_explicit_with_full_tuple(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-    location = HostLocation(host=host, path=tmp_path)
-    explicit: list[tuple[str, ...]] = []
-    clone: list[HostLocation] = []
-    # Explicit --adopt takes precedence even when a clone source is also present.
-    dispatch_session_adoption(("a", "b"), location, on_explicit=explicit.append, on_clone=clone.append)
-    assert explicit == [("a", "b")]
-    assert clone == []
-
-
-def test_dispatch_session_adoption_routes_to_clone_when_only_source_set(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-    location = HostLocation(host=host, path=tmp_path)
-    explicit: list[tuple[str, ...]] = []
-    clone: list[HostLocation] = []
-    dispatch_session_adoption((), location, on_explicit=explicit.append, on_clone=clone.append)
-    assert explicit == []
-    assert clone == [location]
-
-
-def test_dispatch_session_adoption_no_op_when_neither_source() -> None:
-    explicit: list[tuple[str, ...]] = []
-    clone: list[HostLocation] = []
-    dispatch_session_adoption((), None, on_explicit=explicit.append, on_clone=clone.append)
-    assert explicit == []
-    assert clone == []
 
 
 def test_adopt_sessions_copies_all_explicit_and_resumes_the_last() -> None:

@@ -456,8 +456,9 @@ class _CreateCommand(click.Command):
         "Adopt an existing session into this newly created agent so it resumes that conversation. "
         "Accepts a session id or a path to the session file; a session id is searched across the "
         "relevant user/config store, every live local mngr agent, and preserved sessions from "
-        "destroyed agents. Repeatable: the last named session is the one resumed on startup. "
-        "Incompatible with --from."
+        "destroyed agents. Repeatable: every named session is copied in and the last is resumed on "
+        "startup. May be combined with --from, in which case the cloned session is resumed instead "
+        "and the --adopt sessions remain available in the agent."
     ),
 )
 @optgroup.option(
