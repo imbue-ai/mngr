@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.9] - 2026-06-16
+
 ### Changed
 
 - Changed: Vultr release-test settings now also disable the `azure` provider (`[providers.azure] is_enabled = false`), mirroring the existing modal/gcp/aws/ovh disables, so `mngr list` inside the Vultr lifecycle tests no longer exits non-zero when Azure credentials aren't resolvable.

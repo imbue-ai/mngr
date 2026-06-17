@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.5] - 2026-06-16
+
 ### Added
 
 - Added: `mngr usage` generalized beyond Claude — usage sources that report token counts rather than a pre-computed dollar cost can be priced centrally via the new `TokenSnapshot` data type and `pricing.compute_cost`. Anthropic prices mirror `apps/modal_litellm`; OpenAI / Codex prices (`gpt-5.x`, `*-codex`, `o3`/`o4-mini`, ...) are mirrored from litellm directly and pinned by a `litellm_pricing_test`. An unknown model resolves to no estimate (rather than a misleading `$0`).

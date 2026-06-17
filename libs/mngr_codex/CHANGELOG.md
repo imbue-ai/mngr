@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.3] - 2026-06-16
+
 ### Added
 
 - Added: codex agents now preserve transcripts (raw + common), the root session-id history, and the native resumable rollout session store (`CODEX_HOME/sessions`) on destroy, closing the carried-forward session-preservation gap and matching the claude plugin. New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. The auth-token symlink and config sit as siblings in `CODEX_HOME` and are excluded.

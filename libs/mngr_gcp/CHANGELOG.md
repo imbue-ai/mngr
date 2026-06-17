@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-16
+
 ### Changed
 
 - Changed: `mngr gcp prepare` / `mngr gcp cleanup` group their GCP-specific options under a "Provider" option group, so `--help` and the generated docs list them ahead of the shared common options instead of below them.

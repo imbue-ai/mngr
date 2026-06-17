@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.9] - 2026-06-16
+
 ### Fixed
 
 - Fixed: `start_host` (the `mngr stop --stop-host` resume path) now restarts the container's sshd after `docker start`. sshd is launched via `docker exec`, not the container entrypoint, so it does not survive a container stop/start (or a host VM reboot that takes the container down, e.g. an AWS instance stop/start) — without restarting it, the resume timed out waiting for container SSH. Latent gap for every VPS-Docker provider; AWS's native instance stop/start surfaced it.

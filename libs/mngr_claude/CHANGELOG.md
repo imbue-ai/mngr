@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.16] - 2026-06-16
+
 ### Changed
 
 - Changed: Common-transcript converter's event-conversion logic moved out of the inline `python3` heredoc in `common_transcript.sh` into a standalone `common_transcript_convert.py` (provisioned alongside the shell script), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, and transcript lines whose `message` is `null` are dropped silently rather than aborting the conversion run.

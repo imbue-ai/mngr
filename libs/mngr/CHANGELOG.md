@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.16] - 2026-06-16
+
 ### Added
 
 - Added: New `azure` provider backend wiring. `azure` joins the remote-backend list and the install-wizard plugin catalog; `mngr azure prepare` / `mngr azure cleanup` now take `--provider` (and the standard common options), so they read defaults from the selected `[providers.NAME]` block.

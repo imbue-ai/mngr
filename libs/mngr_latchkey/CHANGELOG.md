@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.5] - 2026-06-16
+
 ### Added
 
 - Added: Exposed the catch-all permission name as a public `WILDCARD_PERMISSION_NAME` constant (still `any`), so consumers like the minds permission dialog can present it as `all` while keeping the stored/granted value unchanged.

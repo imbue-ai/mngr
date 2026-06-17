@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.16] - 2026-06-16
+
 ### Added
 
 - Added: opencode agents now preserve transcripts (raw + common) and the root session-id history on destroy, matching the claude plugin. New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. opencode's native resumable session store (the SQLite `opencode.db` plus its `-wal`/`-shm` write-ahead-log sidecars and `storage/`) is preserved too, so the session can be resumed/adopted; the sibling `auth.json` (a symlink to shared credentials) and `log/` are excluded. WAL sidecars are copied alongside the db so recent (not-yet-checkpointed) turns are not lost.

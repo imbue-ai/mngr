@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.5] - 2026-06-16
+
 ### Changed
 
 - Changed: Claude usage events now aggregate through the new `aggregate_usage_source` reader hookimpl rather than being special-cased inside `mngr_usage` itself. This plugin claims the `claude` source and aggregates with the process-cumulative strategy (Claude reports cost cumulatively across a process, so a `/clear` that rotates `session_id` must not double-count). Output is identical.

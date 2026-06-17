@@ -5,9 +5,9 @@ description = "pi usage data provider for `mngr usage` (reader + writer gate; th
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.15",
-    "imbue-mngr-pi-coding==0.1.12",
-    "imbue-mngr-usage==0.1.4",
+    "imbue-mngr==0.2.16",
+    "imbue-mngr-pi-coding==0.1.13",
+    "imbue-mngr-usage==0.1.5",
 ]
 
 [project.entry-points.mngr]

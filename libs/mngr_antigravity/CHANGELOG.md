@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.7] - 2026-06-16
+
 ### Added
 
 - Added: agy (antigravity) agents now preserve transcripts (raw + common) and conversation-id history on destroy, mirroring the claude plugin. New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. agy's native resumable conversation store (`plugin/antigravity/home/.gemini/antigravity-cli/conversations/`) is preserved too, so the agent can be resumed or adopted. Known limitation: on macOS the store is encrypted by the login-keychain "Antigravity Safe Storage" key, so a macOS-created store is not portable to another machine or user.

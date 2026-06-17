@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.5] - 2026-06-16
+
 ### Changed
 
 - Changed: `mngr ovh list` now reads its defaults from the user's `[providers.<name>]` settings.toml block (selected with `--provider`, default `ovh`), matching `mngr aws prepare` / `mngr gcp prepare` / `mngr azure prepare`. Previously it built `OvhProviderConfig()` with class defaults unconditionally, so a user who pinned a non-default `endpoint` / `ovh_subsidiary` (e.g. `ovh-eu`) would inspect a different account than `mngr create --provider <name>` actually used. Credentials still fall back to env / `~/.ovh.conf`; a warning is logged if the named `--provider` block exists but is not an OVH backend.
