@@ -177,17 +177,41 @@ mechanism any plugin can use, rather than the sole hard-coded implementation.
    precede any provisioning that overwrites identity files (Claude relies on copy-then-
    overwrite ordering today).
 
-3. **`--adopt-session` relationship.** `--from <agent>` and `--adopt-session` are mutually
-   exclusive today and both funnel into Claude. After generalization, `--from` drives the
-   generic copy + rewire while `--adopt-session` stays a Claude CLI feature. Keep the
-   exclusion? Could `--adopt-session` eventually be reframed as the same rewire hook fed a
-   different source? (Out of scope to implement, worth noting.)
+3. **Harmonize `--adopt-session` with `--from` (goal, partially scoped).** The intent is for
+   `--adopt-session` and `--from` to share machinery rather than be parallel special cases.
+   They already converge on `_finalize_adopted_session`, and `--adopt-session`'s source
+   resolution (`_resolve_adopt_session`) already searches agent sandboxes, so `--from <agent>`
+   is nearly "adopt the latest session from agent X, plus carry the rest of the sandbox."
+
+   **Feasible plan:** factor a single Claude-internal routine -- *given a source project dir
+   (on some host) and a session selector (a named id, or "latest"), place it under this
+   agent's encoded `projects/` dir and finalize* -- and route both paths through it:
+   - `--from` = generic sandbox copy (via `register_clone_state`) + `on_clone_from_agent`
+     invoking the routine with `selector=latest` against the just-copied sandbox.
+   - `--adopt-session` = resolve source + named session, then invoke the same routine, with
+     no generic sandbox copy.
+
+   **Boundary:** `--adopt-session` cannot be expressed as pure registration. Its source is not
+   always an agent (it may be the user's `~/.claude` or a loose `.jsonl`) and it selects a
+   specific session rather than copying a whole sandbox -- both are Claude-domain concepts.
+   So it remains a Claude CLI feature that *shares Claude's cloning internals* with `--from`,
+   rather than folding into the cross-plugin `register_clone_state` mechanism, which stays
+   "copy sandbox + call rewire hook." The mutual exclusion between the two flags is retained.
+
+   **Known friction:** `--from` today bulk-copies the sandbox then *renames* the project
+   subdir (avoiding a second copy), while adopt copies a specific dir; the shared routine must
+   reconcile rename-in-place vs. copy (rename is an optimization when the data is already local
+   in the sandbox).
 
 4. **Idempotent re-create (`is_update=True`).** Cloning into an update of an existing agent
    is almost certainly nonsensical; confirm the copy is skipped (or rejected) when
    `is_update` is set.
 
-5. **Failure semantics.** If a registered path is missing on the source, or a rewire hook
-   raises, should the clone fail or degrade to a partial copy with a warning? Claude today
-   degrades to a fresh session with a warning when no source session exists; a general
-   mechanism should state the default and whether plugins can override it.
+## Resolved: Failure Semantics
+
+A clone **warns and degrades** rather than failing the `create`. If a registered path is
+missing on the source, or a rewire hook cannot complete (e.g. no source session to resume),
+the new agent is still created -- with a partial copy, or a fresh session -- and a warning is
+logged. This matches Claude's current behavior (it already degrades to a fresh session with a
+warning when the source has no session). A half-built clone should never block bringing the
+agent up; the user can re-clone or adopt explicitly if the degraded result is unacceptable.
