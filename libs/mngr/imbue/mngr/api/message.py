@@ -20,6 +20,7 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
@@ -211,7 +212,7 @@ def _send_message_to_agent(
 
     try:
         with log_span("Sending message to agent {}", agent_name):
-            agent.send_message(message_content)
+            require_interactive_agent(agent).send_message(message_content)
         with result_lock:
             result.successful_agents.append(agent_name)
         if on_success:

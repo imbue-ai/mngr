@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 from imbue.mngr import hookimpl
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 
 
-class CommandAgent(BaseAgent[AgentTypeConfig], HasUnattendedModeMixin):
+class CommandAgent(SendKeysAgent[AgentTypeConfig], HasUnattendedModeMixin):
     """Agent type that runs an arbitrary shell command (see ``register_agent_type``).
 
     A bare command runner: it does not inherit ``CliBackedAgentMixin``, so the CLI-oriented
     capabilities render ``n/a`` for it. It runs unattended by construction -- a plain command
-    has no in-run tool prompt to approve -- so ``is_unattended_enabled`` is always True.
+    has no in-run tool prompt to approve -- so ``is_unattended_enabled`` is always True. It is a
+    ``SendKeysAgent`` (not headless), so ``mngr message`` can type into its pane.
     """
 
     def is_unattended_enabled(self) -> bool:

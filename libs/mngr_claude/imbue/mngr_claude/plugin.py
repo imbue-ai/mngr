@@ -1620,10 +1620,13 @@ class ClaudeCoreAgent(
         with log_span("Configuring agent hooks in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
-    def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
-        """No-op for core/headless claude: there is no interactive TUI whose
-        startup dialogs could intercept input. The interactive :class:`ClaudeAgent`
-        subclass overrides this to dismiss trust / onboarding / effort dialogs.
+    def _dismiss_start_dialogs(
+        self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext
+    ) -> None:
+        """No-op for core/headless claude: there is no interactive TUI whose startup
+        dialogs could intercept input, so no dialog handling runs at all. The
+        interactive :class:`ClaudeAgent` subclass overrides this to dismiss (or
+        auto-dismiss) trust / onboarding / effort dialogs before the agent starts.
         """
 
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
@@ -1813,20 +1816,8 @@ class ClaudeCoreAgent(
                     concurrency_group,
                 )
 
-            if host.is_local and not config.use_env_config_dir:
-                # Determine the source path for trust extension
-                source_path: Path | None = None
-                transfer_mode = options.transfer_mode
-                if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
-                    source_path = self._find_git_source_path(mngr_ctx.concurrency_group)
-
-                if config.auto_dismiss_dialogs:
-                    # Auto-approve all dialogs for agents that opt into dismissal
-                    auto_dismiss_claude_dialogs(find_user_claude_config(), self.work_dir)
-                else:
-                    # Check/prompt for all blocking dialogs
-                    # source_path=None (clone/no-git) means trust is prompted for work_dir
-                    self.interactively_dismiss_claude_dialogs(source_path, mngr_ctx)
+            # Dismiss start dialogs (TUI-only; a no-op on the headless core).
+            self._dismiss_start_dialogs(host, options, mngr_ctx)
 
             # Ensure claude is installed (and at the right version if pinned)
             if config.check_installation:
@@ -2289,6 +2280,28 @@ class ClaudeAgent(
                 "  - Set ANTHROPIC_API_KEY environment variable (use --pass-env ANTHROPIC_API_KEY)\n"
                 "  - Run 'claude login' to create ~/.claude/.credentials.json"
             )
+
+    def _dismiss_start_dialogs(
+        self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext
+    ) -> None:
+        """Dismiss blocking Claude startup dialogs before the agent starts so they don't
+        intercept tmux input. Only acts on local, non-``use_env_config_dir`` hosts;
+        ``auto_dismiss_dialogs`` silently approves, otherwise routes through
+        ``interactively_dismiss_claude_dialogs`` (prompt/validate per mode).
+        """
+        config = self.agent_config
+        if not (host.is_local and not config.use_env_config_dir):
+            return
+        # Determine the source path for trust extension.
+        source_path: Path | None = None
+        if options.transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
+            source_path = self._find_git_source_path(mngr_ctx.concurrency_group)
+        if config.auto_dismiss_dialogs:
+            # Auto-approve all dialogs for agents that opt into dismissal.
+            auto_dismiss_claude_dialogs(find_user_claude_config(), self.work_dir)
+        else:
+            # source_path=None (clone/no-git) means trust is prompted for work_dir.
+            self.interactively_dismiss_claude_dialogs(source_path, mngr_ctx)
 
     def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
         """Ensure all known Claude startup dialogs are dismissed in the global config.
