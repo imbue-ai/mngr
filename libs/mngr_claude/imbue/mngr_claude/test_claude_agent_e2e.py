@@ -21,8 +21,9 @@ claude's only real specifics over the sibling ports:
   seed worktree and the fresh adoption worktree.
 
 * Post-``--`` args. ``--dangerously-skip-permissions`` lets the forced bash tool call
-  run without a permission pause, and ``--pass-env ANTHROPIC_API_KEY`` carries the key
-  to the agent.
+  run without a permission pause, ``--pass-env ANTHROPIC_API_KEY`` carries the key to the
+  agent, and ``--model haiku`` pins the cheapest tier (the seed/recall turns don't need
+  more).
 
 * Adoption resolves by the preserved session JSONL's absolute path. claude has no
   root-session-id sidecar file (unlike codex); the preserved native store is the
@@ -56,6 +57,11 @@ from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 # this tree to preserved/, and adopt_session_arg resolves the JSONL out of it.
 _CLAUDE_PROJECTS_RELPATH = "plugin/claude/anthropic/projects"
 
+# Pin the cheapest tier: the seed/recall turns just plant and echo a secret, so a frontier
+# model would only add cost and latency to the release run. ``haiku`` is Claude Code's alias
+# for the current Haiku.
+_MODEL = "haiku"
+
 
 class _ClaudeReleaseProfile(AgentReleaseProfile):
     agent_type = "claude"
@@ -67,9 +73,9 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = True
     asserts_usage = True
-    # The non-empty store also drives the adopt-from-preserved arc: after destroy, a
-    # fresh agent in a new worktree adopts the just-preserved session and must recall the
-    # pre-destroy secret -- proving the store resumes and the cross-cwd re-filing works.
+    # This is the store the adopt-from-preserved arc adopts: after destroy, a fresh agent
+    # in a new worktree adopts the just-preserved session and must recall the pre-destroy
+    # secret -- proving the store resumes and the cross-cwd re-filing works.
     native_session_preserved_relpaths = (_CLAUDE_PROJECTS_RELPATH,)
 
     def adopt_session_arg(self, preserved_dir: Path) -> str:
@@ -123,6 +129,8 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
             "ANTHROPIC_API_KEY",
             "--",
             "--dangerously-skip-permissions",
+            "--model",
+            _MODEL,
         ]
 
     def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:

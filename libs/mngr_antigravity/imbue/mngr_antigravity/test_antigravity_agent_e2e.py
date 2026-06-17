@@ -78,9 +78,9 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
     observes_running_marker = False
     forces_tool_call = False
     asserts_usage = False
-    # The non-empty store also drives adoption: after destroy, the harness creates a fresh
-    # agent in a new worktree that adopts the just-preserved conversation (via
-    # --adopt-session) and asserts it recalls the secret.
+    # This is the store the adopt-from-preserved arc adopts: after destroy, the harness
+    # creates a fresh agent in a new worktree that adopts the just-preserved conversation
+    # (via --adopt-session) and asserts it recalls the secret.
     native_session_preserved_relpaths = ("plugin/antigravity/home/.gemini/antigravity-cli/conversations",)
 
     def adopt_session_arg(self, preserved_dir: Path) -> str:
