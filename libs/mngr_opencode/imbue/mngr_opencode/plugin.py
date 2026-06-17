@@ -186,7 +186,7 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     sync_global_config: bool = Field(
         default=True,
         description="Base the per-agent opencode.json on a copy of the user's "
-        "~/.config/opencode/opencode.json (True, default), or start from an empty base (False).",
+        "~/.config/opencode/opencode.json, or start from an empty base.",
     )
     # symlink_auth mirrors mngr_antigravity's symlink_oauth_token. With the
     # default (symlink), the per-agent auth.json symlinks to the shared
@@ -194,7 +194,7 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # agents (and refreshes propagate). Copy mode (False) gives full isolation.
     symlink_auth: bool = Field(
         default=True,
-        description="Symlink (True, default) the per-agent auth.json to the shared "
+        description="Symlink the per-agent auth.json to the shared "
         "~/.local/share/opencode/auth.json, so one login authenticates all agents. "
         "Set False for full isolation.",
     )

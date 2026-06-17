@@ -86,13 +86,13 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `default_instance_type` | `t3.small` | EC2 instance type. Surfaced as the `--aws-instance-type=` build arg. |
 | `default_ami_id` | `""` | Explicit AMI override; takes precedence over default_ami_by_region. When empty, default_ami_by_region is consulted for the chosen region. |
 | `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMI IDs, used when default_ami_id is empty. These ship no GPU / NVIDIA drivers; supply your own AMI via default_ami_id / --aws-ami for GPU workloads. |
-| `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. Default is auto-create with name 'mngr-aws'. The auto-create path consults allowed_ssh_cidrs. |
+| `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. The auto-create path consults allowed_ssh_cidrs. |
 | `subnet_id` | `None` | Subnet ID. When None, EC2 picks the default-VPC subnet for the AZ. |
 | `vpc_id` | `None` | VPC ID. Only used to scope auto-created security group lookups. |
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict, or () for no ingress. A warning is logged when the effective range is 0.0.0.0/0 or empty. |
 | `associate_public_ip` | `True` | Assign a public IPv4 address to the instance. Required for the current mngr-from-developer-laptop SSH access model. For a more secure deployment, set to False and run mngr from a bastion or via Session Manager. |
 | `root_volume_size_gb` | `30` | Size of the root EBS volume in GB. |
-| `root_volume_type` | `gp3` | EBS volume type for the root volume (e.g., gp3, gp2, io2). |
+| `root_volume_type` | `gp3` | EBS volume type for the root volume. |
 | `iam_instance_profile` | `None` | Optional IAM instance profile name attached to launched instances. |
 | `terminate_on_shutdown` | `false` | EC2 shutdown behavior (InstanceInitiatedShutdownBehavior) on an OS shutdown. False keeps the instance stoppable and resumable via `mngr start` (EBS preserved); True terminates it (ephemeral / self-cleaning). |
 | `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |

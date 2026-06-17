@@ -40,7 +40,7 @@ class OvhProviderConfig(VpsDockerProviderConfig):
     )
     endpoint: str = Field(
         default=_DEFAULT_ENDPOINT,
-        description="python-ovh endpoint id ('ovh-eu', 'ovh-us', 'ovh-ca', ...). Falls back to OVH_ENDPOINT.",
+        description="python-ovh endpoint id ('ovh-eu', 'ovh-ca', ...). Falls back to OVH_ENDPOINT.",
     )
     application_key: SecretStr | None = Field(
         default=None,
@@ -68,7 +68,7 @@ class OvhProviderConfig(VpsDockerProviderConfig):
     )
     default_region: str = Field(
         default=_DEFAULT_REGION,
-        description="Default VPS datacenter (e.g. US-EAST-VA, US-WEST-OR for US accounts).",
+        description="Default VPS datacenter (e.g. US-WEST-OR for US accounts).",
     )
     default_plan: str = Field(
         default=_DEFAULT_PLAN,

@@ -56,13 +56,13 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
-| `endpoint` | `ovh-us` | python-ovh endpoint id ('ovh-eu', 'ovh-us', 'ovh-ca', ...). Falls back to OVH_ENDPOINT. |
+| `endpoint` | `ovh-us` | python-ovh endpoint id ('ovh-eu', 'ovh-ca', ...). Falls back to OVH_ENDPOINT. |
 | `application_key` | `None` (env / `~/.ovh.conf`) | OVH application key (AK). Falls back to OVH_APPLICATION_KEY or OVH_APP_KEY env vars. |
 | `application_secret` | `None` (env / `~/.ovh.conf`) | OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET or OVH_APP_SECRET env vars. |
 | `consumer_key` | `None` (env / `~/.ovh.conf`) | OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var. |
 | `client_id` | `None` (env / `~/.ovh.conf`) | OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var. |
 | `client_secret` | `None` (env / `~/.ovh.conf`) | OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var. |
-| `default_region` | `US-EAST-VA` | Default VPS datacenter (e.g. US-EAST-VA, US-WEST-OR for US accounts). |
+| `default_region` | `US-EAST-VA` | Default VPS datacenter (e.g. US-WEST-OR for US accounts). |
 | `default_plan` | `vps-2025-model1` | Default VPS plan code (1 vCPU / 8 GB RAM / 80 GB SSD, ~$7.99/mo). |
 | `default_image_name` | `Debian 12 - Docker` | Default OS image name (Docker pre-installed). |
 | `bootstrap_ssh_user` | `debian` | Non-root user the OVH image installs the rebuild key for. Override only if you change default_image_name to a non-Debian image (e.g. ubuntu, almalinux). |

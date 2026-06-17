@@ -112,14 +112,13 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     default_zone: str | None = Field(
         default=None,
         description=(
-            "Zone for new instances (GCE VMs are zonal, e.g. 'us-west1-a'). When unset, taken from "
-            "the active 'gcloud config get compute/zone' if available, otherwise 'us-west1-a'. Must "
-            "lie in default_region when both are set explicitly."
+            "Zone for new instances (GCE VMs are zonal). When unset, taken from the active "
+            "'gcloud config get compute/zone'. Must lie in default_region when both are set explicitly."
         ),
     )
     default_machine_type: str = Field(
         default="e2-small",
-        description="GCE machine type (e.g., 'e2-small' for ~2 vCPU, 2GB RAM).",
+        description="GCE machine type.",
     )
     default_source_image: str = Field(
         default=DEFAULT_GCE_IMAGE,
@@ -134,7 +133,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     )
     boot_disk_type: str = Field(
         default="pd-balanced",
-        description="Boot disk type (e.g., 'pd-balanced', 'pd-ssd', 'pd-standard').",
+        description="Boot disk type.",
     )
     network: str = Field(
         default="default",
@@ -147,8 +146,8 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     allowed_ssh_cidrs: tuple[str, ...] = Field(
         default=("0.0.0.0/0",),
         description=(
-            "Inbound CIDRs for tcp/22 and tcp/<container_ssh_port>. Default ('0.0.0.0/0',) opens to "
-            "the internet (a warning is logged at prepare/create time); use e.g. ['203.0.113.4/32'] "
+            "Inbound CIDRs for tcp/22 and tcp/<container_ssh_port>. An open range like 0.0.0.0/0 opens "
+            "to the internet (a warning is logged at prepare/create time); use e.g. ['203.0.113.4/32'] "
             "to restrict to your own IP, or () for no ingress (no firewall rule is created and the "
             "instance is unreachable from outside its VPC)."
         ),

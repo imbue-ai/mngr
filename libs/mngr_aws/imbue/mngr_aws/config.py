@@ -111,8 +111,8 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default_factory=AutoCreateSecurityGroup,
         description=(
             "Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, "
-            "or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. Default is "
-            "auto-create with name 'mngr-aws'. The auto-create path consults allowed_ssh_cidrs."
+            "or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. "
+            "The auto-create path consults allowed_ssh_cidrs."
         ),
     )
     subnet_id: str | None = Field(
@@ -146,7 +146,7 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     )
     root_volume_type: str = Field(
         default="gp3",
-        description="EBS volume type for the root volume (e.g., gp3, gp2, io2).",
+        description="EBS volume type for the root volume.",
     )
     iam_instance_profile: str | None = Field(
         default=None,
