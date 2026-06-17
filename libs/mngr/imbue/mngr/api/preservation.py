@@ -22,8 +22,10 @@ mirror the agent-state-dir layout verbatim under the destination root.
 """
 
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import Field
@@ -31,13 +33,18 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -65,6 +72,162 @@ def get_preserved_agents_root_dir(host_dir: Path) -> Path:
     live on the local machine so they survive remote host destruction.
     """
     return host_dir / "preserved"
+
+
+def iter_agent_session_paths(local_host_dir: Path, relpath: Path) -> list[Path]:
+    """Return ``<agent_dir>/relpath`` for every live and preserved local agent where it exists.
+
+    Scans both the live agents root (``<host_dir>/agents/``) and the preserved-agents root
+    (``<host_dir>/preserved/``); each agent stores its per-agent files under the same
+    ``relpath``. Session adoption uses this to find a session id across every local agent's
+    native store. The returned paths may be files or directories (``exists()`` is the test),
+    so it serves both directory stores (e.g. claude's ``projects/``) and single-file stores
+    (e.g. opencode's ``opencode.db``). Local host only: an adopted store is copied onto the
+    destination from a path that must already be reachable locally.
+    """
+    paths: list[Path] = []
+    for parent in (get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)):
+        if not parent.is_dir():
+            continue
+        for agent_dir in sorted(parent.iterdir()):
+            candidate = agent_dir / relpath
+            if candidate.exists():
+                paths.append(candidate)
+    return paths
+
+
+def dedupe_by_resolved_path(candidates: Iterable[Path]) -> list[Path]:
+    """Return ``candidates`` with duplicate paths removed, preserving first-seen order.
+
+    Two candidates are duplicates when they ``resolve()`` to the same real path (so a
+    symlinked and a direct route to one dir collapse to one). The original (unresolved)
+    path is kept. Session-adoption resolvers use this to dedupe their search dirs -- the
+    current/user config dir can coincide with a scanned agent dir -- so a session that
+    lives in one physical dir is never reported as ambiguously matching "two" dirs.
+    """
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            deduped.append(candidate)
+    return deduped
+
+
+def run_adopt_session_preflight(
+    agent_type: AgentTypeName,
+    adopt_session: tuple[str, ...],
+    mngr_ctx: MngrContext,
+    agent_class: type,
+    resolve_one: Callable[[str], object],
+) -> None:
+    """Fail-fast on bad ``--adopt`` session ids before any host or worktree is created.
+
+    The agent-agnostic gate (the type must support adoption; mutual exclusion with ``--from``)
+    runs in :func:`~imbue.mngr.api.create.create`; this is the per-plugin ``on_before_create``
+    body. It resolves every named session *now* -- the source is always local, so the result
+    matches the resolution done later in ``on_after_provisioning`` -- so a bad id is a clean
+    user error rather than a ConcurrencyExceptionGroup traceback out of the provisioning group.
+
+    No-op unless ``adopt_session`` is set and the agent type is (a subtype of) ``agent_class``.
+    ``resolve_one`` is the plugin's own resolver, called once per named session for its side
+    effect of raising :class:`UserInputError` on an unknown/ambiguous id.
+    """
+    if not adopt_session:
+        return
+    resolved = resolve_agent_type(agent_type, mngr_ctx.config)
+    # The core gate (`_validate_session_adoption`, which runs before any on_before_create hook)
+    # has already rejected `--adopt` for a type that supports no adoption at all, so the resolved
+    # type is guaranteed adoption-capable here. A mismatch with *this* plugin's ``agent_class``
+    # therefore means the create is for a *different* adoption-capable agent -- whose own hook
+    # validates these ids -- not a silent drop. The assert keeps that invariant loud (rather than a
+    # silent no-op) if the core gate is ever bypassed or its capability check drifts out of sync.
+    if not issubclass(resolved.agent_class, HasSessionAdoptionMixin):
+        raise AssertionError(
+            f"--adopt reached the {agent_class.__name__} preflight for non-adoption type {agent_type!r}; "
+            "_validate_session_adoption should have rejected it first"
+        )
+    if not issubclass(resolved.agent_class, agent_class):
+        return
+    for session_arg in adopt_session:
+        resolve_one(session_arg)
+
+
+_MatchT = TypeVar("_MatchT")
+
+
+def require_unique_match(
+    matches: Sequence[_MatchT],
+    *,
+    not_found_message: str,
+    ambiguous_message: str,
+) -> _MatchT:
+    """Return the single element of ``matches``, raising :class:`UserInputError` for zero or many.
+
+    Every per-CLI adopt resolver scans its native store(s) for a session id and ends the same
+    way: zero hits is an unknown-id error (``not_found_message``), more than one is an ambiguity
+    (``ambiguous_message`` followed by the colliding candidates, one per indented line), exactly
+    one is the answer. Only the store scanning differs per CLI; this shared tail keeps the
+    not-found/ambiguous error shape uniform.
+    """
+    if not matches:
+        raise UserInputError(not_found_message)
+    if len(matches) > 1:
+        listing = "\n".join(f"  {match}" for match in matches)
+        raise UserInputError(f"{ambiguous_message}\n{listing}")
+    return matches[0]
+
+
+def adopt_sessions(
+    adopt_session: tuple[str, ...],
+    source_location: HostLocation | None,
+    *,
+    copy_explicit: Callable[[str], str],
+    copy_clone: Callable[[HostLocation], str],
+    resume: Callable[[str], None],
+) -> None:
+    """Copy every ``--adopt`` session (and the ``--from`` clone) into the new agent, then resume one.
+
+    Each ``--adopt`` value is copied in via ``copy_explicit`` (which rebinds it to the new work
+    dir and returns its resumable id); a ``--from`` clone is additionally copied via ``copy_clone``
+    (same, but raising if the source has no resumable session). The session actually resumed --
+    via ``resume``, which writes the agent's resume pointer -- is the clone's when ``--from`` is
+    given, otherwise the last ``--adopt`` value; the rest are left available for the agent's own
+    session switcher. With neither option set, nothing is adopted (fresh start).
+
+    ``--adopt`` and ``--from`` are no longer mutually exclusive: every named session plus the
+    clone is made available, and the clone is the one resumed.
+    """
+    resume_id: str | None = None
+    for adopt_arg in adopt_session:
+        resume_id = copy_explicit(adopt_arg)
+    if source_location is not None:
+        resume_id = copy_clone(source_location)
+    if resume_id is not None:
+        resume(resume_id)
+
+
+def transfer_cloned_agent_session_store(
+    dest_host: OnlineHostInterface,
+    dest_state_dir: Path,
+    source_location: HostLocation,
+    store_relpath: Path,
+) -> bool:
+    """Copy a cloned source agent's native session store into the destination agent (``--from``).
+
+    A generic ``--from`` clone copies the source *workspace* but not the source agent's
+    *state dir*, so an agent that wants the clone to resume the source's conversation
+    transfers just its native session store (``store_relpath``, the same relpath it
+    preserves and scans) from the source state dir into its own. The agent then rebinds
+    that store to its new work_dir. Returns True if the source store existed and was
+    copied, else False (the clone starts a fresh session).
+    """
+    source_store = source_location.path / store_relpath
+    if not source_location.host.path_exists(source_store):
+        return False
+    dest_host.copy_directory(source_location.host, source_store, dest_state_dir / store_relpath)
+    return True
 
 
 def get_preserved_agent_dir(host_dir: Path, agent_name: AgentName, agent_id: AgentId) -> Path:

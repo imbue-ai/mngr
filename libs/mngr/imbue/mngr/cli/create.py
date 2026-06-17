@@ -66,6 +66,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -503,6 +504,20 @@ class _CreateCommand(click.Command):
         "A bare name refers to an agent; use :PATH for a directory. GIT_URL (e.g. "
         "https://github.com/owner/repo or git@gitlab.com:owner/repo.git) is cloned to "
         "~/.mngr/clones/<name>-<id>/ using local git auth. Defaults to git root if omitted"
+    ),
+)
+@optgroup.option(
+    "--adopt",
+    "--adopt-session",
+    "adopt_session",
+    multiple=True,
+    help=(
+        "Adopt an existing session into this newly created agent so it resumes that conversation. "
+        "Accepts a session id or a path to the session file; a session id is searched across the "
+        "relevant user/config store, every live local mngr agent, and preserved sessions from "
+        "destroyed agents. Repeatable: every named session is copied in and the last is resumed on "
+        "startup. May be combined with --from, in which case the cloned session is resumed instead "
+        "and the --adopt sessions remain available in the agent."
     ),
 )
 @optgroup.option(
@@ -995,7 +1010,7 @@ def _create_agent(
                     elif setup.initial_message is not None:
                         # Send initial message directly (from --message or --message-file)
                         logger.info("Sending message to agent")
-                        agent.send_message(setup.initial_message)
+                        require_interactive_agent(agent).send_message(setup.initial_message)
                     else:
                         pass
 
@@ -1230,7 +1245,7 @@ def _handle_editor_message(
             return
 
         logger.info("Sending edited message...")
-        agent.send_message(edited_message)
+        require_interactive_agent(agent).send_message(edited_message)
         logger.debug("Message sent successfully")
 
 
@@ -1692,6 +1707,7 @@ def _parse_agent_opts(
         label_options=label_options,
         provisioning=provisioning,
         tmux=tmux_options,
+        adopt_session=opts.adopt_session,
         source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base
@@ -1978,7 +1994,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     key="create",
     one_line_description="Create and run an agent",
     synopsis="""mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--adopt <SESSION>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]

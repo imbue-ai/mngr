@@ -12,23 +12,27 @@ from typing import Any
 
 import pluggy
 import pytest
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import AgentInstallationError
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -43,6 +47,8 @@ from imbue.mngr_pi_coding.plugin import _inbox_append_command
 from imbue.mngr_pi_coding.plugin import _load_resource
 from imbue.mngr_pi_coding.plugin import _read_pi_trust
 from imbue.mngr_pi_coding.plugin import _serialize_pi_trust
+from imbue.mngr_pi_coding.plugin import _waiting_reason
+from imbue.mngr_pi_coding.plugin import agent_field_generators
 from imbue.mngr_pi_coding.plugin import register_agent_aliases
 from imbue.mngr_pi_coding.plugin import register_agent_type
 
@@ -100,11 +106,17 @@ def _stub_host(
     )
 
 
-def _make_options() -> CreateAgentOptions:
+def _make_options(
+    *,
+    adopt_session: tuple[str, ...] = (),
+    source_agent_state_location: HostLocation | None = None,
+) -> CreateAgentOptions:
     return CreateAgentOptions(
         name=AgentName("test"),
         agent_type=AgentTypeName("pi-coding"),
         environment=AgentEnvironmentOptions(),
+        adopt_session=adopt_session,
+        source_agent_state_location=source_agent_state_location,
     )
 
 
@@ -413,7 +425,7 @@ def test_provision_raises_when_pi_not_installed_locally(tmp_path: Path, pi_agent
     options = _make_options()
     mngr_ctx = _make_test_mngr_ctx(tmp_path, is_auto_approve=False)
 
-    with pytest.raises(PluginMngrError, match="pi is not installed"):
+    with pytest.raises(AgentInstallationError, match="pi is not installed"):
         pi_agent.provision(host, options, mngr_ctx)
 
 
@@ -460,7 +472,7 @@ def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent:
         concurrency_group=ConcurrencyGroup(name="test"),
     )
 
-    with pytest.raises(PluginMngrError, match="automatic remote installation is disabled"):
+    with pytest.raises(AgentInstallationError, match="automatic remote installation is disabled"):
         pi_agent.provision(host, options, mngr_ctx)
 
 
@@ -546,6 +558,21 @@ def test_assemble_command_preserves_cli_and_agent_args(pi_agent: PiCodingAgent, 
 
     assert "--thinking high" in command
     assert "--model claude" in command
+
+
+def test_assemble_command_adds_approve_when_auto_dismiss_dialogs(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    # auto_dismiss_dialogs launches pi with --approve so it auto-trusts the project
+    # folder (pi's native unattended path), and the trust dialog never blocks.
+    object.__setattr__(pi_agent, "agent_config", PiCodingAgentConfig(auto_dismiss_dialogs=True))
+    command = str(pi_agent.assemble_command(_fake_host(tmp_path), (), None))
+    assert "--approve" in command
+
+
+def test_assemble_command_omits_approve_by_default(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    # Default config does not auto-dismiss, so --approve is not added: pi decides
+    # trust itself (the dialog, or a previously seeded trust decision).
+    command = str(pi_agent.assemble_command(_fake_host(tmp_path), (), None))
+    assert "--approve" not in command
 
 
 # =============================================================================
@@ -715,6 +742,110 @@ def test_seed_per_agent_workspace_trust_writes_per_agent_file(pi_agent: PiCoding
 
 
 # =============================================================================
+# Session adoption (--adopt and --from clone)
+# =============================================================================
+
+
+def _write_pi_session(sessions_dir: Path, subdir: str, session_id: str, cwd: str = "/old/cwd") -> Path:
+    """Write a minimal pi session JSONL under ``sessions_dir/subdir`` and return its path.
+
+    The first record is a ``session`` record carrying ``cwd`` (the field adoption
+    rebinds); a second message record stands in for conversation content.
+    """
+    session_subdir = sessions_dir / subdir
+    session_subdir.mkdir(parents=True, exist_ok=True)
+    session_file = session_subdir / f"20240101_000000_{session_id}.jsonl"
+    session_file.write_text(
+        json.dumps({"type": "session", "cwd": cwd, "id": session_id}) + "\n" + json.dumps({"type": "message"}) + "\n"
+    )
+    return session_file
+
+
+def _read_resume_pointer(agent: PiCodingAgent) -> str:
+    return (agent._get_agent_dir() / _SESSION_FILE_NAME).read_text()
+
+
+@pytest.mark.rsync
+def test_adopt_session_multiple_resumes_last(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """``--adopt A B`` copies both sessions in and resumes the last (B)."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    source_a = _write_pi_session(tmp_path / "src-a", "encoded-a", "sessA")
+    source_b = _write_pi_session(tmp_path / "src-b", "encoded-b", "sessB")
+    options = _make_options(adopt_session=(str(source_a), str(source_b)))
+
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    sessions_dir = agent.get_pi_config_dir() / "sessions"
+    # Both sessions are available in the new agent's store (additive copy).
+    assert (sessions_dir / "encoded-a" / source_a.name).exists()
+    assert (sessions_dir / "encoded-b" / source_b.name).exists()
+    # Only the last (B) is resumed.
+    assert _read_resume_pointer(agent) == str(sessions_dir / "encoded-b" / source_b.name)
+
+
+@pytest.mark.rsync
+def test_adopt_session_rebinds_cwd(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """An adopted session's embedded cwd is rebound to the new agent's work_dir."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    source = _write_pi_session(tmp_path / "src", "encoded", "sess1", cwd="/no/longer/exists")
+    options = _make_options(adopt_session=(str(source),))
+
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    adopted = agent.get_pi_config_dir() / "sessions" / "encoded" / source.name
+    first_record = json.loads(adopted.read_text().splitlines()[0])
+    assert first_record["cwd"] == agent._get_host_canonical_work_dir(agent.host)
+
+
+@pytest.mark.rsync
+def test_adopt_from_clone_with_explicit_resumes_clone(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """``--adopt A --from X`` copies both, and the clone (X) is the one resumed."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    source_a = _write_pi_session(tmp_path / "src-a", "encoded-a", "sessA")
+
+    # The --from source's native pi session store, at the preserved relpath.
+    source_state_dir = tmp_path / "source-agent-state"
+    source_sessions = source_state_dir / "plugin" / "pi_coding" / "sessions"
+    clone_session = _write_pi_session(source_sessions, "encoded-clone", "sessClone")
+    source_location = HostLocation(host=agent.host, path=source_state_dir)
+    options = _make_options(adopt_session=(str(source_a),), source_agent_state_location=source_location)
+
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    # The explicit session is still copied in (available, not resumed).
+    assert (agent.get_pi_config_dir() / "sessions" / "encoded-a" / source_a.name).exists()
+    # The clone's session is the one resumed.
+    resumed = agent._get_agent_dir() / "plugin" / "pi_coding" / "sessions" / "encoded-clone" / clone_session.name
+    assert _read_resume_pointer(agent) == str(resumed)
+
+
+def test_adopt_from_clone_no_store_raises(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A ``--from`` clone whose source has no pi session store raises AgentStartError."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    # Source state dir exists but has no plugin/pi_coding/sessions store.
+    source_state_dir = tmp_path / "source-agent-state"
+    source_state_dir.mkdir()
+    source_location = HostLocation(host=agent.host, path=source_state_dir)
+    options = _make_options(source_agent_state_location=source_location)
+
+    with pytest.raises(AgentStartError, match="no pi session store"):
+        agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+
+def test_adopt_from_clone_empty_store_raises(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A ``--from`` clone whose source store has no session JSONL raises AgentStartError."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    source_state_dir = tmp_path / "source-agent-state"
+    # The store dir exists but holds no .jsonl session.
+    (source_state_dir / "plugin" / "pi_coding" / "sessions").mkdir(parents=True)
+    source_location = HostLocation(host=agent.host, path=source_state_dir)
+    options = _make_options(source_agent_state_location=source_location)
+
+    with pytest.raises(AgentStartError, match="no session JSONL"):
+        agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+
+# =============================================================================
 # Message delivery via the inbox (pi.sendUserMessage injection)
 # =============================================================================
 
@@ -866,3 +997,40 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
 
     dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
     assert not dest_dir.exists()
+
+
+def test_pi_config_defaults_to_unattended() -> None:
+    # pi has no tool-approval gate, so auto_allow_permissions is pinned on.
+    assert PiCodingAgentConfig().auto_allow_permissions is True
+
+
+def test_pi_config_rejects_disabling_auto_allow() -> None:
+    # pi cannot enforce a deny, so explicitly disabling auto-allow is an error
+    # (pydantic wraps the PiAutoAllowRequiredError raised by the field validator).
+    with pytest.raises(ValidationError, match="cannot honor"):
+        PiCodingAgentConfig(auto_allow_permissions=False)
+
+
+def test_agent_field_generators_exposes_pi_waiting_reason() -> None:
+    result = agent_field_generators()
+    assert result is not None
+    plugin_name, generators = result
+    assert plugin_name == "pi-coding"
+    assert "waiting_reason" in generators
+    assert callable(generators["waiting_reason"])
+
+
+def test_pi_waiting_reason_is_end_of_turn_when_idle(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    # No active marker -> the agent is idle, so the (single-value) reason is END_OF_TURN.
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+    assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
+
+
+def test_pi_waiting_reason_is_none_when_active(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    # Active marker present -> the agent is running, so there is no waiting reason.
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    marker = agent._get_agent_dir() / "active"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
+    assert _waiting_reason(agent, agent.host) is None

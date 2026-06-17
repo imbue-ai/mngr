@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.message import MessageResult
@@ -295,14 +295,14 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
 
     host.start_agents([agent1.id, agent2.id])
 
-    original_send = BaseAgent.send_message
+    original_send = SendKeysAgent.send_message
 
-    def exploding_send(self: BaseAgent, message: str) -> None:
+    def exploding_send(self: SendKeysAgent, message: str) -> None:
         if str(self.name) == "will-explode":
             raise SendMessageError("will-explode", "simulated send failure")
         original_send(self, message)
 
-    monkeypatch.setattr(BaseAgent, "send_message", exploding_send)
+    monkeypatch.setattr(SendKeysAgent, "send_message", exploding_send)
 
     matches = find_all_agents(
         addresses=(),

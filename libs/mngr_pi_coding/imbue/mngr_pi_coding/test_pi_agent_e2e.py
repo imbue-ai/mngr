@@ -33,6 +33,7 @@ from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
+from imbue.mngr.utils.testing import run_mngr_subprocess
 
 # A fast, cheap, tool-capable model keeps the real turns short.
 _MODEL = "claude-haiku-4-5"
@@ -46,6 +47,7 @@ class _PiReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = True
     asserts_usage = True
+    # This is the store the adopt-from-preserved arc adopts (see adopt_session_arg).
     native_session_preserved_relpaths = ("plugin/pi_coding/sessions",)
 
     def unavailable_reason(self) -> str | None:
@@ -89,11 +91,39 @@ class _PiReleaseProfile(AgentReleaseProfile):
             _MODEL,
         ]
 
-    def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
-        # uv run mngr from the checkout, matching how the rest of this lib's e2e runs.
-        return subprocess.run(
-            ["uv", "run", "mngr", *args], env=dict(ctx.env), capture_output=True, text=True, timeout=timeout
+    def adopt_session_arg(self, preserved_dir: Path) -> str:
+        """Return the absolute path to the preserved pi session JSONL to adopt.
+
+        ``pi_session_file`` (preserved alongside the store) holds the live agent's
+        session path; only its basename is stable across the destroy, so locate the
+        matching JSONL under the preserved ``sessions`` store and return that path.
+        """
+        pointer = preserved_dir / "pi_session_file"
+        session_basename = Path(pointer.read_text().strip()).name
+        sessions_root = preserved_dir / "plugin" / "pi_coding" / "sessions"
+        matches = [path for path in sessions_root.glob(f"*/{session_basename}")]
+        assert len(matches) == 1, (
+            f"expected exactly one preserved pi session named {session_basename} under {sessions_root}, "
+            f"found {matches}"
         )
+        return str(matches[0])
+
+    def prepare_adoption_workspace(self, work_dir: Path) -> None:
+        """Seed the fresh adoption worktree with the same trust inputs the base source has.
+
+        A ``.agents/skills`` dir gives the worktree pi "project trust inputs"; ``mngr
+        create --yes`` pre-seeds trust so the dialog never appears, matching ``setup``.
+        """
+        init_git_repo(work_dir, initial_commit=True)
+        (work_dir / ".gitignore").write_text(".pi/\n")
+        skills_dir = work_dir / ".agents" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "example.md").write_text("# Example skill (gives the worktree pi trust inputs)\n")
+        run_git_command(work_dir, "add", ".gitignore", ".agents")
+        run_git_command(work_dir, "commit", "-m", "add gitignore and .agents/skills")
+
+    def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
+        return run_mngr_subprocess(*args, env=dict(ctx.env), timeout=timeout)
 
 
 @pytest.mark.release
