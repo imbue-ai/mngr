@@ -83,8 +83,6 @@ _HOST_NAME_TAG_KEY: Final[str] = "Name"
 # credentials (no long-lived keys on the box). The same oneshot is also triggered
 # once on graceful stop so the offline copy is current. Offline reads are served
 # from the bucket by the operator's credentials via ``get_volume_for_host``.
-# ``HOST_DIR_SYNC_UNIT_NAME`` / ``HOST_DIR_SYNC_INTERVAL_SECONDS`` are re-exported
-# from the base for the unit tests and the README.
 # host_dir can contain large transient build artifacts; exclude the obvious ones
 # so a periodic full-tree sync stays cheap. Conservative -- only mngr-irrelevant
 # caches that never need to be read offline.

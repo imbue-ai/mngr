@@ -1,12 +1,12 @@
 """Unit tests for the pure host_dir-sync daemon unit/script body generators."""
 
 from imbue.mngr.primitives import HostId
-from imbue.mngr_aws.backend import HOST_DIR_SYNC_INTERVAL_SECONDS
-from imbue.mngr_aws.backend import HOST_DIR_SYNC_UNIT_NAME
 from imbue.mngr_aws.backend import _build_awscli_install_command
 from imbue.mngr_aws.backend import _build_host_dir_sync_command
 from imbue.mngr_aws.backend import _build_host_dir_sync_service_unit
 from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
+from imbue.mngr_vps.instance import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance import HOST_DIR_SYNC_UNIT_NAME
 from imbue.mngr_vps.instance import build_host_dir_sync_timer_unit
 
 _HOST_DIR = "/mnt/mngr-btrfs/abc123/host_dir"

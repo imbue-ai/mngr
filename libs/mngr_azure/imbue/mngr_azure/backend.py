@@ -83,8 +83,7 @@ _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
 # VM's user-assigned identity via MSI (no long-lived keys on the box). The same
 # oneshot is triggered once on graceful stop so the offline copy is current.
 # Offline reads are served from the bucket by the operator's credentials via
-# ``get_volume_for_host``. ``HOST_DIR_SYNC_UNIT_NAME`` /
-# ``HOST_DIR_SYNC_INTERVAL_SECONDS`` are re-exported from the base for the tests.
+# ``get_volume_for_host``.
 # host_dir can contain large transient build artifacts; exclude the obvious ones
 # so a periodic full-tree sync stays cheap. azcopy distinguishes file-NAME globs
 # (``--exclude-pattern``) from directory PATH prefixes (``--exclude-path``), so the
