@@ -1240,14 +1240,12 @@ def test_adopt_and_from_resumes_the_clone(codex_agent: CodexAgent, tmp_path: Pat
     source_state_dir = tmp_path / "source_agent_state"
     source_sessions = source_state_dir / "plugin" / "codex" / "home" / "sessions"
     clone_rollout = _write_rollout(source_sessions, _OTHER_SESSION_ID, cwd="/old")
-    # The clone's rollout is the most-recent conversation. The clone path's ``ls -t``
-    # scan runs over the (now shared) dest store, and adopting the explicit session
-    # rewrites its rollout's cwd -- which bumps that file's mtime to "now". Give the
-    # clone source a far-future mtime so it is unambiguously the newest in the dest
-    # store regardless of that rewrite, so the resume pointer is the clone's.
-    os.utime(explicit_rollout, (1000, 1000))
+    # Make the explicit ``--adopt`` rollout the *newest* by mtime in the merged dest store
+    # (the worst case for any destination-mtime scan): the clone must still win because its
+    # id is read from the source store before transfer, not picked by ``ls -t`` over the dest.
     far_future = time.time() + 1_000_000
-    os.utime(clone_rollout, (far_future, far_future))
+    os.utime(clone_rollout, (1000, 1000))
+    os.utime(explicit_rollout, (far_future, far_future))
     source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
     options = CreateAgentOptions(
         agent_type=AgentTypeName("codex"),

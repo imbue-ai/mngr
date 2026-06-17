@@ -958,29 +958,28 @@ class CodexAgent(
         """Transfer the cloned source agent's native session store in, rebind its latest rollout.
 
         Transfers the source's native session store (the same relpath the agent preserves
-        and scans) into this agent's state dir, discovers the source's most-recent rollout
-        in the transferred store, and rebinds its cwd. Returns the discovered session id.
+        and scans) into this agent's state dir, and rebinds the source's most-recent rollout
+        cwd. Returns the discovered session id.
 
-        Raises :class:`AgentStartError` when the source has no session store, or the
-        transferred store holds no rollout: a ``--from`` clone is an explicit request to
-        resume the source's conversation, so an empty source is a hard failure rather than a
-        silent fresh start.
+        The clone's session id is read from the *source* store (which holds only the source
+        agent's own sessions), not the merged destination store: any ``--adopt`` sessions the
+        orchestrator copied in first were rewritten by their cwd-rebind (bumping their mtime to
+        "now"), so an ``ls -t`` over the destination could rank one of them ahead of the clone's
+        older transferred rollout and resume the wrong session.
+
+        Raises :class:`AgentStartError` when the source has no session store, or the store holds
+        no rollout: a ``--from`` clone is an explicit request to resume the source's conversation,
+        so an empty source is a hard failure rather than a silent fresh start.
         """
-        transferred = transfer_cloned_agent_session_store(
-            host, self._get_agent_dir(), source_location, _AGENT_SESSIONS_RELPATH
-        )
-        if not transferred:
+        source_sessions_dir = source_location.path / _AGENT_SESSIONS_RELPATH
+        session_id = self._find_latest_session_id(source_location.host, source_sessions_dir)
+        if session_id is None:
             raise AgentStartError(
                 str(self.name),
                 f"clone source agent {source_location.path} has no codex session store to resume",
             )
+        transfer_cloned_agent_session_store(host, self._get_agent_dir(), source_location, _AGENT_SESSIONS_RELPATH)
         dest_sessions_dir = self._get_codex_home() / "sessions"
-        session_id = self._find_latest_session_id(host, dest_sessions_dir)
-        if session_id is None:
-            raise AgentStartError(
-                str(self.name),
-                f"no rollout found in transferred codex session store at {dest_sessions_dir}",
-            )
         with log_span("Adopting cloned codex session {}", session_id):
             self._rebind_adopted_rollout_cwd(host, dest_sessions_dir, session_id)
         logger.info("Adopted cloned codex session {} into agent {}", session_id, self.id)
