@@ -41,6 +41,7 @@ from imbue.mngr_usage.api import window_render_dict
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
+from imbue.mngr_usage.data_types import TokenSnapshot
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
@@ -178,7 +179,7 @@ def _format_cost_line(
     Caller contract: only invoke when there's at least one session of
     this mode (``session_count >= 1``), so ``latest_event_at`` is always
     a real timestamp -- the freshest session's last event for this mode.
-    ``UsageSnapshot`` enforces this pairing by construction (the
+    ``_UsageRenderModel`` enforces this pairing by construction (its
     per-mode ``latest_*_event_at`` property is ``int | None`` and is
     ``None`` iff the mode has zero sessions); callers in
     ``_write_source_section`` gate on the timestamp being present.
@@ -341,6 +342,22 @@ class _UsageRenderModel(FrozenModel):
         return self.snapshot.api_cost
 
     @property
+    def subscription_tokens(self) -> TokenSnapshot:
+        return self.snapshot.subscription_tokens
+
+    @property
+    def api_tokens(self) -> TokenSnapshot:
+        return self.snapshot.api_tokens
+
+    @property
+    def is_subscription_cost_estimated(self) -> bool:
+        return self.snapshot.is_subscription_cost_estimated
+
+    @property
+    def is_api_cost_estimated(self) -> bool:
+        return self.snapshot.is_api_cost_estimated
+
+    @property
     def since_seconds(self) -> int:
         return self.snapshot.since_seconds
 
@@ -416,8 +433,16 @@ def _render_one_source_for_json(model: _UsageRenderModel, now: int, detail: bool
         "session_count": model.session_count,
         "subscription_session_count": model.subscription_session_count,
         "api_session_count": model.api_session_count,
-        "subscription_cost": model.subscription_cost.model_dump(),
-        "api_cost": model.api_cost.model_dump(),
+        "subscription_cost": {
+            **model.subscription_cost.model_dump(),
+            "is_estimated": model.is_subscription_cost_estimated,
+        },
+        "subscription_tokens": model.subscription_tokens.model_dump(),
+        "api_cost": {
+            **model.api_cost.model_dump(),
+            "is_estimated": model.is_api_cost_estimated,
+        },
+        "api_tokens": model.api_tokens.model_dump(),
     }
     if detail:
         out["sessions"] = [session_render_dict(s, now) for s in model.sessions]
@@ -505,7 +530,10 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     if sub_latest is not None:
         subscription_line = _format_cost_line(
             mode_label="subscription cost",
-            mode_suffix=" (imputed)",
+            # "imputed" already marks it informational; add "estimated" when the
+            # dollars were token-derived rather than harness-reported (mirrors the
+            # api line and the JSON/CEL is_estimated flag).
+            mode_suffix=" (imputed, estimated)" if model.is_subscription_cost_estimated else " (imputed)",
             aggregate_cost=model.subscription_cost,
             session_count=model.subscription_session_count,
             since_seconds=model.since_seconds,
@@ -519,7 +547,8 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     if api_latest is not None:
         api_line = _format_cost_line(
             mode_label="api cost",
-            mode_suffix="",
+            # Flag token-derived dollars so a reader doesn't read an estimate as billed.
+            mode_suffix=" (estimated)" if model.is_api_cost_estimated else "",
             aggregate_cost=model.api_cost,
             session_count=model.api_session_count,
             since_seconds=model.since_seconds,
@@ -954,6 +983,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
         result = wait_for_usage(
             poll_fn=lambda: gather_usage_snapshots(
                 mngr_ctx,
+                now=int(time.time()),
                 include_filters=include_filters,
                 exclude_filters=exclude_filters,
                 provider_names=provider_names,
@@ -963,6 +993,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
             until_filters=until_programs,
             timeout_seconds=timeout_seconds,
             interval_seconds=interval_seconds,
+            now_fn=lambda: int(time.time()),
         )
     except KeyboardInterrupt:
         logger.debug("Received keyboard interrupt")

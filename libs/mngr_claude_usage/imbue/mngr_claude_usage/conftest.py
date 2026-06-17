@@ -3,24 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from imbue.imbue_common.conftest_hooks import register_marker
-from imbue.mngr.hosts.host import Host
-from imbue.mngr.primitives import HostName
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
-from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr_claude_usage import resources as _resources
 
-register_marker("tmux: marks tests that invoke tmux via agent discovery")
 register_plugin_test_fixtures(globals())
 
 WRITER_SCRIPT_NAME = "claude_usage_writer.sh"
-
-
-@pytest.fixture
-def local_host(local_provider: LocalProviderInstance) -> Host:
-    """Local-provider Host for tests that exercise host.read_text_file / host.write_file."""
-    return local_provider.create_host(HostName(LOCAL_HOST_NAME))
 
 
 @pytest.fixture
