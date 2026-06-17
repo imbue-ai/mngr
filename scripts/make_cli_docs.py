@@ -18,7 +18,6 @@ All content comes from two sources:
 """
 
 import argparse
-import importlib
 import os
 import re
 import sys
@@ -32,6 +31,7 @@ os.environ["MNGR_LOAD_ALL_PLUGINS"] = "1"
 
 import click
 from click_option_group import GroupedOption
+from pydantic import BaseModel
 
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -40,6 +40,13 @@ from imbue.mngr.cli.help_topics import get_topic
 from imbue.mngr.main import BUILTIN_COMMANDS
 from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
+from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
+from imbue.mngr_ovh.config import OvhProviderConfig
+from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
+from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vultr.config import VultrProviderConfig
 
 # Commands categorized by their documentation location
 PRIMARY_COMMANDS = {
@@ -711,8 +718,7 @@ class ConfigTableRow(NamedTuple):
 
 class ConfigTable(NamedTuple):
     readme: str  # path relative to the repo root
-    module: str  # importable module holding the config class
-    class_name: str
+    config_cls: type[BaseModel]  # the Pydantic config class whose field descriptions we render
     field_header: str  # label for column 1 (the field / option / setting name)
     description_header: str  # label for column 3
     rows: tuple[ConfigTableRow, ...]
@@ -721,8 +727,7 @@ class ConfigTable(NamedTuple):
 CONFIG_TABLES: tuple[ConfigTable, ...] = (
     ConfigTable(
         readme="libs/mngr_aws/README.md",
-        module="imbue.mngr_aws.config",
-        class_name="AwsProviderConfig",
+        config_cls=AwsProviderConfig,
         field_header="Field",
         description_header="Description",
         rows=(
@@ -744,8 +749,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
     ),
     ConfigTable(
         readme="libs/mngr_gcp/README.md",
-        module="imbue.mngr_gcp.config",
-        class_name="GcpProviderConfig",
+        config_cls=GcpProviderConfig,
         field_header="Field",
         description_header="Description",
         rows=(
@@ -768,8 +772,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
     ),
     ConfigTable(
         readme="libs/mngr_ovh/README.md",
-        module="imbue.mngr_ovh.config",
-        class_name="OvhProviderConfig",
+        config_cls=OvhProviderConfig,
         field_header="Field",
         description_header="Description",
         rows=(
@@ -793,8 +796,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
     ),
     ConfigTable(
         readme="libs/mngr_vultr/README.md",
-        module="imbue.mngr_vultr.config",
-        class_name="VultrProviderConfig",
+        config_cls=VultrProviderConfig,
         field_header="Field",
         description_header="Description",
         rows=(
@@ -806,8 +808,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
     ),
     ConfigTable(
         readme="libs/mngr_vps_docker/README.md",
-        module="imbue.mngr_vps_docker.config",
-        class_name="VpsDockerProviderConfig",
+        config_cls=VpsDockerProviderConfig,
         field_header="Field",
         description_header="Description",
         rows=(
@@ -828,8 +829,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
     ),
     ConfigTable(
         readme="libs/mngr_opencode/README.md",
-        module="imbue.mngr_opencode.plugin",
-        class_name="OpenCodeAgentConfig",
+        config_cls=OpenCodeAgentConfig,
         field_header="Option",
         description_header="Meaning",
         rows=(
@@ -843,8 +843,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
     ),
     ConfigTable(
         readme="libs/mngr_pi_coding/README.md",
-        module="imbue.mngr_pi_coding.plugin",
-        class_name="PiCodingAgentConfig",
+        config_cls=PiCodingAgentConfig,
         field_header="Setting",
         description_header="Description",
         rows=(
@@ -863,9 +862,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
 
 def _render_config_table(table: ConfigTable) -> str:
     """Render a markdown table; the Description column comes from the model's field descriptions."""
-    module = importlib.import_module(table.module)
-    config_cls = getattr(module, table.class_name)
-    model_fields = config_cls.model_fields
+    model_fields = table.config_cls.model_fields
     lines = [
         f"| {table.field_header} | Default | {table.description_header} |",
         "|---|---|---|",
@@ -873,9 +870,7 @@ def _render_config_table(table: ConfigTable) -> str:
     for row in table.rows:
         field_info = model_fields.get(row.field)
         if field_info is None:
-            raise ValueError(
-                f"{table.class_name} ({table.module}) has no field {row.field!r} referenced by {table.readme}"
-            )
+            raise ValueError(f"{table.config_cls.__name__} has no field {row.field!r} referenced by {table.readme}")
         description = _escape_markdown_table(" ".join((field_info.description or "").split()))
         lines.append(f"| `{row.field}` | {row.default} | {description} |")
     return "\n".join(lines)
