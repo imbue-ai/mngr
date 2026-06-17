@@ -39,9 +39,9 @@ from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
-from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import get_preserved_agents_root_dir
-from imbue.mngr.api.preservation import preserve_agent_data
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -62,13 +62,13 @@ from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.plugins.hookspecs import OptionStackItem
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import TransferMode
@@ -315,12 +315,8 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     preserve_sessions_on_destroy: bool = Field(
         default=True,
-        description="Preserve Claude session files locally before the agent's state directory is deleted on destroy. "
-        "When enabled, session JSONL files, transcripts (raw and common), and the session ID history "
-        "are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the agent's "
-        "state-directory layout. For remote agents, files are pulled to the local machine so they "
-        "survive host destruction. "
-        "Set to False to discard session data on destroy.",
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
     use_env_config_dir: bool = Field(
         default=False,
@@ -1100,6 +1096,11 @@ def _load_claude_resource_script(filename: str) -> str:
 # It is omitted from the agent's commands/ dir entirely when the user opts out.
 _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 
+# The python converter that common_transcript.sh invokes (python3
+# <dir>/common_transcript_convert.py). Provisioned alongside the .sh so the
+# shell resolves it relative to itself; gated by the same emit_common_transcript.
+_CLAUDE_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: Final[str] = "common_transcript_convert.py"
+
 # The raw-transcript streamer (returned by ClaudeAgent.get_raw_transcript_scripts
 # per HasTranscriptMixin). Always provisioned: it tails Claude's native session
 # JSONL files into logs/claude_transcript/events.jsonl, which is read by the
@@ -1408,7 +1409,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
         """Return only the script gated by ``emit_common_transcript``.
 
-        For Claude that's a single converter (``common_transcript.sh``).
+        For Claude that's a converter shell script (``common_transcript.sh``)
+        plus the python module it invokes (``common_transcript_convert.py``).
         The raw transcript streamer is on
         :meth:`get_raw_transcript_scripts` and the background
         orchestrator that supervises it is in
@@ -1416,7 +1418,11 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         whether the common transcript is on.
         """
         return {
-            _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME)
+            name: _load_claude_resource_script(name)
+            for name in (
+                _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME,
+                _CLAUDE_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME,
+            )
         }
 
     def _build_accept_marker_command(self) -> str:
@@ -2409,13 +2415,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """
         # Preserve session files before the state dir is deleted
         if self.agent_config.preserve_sessions_on_destroy:
-            preserve_agent_data(
-                _claude_preserved_items(self.agent_config.use_env_config_dir),
-                host,
-                self._get_agent_dir(),
-                get_local_preserved_agent_dir(self.mngr_ctx, self.name, self.id),
-                self.mngr_ctx,
-            )
+            preserve_agent_state(_claude_preserved_items(self.agent_config.use_env_config_dir), self, host)
 
         if self.agent_config.use_env_config_dir:
             # Shared-config mode: mngr never wrote per-agent keychain entries or
@@ -2478,6 +2478,14 @@ def _should_preserve_sessions(ref: DiscoveredAgent) -> bool:
     """
     agent_config = ref.certified_data.get("agent_config", {})
     return bool(agent_config.get("preserve_sessions_on_destroy"))
+
+
+def _claude_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) Claude agent, or None to skip it."""
+    if not _should_preserve_sessions(ref):
+        return None
+    is_shared_config = bool(ref.certified_data.get("agent_config", {}).get("use_env_config_dir"))
+    return _claude_preserved_items(is_shared_config)
 
 
 def _generate_claude_home_settings() -> dict[str, Any]:
@@ -2554,28 +2562,13 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     """Preserve Claude session files from the host's volume before it is destroyed.
 
     When a host goes offline and is destroyed without calling agent.on_destroy(),
-    session data still lives on the host's persisted volume. If the provider
-    surfaces that volume, ``to_offline_host`` returns an ``OfflineHostWithVolume``
-    (a :class:`HostFileReadInterface`), so the same :func:`preserve_agent_data`
-    used on the online path reads the files straight off the volume. If the host
-    is not readable (no volume), there is nothing we can preserve.
+    session data still lives on the host's persisted volume. The shared
+    :func:`preserve_host_agents_on_destroy` reads the declared files straight off
+    that volume (when the host surfaces one) for each Claude agent that opted in.
     """
-    if not isinstance(host, HostFileReadInterface):
-        logger.debug("Host {} is not readable (no volume); skipping session preservation", host.id)
-        return
-
-    for ref in host.discover_agents():
-        if not _should_preserve_sessions(ref):
-            continue
-        agent_config = ref.certified_data.get("agent_config", {})
-        is_shared_config = bool(agent_config.get("use_env_config_dir"))
-        preserve_agent_data(
-            _claude_preserved_items(is_shared_config),
-            host,
-            get_agent_state_dir_path(host.host_dir, ref.agent_id),
-            get_local_preserved_agent_dir(mngr_ctx, ref.agent_name, ref.agent_id),
-            mngr_ctx,
-        )
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName("claude"), _claude_items_to_preserve_for_discovered_agent
+    )
 
 
 @hookimpl

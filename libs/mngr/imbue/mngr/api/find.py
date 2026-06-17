@@ -12,6 +12,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
@@ -247,6 +248,57 @@ def resolve_host_location_address(
     return ResolvedHostLocationAddress(
         location=HostLocation(host=online_host, path=resolved_path),
         agent=resolved_agent,
+    )
+
+
+def resolve_host_location(
+    parsed: HostLocationAddress,
+    mngr_ctx: MngrContext,
+    *,
+    is_start_desired: bool = True,
+) -> ResolvedHostLocationAddress:
+    """Resolve a :class:`HostLocationAddress` to a host, path, and optional agent.
+
+    Convenience wrapper that drives discovery on the caller's behalf:
+
+    - If ``parsed`` has no agent and no host, the path is returned with the
+      local host (no discovery is performed, so unrelated providers like
+      Docker or Modal are not touched).
+    - Otherwise, performs discovery narrowed to the address's provider (when
+      pinned) and delegates to :func:`resolve_host_location_address`.
+
+    Callers that need to drive discovery themselves (e.g. ``mngr create``,
+    which caches a single discovery result across multiple address
+    resolutions) should call :func:`resolve_host_location_address` directly.
+
+    Raises :class:`UserInputError` if ``parsed`` has no path, no agent, and
+    no host.
+    """
+    if parsed.agent is None and parsed.host is None:
+        if parsed.path is None:
+            raise UserInputError("Location must include an agent, a host, or a path")
+        return ResolvedHostLocationAddress(location=HostLocation(host=get_local_host(mngr_ctx), path=parsed.path))
+
+    # Narrow discovery to the address's provider (when pinned) and feed the
+    # event-stream optimization with the agent name/ID (when present).
+    provider_names: tuple[str, ...] | None = None
+    if parsed.host is not None and parsed.host.provider is not None:
+        provider_names = (str(parsed.host.provider),)
+    agent_identifiers: tuple[str, ...] | None = None
+    if parsed.agent is not None:
+        agent_identifiers = (str(parsed.agent),)
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=provider_names,
+        agent_identifiers=agent_identifiers,
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    return resolve_host_location_address(
+        parsed,
+        agents_by_host,
+        mngr_ctx,
+        is_start_desired=is_start_desired,
     )
 
 

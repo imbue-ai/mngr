@@ -12,8 +12,8 @@ importers:
         specifier: ^1.6.0
         version: 1.6.4
       latchkey:
-        specifier: ^2.16.0
-        version: 2.16.0
+        specifier: ^2.16.1
+        version: 2.16.1
     devDependencies:
       '@playwright/test':
         specifier: 1.60.0
@@ -1895,8 +1895,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@2.16.0:
-    resolution: {integrity: sha512-5jk26eHKs2VIw8gJPpswMSKmaRuHm/UIrmPeBcYuXNhcl/N/hOQ6l8fX8GzRhYGxgxJB3KDzR549JosfFVsaHQ==}
+  latchkey@2.16.1:
+    resolution: {integrity: sha512-X/4MHhEIerwhXJlxSW6OVAu8Vpx7iB2OkrgfnI+5ta/GffPi2ASDp/FcPZ+cefH7dCaGFWm7wNzYf9nOZtK9RA==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -4964,7 +4964,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@2.16.0:
+  latchkey@2.16.1:
     dependencies:
       '@imbue-ai/detent': 1.6.0
       '@napi-rs/keyring': 1.2.0

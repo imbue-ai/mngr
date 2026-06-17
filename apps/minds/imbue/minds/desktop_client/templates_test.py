@@ -89,8 +89,8 @@ def test_render_workspace_settings_renders_all_palette_swatches() -> None:
         servers=(),
         current_color="#0b292b",
     )
-    # All 12 swatches present, with the workspace's current color marked
-    # as the checked radio so screen readers see the selection state.
+    # All palette swatches present, with the workspace's current color
+    # marked as the checked radio so screen readers see the selection state.
     for hex_value in WORKSPACE_PALETTE.values():
         assert f'data-color="{hex_value}"' in html
     assert 'aria-checked="true"' in html
@@ -272,7 +272,7 @@ def test_render_create_form_omits_env_file_checkbox() -> None:
 
 def test_render_create_form_includes_color_picker_with_palette_swatches() -> None:
     html = render_create_form()
-    # All 12 palette swatches present.
+    # All palette swatches present.
     for hex_value in WORKSPACE_PALETTE.values():
         assert f'data-color="{hex_value}"' in html
     # Hidden input named "color" carries the default selection.
@@ -407,8 +407,8 @@ def test_render_chrome_page_drops_title_swatch_and_seam_border() -> None:
 
 def test_render_chrome_page_titlebar_background_follows_titlebar_bg_var() -> None:
     # The titlebar paints via the ``--titlebar-bg`` CSS variable (set by
-    # chrome.js when a workspace is active) with a zinc-900 fallback, so
-    # the dark default chrome transitions cleanly to the active
+    # chrome.js when a workspace is active) with a pure-white fallback, so
+    # the neutral, workspace-less chrome transitions cleanly to the active
     # workspace's accent color.
     html = render_chrome_page()
     assert "var(--titlebar-bg" in html
@@ -931,9 +931,10 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
 # (normalizeHex / pickForegroundForHex); the guard test below ensures
 # no JS palette mirror gets reintroduced.
 
-# Order is significant: the 10 chromatic colors come first, then the
-# two achromatic neutrals (indifference = black, white) grouped at the
-# end, so the picker + the create-form preselect prioritize real colors.
+# Order is significant: it drives the picker's render order and
+# pick_unused_create_color's preference walk. ``confusion`` (the
+# default) leads; pure black and pure white are intentionally absent
+# (the neutral system-theme chrome would collide with them).
 _EXPECTED_PALETTE: Final[dict[str, str]] = {
     "confusion": "#0b292b",
     "courage": "#492222",
@@ -945,8 +946,6 @@ _EXPECTED_PALETTE: Final[dict[str, str]] = {
     "comfort": "#f5d6a0",
     "inspiration": "#e9ecd9",
     "clarity": "#fcefd4",
-    "indifference": "#000000",
-    "white": "#ffffff",
 }
 
 _WORKSPACE_ACCENT_JS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "workspace_accent.js"
@@ -961,14 +960,16 @@ def test_workspace_palette_matches_expected_entries() -> None:
     assert list(WORKSPACE_PALETTE.items()) == list(_EXPECTED_PALETTE.items())
 
 
-def test_workspace_palette_groups_neutrals_last() -> None:
-    # Order is semantic: chromatic colors first, the two achromatic
-    # neutrals (black + white) last, so the picker + create-form
-    # preselect prioritize real colors.
-    names = list(WORKSPACE_PALETTE.keys())
-    assert names[-2:] == ["indifference", "white"]
-    # ``confusion`` (the default) leads the chromatic block.
-    assert names[0] == "confusion"
+def test_workspace_palette_excludes_pure_black_and_white() -> None:
+    # Pure black/white were removed so a workspace accent can't collide
+    # with the neutral system-theme chrome (which is now pure white in
+    # light mode / pure black in dark mode). Users can still type either
+    # into the settings hex input; they're just not preset swatches.
+    values = set(WORKSPACE_PALETTE.values())
+    assert "#000000" not in values
+    assert "#ffffff" not in values
+    # ``confusion`` (the default) still leads the palette.
+    assert list(WORKSPACE_PALETTE.keys())[0] == "confusion"
 
 
 def test_default_workspace_color_is_confusion() -> None:
@@ -990,11 +991,13 @@ def test_workspace_accent_js_has_no_palette_mirror() -> None:
     assert "pickForegroundForHex" in js_content
 
 
-# Cases ordered: 4 dark palette entries (-> white text), 8 light palette
-# entries (-> black text), 2 mid-range customs that exercise either side
-# of the WCAG threshold.
+# ``pick_workspace_foreground`` runs on any hex (palette entries *and*
+# custom hexes typed into the settings input), so the cases below cover
+# both. Ordered: 3 dark palette entries (-> white text), 7 light palette
+# entries (-> black text), then 4 customs incl. the pure black/white
+# extremes (no longer palette entries) and two mid-range values that
+# exercise either side of the WCAG threshold.
 _PICK_FOREGROUND_CASES: Final[tuple[tuple[str, str], ...]] = (
-    ("#000000", "255 255 255"),
     ("#0b292b", "255 255 255"),
     ("#492222", "255 255 255"),
     ("#3c3d06", "255 255 255"),
@@ -1005,6 +1008,7 @@ _PICK_FOREGROUND_CASES: Final[tuple[tuple[str, str], ...]] = (
     ("#f5d6a0", "0 0 0"),
     ("#e9ecd9", "0 0 0"),
     ("#fcefd4", "0 0 0"),
+    ("#000000", "255 255 255"),
     ("#ffffff", "0 0 0"),
     ("#808080", "0 0 0"),
     ("#404040", "255 255 255"),
@@ -1062,7 +1066,6 @@ def test_normalize_workspace_color_rejects_malformed_inputs(value: str) -> None:
 
 _PALETTE_HEXES: Final[tuple[str, ...]] = tuple(WORKSPACE_PALETTE.values())
 _CONFUSION = WORKSPACE_PALETTE["confusion"]
-_INDIFFERENCE = WORKSPACE_PALETTE["indifference"]
 
 
 def test_pick_unused_create_color_defaults_to_confusion_when_none_used() -> None:
@@ -1092,13 +1095,6 @@ def test_pick_unused_create_color_ignores_custom_colors() -> None:
     # with a custom color the set is non-empty so the first palette entry
     # (confusion) is returned.
     assert pick_unused_create_color({"#123456"}) == _CONFUSION
-
-
-def test_pick_unused_create_color_picks_neutrals_only_after_colors() -> None:
-    # With every chromatic color used, the first unused entry is the
-    # first neutral (indifference = black), confirming neutrals sort last.
-    chromatic = [hex_value for name, hex_value in WORKSPACE_PALETTE.items() if name not in ("indifference", "white")]
-    assert pick_unused_create_color(set(chromatic)) == _INDIFFERENCE
 
 
 def test_pick_unused_create_color_is_case_insensitive() -> None:

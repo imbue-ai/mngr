@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+The codex background-tasks supervisor now also launches an optional usage writer (`codex_usage.sh`) when it's present in the agent's `commands/` dir -- installed by the new `imbue-mngr-codex-usage` package -- and restarts it if it dies, alongside the existing raw/common transcript watchers. No change for agents without the usage plugin installed.
+
+The common-transcript converter's rollout-to-common conversion logic now lives in a standalone `common_transcript_convert.py` (provisioned alongside `common_transcript.sh` and invoked by it) rather than an inline `python3` heredoc, so it is type-checked, linted, and unit-tested directly. Malformed rollout lines and unreadable existing-output lines are dropped silently.
+
+codex now flushes the common transcript at turn end. When the root turn finishes and no subagents are in flight (the agent goes WAITING), the Stop / SubagentStop hooks run one synchronous `--single-pass` conversion, so a consumer harvesting the final message on the WAITING signal no longer races the 5s converter daemon -- matching claude and antigravity. The converter takes the shared convert lock around its read-modify-write so this flush and the background daemon cannot produce duplicate events.
+
+The common-transcript watcher no longer echoes converter errors to the agent's pane: a genuine conversion error is recorded in the structured log only, instead of also being written to the watcher's stderr.
+
+Codex agents now preserve their transcripts on destroy (closing the carried-forward session-preservation gap), matching the claude plugin.
+
+- New `preserve_on_destroy` config option (default `true`): before a codex agent's state directory is deleted on destroy, its raw and common transcripts and the root session-id history are copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`, mirroring the agent's state-directory layout. For remote agents the files are pulled to the local machine so they survive host destruction. Set to `false` to discard transcript data on destroy.
+
+- The native resumable rollout session store under `CODEX_HOME/sessions` is now preserved on destroy too, so a preserved agent can be resumed/adopted from codex's own session files. Only the `sessions/` directory is targeted, so the auth-token symlink and config that sit as siblings in `CODEX_HOME` are still excluded.
+
+- Works for both online destroys and offline host destruction (where the agent state is read off the host's persisted volume).
+
+- The codex release lifecycle test now asserts the transcripts are actually preserved on destroy (previously destroy was bare cleanup), so the feature is covered end-to-end against the real `codex` binary.
+
 ## 2026-06-15
 
 Codex agents now report *why* they are waiting, via a `waiting_reason` field in `mngr list` (matching `mngr_claude`):

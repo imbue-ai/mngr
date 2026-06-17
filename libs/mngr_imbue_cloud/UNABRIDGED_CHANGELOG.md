@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Dropped the dead `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` stub overrides from `LimaSliceVpsClient`, matching the removal of those abstract methods from the shared `VpsClientInterface`. These had no production callers and only raised "unavailable". The now-unused `VpsSnapshotId` / `VpsSnapshotInfo` / `VpsSshKeyInfo` imports and the unit-test calls that exercised the stubs were removed as well.
+
+`destroy_host` now raises a `CleanupFailedGroup` carrying the classified cleanup failures (instead of returning them, or swallowing errors as warnings) when a resource is left behind, and returns normally otherwise. A resource that was already gone is treated as benign (no failure); a resource that exists but could not be destroyed is recorded as a `HOST_RESOURCE_REMAINS` failure (or `OTHER` for a bookkeeping/record write failure), so `mngr destroy`/`cleanup` can surface it and exit with an informative, cause-specific code. See `specs/cleanup-error-aggregation.md`.
+
 ## 2026-06-15
 
 Added a `--skip-deferred-install-wait` flag to `admin pool create` (slice + ovh_vps): when set, the bake does NOT wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to finish before stopping the baked services agent. Saves a few minutes per bake for dev/throwaway hosts; the tradeoff is the baked container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg), so it must never be used for production pool hosts.

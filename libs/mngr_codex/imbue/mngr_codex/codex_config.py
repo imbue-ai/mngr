@@ -70,6 +70,11 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 # the codex process).
 CODEX_HOME_RELATIVE_PATH: tuple[str, ...] = ("plugin", "codex", "home")
 
+# Codex's native resumable rollout store (the dir ``codex resume`` reads), as a
+# POSIX rel-path under the agent state dir. Preserved on destroy; it is a sibling
+# of the auth symlink and config, so targeting it specifically excludes those.
+SESSIONS_RELATIVE_PATH: str = Path(*CODEX_HOME_RELATIVE_PATH, "sessions").as_posix()
+
 _CONFIG_FILENAME: str = "config.toml"
 _AUTH_FILENAME: str = "auth.json"
 _HOOKS_FILENAME: str = "hooks.json"
@@ -197,6 +202,10 @@ MARKER_STATE_LIB_SCRIPT_NAME: str = "codex_marker_state.sh"
 BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
 RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
 COMMON_TRANSCRIPT_SCRIPT_NAME: str = "common_transcript.sh"
+# The python converter that common_transcript.sh invokes (python3
+# <dir>/common_transcript_convert.py). Provisioned alongside the .sh so the shell
+# resolves it relative to itself; gated by the same emit_common_transcript.
+COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: str = "common_transcript_convert.py"
 
 # Output locations (under ``$MNGR_AGENT_STATE_DIR``) for the transcript layers:
 # raw bytes under ``logs/`` and the agent-agnostic common transcript under

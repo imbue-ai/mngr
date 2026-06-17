@@ -246,6 +246,11 @@
 # Local-only throwaway scripts (e.g. one-off test harnesses).
 **/scripts/*.local.sh
 
+# Local working / scratch Python + text (not committed; e.g. one-off validation
+# harnesses or probe scripts). Mirrors the *.local.md / *.local.sh convention.
+**/*.local.py
+**/*.local.txt
+
 # Test output files (slow tests, coverage summaries)
 **/.test_output/
 
