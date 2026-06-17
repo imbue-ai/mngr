@@ -492,7 +492,7 @@ class OpenCodeAgent(
 
         Two triggers, mutually exclusive (enforced by the core adopt gate):
 
-        * ``--adopt-session`` (``plugin_data["adopt_session"]``, a tuple since the option is
+        * ``--adopt`` (``options.adopt_session``, a tuple since the option is
           ``multiple=True``): each argument is a ``ses_...`` id (resolved across the user-native
           db and every live/preserved mngr agent's db) or an absolute path to a source
           ``opencode.db``. OpenCode resumes a single root conversation, so the last entry wins.
@@ -503,7 +503,7 @@ class OpenCodeAgent(
         Resolving, copying, rebinding, and writing the resume pointer happen here -- the same
         create-time seam where the launch script first records ``root_session_id``.
         """
-        adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        adopt_args: tuple[str, ...] = options.adopt_session
         if adopt_args:
             adopt_arg = adopt_args[-1]
             with log_span("Adopting OpenCode session from {}", adopt_arg):
@@ -756,17 +756,17 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """OpenCode-specific fail-fast pre-resolution of ``--adopt-session`` session ids.
+    """OpenCode-specific fail-fast pre-resolution of ``--adopt`` session ids.
 
     The agent-agnostic gate (the type must support session adoption; mutual exclusion with
-    cloning via ``--from``) and the ``--adopt-session`` option declaration both live in the core
-    ``builtin_adopt_session`` hookimpl. This runs only for opencode agents and resolves the named
-    session id(s) *now* -- before any host or worktree is created -- so a bad or ambiguous id is a
-    clean ``UserInputError`` rather than a ConcurrencyExceptionGroup traceback out of
-    ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The source
-    is always local, so the result matches the resolution done later.
+    cloning via ``--from``) lives in the core ``_validate_session_adoption``. This runs only for
+    opencode agents and resolves the named session id(s) *now* -- before any host or worktree is
+    created -- so a bad or ambiguous id is a clean ``UserInputError`` rather than a
+    ConcurrencyExceptionGroup traceback out of ``on_after_provisioning`` (which runs inside
+    provision_agent's ConcurrencyGroup). The source is always local, so the result matches the
+    resolution done later.
     """
-    adopt_session: tuple[str, ...] = args.agent_options.plugin_data.get("adopt_session", ())
+    adopt_session: tuple[str, ...] = args.agent_options.adopt_session
     if not adopt_session:
         return None
     resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)

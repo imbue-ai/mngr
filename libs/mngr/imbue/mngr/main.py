@@ -8,7 +8,6 @@ import pluggy
 import setproctitle
 from click_option_group import OptionGroup
 
-import imbue.mngr.agents.builtin_adopt_session as builtin_adopt_session_module
 import imbue.mngr.cli.builtin_help_topics as builtin_help_topics_module
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
@@ -308,11 +307,6 @@ def create_plugin_manager() -> pluggy.PluginManager:
     # agents above). The register_help_topics hook is fired once at module
     # import, not here (see load_help_topics_from_plugins).
     pm.register(builtin_help_topics_module, name="builtin_help_topics")
-
-    # Register the agent-agnostic --adopt-session CLI option + validation as a built-in
-    # plugin, so session adoption's CLI surface lives in core (the capability and mixin do)
-    # rather than in any single agent plugin.
-    pm.register(builtin_adopt_session_module, name="builtin_adopt_session")
 
     return pm
 

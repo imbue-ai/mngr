@@ -1,7 +1,7 @@
-"""Release tests for ``mngr create --adopt-session``.
+"""Release tests for ``mngr create --adopt``.
 
 Verifies end-to-end that a new mngr-managed claude agent created with
-``--adopt-session`` actually resumes from the source session: the destination
+``--adopt`` actually resumes from the source session: the destination
 agent's claude process must receive the prior conversation as context and be
 able to recall a unique secret that was planted in the source session.
 
@@ -258,7 +258,7 @@ def _verify_adopted_context(
     secret: str,
     env: dict[str, str],
 ) -> None:
-    """Create the destination agent with ``--adopt-session`` and assert it can recall ``secret``.
+    """Create the destination agent with ``--adopt`` and assert it can recall ``secret``.
 
     Launches the destination interactively (no ``-p``) so we can drive it
     with ``mngr message`` after startup. ``mngr destroy`` is invoked on the
@@ -284,7 +284,7 @@ def _verify_adopted_context(
             str(dest_work_dir),
             "--pass-env",
             "ANTHROPIC_API_KEY",
-            "--adopt-session",
+            "--adopt",
             adopt_arg,
             "--",
             "--dangerously-skip-permissions",
@@ -324,7 +324,7 @@ def test_adopt_session_brings_context_from_vanilla_claude_session(
     """Adopt a session created by the vanilla ``claude`` CLI; the new agent must recall the secret.
 
     Source layout: ``$HOME/.claude/projects/<encoded-cwd>/<session_id>.jsonl``.
-    Adopt by session ID (``--adopt-session <id>``).
+    Adopt by session ID (``--adopt <id>``).
     """
     secret = uuid.uuid4().hex
     session_id, _ = _create_vanilla_claude_session(source_work_dir, secret, trusted_subprocess_env)

@@ -536,7 +536,7 @@ def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exi
     Files on disk are named ``<session_id>.jsonl``, so the guard returned no
     matches, the ``&&`` short-circuited, and the silent ``||`` fallback ran
     ``claude --session-id <fresh agent uuid>`` instead of ``claude --resume <adopted_id>``.
-    The end-user symptom was that ``--adopt-session`` appeared to do nothing
+    The end-user symptom was that ``--adopt`` appeared to do nothing
     and a brand-new session opened with no error.
 
     This test executes the assembled shell pipeline against a stub ``claude``
@@ -3530,10 +3530,9 @@ def test_reconcile_installed_version_raises_on_mismatch() -> None:
 # =============================================================================
 
 
-# The --adopt-session option declaration + the agent-agnostic gate (type must support
-# session adoption; mutual exclusion with --from) now live in the core
-# ``builtin_adopt_session`` hookimpl, tested in its own module; claude only retains its
-# claude-specific fail-fast pre-resolution below.
+# The --adopt option declaration + the agent-agnostic gate (type must support
+# session adoption; mutual exclusion with --from) now live in core, tested
+# there; claude only retains its claude-specific fail-fast pre-resolution below.
 
 
 # =============================================================================
@@ -3542,7 +3541,7 @@ def test_reconcile_installed_version_raises_on_mismatch() -> None:
 
 
 def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should return None when adopt_session is not in plugin_data."""
+    """on_before_create should return None when adopt_session is empty."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(agent_type=AgentTypeName("claude")),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
@@ -3552,13 +3551,13 @@ def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext
 
 
 def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should pass when --adopt-session names a resolvable session with a claude agent."""
+    """on_before_create should pass when --adopt names a resolvable session with a claude agent."""
     session_file = tmp_path / "abc123.jsonl"
     session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": (str(session_file),)},
+            adopt_session=(str(session_file),),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3588,7 +3587,7 @@ def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_c
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=subtype,
-            plugin_data={"adopt_session": (str(session_file),)},
+            adopt_session=(str(session_file),),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3597,7 +3596,7 @@ def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_c
 
 
 def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should raise UserInputError when an --adopt-session ID does not resolve.
+    """on_before_create should raise UserInputError when an --adopt ID does not resolve.
 
     Validating here -- before any host or worktree is created, and outside the provisioning
     ConcurrencyGroup -- means a bad session ID surfaces as a clean, fail-fast user error
@@ -3607,7 +3606,7 @@ def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrConte
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("nonexistent-session",)},
+            adopt_session=("nonexistent-session",),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3654,7 +3653,7 @@ def test_on_after_provisioning_adopts_session_by_id(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3696,7 +3695,7 @@ def test_on_after_provisioning_raises_when_session_not_found(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": ("nonexistent-session",)},
+        adopt_session=("nonexistent-session",),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3726,7 +3725,7 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     home_claude = str(Path.home() / ".claude")
@@ -3761,7 +3760,7 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (str(session_file),)},
+        adopt_session=(str(session_file),),
     )
 
     agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
@@ -3804,7 +3803,7 @@ def test_on_after_provisioning_adopts_session_from_preserved_agent(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3847,7 +3846,7 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):

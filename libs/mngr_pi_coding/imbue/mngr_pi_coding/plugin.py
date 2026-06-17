@@ -898,24 +898,23 @@ class PiCodingAgent(
     def adopt_session(self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
         """Adopt a session so the new agent resumes existing context.
 
-        Dispatches to ``_adopt_session`` (``--adopt-session``) or
+        Dispatches to ``_adopt_session`` (``--adopt``) or
         ``_adopt_cloned_session`` (``--from <agent>``); the two are mutually
-        exclusive (rejected upstream in the core ``builtin_adopt_session`` gate).
+        exclusive (rejected upstream by core session-adoption validation).
 
-        ``--adopt-session`` is ``multiple=True``, so ``plugin_data["adopt_session"]``
-        is a tuple; when set, the last entry's session (resolved across the
-        user-native store, live mngr agents, and preserved agents) is copied into
-        this agent's session store, rebound to this agent's work_dir, and recorded
-        as the resume pointer. Empty (and no ``--from``) means no adoption (the
-        agent starts fresh).
+        ``--adopt`` is ``multiple=True``, so ``options.adopt_session`` is a tuple;
+        when set, the last entry's session (resolved across the user-native store,
+        live mngr agents, and preserved agents) is copied into this agent's session
+        store, rebound to this agent's work_dir, and recorded as the resume pointer.
+        Empty (and no ``--from``) means no adoption (the agent starts fresh).
         """
-        adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        adopt_args = options.adopt_session
         if adopt_args:
             self._adopt_session(host, adopt_args[-1])
         elif options.source_agent_state_location is not None:
             self._adopt_cloned_session(host, options.source_agent_state_location)
         else:
-            # Neither --adopt-session nor --from: the agent starts a fresh session.
+            # Neither --adopt nor --from: the agent starts a fresh session.
             return
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
@@ -977,7 +976,7 @@ class PiCodingAgent(
         Rewrites the JSONL's embedded cwd to this agent's host-canonical work_dir
         (so pi never stalls at its missing-cwd dialog) and writes its absolute path
         to ``pi_session_file`` so the launch ``pi --session <file>`` resumes it.
-        Shared by ``--adopt-session`` and ``--from``.
+        Shared by ``--adopt`` and ``--from``.
         """
         new_cwd = self._get_host_canonical_work_dir(host)
         host.write_text_file(adopted_file, _rewrite_pi_session_cwd(host.read_text_file(adopted_file), new_cwd))
@@ -1064,17 +1063,17 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """pi-specific fail-fast pre-resolution of ``--adopt-session`` session ids.
+    """pi-specific fail-fast pre-resolution of ``--adopt`` session ids.
 
-    The agent-agnostic gate (the type must support session adoption; mutual exclusion
-    with ``--from`` cloning) and the ``--adopt-session`` option declaration both live in
-    the core ``builtin_adopt_session`` hookimpl. This runs only for pi-coding agents and
-    resolves every named session *now* -- before any host or worktree is created -- so a
-    bad/ambiguous id is a clean ``UserInputError`` rather than a traceback out of
-    ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
-    source is always local, so the result matches the resolution done later.
+    The agent-agnostic validation (the type must support session adoption; mutual
+    exclusion with ``--from`` cloning) lives in core session-adoption validation. This
+    runs only for pi-coding agents and resolves every named session *now* -- before any
+    host or worktree is created -- so a bad/ambiguous id is a clean ``UserInputError``
+    rather than a traceback out of ``on_after_provisioning`` (which runs inside
+    provision_agent's ConcurrencyGroup). The source is always local, so the result
+    matches the resolution done later.
     """
-    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
+    adopt_session = args.agent_options.adopt_session
     if not adopt_session:
         return None
     resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)

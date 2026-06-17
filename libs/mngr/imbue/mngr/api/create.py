@@ -18,7 +18,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
@@ -92,6 +94,29 @@ def destroy_new_host_on_create_failure(
                     logger.opt(exception=destroy_error).warning(
                         "Failed to destroy host {} after a failed create", host.id
                     )
+
+
+def _validate_session_adoption(agent_options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
+    """Agent-agnostic validation of the ``--adopt`` option, for every create path.
+
+    The target type must support session adoption (``HasSessionAdoptionMixin``), and adoption
+    is mutually exclusive with cloning via ``--from <agent>`` (both seed the new agent's resume
+    session). Each adoption-capable plugin still runs its own ``on_before_create`` to fail-fast
+    on a bad/ambiguous session id against its native store.
+    """
+    if not agent_options.adopt_session:
+        return
+    resolved = resolve_agent_type(agent_options.agent_type, mngr_ctx.config)
+    if not issubclass(resolved.agent_class, HasSessionAdoptionMixin):
+        raise UserInputError(
+            f"--adopt can only be used with an agent type that supports session adoption, "
+            f"not '{agent_options.agent_type}'."
+        )
+    if agent_options.source_agent_state_location is not None:
+        raise UserInputError(
+            "--adopt is incompatible with cloning via --from <agent>: both adopt a session "
+            "into the new agent. Pick one."
+        )
 
 
 def _call_on_before_create_hooks(
@@ -193,6 +218,9 @@ def create(
     - Starts the agent process
     - Returns information about the running agent and host.
     """
+    # Agent-agnostic --adopt validation (fail fast before any plugin-specific work).
+    _validate_session_adoption(agent_options, mngr_ctx)
+
     # Allow plugins to modify the create arguments before we do anything else
     target_host, agent_options, create_work_dir = _call_on_before_create_hooks(
         mngr_ctx, target_host, agent_options, create_work_dir

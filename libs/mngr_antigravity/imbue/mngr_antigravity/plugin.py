@@ -697,13 +697,13 @@ class AntigravityAgent(
     ) -> None:
         """Resume a prior conversation into this newly provisioned agent.
 
-        Two sources, mutually exclusive (the core ``builtin_adopt_session`` gate rejects
+        Two sources, mutually exclusive (the core session-adoption gate rejects
         combining them):
 
-        - ``--adopt-session``: ``plugin_data["adopt_session"]`` is a tuple (the option is
-          ``multiple=True``); agy resumes a single conversation, so the LAST entry wins. The
-          adopt argument (a conversation id or an absolute path to a conversations store /
-          ``<id>.db`` file) is resolved, the matching store is copied into this agent's
+        - ``--adopt`` (alias ``--adopt-session``): ``options.adopt_session`` is a tuple (the
+          option is ``multiple=True``); agy resumes a single conversation, so the LAST entry
+          wins. The adopt argument (a conversation id or an absolute path to a conversations
+          store / ``<id>.db`` file) is resolved, the matching store is copied into this agent's
           antigravity home, and the id is written into the resume pointers.
         - ``--from <agent>``: ``options.source_agent_state_location`` is the cloned source
           agent's state dir, but a clone does not copy that state dir, so
@@ -712,7 +712,7 @@ class AntigravityAgent(
 
         Either way ``assemble_command`` then resumes the recorded id via ``agy --conversation``.
         """
-        adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        adopt_args: tuple[str, ...] = options.adopt_session
         if adopt_args:
             self._adopt_session(host, adopt_args[-1])
             return
@@ -1388,17 +1388,17 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Antigravity-specific fail-fast pre-resolution of ``--adopt-session`` conversation ids.
+    """Antigravity-specific fail-fast pre-resolution of ``--adopt`` conversation ids.
 
     The agent-agnostic gate (the type must support session adoption; mutual exclusion with
-    cloning via ``--from``) and the ``--adopt-session`` option declaration both live in the
-    core ``builtin_adopt_session`` hookimpl. This runs only for antigravity agents and resolves
-    every named conversation *now* -- before any host or worktree is created -- so a bad or
-    ambiguous id is a clean ``UserInputError`` rather than a ConcurrencyExceptionGroup traceback
-    out of ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
-    source is always local, so the result matches the resolution done later.
+    cloning via ``--from``) and the ``--adopt`` option declaration both live in core. This
+    runs only for antigravity agents and resolves every named conversation *now* -- before any
+    host or worktree is created -- so a bad or ambiguous id is a clean ``UserInputError``
+    rather than a ConcurrencyExceptionGroup traceback out of ``on_after_provisioning`` (which
+    runs inside provision_agent's ConcurrencyGroup). The source is always local, so the result
+    matches the resolution done later.
     """
-    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
+    adopt_session = args.agent_options.adopt_session
     if not adopt_session:
         return None
     resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)

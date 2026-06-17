@@ -144,7 +144,7 @@ depending on the build machine's home directory path.
 # An mngr agent's isolated Claude config dir lives at
 # <agent_state_dir>/plugin/claude/anthropic/ (the per-agent replacement for ~/.claude/),
 # with session JSONLs filed under its projects/ subdir. Both live local mngr agents and
-# preserved agents mirror this layout, so --adopt-session can resolve a session ID against
+# preserved agents mirror this layout, so --adopt can resolve a session ID against
 # either.
 _AGENT_CLAUDE_CONFIG_RELPATH: Final[Path] = Path("plugin") / "claude" / "anthropic"
 _AGENT_CLAUDE_PROJECTS_RELPATH: Final[Path] = _AGENT_CLAUDE_CONFIG_RELPATH / "projects"
@@ -167,7 +167,7 @@ def _mngr_session_projects_dirs(mngr_ctx: MngrContext) -> list[Path]:
 
 
 def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tuple[str, Path]:
-    """Resolve an --adopt-session argument to a (session_id, project_dir) pair.
+    """Resolve an --adopt argument to a (session_id, project_dir) pair.
 
     Accepts either:
     - A path to a .jsonl file (e.g. ~/.claude/projects/foo/abc123.jsonl)
@@ -215,7 +215,7 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
 
     if not matches:
         # Don't enumerate the searched dirs: there is one per local mngr agent, so the
-        # list can run to hundreds of paths. The --adopt-session help documents the
+        # list can run to hundreds of paths. The --adopt help documents the
         # search scope (current/user Claude config dirs, live agents, preserved agents).
         raise UserInputError(
             f"Session {adopt_session_arg} not found. "
@@ -1989,7 +1989,7 @@ class ClaudeAgent(
 
     Adds, on top of :class:`ClaudeCoreAgent`, the keystroke send / readiness
     pipeline, the live streaming snapshot, and session adoption
-    (``--adopt-session`` / ``--from`` carry-forward). The headless variant
+    (``--adopt`` / ``--from`` carry-forward). The headless variant
     inherits the core directly and so carries none of these interactive-only
     capabilities.
     """
@@ -2337,7 +2337,7 @@ class ClaudeAgent(
     ) -> None:
         """Adopt a session so the agent's claude resumes existing context.
 
-        Dispatches to ``_adopt_explicit_sessions`` (``--adopt-session``)
+        Dispatches to ``_adopt_explicit_sessions`` (``--adopt``)
         or ``_adopt_cloned_session`` (``--from <agent>``); both end in
         ``_finalize_adopted_session``. The combination is rejected
         upstream in ``on_before_create``.
@@ -2351,9 +2351,9 @@ class ClaudeAgent(
           in shared mode, and it only adds new project subdirs -- it never
           modifies existing user files.
         """
-        adopt_session_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        adopt_session_args: tuple[str, ...] = options.adopt_session
         assert not (adopt_session_args and options.source_agent_state_location is not None), (
-            "--adopt-session and --from <agent> are mutually exclusive (should have been rejected by on_before_create)"
+            "--adopt and --from <agent> are mutually exclusive (should have been rejected by on_before_create)"
         )
         if adopt_session_args:
             self._adopt_explicit_sessions(host, adopt_session_args)
@@ -2366,7 +2366,7 @@ class ClaudeAgent(
         adopt_session_args: tuple[str, ...],
     ) -> None:
         """Position sessions named on the command line under the destination's
-        encoded project dir and finalize. Used by ``--adopt-session``.
+        encoded project dir and finalize. Used by ``--adopt``.
 
         When multiple sessions are named, each one's source project dir is
         copied into the destination so all of them are available in the new
@@ -2626,17 +2626,16 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Claude-specific fail-fast pre-resolution of ``--adopt-session`` session ids.
+    """Claude-specific fail-fast pre-resolution of ``--adopt`` session ids.
 
     The agent-agnostic gate (the type must support session adoption; mutual exclusion with
-    cloning via ``--from``) and the ``--adopt-session`` option declaration both live in the
-    core ``builtin_adopt_session`` hookimpl. This runs only for claude agents and resolves
+    cloning via ``--from``) lives in core. This runs only for claude agents and resolves
     every named session *now* -- before any host or worktree is created -- so a bad id is a
     clean user error rather than a ConcurrencyExceptionGroup traceback out of
     ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
     source is always local, so the result matches the resolution done later.
     """
-    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
+    adopt_session = args.agent_options.adopt_session
     if not adopt_session:
         return None
     resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)

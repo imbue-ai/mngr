@@ -909,8 +909,8 @@ class CodexAgent(
 
         Two mutually exclusive sources, dispatched here:
 
-        - ``--adopt-session`` (``plugin_data["adopt_session"]``, the tuple of values passed
-          to the command-global ``multiple=True`` flag): adopt the last entry (a codex
+        - ``--adopt`` (``options.adopt_session``, the tuple of values passed to the
+          command-global ``multiple=True`` flag): adopt the last entry (a codex
           session id or an absolute rollout ``.jsonl`` path). Resolve it to a
           ``(session_id, source_sessions_dir)`` (see ``_resolve_adopt_session``), copy that
           source ``sessions/`` tree into this agent's ``CODEX_HOME/sessions``, then rebind.
@@ -924,7 +924,7 @@ class CodexAgent(
         write the session id as the resume pointer (``codex_root_session``) that
         ``assemble_command``'s prelude reads.
         """
-        adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        adopt_args = options.adopt_session
         if adopt_args:
             user_codex_home = self._resolve_user_codex_home(host)
             session_id, source_sessions_dir = _resolve_adopt_session(adopt_args[-1], mngr_ctx, user_codex_home)
@@ -993,7 +993,7 @@ class CodexAgent(
 
         Rewrites the adopted rollout's recorded cwd to this agent's work dir, then writes
         ``session_id`` to ``codex_root_session`` so the launch prelude resumes it. Shared by
-        the ``--adopt-session`` and ``--from`` paths, which differ only in how the store
+        the ``--adopt`` and ``--from`` paths, which differ only in how the store
         arrives in ``dest_sessions_dir``.
         """
         self._rebind_adopted_rollout_cwd(host, dest_sessions_dir, session_id)
@@ -1232,17 +1232,18 @@ def _user_native_codex_home() -> Path:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Codex-specific fail-fast pre-resolution of ``--adopt-session`` session ids.
+    """Codex-specific fail-fast pre-resolution of ``--adopt`` session ids.
 
     The agent-agnostic gate (the type must support session adoption; mutual exclusion with
-    ``--from``) and the ``--adopt-session`` option declaration live in the core
-    ``builtin_adopt_session`` hookimpl. This runs only for codex agents and resolves every
-    named session *now* -- before any host or worktree is created -- so a bad or ambiguous
-    id is a clean ``UserInputError`` rather than a ConcurrencyExceptionGroup traceback out
-    of ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
-    source is always local, so the result matches the resolution done later.
+    ``--from``) and the ``--adopt`` option declaration live in core (the
+    ``adopt_session`` field on ``CreateAgentOptions`` and ``_validate_session_adoption``).
+    This runs only for codex agents and resolves every named session *now* -- before any
+    host or worktree is created -- so a bad or ambiguous id is a clean ``UserInputError``
+    rather than a ConcurrencyExceptionGroup traceback out of ``on_after_provisioning``
+    (which runs inside provision_agent's ConcurrencyGroup). The source is always local, so
+    the result matches the resolution done later.
     """
-    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
+    adopt_session = args.agent_options.adopt_session
     if not adopt_session:
         return None
     resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)

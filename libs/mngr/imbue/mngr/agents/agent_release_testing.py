@@ -145,7 +145,7 @@ class AgentReleaseProfile(abc.ABC):
         return "What was the exact secret I asked you to remember earlier? Reply with just the secret."
 
     def adopt_session_arg(self, preserved_dir: Path) -> str:
-        """Return the value to hand the adopting create via ``--adopt-session``.
+        """Return the value to hand the adopting create via ``--adopt``.
 
         Computed from the just-preserved agent dir (``preserved/<name>--<id>/``): either a
         session/conversation id the plugin can resolve, or an absolute path to the agent's
@@ -309,13 +309,15 @@ def _adopt_preserved_and_recall(
     Runs after the source agent is destroyed (so its live state dir is gone and the only
     agent under ``agents/`` is this adopting one). The adopting agent is created against a
     *new* worktree -- exercising the per-agent original-cwd rebind -- with the resolved
-    adopt argument passed via ``--adopt-session``. No secret is seeded: recall must succeed
+    adopt argument passed via ``--adopt``. No secret is seeded: recall must succeed
     purely from the adopted session's restored context.
     """
     host_dir = ctx.host_dir
     adopt_work = tmp_path / "adopt_work"
     profile.prepare_adoption_workspace(adopt_work)
-    adopt_ctx = ctx.model_copy(update={"workspace": adopt_work})
+    # Reconstruct (rather than model_copy(update=...)) so the new context is re-validated:
+    # same plumbing as the source run, but pointed at the fresh adoption worktree.
+    adopt_ctx = AgentReleaseContext(env=ctx.env, workspace=adopt_work, host_dir=ctx.host_dir, teardown=ctx.teardown)
     adopt_name = f"{profile.agent_type.replace('-', '')}-adopt-{get_short_random_string()}"
     created = False
     try:
@@ -326,7 +328,7 @@ def _adopt_preserved_and_recall(
             profile.agent_type,
             "--no-connect",
             "--yes",
-            "--adopt-session",
+            "--adopt",
             profile.adopt_session_arg(preserved_dir),
             *profile.create_extra_args(adopt_ctx),
             timeout=_CREATE_TIMEOUT_SECONDS,
@@ -462,8 +464,8 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
             # 9. Adopt the just-preserved session into a fresh agent (new worktree) and prove
             #    it recalls the pre-destroy secret -- that the preserved store *resumes*, not
             #    just that its bytes survived. Every preserving agent must support this (its
-            #    plugin implements the resolve + cwd-rebind path the ADOPT_SESSION_ENV_VAR seam
-            #    triggers); a profile that hasn't wired adopt_session_arg fails loudly here.
+            #    plugin implements the resolve + cwd-rebind path that ``--adopt`` triggers);
+            #    a profile that hasn't wired adopt_session_arg fails loudly here.
             _adopt_preserved_and_recall(
                 profile,
                 ctx,

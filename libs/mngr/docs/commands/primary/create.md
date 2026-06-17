@@ -7,7 +7,7 @@
 
 ```text
 mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--adopt <SESSION>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
@@ -99,13 +99,13 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
 | `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types | `False` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
-| `--adopt-session` | text | Adopt an existing session into this newly created agent so it resumes that conversation. The agent type must support session adoption. Accepts a session id or a path to the session file; a session id is searched across the relevant user/config store, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: the last named session is the one resumed on startup. | None |
 
 ## Source Data (what to include in the new agent)
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH &#x7C; GIT_URL]. A bare name refers to an agent; use :PATH for a directory. GIT_URL (e.g. https://github.com/owner/repo or git@gitlab.com:owner/repo.git) is cloned to ~/.mngr/clones/<name>-<id>/ using local git auth. Defaults to git root if omitted | None |
+| `--adopt`, `--adopt-session` | text | Adopt an existing session into this newly created agent so it resumes that conversation. The agent type must support session adoption. Accepts a session id or a path to the session file; a session id is searched across the relevant user/config store, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: the last named session is the one resumed on startup. Incompatible with --from. (--adopt-session is an accepted alias.) | None |
 | `--rsync`, `--no-rsync` | boolean | Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled] | None |
 | `--rsync-args` | text | Additional arguments to pass to rsync | None |
 
