@@ -1,16 +1,23 @@
 """Unit tests for InteractiveTuiAgent's contract."""
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 from typing import Final
+from typing import Generator
 from typing import cast
+
+import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import _send_enter_and_wait_for_signal
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
+from imbue.mngr.agents.tui_utils import wait_for_tui_ready
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.primitives import AgentName
 
 
 class _ProbeTuiAgent(InteractiveTuiAgent[AgentTypeConfig]):
@@ -18,6 +25,43 @@ class _ProbeTuiAgent(InteractiveTuiAgent[AgentTypeConfig]):
 
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         send_enter_best_effort(self, tmux_target)
+
+
+class _RecordingTuiAgent(_ProbeTuiAgent):
+    """Probe that records the order of ``send_message`` steps against stubbed pane content.
+
+    ``pane_content`` is what every pane capture returns; setting it to a string
+    that lacks ``TUI_READY_INDICATOR`` makes the readiness wait time out, while
+    one that contains both the indicator and the message makes the whole pipeline
+    succeed without touching a real host or tmux.
+    """
+
+    pane_content: str = ""
+    steps: list[str] = []
+
+    @property
+    def tmux_target(self) -> TmuxWindowTarget:
+        return TmuxWindowTarget(session_name="s", window=0)
+
+    @contextlib.contextmanager
+    def _message_lock(self) -> Generator[None, None, None]:
+        yield
+
+    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
+        return self.pane_content
+
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+        self.steps.append("preflight")
+
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
+        self.steps.append("paste")
+
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
+        self.steps.append("enter")
+
+
+def _make_recording_agent(pane_content: str) -> _RecordingTuiAgent:
+    return _RecordingTuiAgent.model_construct(name=AgentName("probe"), pane_content=pane_content, steps=[])
 
 
 def test_interactive_tui_agent_subclasses_base_agent() -> None:
@@ -122,3 +166,32 @@ def test_send_enter_returns_false_when_the_command_fails() -> None:
         accept_marker_command=_PROBE_MARKER_COMMAND,
     )
     assert result is False
+
+
+_RESUME_MESSAGE: Final[str] = "please resume the task"
+
+
+def test_send_message_waits_for_ready_indicator_before_pasting() -> None:
+    """send_message must confirm the TUI ready indicator before any keystrokes.
+
+    The readiness wait happens inside send_message (not only on the create
+    path), so it covers resume too: pasting before the indicator is visible
+    would drop keystrokes into a still-replaying transcript.
+    """
+    pane = f"probe-banner {_RESUME_MESSAGE}"
+    agent = _make_recording_agent(pane)
+    agent.send_message(_RESUME_MESSAGE)
+    # Readiness is gated before paste: the steps run in order only because
+    # wait_for_tui_ready saw the indicator first.
+    assert agent.steps == ["preflight", "paste", "enter"]
+
+
+@pytest.mark.allow_warnings
+def test_send_message_raises_when_ready_indicator_never_appears() -> None:
+    """If the indicator is absent (e.g. transcript still replaying), nothing is pasted."""
+    agent = _make_recording_agent(pane_content="restored conversation, no prompt yet")
+    with pytest.raises(SendMessageError):
+        # Use a short readiness timeout so the test does not block on the
+        # production 30s default; the message is irrelevant since we never paste.
+        wait_for_tui_ready(agent, agent.tmux_target, agent.get_tui_ready_indicator(), timeout_seconds=0.2)
+    assert agent.steps == []
