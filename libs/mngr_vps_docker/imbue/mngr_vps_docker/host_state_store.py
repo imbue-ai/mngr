@@ -9,6 +9,7 @@ from pydantic import ConfigDict
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 
@@ -56,6 +57,76 @@ class HostStateStore(MutableModel, ABC):
     def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
         """Reconstruct the host record from the mirror, or None when the host is unknown to the store."""
 
+    def read_host_record_with_tag_fallback(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        """Read the host record, falling back to the instance's own tags when the primary mirror lacks it.
+
+        Default (tag store): identical to ``read_host_record`` -- it already reads
+        the instance's tags. The bucket store overrides this to try its
+        ``host_state.json`` first and then the tag fallback, so a bucket-mode host
+        created before the bucket existed (no ``host_state.json`` yet) is still
+        reconstructed from its tags.
+        """
+        return self.read_host_record(host_id)
+
+
+class HostDirBackend(MutableModel, ABC):
+    """The offline ``host_dir`` capability for a provider's stopped hosts.
+
+    A stopped host's ``host_dir`` is readable offline only when the feature is on
+    AND a state bucket exists; otherwise it is simply unavailable. The provider
+    selects one of these once (a cached property keyed on exactly those two
+    conditions), so no call site re-tests them: the bucket-backed implementation
+    does the real work, and ``NullHostDirBackend`` is the no-op fallback. This is
+    the host_dir sibling of the ``HostStateStore`` select-once strategy.
+
+    All methods are best-effort and never raise -- a host_dir failure only costs
+    offline readability, never the primary create/stop path.
+    """
+
+    @abstractmethod
+    def create_identity(self) -> str | None:
+        """Bucket-write identity to attach at create (IAM instance profile / managed-identity id), or None."""
+
+    @abstractmethod
+    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Install the on-box periodic host_dir-to-bucket sync daemon."""
+
+    @abstractmethod
+    def trigger_final_sync(self, host_id: HostId, vps_ip: str) -> None:
+        """Run one final host_dir sync before the instance pauses, so the offline copy is current."""
+
+    @abstractmethod
+    def volume_reference(self, host_id: HostId) -> HostVolume | None:
+        """Cheap bucket-backed host_dir volume reference (no network probe), or None when unavailable."""
+
+    @abstractmethod
+    def volume(self, host_id: HostId) -> HostVolume | None:
+        """Bucket-backed host_dir volume with a light existence probe, or None when unavailable."""
+
+
+class NullHostDirBackend(HostDirBackend):
+    """No-op host_dir backend: offline ``host_dir`` is unavailable (feature off or no state bucket).
+
+    The fallback half of the select-once strategy. Shared by every provider --
+    "no offline host_dir" looks identical regardless of cloud -- so there is one
+    null object rather than a per-provider empty subclass.
+    """
+
+    def create_identity(self) -> str | None:
+        return None
+
+    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
+        pass
+
+    def trigger_final_sync(self, host_id: HostId, vps_ip: str) -> None:
+        pass
+
+    def volume_reference(self, host_id: HostId) -> HostVolume | None:
+        return None
+
+    def volume(self, host_id: HostId) -> HostVolume | None:
+        return None
+
 
 @runtime_checkable
 class StateBucket(Protocol):
@@ -94,6 +165,9 @@ class BucketHostStateStore(HostStateStore):
     bucket: StateBucket
     bucket_error_type: type[MngrError]
     bucket_label: str
+    # Tag store consulted when the bucket has no ``host_state.json`` for a host
+    # (e.g. created before the bucket existed); None disables the fallback.
+    fallback: HostStateStore | None = None
 
     def persist_host_record(self, record: VpsDockerHostRecord) -> None:
         host_id = HostId(record.certified_host_data.host_id)
@@ -138,3 +212,9 @@ class BucketHostStateStore(HostStateStore):
         except ValueError as e:
             logger.warning("Malformed host record for {} in {}: {}", host_id, self.bucket_label, e)
             return None
+
+    def read_host_record_with_tag_fallback(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        record = self.read_host_record(host_id)
+        if record is None and self.fallback is not None:
+            return self.fallback.read_host_record(host_id)
+        return record
