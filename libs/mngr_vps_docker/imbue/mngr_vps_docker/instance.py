@@ -2536,6 +2536,38 @@ def build_poweroff_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
     )
 
 
+def build_oneshot_sync_service_unit(
+    description: str, command: str, *, environment: Mapping[str, str] | None = None
+) -> str:
+    """Build a ``Type=oneshot`` systemd ``.service`` that runs ``command`` once.
+
+    Shared by the cloud host_dir-sync daemons (AWS ``aws s3 sync`` / Azure
+    ``azcopy sync``). ``environment`` adds ``Environment=K=V`` lines before
+    ``ExecStart`` (Azure pins the azcopy MSI login this way; AWS passes none).
+    """
+    env_lines = "".join(f"Environment={key}={value}\n" for key, value in (environment or {}).items())
+    return f"[Unit]\nDescription={description}\n[Service]\nType=oneshot\n{env_lines}ExecStart=/bin/sh -c '{command}'\n"
+
+
+def build_sync_timer_unit(description: str, interval_seconds: int, unit_name: str) -> str:
+    """Build a systemd ``.timer`` that fires ``<unit_name>.service`` every ``interval_seconds``.
+
+    ``OnBootSec`` gives the host a moment to finish bootstrapping before the first
+    run; ``OnUnitActiveSec`` then repeats at the interval. Shared by the cloud
+    host_dir-sync daemons.
+    """
+    return (
+        "[Unit]\n"
+        f"Description={description}\n"
+        "[Timer]\n"
+        f"OnBootSec={interval_seconds}\n"
+        f"OnUnitActiveSec={interval_seconds}\n"
+        f"Unit={unit_name}.service\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
 class OfflineCapableVpsDockerProvider(VpsDockerProvider):
     """``VpsDockerProvider`` for cloud providers whose hosts can be stopped while
     their disk persists, with host/agent identity mirrored into instance

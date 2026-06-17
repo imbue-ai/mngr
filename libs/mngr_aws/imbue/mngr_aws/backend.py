@@ -43,7 +43,9 @@ from imbue.mngr_vps_docker.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
+from imbue.mngr_vps_docker.instance import build_oneshot_sync_service_unit
 from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
+from imbue.mngr_vps_docker.instance import build_sync_timer_unit
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -102,30 +104,18 @@ def _build_host_dir_sync_service_unit(host_dir_on_outer: str, sync_target_uri: s
     ``Type=oneshot`` so a stop-time ``systemctl start`` blocks until the sync
     completes (the offline copy is current before the instance powers off).
     """
-    return (
-        "[Unit]\n"
-        "Description=Sync this host's host_dir to the mngr S3 state bucket for offline reads\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart=/bin/sh -c '{_build_host_dir_sync_command(host_dir_on_outer, sync_target_uri)}'\n"
+    return build_oneshot_sync_service_unit(
+        "Sync this host's host_dir to the mngr S3 state bucket for offline reads",
+        _build_host_dir_sync_command(host_dir_on_outer, sync_target_uri),
     )
 
 
 def _build_host_dir_sync_timer_unit(interval_seconds: int) -> str:
-    """Build the systemd ``.timer`` that fires the host_dir sync every ``interval_seconds``.
-
-    ``OnBootSec`` gives the host a moment to finish bootstrapping before the
-    first sync; ``OnUnitActiveSec`` then repeats at the interval.
-    """
-    return (
-        "[Unit]\n"
-        "Description=Periodically sync this host's host_dir to the mngr S3 state bucket\n"
-        "[Timer]\n"
-        f"OnBootSec={interval_seconds}\n"
-        f"OnUnitActiveSec={interval_seconds}\n"
-        f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=timers.target\n"
+    """Build the systemd ``.timer`` that fires the host_dir sync every ``interval_seconds``."""
+    return build_sync_timer_unit(
+        "Periodically sync this host's host_dir to the mngr S3 state bucket",
+        interval_seconds,
+        HOST_DIR_SYNC_UNIT_NAME,
     )
 
 
