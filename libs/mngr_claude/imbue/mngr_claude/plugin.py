@@ -2004,7 +2004,12 @@ class ClaudeAgent(
     capabilities.
     """
 
-    TUI_READY_INDICATOR = "Claude Code"
+    # The input-prompt glyph rendered by Claude Code's prompt box. Unlike the
+    # "Claude Code" welcome banner, it appears on BOTH a fresh start and a
+    # resume (the welcome banner is absent when resuming a saved session) and
+    # stays visible while a turn is processing, making it a universal readiness
+    # signal for every send path.
+    TUI_READY_INDICATOR = "❯"
 
     # Path template for the transcript event log that the acceptance-marker
     # probe (see _build_accept_marker_command) reads as the fallback source when

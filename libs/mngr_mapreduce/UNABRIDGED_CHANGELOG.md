@@ -2,6 +2,20 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+## Tests
+
+- Marked `test_run_mngr_raw_returns_finished_process` as `@pytest.mark.flaky`: its `mngr config list` subprocess has a hard 10s budget, and a cold `mngr` start under heavy offload parallelism can occasionally exceed it. Offload now retries it automatically.
+
+`stop_agent_on_host` now also tolerates the `CleanupFailedGroup` that `Host.stop_agents`
+raises when cleanup leaves a resource behind, so a best-effort stop in a `finally` logs and
+continues instead of masking the real result.
+
+`test_run_mngr_raw_returns_finished_process` no longer races the global 10s pytest timeout
+against its own 10s subprocess budget: the test function now gets a 30s timeout so a slow
+cold `mngr` start under load no longer flakes it.
+
 ## 2026-06-08
 
 - Marked unpublished-on-purpose in `UNPUBLISHED_PACKAGES` (it is an internal map-reduce framework library with no CLI of its own, consumed only by recipes like `mngr_tmr`), so the release tooling will not offer it for publication. Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.

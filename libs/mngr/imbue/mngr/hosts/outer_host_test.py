@@ -37,6 +37,31 @@ def test_outer_host_satisfies_outer_host_interface(temp_mngr_ctx: MngrContext) -
     assert isinstance(outer, OuterHostInterface)
 
 
+def test_ensure_connected_wraps_paramiko_value_error(temp_mngr_ctx: MngrContext) -> None:
+    """paramiko's bare ValueError on connect is surfaced as a structured HostConnectionError.
+
+    A malformed or half-written ``.pub`` next to the private key makes paramiko's
+    per-connection certificate probe raise ``ValueError: Not enough fields for
+    public blob``. It must become a ``MngrError`` so best-effort callers (e.g.
+    host discovery) treat it as a per-host connection failure rather than letting
+    it abort the whole operation.
+    """
+
+    class _ConnectFailingHost:
+        name = "fake-host"
+        connector_cls = PyinfraHost
+        connected = False
+
+        def connect(self, raise_exceptions: bool = False) -> None:
+            raise ValueError("Not enough fields for public blob")
+
+    connector = PyinfraConnector(cast(PyinfraHost, _ConnectFailingHost()))
+    outer = OuterHost(id=HostId.generate(), connector=connector, mngr_ctx=temp_mngr_ctx)
+
+    with pytest.raises(HostConnectionError, match="Not enough fields for public blob"):
+        outer._ensure_connected()
+
+
 def test_prepend_env_exports_none_or_empty_is_unchanged() -> None:
     """No env vars -> the command is returned untouched."""
     assert _prepend_env_exports("docker build .", None) == "docker build ."

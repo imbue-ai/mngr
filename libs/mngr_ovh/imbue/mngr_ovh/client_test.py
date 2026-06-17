@@ -17,7 +17,6 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 
 def _client_with_call(call_side_effect: Any) -> OvhVpsClient:
@@ -288,61 +287,6 @@ class TestOvhVpsClientTask:
             client.wait_for_no_active_tasks("vps-x", timeout_seconds=0.05)
 
 
-class TestOvhVpsClientSnapshots:
-    def test_create_snapshot_raises_when_one_already_exists(self) -> None:
-        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-            if method == "GET" and path.endswith("/snapshot"):
-                return {"id": "existing", "description": "old"}
-            raise AssertionError(f"Unexpected call {method} {path}")
-
-        client = _client_with_call(fake_call)
-        with pytest.raises(MngrError, match="already has a snapshot"):
-            client.create_snapshot(VpsInstanceId("vps-x"), "new")
-
-    def test_delete_snapshot_deletes_owning_vps_slot(self) -> None:
-        captured: list[tuple[str, str]] = []
-
-        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-            captured.append((method, path))
-            return None
-
-        client = _client_with_call(fake_call)
-        client.delete_snapshot(VpsSnapshotId("vps-eec8860b.vps.ovh.us"))
-        assert captured == [("DELETE", "/vps/vps-eec8860b.vps.ovh.us/snapshot")]
-
-    def test_create_snapshot_returns_service_name_for_delete_round_trip(self) -> None:
-        """create_snapshot must return the owning serviceName, not the snapshot's internal id.
-
-        delete_snapshot's URL pattern is /vps/{serviceName}/snapshot, so the id
-        round-tripped through VpsSnapshotId must always be the serviceName --
-        even when the OVH API populates a distinct 'id' field on the snapshot.
-        """
-        service_name = "vps-abc.vps.ovh.us"
-        call_log: list[tuple[str, str]] = []
-
-        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-            call_log.append((method, path))
-            if method == "GET" and path == f"/vps/{service_name}/snapshot":
-                # First call (existence check): no snapshot yet. Subsequent calls
-                # (post-task verification): a snapshot whose internal id differs
-                # from the serviceName, which is what would break delete if we
-                # returned snap['id'] instead of the serviceName.
-                get_calls = [c for c in call_log if c == ("GET", f"/vps/{service_name}/snapshot")]
-                if len(get_calls) == 1:
-                    return None
-                return {"id": "internal-snapshot-uuid", "description": "x"}
-            if method == "POST" and path.endswith("/createSnapshot"):
-                return {"id": 42}
-            if method == "GET" and "/tasks/" in path:
-                return {"id": 42, "state": "done", "type": "snapshotCreate"}
-            raise AssertionError(f"Unexpected call: {method} {path}")
-
-        client = _client_with_call(fake_call)
-        client.task_poll_interval = 0.0
-        snapshot_id = client.create_snapshot(VpsInstanceId(service_name), "desc")
-        assert str(snapshot_id) == service_name
-
-
 class TestOvhVpsClientServiceInfo:
     def test_get_service_info_returns_payload(self) -> None:
         def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
@@ -549,11 +493,5 @@ class TestOvhVpsClientSshKeyShim:
         client = _client_with_call(lambda *a, **k: None)
         client.upload_ssh_key("k1", "ssh-rsa K")
         client.delete_ssh_key("k1")
-        assert client.list_ssh_keys() == []
-
-    def test_list_ssh_keys_reflects_cache(self) -> None:
-        client = _client_with_call(lambda *a, **k: None)
-        client.upload_ssh_key("k1", "ssh-rsa A")
-        client.upload_ssh_key("k2", "ssh-rsa B")
-        names = {k.name for k in client.list_ssh_keys()}
-        assert names == {"k1", "k2"}
+        with pytest.raises(MngrError):
+            client.get_cached_public_key("k1")

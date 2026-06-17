@@ -1,0 +1,2 @@
+- Avoid `logger.warning()`.
+- Replace `logger.debug()` with `logger.info()` to prevent logs from growing needlessly.
