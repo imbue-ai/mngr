@@ -1,3 +1,0 @@
-The common-transcript converter's event-conversion logic moved out of an inline `python3` heredoc in `common_transcript.sh` into a standalone `common_transcript_convert.py` (provisioned alongside the shell script), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, and transcript lines whose `message` is `null` (rather than an object) are dropped silently rather than aborting the conversion run.
-
-The common-transcript watcher no longer echoes converter errors to the agent's pane: a genuine conversion error is recorded in the structured log only, instead of also being written to the watcher's stderr.

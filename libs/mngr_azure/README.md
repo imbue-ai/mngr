@@ -148,9 +148,15 @@ mngr start my-agent
 mngr destroy my-agent
 ```
 
-`mngr stop` / `start` operate on the Docker container inside the VM (the VM keeps
-running); `mngr destroy` deletes the VM, and the NIC, public IP and OS disk are
-reaped automatically via their `delete_option=Delete` (no orphaned resources).
+`mngr stop` stops the container and then **deallocates** the VM, which actually
+halts compute billing (an OS-level shutdown would only power it off — "Stopped
+(not deallocated)" — and keep billing); the OS disk and all state persist, so a
+paused agent costs only disk storage. `mngr start` re-allocates it. The public IP
+is static, so it and the SSH host keys survive the stop (no known_hosts rebind on
+resume). A deallocated VM still shows in `mngr list` and resolves by name (offline
+discovery via VM tags). `mngr destroy` deletes the VM, and the NIC, public IP and
+OS disk are reaped automatically via their `delete_option=Delete` (no orphaned
+resources).
 
 If a `mngr create` fails *after* the public IP + NIC are provisioned but before
 the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up —
@@ -173,27 +179,53 @@ size has no capacity in the region right now; pick another size with
   cloud-init with the Azure datasource, so the shared `mngr_vps_docker` bootstrap
   works unchanged). Configurable via `image_publisher` / `image_offer` /
   `image_sku` / `image_version`.
-- **Snapshots** are managed-disk snapshots of the VM's OS disk.
+- **No snapshot workflow:** the Azure client exposes no managed-disk-snapshot surface (the speculative `create_snapshot` / `list_snapshots` / `delete_snapshot` client methods are not part of `VpsClientInterface`). Restore from a fresh `mngr create` instead.
 - **Spot** (`--azure-spot`): `priority=Spot`, `eviction_policy=Delete`,
   `max_price=-1` — evicted only on capacity, and deleted (not stopped) on
   eviction, matching AWS spot's terminate-on-reclaim.
-- VMs are tagged `mngr-provider`, `mngr-host-id`, `mngr-created-at`, and
-  `managed-by=mngr`; discovery filters the resource group's VM list by
-  `mngr-provider`.
+- VMs are tagged `mngr-provider`, `mngr-host-id`, `mngr-created-at`,
+  `managed-by=mngr`, and `mngr-host-name`; discovery filters the resource group's
+  VM list by `mngr-provider`. Per-agent records are mirrored into VM tags
+  (`mngr-agent-<id>-<field>`) so a deallocated VM still lists its agents and
+  resolves by name; offline discovery reconstructs deallocated/stopped VMs from
+  those tags (the VM list is fetched with `expand=instanceView` to read power
+  state).
+- **Stop/start = deallocate/start:** `mngr stop` deallocates the VM
+  (`virtual_machines.begin_deallocate`) to halt compute billing; `mngr start`
+  re-allocates it (`begin_start`). The static public IP and on-disk SSH host keys
+  persist, so resume needs no IP/known_hosts fixup. Mirrors `mngr_aws`/`mngr_gcp`;
+  the shared `mngr_vps_docker` base is untouched.
+- **Idle self-deallocate (managed identity):** each VM is created with a
+  system-assigned managed identity. The in-container idle watcher touches a
+  sentinel; a host-side systemd path unit runs a script that uses the VM's IMDS
+  token to call the ARM `deallocate` API on itself (the only in-guest way to halt
+  Azure compute billing — an OS shutdown does not). `mngr azure prepare` creates a
+  least-privilege custom role (`mngr-self-deallocate`, just
+  `Microsoft.Compute/virtualMachines/deallocate/action` + `read`), and each VM
+  gets a role assignment scoped to itself. **Graceful fallback:** if the operator
+  lacks `Microsoft.Authorization/roleAssignments`/`roleDefinitions` write (Owner /
+  User Access Administrator), the role steps are skipped with a clear warning and
+  idle self-deallocate is disabled; on a refused deallocate the in-VM script just
+  logs and exits (it does not poweroff — an Azure OS shutdown would only strand the
+  VM unreachable while it keeps billing). `mngr stop`/`start` still deallocate
+  normally, and remain the only way to halt billing on such a host.
 
 ## Auto-shutdown and cost safety
 
-`auto_shutdown_seconds` schedules cloud-init `shutdown -P +N`. **Caveat (Azure
-specific):** an OS-level shutdown leaves the VM "Stopped (not deallocated)",
-which still bills for compute — Azure has no native "delete after N minutes" like
-AWS/GCP. This matches the Vultr provider's behavior. The real cost backstop for
-tests is the session-end orphan scanner in `conftest.py`, which force-deletes any
-VM tagged `mngr-pytest-launched` older than the TTL. A future improvement could
-add true self-deletion via a managed identity + a cloud-init systemd timer.
+Two independent mechanisms:
+
+- **Idle self-deallocate** (the primary, cost-parity path): an idle agent
+  deallocates its own VM via its managed identity (see "How it works"), genuinely
+  halting compute billing — even if the orchestrating `mngr` process is gone.
+  Requires the operator to have granted the role assignment (otherwise it is
+  disabled and only `mngr stop` halts billing — an in-VM OS shutdown does not).
+- **`auto_shutdown_seconds`** schedules cloud-init `shutdown -P +N` as a coarse
+  time cap. **Caveat (Azure specific):** this OS-level shutdown alone leaves the VM
+  "Stopped (not deallocated)", which still bills for compute. For test isolation
+  the real backstop is the session-end orphan scanner in `conftest.py`, which
+  force-deletes any VM tagged `mngr-pytest-launched` older than the TTL.
 
 ## Future improvements
 
-- Managed-identity self-delete after `auto_shutdown_seconds` (true cost parity
-  with AWS/GCP, stopping compute billing even if the orchestrator is killed).
 - Custom-image baking (skip the per-create cloud-init Docker install).
 - Azure Resource Graph for cross-region listing.

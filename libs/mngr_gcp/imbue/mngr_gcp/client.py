@@ -22,16 +22,14 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 # Label key stamped on every mngr-managed instance (the provider-instance name
 # is the value). Discovery filters on it, and ``mngr gcp cleanup`` uses its
@@ -44,6 +42,11 @@ MNGR_PROVIDER_LABEL_KEY: Final[str] = "mngr-provider"
 # this label (not the instance name) to find leaked instances, which means
 # tests do not have to constrain host naming: any agent name works.
 GCP_PYTEST_LAUNCHED_LABEL: Final[str] = "mngr-pytest-launched"
+
+# Instance-metadata key holding the human host name (``mngr-<host_name>``). Stored
+# in metadata, not a label, because GCE labels lowercase and restrict values --
+# offline discovery recovers the name from here for a STOPPED instance.
+HOST_NAME_METADATA_KEY: Final[str] = "mngr-host-name"
 
 # SSH metadata is injected as ``<user>:<public-key>``. The google-guest-agent
 # creates whatever user is named here, so ``ubuntu`` works on any image (including
@@ -497,6 +500,11 @@ class GcpVpsClient(VpsClientInterface):
             # ssh-keys metadata grants access (no inherited project keys).
             compute_v1.Items(key="enable-oslogin", value="FALSE"),
             compute_v1.Items(key="block-project-ssh-keys", value="TRUE"),
+            # Mirror the human host name into metadata (NOT a label -- labels
+            # lowercase and restrict the charset, mangling a mixed-case name) so a
+            # STOPPED instance can be reconstructed by name in offline discovery.
+            # ``label`` is ``mngr-<host_name>``; the read side strips the prefix.
+            compute_v1.Items(key=HOST_NAME_METADATA_KEY, value=label),
         ]
         if ssh_metadata_value:
             metadata_items.append(compute_v1.Items(key="ssh-keys", value=ssh_metadata_value))
@@ -594,6 +602,107 @@ class GcpVpsClient(VpsClientInterface):
             return
         logger.info("Deleted GCE instance {}", instance_id)
 
+    def stop_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> None:
+        """Stop (not delete) a GCE instance, preserving its boot disk.
+
+        Unlike ``destroy_instance`` (delete), a stop keeps the boot disk and all
+        on-disk state intact so the instance can later be resumed via
+        ``start_instance``. Compute billing ends while stopped; disk storage
+        continues to bill. Blocks until the instance reaches the terminal
+        ``TERMINATED`` status (GCE's name for a *stopped* -- not deleted --
+        instance). Idempotent: stopping an already-stopped instance still waits
+        for ``TERMINATED``.
+
+        This widens ``GcpVpsClient`` beyond the shared ``VpsClientInterface``
+        (which has no stop/start); ``GcpProvider`` reaches it via
+        ``self.gcp_client``, mirroring ``AwsVpsClient.stop_instance``.
+        """
+        with self._translate_gcp_errors():
+            operation = self._instances().stop(project=self.project_id, zone=self.zone, instance=str(instance_id))
+        self._await_operation(operation)
+        logger.info("Stopping GCE instance {}", instance_id)
+        self._wait_for_instance_status(instance_id, "TERMINATED", timeout_seconds)
+        logger.info("GCE instance {} stopped", instance_id)
+
+    def start_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
+        """Start a previously-stopped GCE instance and return its external IP.
+
+        A stopped instance with an ephemeral external IP loses it; GCE assigns a
+        fresh one on start, so the returned IP may differ from the pre-stop
+        address -- callers must refresh any cached address / known_hosts entries.
+        Blocks until the instance is ``RUNNING`` and reports an external IP.
+        Idempotent: starting an already-running instance returns its current IP.
+
+        GCP-only, like ``stop_instance`` -- reached via ``self.gcp_client``.
+        """
+        with self._translate_gcp_errors():
+            operation = self._instances().start(project=self.project_id, zone=self.zone, instance=str(instance_id))
+        self._await_operation(operation)
+        logger.info("Starting GCE instance {}", instance_id)
+        self._wait_for_instance_status(instance_id, "RUNNING", timeout_seconds)
+        return self._wait_for_external_ip(instance_id, timeout_seconds)
+
+    def _instance_status_name(self, instance_id: VpsInstanceId) -> str:
+        """Return the raw GCE status (e.g. ``RUNNING`` / ``TERMINATED``), or ``''`` if the instance is gone.
+
+        Unlike ``get_instance_status`` (which collapses every stopped/stopping
+        state into ``HALTED``), this preserves the raw GCE status so callers can
+        distinguish ``STOPPING`` from the terminal ``TERMINATED``.
+        """
+        try:
+            instance = self._get_instance(instance_id)
+        except VpsApiError as e:
+            if e.status_code == 404:
+                return ""
+            raise
+        return instance.status
+
+    def _wait_for_instance_status(
+        self, instance_id: VpsInstanceId, target_status: str, timeout_seconds: float
+    ) -> None:
+        """Poll ``instances.get`` every 5s until the instance reaches ``target_status``.
+
+        Polls via the shared ``wait_for`` helper and re-raises its
+        ``TimeoutError`` as ``VpsProvisioningError`` to match this client's error
+        contract (mirrors ``AwsVpsClient._wait_for_instance_state``).
+        """
+        try:
+            wait_for(
+                lambda: self._instance_status_name(instance_id) == target_status,
+                timeout=timeout_seconds,
+                poll_interval=5.0,
+                error_message=(
+                    f"GCE instance {instance_id} did not reach status {target_status!r} within {timeout_seconds}s"
+                ),
+            )
+        except TimeoutError as e:
+            raise VpsProvisioningError(str(e)) from e
+
+    def _wait_for_external_ip(self, instance_id: VpsInstanceId, timeout_seconds: float) -> str:
+        """Poll until the instance reports an external IP, returning it.
+
+        A just-started instance can be ``RUNNING`` a beat before its access
+        config publishes the fresh NAT IP, so poll ``get_instance_ip`` rather
+        than reading it once.
+        """
+        ip, _, _ = poll_for_value(
+            lambda: self._external_ip_or_none(instance_id),
+            timeout=timeout_seconds,
+            poll_interval=2.0,
+        )
+        if ip is None:
+            raise VpsProvisioningError(
+                f"GCE instance {instance_id} did not report an external IP within {timeout_seconds}s"
+            )
+        return ip
+
+    def _external_ip_or_none(self, instance_id: VpsInstanceId) -> str | None:
+        """Return the instance's external IP, or ``None`` if it has none yet."""
+        try:
+            return self.get_instance_ip(instance_id)
+        except VpsProvisioningError:
+            return None
+
     def _get_instance(self, instance_id: VpsInstanceId) -> Any:
         with self._translate_gcp_errors():
             return self._instances().get(project=self.project_id, zone=self.zone, instance=str(instance_id))
@@ -646,9 +755,75 @@ class GcpVpsClient(VpsClientInterface):
                         "main_ip": main_ip,
                         "state": instance.status,
                         "tags": tag_kv,
+                        # Offline discovery reads the host name + per-agent records
+                        # from instance metadata (GCE labels are too restricted to
+                        # hold them); surface it here so a stopped instance can be
+                        # reconstructed without a second GET.
+                        "metadata": {item.key: item.value for item in instance.metadata.items},
                     }
                 )
         return instances
+
+    # =========================================================================
+    # Instance metadata (offline-discovery mirror for STOPPED hosts)
+    # =========================================================================
+
+    def set_instance_metadata(
+        self, instance_id: VpsInstanceId, updates: Mapping[str, str], delete_keys: Sequence[str] = ()
+    ) -> None:
+        """Upsert ``updates`` and drop ``delete_keys`` in the instance's metadata.
+
+        GCE has no per-key metadata write (unlike EC2 ``CreateTags``):
+        ``setMetadata`` replaces the whole metadata object and is guarded by a
+        ``fingerprint`` for optimistic concurrency. So this reads the live
+        instance, merges the change, and writes back with the current
+        fingerprint, retrying once on a ``412`` fingerprint conflict (a
+        concurrent metadata write -- rare, but possible when two agents persist
+        at once). No-op when there is nothing to change. Used to mirror
+        offline-discoverable metadata (host name, per-agent records) onto the
+        instance so a stopped VM still lists its agents and resolves by name.
+        AWS does the equivalent with EC2 tags; GCE labels are too restricted
+        (lowercase ``[a-z0-9_-]``, 63 chars) to hold arbitrary agent data.
+        """
+        if not updates and not delete_keys:
+            return
+        for attempt in range(2):
+            instance = self._get_instance(instance_id)
+            items = {item.key: item.value for item in instance.metadata.items}
+            items.update(updates)
+            for key in delete_keys:
+                items.pop(key, None)
+            metadata = compute_v1.Metadata(
+                fingerprint=instance.metadata.fingerprint,
+                items=[compute_v1.Items(key=key, value=value) for key, value in items.items()],
+            )
+            try:
+                with self._translate_gcp_errors():
+                    operation = self._instances().set_metadata(
+                        project=self.project_id,
+                        zone=self.zone,
+                        instance=str(instance_id),
+                        metadata_resource=metadata,
+                    )
+                self._await_operation(operation)
+                return
+            except VpsApiError as e:
+                # 412 PRECONDITION_FAILED == fingerprint conflict: another write
+                # landed between our GET and setMetadata. Refetch and retry once.
+                if e.status_code == 412 and attempt == 0:
+                    logger.debug("GCE setMetadata fingerprint conflict on {}; retrying", instance_id)
+                    continue
+                raise
+
+    def get_instance_metadata(self, instance_id: VpsInstanceId) -> dict[str, str]:
+        """Return the instance's metadata items as a dict (``{}`` if the instance is gone)."""
+        try:
+            instance = self._get_instance(instance_id)
+        except VpsApiError as e:
+            if e.status_code == 404:
+                return {}
+            raise
+        return {item.key: item.value for item in instance.metadata.items}
 
     def list_mngr_managed_instances(self) -> list[dict[str, Any]]:
         """List mngr-managed instances across ALL zones in the project.
@@ -680,32 +855,6 @@ class GcpVpsClient(VpsClientInterface):
         return managed
 
     # =========================================================================
-    # Snapshot Operations (unimplemented)
-    # =========================================================================
-
-    # GCE disk-snapshot wiring (create / delete / list) was written
-    # speculatively to satisfy the shared ``VpsClientInterface``
-    # abstractmethods, but the GCP provider has no host snapshot workflow
-    # today -- nothing in ``mngr_gcp`` or the broader ``mngr`` CLI calls these
-    # methods. Stubbed out so any future caller fails loudly instead of running
-    # real Compute Engine snapshot API calls that nothing else expects.
-    def _snapshots_unavailable(self, operation: str) -> VpsDockerError:
-        return VpsDockerError(
-            f"VPS API operation '{operation}' is unavailable: disk snapshot support "
-            "is not implemented in mngr_gcp. The GCP provider currently has no host "
-            "snapshot workflow; restore from a fresh `mngr create` instead."
-        )
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        raise self._snapshots_unavailable("create_snapshot")
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        raise self._snapshots_unavailable("delete_snapshot")
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        raise self._snapshots_unavailable("list_snapshots")
-
-    # =========================================================================
     # SSH Key Operations (no native GCE per-key resource; in-memory map)
     # =========================================================================
 
@@ -725,7 +874,3 @@ class GcpVpsClient(VpsClientInterface):
         """Drop the in-memory key entry. Tolerant of an absent key (fresh-process delete)."""
         self._ssh_public_keys_by_id.pop(key_id, None)
         logger.debug("Dropped in-memory SSH public key {}", key_id)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        """List the in-memory keys. GCE keys live only in per-instance metadata, not as a resource."""
-        return [VpsSshKeyInfo(id=key_id, name=key_id) for key_id in self._ssh_public_keys_by_id]

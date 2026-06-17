@@ -396,6 +396,14 @@ class OuterHost(OuterHostInterface):
                 raise HostAuthenticationError(f"Authentication failed when connecting to host: {e}") from e
             else:
                 raise HostConnectionError(f"Failed to connect to host: {e}") from e
+        except ValueError as e:
+            # paramiko's per-connection certificate probe raises a bare ``ValueError``
+            # (e.g. "Not enough fields for public blob") when it parses a malformed
+            # ``.pub`` sitting next to the private key. Surface it as a structured
+            # connection error so callers that catch ``MngrError`` (e.g. best-effort
+            # host discovery) treat it as a per-host connection failure rather than
+            # letting it abort the whole operation.
+            raise HostConnectionError(f"Failed to connect to host: {e}") from e
 
     def _close_paramiko_client(self) -> None:
         """Close the paramiko SSH client if one exists.
