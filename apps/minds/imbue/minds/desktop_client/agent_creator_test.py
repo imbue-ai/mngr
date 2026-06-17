@@ -575,6 +575,31 @@ def test_clone_no_branch_lands_on_default_branch_and_is_mirror_pushable(tmp_path
     assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "main"
 
 
+def test_clone_no_branch_uses_remotes_actual_default_branch_name(tmp_path: Path) -> None:
+    """The no-branch clone lands on the remote's *actual* default branch name,
+    not an assumed ``main``.
+
+    Guards the choice to resolve the default branch via ``git clone`` rather
+    than hardcoding ``main``: a repo whose default is ``master`` (or anything
+    else) must produce a local branch with that real name, since the name
+    becomes the agent's source-base branch downstream. A hardcoded ``main``
+    would silently mislabel it.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "master")
+    _git(origin, "config", "user.email", "test@example.com")
+    _git(origin, "config", "user.name", "Test")
+    (origin / "f").write_text("base\n")
+    _git(origin, "add", "f")
+    _git(origin, "commit", "-qm", "base commit")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest)
+
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "master"
+
+
 @pytest.mark.rsync
 def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
     """The local-worktree create flow (clone -> rsync overlay -> checkout)
@@ -596,7 +621,7 @@ def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
     (worktree / "f").write_text("uncommitted edit\n")
 
     dest = tmp_path / "clone"
-    clone_git_repo(GitUrl("file://{}".format(worktree)), dest)
+    clone_git_repo(GitUrl("file://{}".format(worktree)), dest, branch=GitBranch("testing"))
     _rsync_worktree_over_clone(worktree, dest)
     checkout_branch(dest, GitBranch("testing"))
 
