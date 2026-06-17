@@ -53,24 +53,26 @@ mngr ovh list --all     # include untagged VPSes too -- useful for sanity-checki
 
 These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 
+<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
-|-------|---------|-------------|
-| `endpoint` | `ovh-us` | python-ovh endpoint id (`ovh-eu`, `ovh-us`, `ovh-ca`, ...) |
-| `application_key` | `None` (env / `~/.ovh.conf`) | AK |
-| `application_secret` | `None` (env / `~/.ovh.conf`) | AS |
-| `consumer_key` | `None` (env / `~/.ovh.conf`) | CK |
-| `client_id` | `None` (env / `~/.ovh.conf`) | OAuth2 client id |
-| `client_secret` | `None` (env / `~/.ovh.conf`) | OAuth2 client secret |
-| `default_region` | `US-EAST-VA` | Default VPS datacenter (e.g. `US-EAST-VA`, `US-WEST-OR` for US accounts) |
-| `default_plan` | `vps-2025-model1` | Default plan code (1 vCPU / 8 GB RAM / 80 GB SSD, ~$7.99/mo) |
-| `default_image_name` | `Debian 12 - Docker` | Default OS image (Docker pre-installed) |
-| `bootstrap_ssh_user` | `debian` | Non-root user the OVH image installs the rebuild key for. Override only if you change `default_image_name` to a non-Debian image (e.g. `ubuntu`, `almalinux`). |
-| `pricing_mode` | `default` | OVH pricing mode (`default`, `upfront6`, `upfront12`); `upfront6` / `upfront12` get a discount in exchange for prepayment |
-| `duration` | `P1M` | ISO-8601 commitment duration (monthly only) |
-| `instance_boot_timeout` | `600.0` | Seconds to wait for the OVH order to deliver a VPS |
-| `enable_recycle_cancelled` | `True` | Whether `mngr create` may reuse a cancelled-but-still-alive VPS instead of ordering fresh |
-| `recycle_safety_margin_hours` | `2` | Min hours of remaining `expiration` for a cancelled VPS to be recyclable |
-| `recycle_max_candidates_considered` | `10` | Cap on provider-tagged VPSes evaluated before falling through to a fresh order. Applied before the cancellation/state/expiration filters, so a recyclable candidate further down a long tagged-VPS list may be missed. |
+|---|---|---|
+| `endpoint` | `ovh-us` | python-ovh endpoint id ('ovh-eu', 'ovh-us', 'ovh-ca', ...). Falls back to OVH_ENDPOINT. |
+| `application_key` | `None` (env / `~/.ovh.conf`) | OVH application key (AK). Falls back to OVH_APPLICATION_KEY or OVH_APP_KEY env vars. |
+| `application_secret` | `None` (env / `~/.ovh.conf`) | OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET or OVH_APP_SECRET env vars. |
+| `consumer_key` | `None` (env / `~/.ovh.conf`) | OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var. |
+| `client_id` | `None` (env / `~/.ovh.conf`) | OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var. |
+| `client_secret` | `None` (env / `~/.ovh.conf`) | OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var. |
+| `default_region` | `US-EAST-VA` | Default VPS datacenter (e.g. US-EAST-VA, US-WEST-OR for US accounts). |
+| `default_plan` | `vps-2025-model1` | Default VPS plan code (1 vCPU / 8 GB RAM / 80 GB SSD, ~$7.99/mo). |
+| `default_image_name` | `Debian 12 - Docker` | Default OS image name (Docker pre-installed). |
+| `bootstrap_ssh_user` | `debian` | Non-root user the OVH image installs the rebuild key for. Override only if you change default_image_name to a non-Debian image (e.g. ubuntu, almalinux). |
+| `pricing_mode` | `default` | OVH pricing mode. UPFRONT6 / UPFRONT12 get a discount in exchange for prepayment. |
+| `duration` | `P1M` | ISO-8601 commitment duration. OVH classic VPS only supports monthly billing. |
+| `instance_boot_timeout` | `600.0` | Seconds to wait for the OVH order to deliver a VPS. |
+| `enable_recycle_cancelled` | `True` | Whether `mngr create` may reuse a cancelled-but-still-alive VPS instead of ordering fresh. |
+| `recycle_safety_margin_hours` | `2` | Minimum hours of remaining expiration for a cancelled VPS to be recyclable. |
+| `recycle_max_candidates_considered` | `10` | Cap on provider-tagged VPSes evaluated before falling through to a fresh order. Applied to the raw tagged-VPS list before the cancellation/state/expiration filters run, so on accounts with many active mngr-tagged VPSes a recyclable candidate further down the list may be missed. |
+<!-- END GENERATED CONFIG TABLE -->
 
 ## Billing caveat
 

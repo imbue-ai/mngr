@@ -53,8 +53,9 @@ User Machine                              VPS
 
 The base config (`VpsDockerProviderConfig`) provides these settings:
 
+<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
-|-------|---------|-------------|
+|---|---|---|
 | `host_dir` | `/mngr` | Base directory for mngr data inside containers |
 | `default_image` | `debian:bookworm-slim` | Default Docker image |
 | `default_idle_timeout` | 800 | Idle timeout in seconds |
@@ -65,9 +66,10 @@ The base config (`VpsDockerProviderConfig`) provides these settings:
 | `container_ssh_port` | 2222 | Container sshd port exposed on VPS |
 | `default_region` | `ewr` | Default cloud region (provider subclasses override the default) |
 | `default_start_args` | `()` | Default `docker run` arguments |
-| `btrfs_mount_path` | `/mngr-btrfs` | Outer-host path where the loop-mounted btrfs filesystem holding the per-host unified volume is mounted |
-| `btrfs_loop_file_path` | `/var/lib/mngr-btrfs.img` | Outer-host path of the loop-backed btrfs image file (allocated with `fallocate`, persisted across reboots via `/etc/fstab`) |
-| `outer_disk_reserved_gb` | `20` | GB of free space on the outer's root filesystem to reserve at provisioning time; loop file size is `free_gb - outer_disk_reserved_gb` |
+| `btrfs_mount_path` | `/mngr-btrfs` | Path on the outer where the loop-mounted btrfs filesystem holding the per-host unified docker volume is mounted. The per-host subvolume lives at ``<btrfs_mount_path>/<host_id_hex>`` and is bound into the agent container via ``docker volume create --opt device=...``. |
+| `btrfs_loop_file_path` | `/var/lib/mngr-btrfs.img` | Path on the outer's root filesystem where the loop-backed btrfs image file is stored. Allocated with ``fallocate`` and mounted via an ``/etc/fstab`` entry so it survives VPS reboots. |
+| `outer_disk_reserved_gb` | `20` | Gigabytes of free space on the outer's root filesystem to hold back from the btrfs loop file at provisioning time. Loop file size is computed as ``free_gb - outer_disk_reserved_gb``; ``VpsProvisioningError`` is raised when the result is not positive. |
+<!-- END GENERATED CONFIG TABLE -->
 
 ## Build and start args
 

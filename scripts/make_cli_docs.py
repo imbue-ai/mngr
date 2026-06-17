@@ -18,10 +18,12 @@ All content comes from two sources:
 """
 
 import argparse
+import importlib
 import os
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 # Force all plugins to load regardless of local config so generated docs
 # always reflect every provider (docker, modal, etc.).  Must be set before
@@ -688,6 +690,216 @@ def build_pypi_readme(repo_root: Path) -> tuple[Path, str]:
     return dest, content
 
 
+# -----------------------------------------------------------------------------
+# Provider / agent config tables
+# -----------------------------------------------------------------------------
+# Each plugin README documents its provider/agent config in a markdown table.
+# The Description column is the single source of truth in the Pydantic
+# ``Field(description=...)`` (also surfaced via ``mngr config``), so we render it
+# from the model rather than hand-maintaining a second copy that drifts. Field
+# order and the displayed default stay curated here; the table is spliced into
+# the README between the BEGIN/END markers.
+
+CONFIG_TABLE_BEGIN = "<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->"
+CONFIG_TABLE_END = "<!-- END GENERATED CONFIG TABLE -->"
+
+
+class ConfigTableRow(NamedTuple):
+    field: str
+    default: str
+
+
+class ConfigTable(NamedTuple):
+    readme: str  # path relative to the repo root
+    module: str  # importable module holding the config class
+    class_name: str
+    field_header: str  # label for column 1 (the field / option / setting name)
+    description_header: str  # label for column 3
+    rows: tuple[ConfigTableRow, ...]
+
+
+CONFIG_TABLES: tuple[ConfigTable, ...] = (
+    ConfigTable(
+        readme="libs/mngr_aws/README.md",
+        module="imbue.mngr_aws.config",
+        class_name="AwsProviderConfig",
+        field_header="Field",
+        description_header="Description",
+        rows=(
+            ConfigTableRow("default_region", "`us-east-1`"),
+            ConfigTableRow("default_instance_type", "`t3.small`"),
+            ConfigTableRow("default_ami_id", '`""`'),
+            ConfigTableRow("default_ami_by_region", "(pinned Debian 12 amd64 per region)"),
+            ConfigTableRow("security_group", '`AutoCreateSecurityGroup(name="mngr-aws")`'),
+            ConfigTableRow("subnet_id", "`None`"),
+            ConfigTableRow("vpc_id", "`None`"),
+            ConfigTableRow("allowed_ssh_cidrs", '`("0.0.0.0/0",)`'),
+            ConfigTableRow("associate_public_ip", "`True`"),
+            ConfigTableRow("root_volume_size_gb", "`30`"),
+            ConfigTableRow("root_volume_type", "`gp3`"),
+            ConfigTableRow("iam_instance_profile", "`None`"),
+            ConfigTableRow("terminate_on_shutdown", "`false`"),
+            ConfigTableRow("auto_shutdown_seconds", "`None`"),
+        ),
+    ),
+    ConfigTable(
+        readme="libs/mngr_gcp/README.md",
+        module="imbue.mngr_gcp.config",
+        class_name="GcpProviderConfig",
+        field_header="Field",
+        description_header="Description",
+        rows=(
+            ConfigTableRow("project_id", "gcloud/ADC default"),
+            ConfigTableRow("default_region", "derived from zone"),
+            ConfigTableRow("default_zone", "gcloud `compute/zone`, else `us-west1-a`"),
+            ConfigTableRow("default_machine_type", "`e2-small`"),
+            ConfigTableRow("default_source_image", "`projects/debian-cloud/global/images/family/debian-12`"),
+            ConfigTableRow("boot_disk_size_gb", "`30`"),
+            ConfigTableRow("boot_disk_type", "`pd-balanced`"),
+            ConfigTableRow("network", "`default`"),
+            ConfigTableRow("subnetwork", "`None`"),
+            ConfigTableRow("allowed_ssh_cidrs", '`("0.0.0.0/0",)`'),
+            ConfigTableRow("firewall_target_tag", "`mngr-ssh`"),
+            ConfigTableRow("associate_external_ip", "`True`"),
+            ConfigTableRow("service_account_email", "`None`"),
+            ConfigTableRow("service_account_scopes", '`("https://www.googleapis.com/auth/cloud-platform",)`'),
+            ConfigTableRow("auto_shutdown_seconds", "`None`"),
+        ),
+    ),
+    ConfigTable(
+        readme="libs/mngr_ovh/README.md",
+        module="imbue.mngr_ovh.config",
+        class_name="OvhProviderConfig",
+        field_header="Field",
+        description_header="Description",
+        rows=(
+            ConfigTableRow("endpoint", "`ovh-us`"),
+            ConfigTableRow("application_key", "`None` (env / `~/.ovh.conf`)"),
+            ConfigTableRow("application_secret", "`None` (env / `~/.ovh.conf`)"),
+            ConfigTableRow("consumer_key", "`None` (env / `~/.ovh.conf`)"),
+            ConfigTableRow("client_id", "`None` (env / `~/.ovh.conf`)"),
+            ConfigTableRow("client_secret", "`None` (env / `~/.ovh.conf`)"),
+            ConfigTableRow("default_region", "`US-EAST-VA`"),
+            ConfigTableRow("default_plan", "`vps-2025-model1`"),
+            ConfigTableRow("default_image_name", "`Debian 12 - Docker`"),
+            ConfigTableRow("bootstrap_ssh_user", "`debian`"),
+            ConfigTableRow("pricing_mode", "`default`"),
+            ConfigTableRow("duration", "`P1M`"),
+            ConfigTableRow("instance_boot_timeout", "`600.0`"),
+            ConfigTableRow("enable_recycle_cancelled", "`True`"),
+            ConfigTableRow("recycle_safety_margin_hours", "`2`"),
+            ConfigTableRow("recycle_max_candidates_considered", "`10`"),
+        ),
+    ),
+    ConfigTable(
+        readme="libs/mngr_vultr/README.md",
+        module="imbue.mngr_vultr.config",
+        class_name="VultrProviderConfig",
+        field_header="Field",
+        description_header="Description",
+        rows=(
+            ConfigTableRow("api_key", "`None` (falls back to `VULTR_API_KEY` env var)"),
+            ConfigTableRow("default_region", "`ewr`"),
+            ConfigTableRow("default_plan", "`vc2-2c-4gb`"),
+            ConfigTableRow("default_os_id", "2136"),
+        ),
+    ),
+    ConfigTable(
+        readme="libs/mngr_vps_docker/README.md",
+        module="imbue.mngr_vps_docker.config",
+        class_name="VpsDockerProviderConfig",
+        field_header="Field",
+        description_header="Description",
+        rows=(
+            ConfigTableRow("host_dir", "`/mngr`"),
+            ConfigTableRow("default_image", "`debian:bookworm-slim`"),
+            ConfigTableRow("default_idle_timeout", "800"),
+            ConfigTableRow("default_idle_mode", "`IO`"),
+            ConfigTableRow("ssh_connect_timeout", "60.0"),
+            ConfigTableRow("instance_boot_timeout", "300.0"),
+            ConfigTableRow("docker_install_timeout", "300.0"),
+            ConfigTableRow("container_ssh_port", "2222"),
+            ConfigTableRow("default_region", "`ewr`"),
+            ConfigTableRow("default_start_args", "`()`"),
+            ConfigTableRow("btrfs_mount_path", "`/mngr-btrfs`"),
+            ConfigTableRow("btrfs_loop_file_path", "`/var/lib/mngr-btrfs.img`"),
+            ConfigTableRow("outer_disk_reserved_gb", "`20`"),
+        ),
+    ),
+    ConfigTable(
+        readme="libs/mngr_opencode/README.md",
+        module="imbue.mngr_opencode.plugin",
+        class_name="OpenCodeAgentConfig",
+        field_header="Option",
+        description_header="Meaning",
+        rows=(
+            ConfigTableRow("cli_args", "`()`"),
+            ConfigTableRow("config_overrides", "`{}`"),
+            ConfigTableRow("sync_global_config", "`true`"),
+            ConfigTableRow("symlink_auth", "`true`"),
+            ConfigTableRow("auto_allow_permissions", "`false`"),
+            ConfigTableRow("emit_common_transcript", "`true`"),
+        ),
+    ),
+    ConfigTable(
+        readme="libs/mngr_pi_coding/README.md",
+        module="imbue.mngr_pi_coding.plugin",
+        class_name="PiCodingAgentConfig",
+        field_header="Setting",
+        description_header="Description",
+        rows=(
+            ConfigTableRow("command", "`pi`"),
+            ConfigTableRow("sync_auth", "`true`"),
+            ConfigTableRow("sync_home_settings", "`true`"),
+            ConfigTableRow("check_installation", "`true`"),
+            ConfigTableRow("resume_session", "`true`"),
+            ConfigTableRow("emit_common_transcript", "`true`"),
+            ConfigTableRow("emit_raw_transcript", "`true`"),
+            ConfigTableRow("auto_dismiss_dialogs", "`false`"),
+        ),
+    ),
+)
+
+
+def _render_config_table(table: ConfigTable) -> str:
+    """Render a markdown table; the Description column comes from the model's field descriptions."""
+    module = importlib.import_module(table.module)
+    config_cls = getattr(module, table.class_name)
+    model_fields = config_cls.model_fields
+    lines = [
+        f"| {table.field_header} | Default | {table.description_header} |",
+        "|---|---|---|",
+    ]
+    for row in table.rows:
+        field_info = model_fields.get(row.field)
+        if field_info is None:
+            raise ValueError(
+                f"{table.class_name} ({table.module}) has no field {row.field!r} referenced by {table.readme}"
+            )
+        description = _escape_markdown_table(" ".join((field_info.description or "").split()))
+        lines.append(f"| `{row.field}` | {row.default} | {description} |")
+    return "\n".join(lines)
+
+
+def _splice_config_table(readme_text: str, table_md: str, readme: str) -> str:
+    """Replace the content between the config-table markers with the rendered table."""
+    begin = readme_text.find(CONFIG_TABLE_BEGIN)
+    end = readme_text.find(CONFIG_TABLE_END)
+    if begin == -1 or end == -1:
+        raise ValueError(
+            f"{readme} is missing the generated-config-table markers ({CONFIG_TABLE_BEGIN} ... {CONFIG_TABLE_END})"
+        )
+    before = readme_text[: begin + len(CONFIG_TABLE_BEGIN)]
+    after = readme_text[end:]
+    return f"{before}\n{table_md}\n{after}"
+
+
+def build_config_table_readme(repo_root: Path, table: ConfigTable) -> tuple[Path, str]:
+    """Return the (README path, full content) with the generated config table spliced in."""
+    path = repo_root / table.readme
+    return path, _splice_config_table(path.read_text(), _render_config_table(table), table.readme)
+
+
 # The exact command a developer runs to regenerate the docs this script owns.
 REGEN_COMMAND = "uv run python scripts/make_cli_docs.py"
 
@@ -706,6 +918,12 @@ def collect_generated_files(repo_root: Path) -> dict[Path, str]:
     # PyPI README from top-level README
     readme_path, readme_content = build_pypi_readme(repo_root)
     generated[readme_path] = readme_content
+
+    # Provider / agent config tables, spliced between markers in each plugin
+    # README (Description column generated from the Pydantic field descriptions).
+    for table in CONFIG_TABLES:
+        path, content = build_config_table_readme(repo_root, table)
+        generated[path] = content
 
     # CLI command docs
     base_dir = repo_root / "libs" / "mngr" / "docs" / "commands"

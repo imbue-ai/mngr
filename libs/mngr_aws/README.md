@@ -79,22 +79,24 @@ Stopped agents stay listed and resumable with `mngr start`; a paused agent costs
 
 These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 
+<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
-|-------|---------|-------------|
-| `default_region` | `us-east-1` | AWS region for new instances (e.g., `us-east-1`). |
-| `default_instance_type` | `t3.small` | EC2 instance type (e.g., `t3.small` for 2 vCPU, 2GB RAM). Surfaced as the `--aws-instance-type=` build arg. |
-| `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
-| `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. These ship no GPU / NVIDIA drivers; supply your own AMI via `default_ami_id` / `--aws-ami` for GPU workloads. |
-| `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |
-| `subnet_id` | `None` | Optional explicit subnet. |
-| `vpc_id` | `None` | Scopes auto-SG lookup. |
-| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Default is open to the internet; a warning is logged at provision time, so tighten for production. An empty tuple adds no ingress, leaving the SG unreachable from outside its VPC. |
-| `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
-| `root_volume_size_gb` | `30` | Root EBS volume size. |
-| `root_volume_type` | `gp3` | Root EBS volume type. |
+|---|---|---|
+| `default_region` | `us-east-1` | AWS region for new instances (e.g., 'us-east-1'). |
+| `default_instance_type` | `t3.small` | EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM). Surfaced as the `--aws-instance-type=` build arg. |
+| `default_ami_id` | `""` | Explicit AMI override; takes precedence over default_ami_by_region. When empty, default_ami_by_region is consulted for the chosen region. |
+| `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMI IDs, used when default_ami_id is empty. These ship no GPU / NVIDIA drivers; supply your own AMI via default_ami_id / --aws-ami for GPU workloads. |
+| `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. Default is auto-create with name 'mngr-aws'. The auto-create path consults allowed_ssh_cidrs. |
+| `subnet_id` | `None` | Subnet ID. When None, EC2 picks the default-VPC subnet for the AZ. |
+| `vpc_id` | `None` | VPC ID. Only used to scope auto-created security group lookups. |
+| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict, or () for no ingress. A warning is logged when the effective range is 0.0.0.0/0 or empty. |
+| `associate_public_ip` | `True` | Assign a public IPv4 address to the instance. Required for the current mngr-from-developer-laptop SSH access model. For a more secure deployment, set to False and run mngr from a bastion or via Session Manager. |
+| `root_volume_size_gb` | `30` | Size of the root EBS volume in GB. |
+| `root_volume_type` | `gp3` | EBS volume type for the root volume (e.g., gp3, gp2, io2). |
 | `iam_instance_profile` | `None` | Optional IAM instance profile name attached to launched instances. |
-| `terminate_on_shutdown` | `false` | EC2 shutdown behavior on an OS shutdown. `false` keeps the instance stoppable and resumable (EBS preserved); `true` terminates it (ephemeral / self-cleaning). |
-| `auto_shutdown_seconds` | `None` | When set, the instance halts itself after about this many seconds (a hard max-lifetime cap, distinct from the activity-based idle timeout). Whether that stops or terminates it follows `terminate_on_shutdown`. Useful for ephemeral test / scratch hosts. |
+| `terminate_on_shutdown` | `false` | EC2 shutdown behavior (InstanceInitiatedShutdownBehavior) on an OS shutdown. False keeps the instance stoppable and resumable via `mngr start` (EBS preserved); True terminates it (ephemeral / self-cleaning). |
+| `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |
+<!-- END GENERATED CONFIG TABLE -->
 
 ## One-time setup: `mngr aws prepare`
 

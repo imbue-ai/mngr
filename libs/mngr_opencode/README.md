@@ -49,14 +49,16 @@ mngr create my-agent my_opencode
 
 ### Options
 
+<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Option | Default | Meaning |
 |---|---|---|
-| `cli_args` | `()` | Extra arguments forwarded to the `opencode attach` (TUI) client. |
-| `config_overrides` | `{}` | Key/value blob merged last into the per-agent `opencode.json` (e.g. `model`, the `permission` policy block). |
-| `sync_global_config` | `true` | Base the per-agent `opencode.json` on a copy of the user's `~/.config/opencode/opencode.json`. |
-| `symlink_auth` | `true` | Symlink the per-agent `auth.json` to the shared one (one login authenticates all agents). Set `false` for full isolation. |
-| `auto_allow_permissions` | `false` | Auto-approve everything not explicitly denied. |
+| `cli_args` | `()` | Extra arguments forwarded to the opencode attach (TUI) client. |
+| `config_overrides` | `{}` | Key/value blob merged last into the per-agent opencode.json (e.g. model, the permission policy block). Example: {"model": "anthropic/claude-sonnet-4-5", "permission": {"bash": {"rm -rf *": "deny"}}}. |
+| `sync_global_config` | `true` | Base the per-agent opencode.json on a copy of the user's ~/.config/opencode/opencode.json (True, default), or start from an empty base (False). |
+| `symlink_auth` | `true` | Symlink (True, default) the per-agent auth.json to the shared ~/.local/share/opencode/auth.json, so one login authenticates all agents. Set False for full isolation. |
+| `auto_allow_permissions` | `false` | Auto-approve everything not explicitly denied (injects a wildcard allow into the opencode.json permission block). |
 | `emit_common_transcript` | `true` | Emit the common transcript that `mngr transcript` reads. |
+<!-- END GENERATED CONFIG TABLE -->
 
 ## Choosing the model
 

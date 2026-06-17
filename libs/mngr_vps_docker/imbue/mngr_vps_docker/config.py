@@ -58,12 +58,10 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
     auto_shutdown_seconds: int | None = Field(
         default=None,
         description=(
-            "When set, cloud-init schedules `shutdown -P` so the VPS halts itself after about "
-            "this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts). "
-            "A hard max-lifetime cap, distinct from the activity-based default_idle_timeout. On "
-            "AWS, combined with InstanceInitiatedShutdownBehavior=terminate, this auto-terminates "
-            "the EC2 instance. On Vultr the OS halts but billing continues until the VPS is "
-            "destroyed."
+            "When set, the host OS halts itself after about this many seconds (rounded up to "
+            "whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, "
+            "distinct from the activity-based default_idle_timeout. Whether the halt stops, "
+            "terminates, or deletes the instance is provider-specific (see the provider's README)."
         ),
     )
     docker_runtime: str | None = Field(

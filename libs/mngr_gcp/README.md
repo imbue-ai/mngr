@@ -108,23 +108,25 @@ GCE VMs are zonal, so the placement knob is `--gcp-zone=` (e.g. `us-west1-b`), n
 
 These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 
+<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
-|-------|---------|-------------|
-| `project_id` | gcloud/ADC default | GCP project ID (a plain identifier, not a credential). When left empty, taken from Application Default Credentials (the active `gcloud config set project` or `GOOGLE_CLOUD_PROJECT`); set it explicitly to pin a specific project. |
-| `default_region` | derived from zone | GCE region. Used only to validate the resolved zone; set it to catch a mismatched `default_zone` typo. |
-| `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal). |
-| `default_machine_type` | `e2-small` | GCE machine type. |
-| `default_source_image` | `projects/debian-cloud/global/images/family/debian-12` | GCE VM boot-disk image (distinct from the base `default_image`, the Docker container image run inside the VM). |
+|---|---|---|
+| `project_id` | gcloud/ADC default | GCP project ID (a plain identifier, not a credential). When left empty, the project is taken from Application Default Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env var); set it explicitly to pin a specific project. |
+| `default_region` | derived from zone | GCE region (e.g., 'us-west1'). Used only to validate the resolved zone; when unset, derived from the resolved zone. Set it to catch a mismatched default_zone typo. |
+| `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal, e.g. 'us-west1-a'). When unset, taken from the active 'gcloud config get compute/zone' if available, otherwise 'us-west1-a'. Must lie in default_region when both are set explicitly. |
+| `default_machine_type` | `e2-small` | GCE machine type (e.g., 'e2-small' for ~2 vCPU, 2GB RAM). |
+| `default_source_image` | `projects/debian-cloud/global/images/family/debian-12` | GCE VM boot-disk image (distinct from the base default_image, the Docker container image run inside the VM). |
 | `boot_disk_size_gb` | `30` | Boot disk size in GB. |
-| `boot_disk_type` | `pd-balanced` | Boot disk type (`pd-balanced`, `pd-ssd`, `pd-standard`). |
+| `boot_disk_type` | `pd-balanced` | Boot disk type (e.g., 'pd-balanced', 'pd-ssd', 'pd-standard'). |
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |
-| `subnetwork` | `None` | Optional explicit subnetwork (required for custom-mode VPCs). |
-| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Defaults open to the internet; warned at prepare/create time. Set `()` for no ingress. |
+| `subnetwork` | `None` | Optional explicit subnetwork (required for custom-mode VPCs); None lets GCE pick for auto-mode networks. |
+| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDRs for tcp/22 and tcp/<container_ssh_port>. Default ('0.0.0.0/0',) opens to the internet (a warning is logged at prepare/create time); use e.g. ['203.0.113.4/32'] to restrict to your own IP, or () for no ingress (no firewall rule is created and the instance is unreachable from outside its VPC). |
 | `firewall_target_tag` | `mngr-ssh` | Network tag bound to the firewall rule; every instance is tagged with it. |
-| `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. Required for the current mngr-from-developer-laptop SSH model; set to `False` and run mngr from an in-VPC bastion for a more secure deployment. |
-| `service_account_email` | `None` | Optional service account attached to launched instances. |
-| `service_account_scopes` | `("https://www.googleapis.com/auth/cloud-platform",)` | OAuth scopes for the attached service account (only used when `service_account_email` is set). |
-| `auto_shutdown_seconds` | `None` | When set, the VM halts itself (`shutdown -P`) after about this many seconds. A hard max-lifetime cap, useful for ephemeral test / scratch hosts. |
+| `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. Required for the current mngr-from-developer-laptop SSH access model; for a more secure deployment, set to False and run mngr from a bastion inside the VPC. |
+| `service_account_email` | `None` | Optional service account email attached to launched instances. When None, GCE applies its normal default for an unspecified service account. |
+| `service_account_scopes` | `("https://www.googleapis.com/auth/cloud-platform",)` | OAuth scopes for the attached service account (only used when service_account_email is set). |
+| `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |
+<!-- END GENERATED CONFIG TABLE -->
 
 ## Required IAM permissions
 
