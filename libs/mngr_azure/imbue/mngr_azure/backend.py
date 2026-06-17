@@ -34,7 +34,7 @@ from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
-from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
+from imbue.mngr_azure.state_bucket import host_dir_sync_target_for
 from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostDirBackend
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
@@ -167,12 +167,6 @@ def _build_azcopy_install_command() -> str:
         'install -m 0755 "$tmp"/azcopy_linux_*/azcopy /usr/local/bin/azcopy && '
         'rm -rf "$tmp")'
     )
-
-
-def _build_host_dir_blob_url(account_name: str, container_name: str, host_id: HostId) -> str:
-    """Return the ``https://<account>.blob.core.windows.net/<container>/hosts/<id>/host_dir`` sync target."""
-    prefix = host_dir_blob_prefix_for(host_id).rstrip("/")
-    return f"https://{account_name}.blob.core.windows.net/{container_name}/{prefix}"
 
 
 def _build_idle_watcher_service_unit() -> str:
@@ -735,7 +729,7 @@ class _BlobHostDirBackend(HostDirBackend):
             )
             return
         host_dir_on_outer = str(self.provider._host_dir_path_on_outer(host_id))
-        blob_prefix_url = _build_host_dir_blob_url(self.bucket.account_name, self.bucket.container_name, host_id)
+        blob_prefix_url = host_dir_sync_target_for(self.bucket.account_name, self.bucket.container_name, host_id)
         service_unit = _build_host_dir_sync_service_unit(host_dir_on_outer, blob_prefix_url, identity_client_id)
         timer_unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
         with log_span("Installing Azure host_dir sync daemon"):

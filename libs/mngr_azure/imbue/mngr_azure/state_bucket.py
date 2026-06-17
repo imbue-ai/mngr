@@ -71,9 +71,14 @@ def host_identity_name_for_account(account_name: str) -> str:
     return f"mngrid-{account_name}"
 
 
-def host_dir_blob_prefix_for(host_id: HostId) -> str:
-    """Return the ``hosts/<host_id_hex>/host_dir/`` blob prefix the sync daemon pushes to."""
-    return state_keys.host_dir_prefix(host_id)
+def host_dir_sync_target_for(account_name: str, container_name: str, host_id: HostId) -> str:
+    """Return the ``https://<account>.blob.core.windows.net/<container>/hosts/<id>/host_dir`` sync target.
+
+    The full blob URL the on-box ``azcopy sync`` pushes to. Mirrors the AWS
+    ``host_dir_sync_target_for`` (which returns the ``s3://`` URI).
+    """
+    prefix = state_keys.host_dir_prefix(host_id).rstrip("/")
+    return f"https://{account_name}.blob.core.windows.net/{container_name}/{prefix}"
 
 
 class BlobStateBucketError(MngrError):
