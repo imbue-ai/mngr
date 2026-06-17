@@ -84,7 +84,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `default_region` | `us-east-1` | AWS region for new instances. |
 | `default_instance_type` | `t3.small` | EC2 instance type. Surfaced as the `--aws-instance-type=` build arg. |
 | `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
-| `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. |
+| `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. These ship no GPU / NVIDIA drivers; supply your own AMI via `default_ami_id` / `--aws-ami` for GPU workloads. |
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |
 | `subnet_id` | `None` | Optional explicit subnet. |
 | `vpc_id` | `None` | Scopes auto-SG lookup. |
@@ -148,5 +148,3 @@ ec2:DeleteSecurityGroup
 ## Limitations
 
 - No host snapshot workflow: restore from a fresh `mngr create` rather than rehydrating a killed host.
-- Spot instances (`--aws-spot`) may be reclaimed by AWS with ~2 minutes' notice and are terminated from mngr's perspective. Use for cheap experimental agents, not long-running workloads.
-- The default Debian 12 AMIs have no GPU / NVIDIA drivers.

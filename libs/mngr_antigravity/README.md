@@ -13,8 +13,6 @@ Each agent runs `agy` under its own `$HOME` and reads its token from a per-agent
 
 This works on both Linux and macOS. Set `symlink_oauth_token = false` for full per-agent isolation (each agent authenticates independently).
 
-> **macOS popup during login is expected and harmless.** When signing in on macOS you may see *"A keychain cannot be found to store \"antigravity.\""* Just dismiss it; `agy` falls back to writing the file token, which is exactly what mngr relies on, and authentication completes normally.
-
 ## Usage
 
 ```bash
@@ -59,7 +57,7 @@ mngr create my-agent readonly_agy
 
 ## Conversation resume
 
-`mngr stop` then `mngr start` resumes the agent's prior agy conversation, keeping its full context rather than starting fresh. This is automatic; there is no flag to set.
+`mngr stop` then `mngr start` resumes the agent's prior agy conversation, keeping its full context rather than starting fresh.
 
 ## Caveats
 
