@@ -25,3 +25,5 @@ Internal refactor (no behavior change): extracted the cloud-agnostic state-bucke
 Internal refactor (no behavior change): renamed the low-level state-bucket methods `write_host_record` / `read_host_record` (raw JSON) to `write_host_record_json` / `read_host_record_json` so they no longer collide with `HostStateStore.read_host_record` (which returns a parsed record); added shared `MANAGED_BY_TAG_KEY` / `MANAGED_BY_TAG_VALUE` constants to `state_keys` (used by both clouds' bucket + host-identity tagging).
 
 Internal refactor (no behavior change): added shared `build_oneshot_sync_service_unit` / `build_sync_timer_unit` systemd-unit builders; the AWS and Azure host_dir-sync daemons now generate their `.service` / `.timer` units through them (the cloud-specific `aws s3 sync` / `azcopy sync` command stays per-provider).
+
+Internal refactor (no behavior change): the find-instance-then-reassemble-from-tags lookup that the default `_offline_agent_dicts_for` and both providers' tag-mirror stores each re-derived now lives once in a shared `_agent_dicts_from_tags` helper on `OfflineCapableVpsDockerProvider`.

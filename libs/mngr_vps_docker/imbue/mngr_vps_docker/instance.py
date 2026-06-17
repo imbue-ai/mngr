@@ -2946,10 +2946,21 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         agents -- which are NOT mirrored into tags -- are still surfaced, and the
         ``instance`` argument is ignored.
         """
+        if instance is not None:
+            return self._persisted_agent_dicts_from_instance(instance)
+        return self._agent_dicts_from_tags(host_id)
+
+    def _agent_dicts_from_tags(self, host_id: HostId) -> list[dict]:
+        """Reassemble a host's agent records from its instance tags/metadata, or [] if the instance is gone.
+
+        Resolves the instance from the cached listing, then reads its mirrored
+        agent records. Shared by the default ``_offline_agent_dicts_for`` and the
+        tag-mirror ``HostStateStore`` implementations (AWS/Azure), which otherwise
+        re-derived the same lookup.
+        """
+        instance = self._find_instance_for_host(host_id)
         if instance is None:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return []
+            return []
         return self._persisted_agent_dicts_from_instance(instance)
 
     @abstractmethod
