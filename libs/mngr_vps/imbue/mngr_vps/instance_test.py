@@ -20,6 +20,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -30,6 +31,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.config import VpsProviderConfig
@@ -672,6 +674,15 @@ def test_provider_builds_bare_realizer_for_none_isolation(temp_mngr_ctx: MngrCon
     provider = _minimal_provider(temp_mngr_ctx, IsolationMode.NONE)
     assert isinstance(provider._realizer, BareRealizer)
     assert provider.supports_snapshots is False
+
+
+def test_bare_provider_rejects_snapshot_operations_up_front(temp_mngr_ctx: MngrContext) -> None:
+    """A bare provider raises SnapshotsNotSupportedError before touching any host record."""
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.NONE)
+    with pytest.raises(SnapshotsNotSupportedError):
+        provider.create_snapshot(HostId.generate())
+    with pytest.raises(SnapshotsNotSupportedError):
+        provider.delete_snapshot(HostId.generate(), SnapshotId("snap-x"))
 
 
 def test_create_host_rejects_bare_on_a_provider_without_machine_lifecycle(temp_mngr_ctx: MngrContext) -> None:

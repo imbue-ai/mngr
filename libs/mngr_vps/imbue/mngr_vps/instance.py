@@ -29,6 +29,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
@@ -109,6 +110,7 @@ from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VPS_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
@@ -408,8 +410,23 @@ class VpsProvider(BaseProviderInstance):
         return self._realizer_cache
 
     @property
+    def _snapshot_capable_realizer(self) -> SnapshotCapableRealizer | None:
+        """The realizer as a snapshot-capable one, or None if it cannot snapshot."""
+        realizer = self._realizer
+        if isinstance(realizer, SnapshotCapableRealizer):
+            return realizer
+        return None
+
+    @property
     def supports_snapshots(self) -> bool:
-        return self._realizer.supports_snapshots
+        return self._snapshot_capable_realizer is not None
+
+    def _require_snapshot_capable_realizer(self) -> SnapshotCapableRealizer:
+        """Return the snapshot-capable realizer, or raise up front if unsupported."""
+        realizer = self._snapshot_capable_realizer
+        if realizer is None:
+            raise SnapshotsNotSupportedError(self.name)
+        return realizer
 
     @property
     def supports_shutdown_hosts(self) -> bool:
@@ -2055,6 +2072,7 @@ class VpsProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         name: SnapshotName | None = None,
     ) -> SnapshotId:
+        realizer = self._require_snapshot_capable_realizer()
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
@@ -2063,7 +2081,7 @@ class VpsProvider(BaseProviderInstance):
         snapshot_name = name or SnapshotName(f"mngr-snapshot-{host_id}-{int(time.time())}")
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            snapshot_id = self._realizer.snapshot_placement(outer, host_record)
+            snapshot_id = realizer.snapshot_placement(outer, host_record)
 
             # Store snapshot record in host data
             snapshot_record = SnapshotRecord(
@@ -2109,13 +2127,14 @@ class VpsProvider(BaseProviderInstance):
         ]
 
     def delete_snapshot(self, host: HostInterface | HostId, snapshot_id: SnapshotId) -> None:
+        realizer = self._require_snapshot_capable_realizer()
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            self._realizer.delete_snapshot_placement(outer, snapshot_id)
+            realizer.delete_snapshot_placement(outer, snapshot_id)
 
     # =========================================================================
     # Tags

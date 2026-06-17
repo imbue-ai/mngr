@@ -44,11 +44,6 @@ class HostRealizer(MutableModel, ABC):
     host_dir: Path = Field(frozen=True, description="Base directory for mngr data on the agent host")
     provider_name: ProviderInstanceName = Field(frozen=True, description="Name of the owning provider instance")
 
-    @property
-    @abstractmethod
-    def supports_snapshots(self) -> bool:
-        """Whether this realizer can snapshot a placement."""
-
     @abstractmethod
     def agent_endpoint(self, vps_ip: str) -> AgentEndpoint:
         """Where (and how) to SSH to the agent placed on ``vps_ip``."""
@@ -157,9 +152,20 @@ class HostRealizer(MutableModel, ABC):
         per-host storage (bare) tears nothing down and raises nothing.
         """
 
+
+class SnapshotCapableRealizer(HostRealizer, ABC):
+    """A ``HostRealizer`` that can snapshot its placement.
+
+    Snapshot support is a structural fact: only realizers that subclass this can
+    create and delete placement snapshots. A plain ``HostRealizer`` (e.g. the
+    bare realizer) has no snapshot methods at all, so the provider gates snapshot
+    operations once at its boundary rather than reaching into a realizer that
+    would only raise.
+    """
+
     @abstractmethod
     def snapshot_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> SnapshotId:
-        """Create a placement snapshot and return its id; raise if unsupported."""
+        """Create a placement snapshot and return its id."""
 
     @abstractmethod
     def delete_snapshot_placement(self, outer: OuterHostInterface, snapshot_id: SnapshotId) -> None:

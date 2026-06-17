@@ -21,6 +21,7 @@ from imbue.mngr_vps.docker_realizer import CONTAINER_SSH_KEY_NAME
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 
@@ -37,8 +38,9 @@ def _realizer(temp_mngr_ctx: MngrContext, key_dir: Path, container_ssh_port: int
     )
 
 
-def test_supports_snapshots_is_true(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    assert _realizer(temp_mngr_ctx, tmp_path).supports_snapshots is True
+def test_docker_realizer_is_snapshot_capable(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The container realizer can snapshot, so it is a SnapshotCapableRealizer."""
+    assert isinstance(_realizer(temp_mngr_ctx, tmp_path), SnapshotCapableRealizer)
 
 
 def test_idle_shutdown_signals_container_pid1_and_needs_a_host_watcher(

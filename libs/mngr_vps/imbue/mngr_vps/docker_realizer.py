@@ -59,7 +59,7 @@ from imbue.mngr_vps.data_types import RealizedPlacement
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.host_store import open_host_store
-from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 
 # Key-file names under ``key_dir`` for the container's client/host keys and its
 # known_hosts. The provider exposes thin accessors with the same names so the
@@ -121,7 +121,7 @@ def _read_live_listing_from_vps(
     return parse_listing_collection_output(result.stdout)
 
 
-class DockerRealizer(HostRealizer):
+class DockerRealizer(SnapshotCapableRealizer):
     """Places the agent inside a Docker container on the VPS.
 
     This is the original ``VpsProvider`` behavior, moved behind the
@@ -130,10 +130,6 @@ class DockerRealizer(HostRealizer):
     sshd, and manage container stop/start/teardown plus ``docker commit``
     snapshots. The agent is reached at ``vps_ip:container_ssh_port``.
     """
-
-    @property
-    def supports_snapshots(self) -> bool:
-        return True
 
     @property
     def idle_shutdown_command(self) -> str:

@@ -102,3 +102,13 @@ Lifted three structurally-duplicated subsystems out of the aws/gcp/azure backend
 - `_on_host_finalized` is now a shared best-effort step runner: each step's failure is logged at WARNING and the rest still run, preserving the prior non-fatal contract. Providers extend the step list via `_post_finalize_steps` (Azure prepends its self-deallocate role assignment).
 
 No user-visible behavior change; the host-side systemd unit names changed from per-provider (`mngr-aws-idle-watcher` etc.) to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`.
+
+Snapshot support is now a structural fact rather than a method that raises.
+`snapshot_placement` / `delete_snapshot_placement` moved off the base
+`HostRealizer` into a narrow `SnapshotCapableRealizer` sub-interface that only
+the container realizer implements; the bare realizer is a plain `HostRealizer`
+with no snapshot bodies. The provider gates its public snapshot operations once
+at its boundary: a snapshot request on a bare placement now fails up front with
+`SnapshotsNotSupportedError` instead of reaching into the realizer mid-operation.
+No behavior change for container hosts; a bare snapshot still fails with a clear
+error (just earlier).

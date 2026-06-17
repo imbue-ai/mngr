@@ -5,10 +5,8 @@ from typing import Final
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
@@ -58,10 +56,6 @@ class BareRealizer(HostRealizer):
     root disk. There is no container to stop/start or snapshot; machine
     stop/start/destroy is the substrate's job.
     """
-
-    @property
-    def supports_snapshots(self) -> bool:
-        return False
 
     @property
     def idle_shutdown_command(self) -> str:
@@ -192,9 +186,3 @@ class BareRealizer(HostRealizer):
     def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, record: VpsHostRecord) -> None:
         # Nothing to tear down on the placement: destroy_host destroys the whole VM.
         return None
-
-    def snapshot_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> SnapshotId:
-        raise SnapshotsNotSupportedError(self.provider_name)
-
-    def delete_snapshot_placement(self, outer: OuterHostInterface, snapshot_id: SnapshotId) -> None:
-        raise SnapshotsNotSupportedError(self.provider_name)

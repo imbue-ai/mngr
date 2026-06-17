@@ -11,19 +11,18 @@ from pydantic import Field
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SnapshotId
 from imbue.mngr_vps.bare_realizer import BARE_HOST_STORE_DIR
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.data_types import RealizePlacementContext
 from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
 from imbue.mngr_vps.primitives import VPS_SSH_KEY_NAME
 
@@ -84,8 +83,9 @@ def _context(
 _STUB_RECORD = VpsHostRecord.model_construct(vps_ip="203.0.113.7")
 
 
-def test_supports_snapshots_is_false(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    assert _bare_realizer(temp_mngr_ctx, tmp_path).supports_snapshots is False
+def test_bare_realizer_is_not_snapshot_capable(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The bare realizer has no snapshot capability -- it is not a SnapshotCapableRealizer."""
+    assert not isinstance(_bare_realizer(temp_mngr_ctx, tmp_path), SnapshotCapableRealizer)
 
 
 def test_idle_shutdown_powers_off_the_vm_directly(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
@@ -167,15 +167,6 @@ def test_lifecycle_steps_are_no_ops(temp_mngr_ctx: MngrContext, tmp_path: Path) 
     realizer.start_placement(outer, _STUB_RECORD)
     realizer.teardown_placement(outer, HostId.generate(), _STUB_RECORD)
     assert stub.commands == []
-
-
-def test_snapshot_operations_are_unsupported(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
-    outer, _stub = _recording_outer()
-    with pytest.raises(SnapshotsNotSupportedError):
-        realizer.snapshot_placement(outer, _STUB_RECORD)
-    with pytest.raises(SnapshotsNotSupportedError):
-        realizer.delete_snapshot_placement(outer, SnapshotId("snap-x"))
 
 
 def test_is_placement_running_is_true_when_vm_reachable(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
