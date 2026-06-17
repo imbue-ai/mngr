@@ -18,7 +18,6 @@ from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
-from imbue.overlay.errors import OverlayError
 
 
 class MngrError(ClickException):
@@ -495,14 +494,8 @@ class ConfigNotFoundError(ConfigError):
     """Config file not found."""
 
 
-class ConfigParseError(ConfigError, OverlayError):
-    """Failed to parse config file.
-
-    Also subclasses ``OverlayError`` so the raw structural errors raised by the
-    ``overlay`` merge algebra (conflicting same-layer assigns, malformed
-    ``__extend`` shapes) and mngr's own config-parse errors are caught by the
-    same ``except OverlayError`` handlers at the config-load / merge boundaries.
-    """
+class ConfigParseError(ConfigError):
+    """Failed to parse config file."""
 
 
 class ConfigKeyNotFoundError(ConfigError, KeyError):

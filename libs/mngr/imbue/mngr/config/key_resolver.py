@@ -109,14 +109,11 @@ def resolve_extends(
     ``ConfigParseError``. Without this, those errors would escape the config-load /
     ``--setting`` paths as a bare ``OverlayError`` -- not a ``ClickException`` -- and
     surface to the user as an unexpected-error traceback instead of a clean
-    ``Error: ...`` message. ``ConfigParseError`` is itself an ``OverlayError``, so a
-    nested ``ConfigParseError`` is re-raised unchanged (no double-wrapping) and the
-    ``except OverlayError`` handlers in ``mngr config set`` still catch it.
+    ``Error: ...`` message. A ``ConfigParseError`` raised deeper down is not an
+    ``OverlayError``, so it propagates unchanged (no double-wrapping).
     """
     try:
         return _resolve_extends(base, override, path=path)
-    except ConfigParseError:
-        raise
     except OverlayError as e:
         raise ConfigParseError(str(e)) from e
 

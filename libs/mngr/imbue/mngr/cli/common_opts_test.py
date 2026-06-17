@@ -35,7 +35,6 @@ from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.overlay.errors import OverlayError
 
 hookimpl = pluggy.HookimplMarker("mngr")
 
@@ -1208,10 +1207,10 @@ def test_apply_settings_to_config_extends_list_field(mngr_test_prefix: str) -> N
 
 
 def test_apply_settings_to_config_extend_on_scalar_raises(mngr_test_prefix: str) -> None:
-    """``__extend`` is not valid on a scalar field; the overlay resolver raises
-    ``OverlayError`` (which ``ConfigParseError`` subclasses)."""
+    """``__extend`` is not valid on a scalar field; the overlay resolver's ``OverlayError``
+    is translated to a ``ConfigParseError`` at the config boundary."""
     config = MngrConfig(prefix=mngr_test_prefix)
-    with pytest.raises(OverlayError, match="__extend on field 'prefix'"):
+    with pytest.raises(ConfigParseError, match="__extend on field 'prefix'"):
         apply_settings_to_config(
             config,
             ("prefix__extend=oops",),

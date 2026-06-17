@@ -21,7 +21,6 @@ from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
-from imbue.overlay.errors import OverlayError
 
 # =============================================================================
 # resolve_extends -- list/tuple aggregate
@@ -214,13 +213,11 @@ def test_resolve_extends_translates_overlay_error_to_config_parse_error() -> Non
 
     ``ConfigParseError`` is a ``ClickException`` (via ``MngrError``), so the top-level
     CLI handler renders it as a clean ``Error: ...`` message; a bare ``OverlayError``
-    would escape as an unexpected-error traceback. ``ConfigParseError`` is also an
-    ``OverlayError`` subclass, so ``except OverlayError`` handlers still catch it.
+    would escape as an unexpected-error traceback.
     """
     base = MngrConfig(prefix="base-")
-    with pytest.raises(ConfigParseError) as exc_info:
+    with pytest.raises(ConfigParseError):
         resolve_extends(base, {"prefix__extend": "oops"})
-    assert isinstance(exc_info.value, OverlayError)
 
 
 # =============================================================================
@@ -415,5 +412,5 @@ def test_resolve_extends_assign_then_extend_resets_then_adds() -> None:
 
 
 def test_resolve_extends_bare_plus_assign_same_key_raises() -> None:
-    with pytest.raises(OverlayError, match="Conflicting assignment"):
+    with pytest.raises(ConfigParseError, match="Conflicting assignment"):
         resolve_extends(MngrConfig(), {"unset_vars": [], "unset_vars__assign": []})

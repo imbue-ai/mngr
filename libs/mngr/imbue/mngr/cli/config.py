@@ -35,6 +35,7 @@ from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.errors import ConfigNotFoundError
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
@@ -532,7 +533,7 @@ def _emit_key_not_found(key: str, output_opts: OutputOptions) -> None:
 def config_set(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
     try:
         _config_set_impl(ctx, key, value, **kwargs)
-    except OverlayError as e:
+    except (OverlayError, ConfigParseError) as e:
         logger.error("Invalid configuration: {}", e)
         ctx.exit(1)
     except AbortError as e:
@@ -638,7 +639,7 @@ def config_extend(ctx: click.Context, key: str, value: str, **kwargs: Any) -> No
     """Write a ``key__extend`` entry that appends to / merges with the base."""
     try:
         _config_extend_impl(ctx, key, value, **kwargs)
-    except OverlayError as e:
+    except (OverlayError, ConfigParseError) as e:
         logger.error("Invalid configuration: {}", e)
         ctx.exit(1)
     except AbortError as e:
