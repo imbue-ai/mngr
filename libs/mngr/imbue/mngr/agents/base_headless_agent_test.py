@@ -14,6 +14,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -97,24 +99,27 @@ def _make_agent(
 # =============================================================================
 
 
-def test_preflight_send_message_raises(
+def test_headless_agent_is_not_interactive(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
+    """Headless agents accept no interactive messages, so they do not carry the marker
+    and have no ``send_message`` (the send-message flow lives only on interactive agents)."""
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
-    with pytest.raises(SendMessageError, match="do not accept interactive messages"):
-        agent._preflight_send_message(agent.tmux_target)
+    assert not isinstance(agent, InteractiveAgentMixin)
+    assert not hasattr(agent, "send_message")
 
 
-def test_send_message_raises(
+def test_require_interactive_agent_rejects_headless(
     local_host: Host,
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
+    """Messaging a headless agent is refused at the call layer with a clear error."""
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
-    with pytest.raises(SendMessageError, match="do not accept interactive messages"):
-        agent.send_message("hello")
+    with pytest.raises(SendMessageError, match="does not accept interactive messages"):
+        require_interactive_agent(agent)
 
 
 def test_is_agent_finished_when_stopped(

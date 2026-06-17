@@ -106,6 +106,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
@@ -120,7 +121,12 @@ from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -340,6 +346,10 @@ class AntigravityAgentConfig(AgentTypeConfig):
         description="When True, auto-trust the source repo without prompting. "
         "When False (default), the user is prompted interactively.",
     )
+    check_installation: bool = Field(
+        default=True,
+        description="Check whether agy is installed and install it if missing (if False, assume it is already present).",
+    )
     # emit_common_transcript gates the JSONL -> common-schema converter that
     # writes to ``events/antigravity/common_transcript/events.jsonl``. The raw
     # transcript at ``logs/antigravity_transcript/events.jsonl`` is always
@@ -356,7 +366,15 @@ class AntigravityAgentConfig(AgentTypeConfig):
     )
 
 
-class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTranscriptMixin):
+class AntigravityAgent(
+    InteractiveTuiAgent[AntigravityAgentConfig],
+    CliBackedAgentMixin,
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
+    HasPermissionPolicyMixin,
+    HasAutoInstallMixin,
+):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
     # Stable substring of the footer hint that agy renders ONLY once the
@@ -519,10 +537,27 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """
         return self._get_agent_dir() / ROOT_CONVERSATION_FILENAME
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_antigravity_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
+
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        # agy's per-resource policy lives in the settings.json `permissions` block.
+        policy = self.agent_config.settings_overrides.get("permissions", {})
+        return policy if isinstance(policy, Mapping) else {}
+
+    def get_install_binary_name(self) -> str:
+        return "agy"
+
+    def get_install_command(self) -> str:
+        return "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and conversation-id history before the state dir is deleted."""
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_antigravity_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
     def provision(
         self,
@@ -550,6 +585,8 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         4. Install the transcript scripts and the background-tasks supervisor
            under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
+        if self.agent_config.check_installation:
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
         host_home, host_uname = self._resolve_host_home_and_os(host)
         self._ensure_source_repo_trusted(host, host_home, mngr_ctx)
         self._provision_agy_home(host, host_home, host_uname)
@@ -1019,7 +1056,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # does not gate run_command confirmations; see the config field comment).
         # A finer-grained policy instead lives in the per-agent settings.json
         # ``permissions`` block (settings_overrides).
-        if self.agent_config.auto_allow_permissions:
+        if self.is_unattended_enabled():
             extra_args.append(_DANGEROUSLY_SKIP_PERMISSIONS_FLAG)
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         background_cmd = self._build_background_tasks_command()

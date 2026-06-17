@@ -12,13 +12,14 @@ from typing import Any
 
 import pluggy
 import pytest
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
@@ -29,6 +30,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -43,6 +45,8 @@ from imbue.mngr_pi_coding.plugin import _inbox_append_command
 from imbue.mngr_pi_coding.plugin import _load_resource
 from imbue.mngr_pi_coding.plugin import _read_pi_trust
 from imbue.mngr_pi_coding.plugin import _serialize_pi_trust
+from imbue.mngr_pi_coding.plugin import _waiting_reason
+from imbue.mngr_pi_coding.plugin import agent_field_generators
 from imbue.mngr_pi_coding.plugin import register_agent_aliases
 from imbue.mngr_pi_coding.plugin import register_agent_type
 
@@ -413,7 +417,7 @@ def test_provision_raises_when_pi_not_installed_locally(tmp_path: Path, pi_agent
     options = _make_options()
     mngr_ctx = _make_test_mngr_ctx(tmp_path, is_auto_approve=False)
 
-    with pytest.raises(PluginMngrError, match="pi is not installed"):
+    with pytest.raises(AgentInstallationError, match="pi is not installed"):
         pi_agent.provision(host, options, mngr_ctx)
 
 
@@ -460,7 +464,7 @@ def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent:
         concurrency_group=ConcurrencyGroup(name="test"),
     )
 
-    with pytest.raises(PluginMngrError, match="automatic remote installation is disabled"):
+    with pytest.raises(AgentInstallationError, match="automatic remote installation is disabled"):
         pi_agent.provision(host, options, mngr_ctx)
 
 
@@ -866,3 +870,40 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
 
     dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
     assert not dest_dir.exists()
+
+
+def test_pi_config_defaults_to_unattended() -> None:
+    # pi has no tool-approval gate, so auto_allow_permissions is pinned on.
+    assert PiCodingAgentConfig().auto_allow_permissions is True
+
+
+def test_pi_config_rejects_disabling_auto_allow() -> None:
+    # pi cannot enforce a deny, so explicitly disabling auto-allow is an error
+    # (pydantic wraps the PiAutoAllowRequiredError raised by the field validator).
+    with pytest.raises(ValidationError, match="cannot honor"):
+        PiCodingAgentConfig(auto_allow_permissions=False)
+
+
+def test_agent_field_generators_exposes_pi_waiting_reason() -> None:
+    result = agent_field_generators()
+    assert result is not None
+    plugin_name, generators = result
+    assert plugin_name == "pi-coding"
+    assert "waiting_reason" in generators
+    assert callable(generators["waiting_reason"])
+
+
+def test_pi_waiting_reason_is_end_of_turn_when_idle(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    # No active marker -> the agent is idle, so the (single-value) reason is END_OF_TURN.
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+    assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
+
+
+def test_pi_waiting_reason_is_none_when_active(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    # Active marker present -> the agent is running, so there is no waiting reason.
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    marker = agent._get_agent_dir() / "active"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
+    assert _waiting_reason(agent, agent.host) is None
