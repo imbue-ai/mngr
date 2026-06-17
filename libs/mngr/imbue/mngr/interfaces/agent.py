@@ -678,13 +678,20 @@ class HasVersionManagementMixin(ABC):
     Either by pinning a specific version or by following an update policy (the
     two faces of version control -- not pinning is itself a choice to track
     upstream). CLIs that simply assume whatever binary is on PATH do not have
-    this capability. This contract returns a short label of the instance's
-    version-management intent.
+    this capability. The agent calls ``reconcile_installed_version`` during
+    provisioning (once the binary is present) to enforce that intent: a pinning
+    agent verifies the installed version and raises on mismatch; an update-policy
+    agent runs its (best-effort) update check.
     """
 
     @abstractmethod
-    def get_version_policy(self) -> str:
-        """Return a short label of how this agent instance manages its binary version."""
+    def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        """Enforce this agent's version intent against the already-present binary.
+
+        Called during provisioning after the binary is known to be installed.
+        Pinning agents verify the installed version matches (raising on
+        mismatch); update-policy agents run their (best-effort) update check.
+        """
         ...
 
 

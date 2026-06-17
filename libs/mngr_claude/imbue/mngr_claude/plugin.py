@@ -34,6 +34,7 @@ from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.git import GitignoreStatus
@@ -46,6 +47,7 @@ from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
@@ -1819,55 +1821,12 @@ class ClaudeCoreAgent(
             # Dismiss start dialogs (TUI-only; a no-op on the headless core).
             self._dismiss_start_dialogs(host, options, mngr_ctx)
 
-            # Ensure claude is installed (and at the right version if pinned)
+            # Ensure claude is installed via the shared helper (consent-gated locally,
+            # config-gated remotely; claude's get_install_command pins the version),
+            # then reconcile the present binary's version against any pin.
             if config.check_installation:
-                is_installed = _check_claude_installed(host)
-                if is_installed:
-                    logger.debug("Claude is already installed on the host")
-                    # If version is pinned, verify the installed version matches
-                    if config.version is not None:
-                        installed_version = _get_claude_version(host)
-                        if installed_version != config.version:
-                            raise PluginMngrError(
-                                f"Claude version mismatch: installed version is {installed_version!r}, "
-                                f"but agent config pins version {config.version!r}. "
-                                "Re-install claude with the correct version or update the pinned version in your agent config."
-                            )
-                        logger.debug("Claude version {} matches pinned version", installed_version)
-                else:
-                    logger.warning("Claude is not installed on the host")
-                    install_hint = _build_install_command_hint(config.version)
-
-                    if host.is_local:
-                        # For local hosts, auto-approve or prompt the user for consent
-                        if mngr_ctx.is_auto_approve:
-                            logger.debug("Auto-approving claude installation (--yes)")
-                        elif mngr_ctx.is_interactive:
-                            if _prompt_user_for_installation(config.version):
-                                logger.debug("User consented to install claude locally")
-                            else:
-                                raise PluginMngrError(
-                                    f"Claude is not installed. Please install it manually with:\n  {install_hint}"
-                                )
-                        else:
-                            # Non-interactive mode: fail with a clear message
-                            raise PluginMngrError(
-                                f"Claude is not installed. Please install it manually with:\n  {install_hint}"
-                            )
-                    else:
-                        if not mngr_ctx.config.is_remote_agent_installation_allowed:
-                            raise PluginMngrError(
-                                "Claude is not installed on the remote host and automatic remote installation is disabled. "
-                                "Set is_remote_agent_installation_allowed = true in your mngr config to enable automatic installation, "
-                                "or install Claude manually on the remote host."
-                            )
-                        else:
-                            logger.debug("Automatic remote agent installation is enabled, proceeding")
-
-                    # Install claude
-                    logger.info("Installing claude...")
-                    _install_claude(host, config.version)
-                    logger.info("Claude installed successfully")
+                ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
+                self.reconcile_installed_version(host, mngr_ctx)
 
             # no matter what, *always* dismiss the cost popup, it's pointless.
             # Skipped in shared mode -- mngr never writes to the user's config.
@@ -1937,9 +1896,25 @@ class ClaudeCoreAgent(
     def is_unattended_enabled(self) -> bool:
         return self.agent_config.auto_allow_permissions
 
-    def get_version_policy(self) -> str:
-        # claude pins a specific version when set, otherwise follows its own auto-update.
-        return self.agent_config.version or "auto-update"
+    def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        """Verify the installed claude matches the pinned version, if one is set.
+
+        claude pins a specific version when ``config.version`` is set, otherwise it
+        follows its own auto-update (nothing to enforce). With a pin, the installed
+        binary must match -- a mismatch means the wrong version is on PATH, which the
+        user must resolve (re-install or update the pin).
+        """
+        pinned_version = self.agent_config.version
+        if pinned_version is None:
+            return
+        installed_version = _get_claude_version(host)
+        if installed_version != pinned_version:
+            raise AgentInstallationError(
+                f"Claude version mismatch: installed version is {installed_version!r}, "
+                f"but agent config pins version {pinned_version!r}. "
+                "Re-install claude with the correct version or update the pinned version in your agent config."
+            )
+        logger.debug("Claude version {} matches pinned version", installed_version)
 
     def get_install_binary_name(self) -> str:
         return "claude"

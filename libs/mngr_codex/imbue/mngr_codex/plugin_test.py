@@ -20,6 +20,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -141,11 +142,22 @@ def test_get_permission_policy_includes_approval_policy_override() -> None:
     assert policy["approval_policy"] == "never"
 
 
-def test_get_version_policy_returns_update_policy_label() -> None:
-    ask = CodexAgent.model_construct(agent_config=CodexAgentConfig(update_policy=CodexUpdatePolicy.ASK))
-    auto = CodexAgent.model_construct(agent_config=CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO))
-    assert ask.get_version_policy() == "ASK"
-    assert auto.get_version_policy() == "AUTO"
+def test_reconcile_installed_version_delegates_to_update_check() -> None:
+    # codex's version reconciliation IS its update check: reconcile resolves the codex
+    # home and runs _maybe_check_for_codex_update against it. (The update decision logic
+    # itself is covered by the _read_codex_versions-override tests below.)
+    recorded: dict[str, object] = {}
+
+    class _RecordingAgent(CodexAgent):
+        def _resolve_user_codex_home(self, host: object) -> Path:
+            return Path("/sentinel/codex-home")
+
+        def _maybe_check_for_codex_update(self, host: object, user_codex_home: Path, mngr_ctx: object) -> None:
+            recorded["home"] = user_codex_home
+
+    agent = _RecordingAgent.model_construct(agent_config=CodexAgentConfig())
+    agent.reconcile_installed_version(cast(OnlineHostInterface, object()), cast(MngrContext, object()))
+    assert recorded["home"] == Path("/sentinel/codex-home")
 
 
 class _StubHost(FakeHost):
