@@ -31,6 +31,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
@@ -1057,6 +1058,67 @@ def test_tui_ready_indicator_is_claude_code(
     """ClaudeAgent inherits InteractiveTuiAgent's TUI_READY_INDICATOR class var."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     assert agent.get_tui_ready_indicator() == "Claude Code"
+
+
+def test_wait_until_ready_for_input_returns_immediately_when_marker_present(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """When the session_started marker exists, the send-gate returns at once without scraping the pane.
+
+    This is the common case (an already-running agent, including one mid-turn
+    whose welcome banner has scrolled off-screen): the hook-emitted marker
+    persists for the whole session, so the gate is a single file check and adds
+    no perceptible latency. It must NOT fall back to reading the tmux pane.
+    """
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+    (agent._get_agent_dir() / "session_started").touch()
+
+    def _fail_if_pane_scraped(*args: object, **kwargs: object) -> str | None:
+        raise AssertionError("readiness gate must not scrape the tmux pane")
+
+    with patch.object(ClaudeAgent, "_capture_pane_content", side_effect=_fail_if_pane_scraped):
+        assert agent.wait_until_ready_for_input(timeout=5.0) is None
+
+
+def test_wait_until_ready_for_input_raises_on_timeout_when_marker_absent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """With no session_started marker, the gate times out and raises SendMessageError.
+
+    SendMessageError is the MngrError subclass that the message-send callers
+    already handle, so a not-ready agent surfaces as a normal send failure.
+    """
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(SendMessageError):
+        agent.wait_until_ready_for_input(timeout=0.2)
+
+
+def test_wait_until_ready_for_input_proceeds_once_marker_appears(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A send during a restart blocks only until the new session re-touches the marker, then proceeds.
+
+    The readiness predicate is False while the new session boots and becomes True
+    once its SessionStart hook fires; the gate must poll until then and return.
+    """
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    readiness_results = iter([False, False, True])
+
+    def _becomes_ready() -> bool:
+        try:
+            return next(readiness_results)
+        except StopIteration:
+            return True
+
+    with patch.object(ClaudeAgent, "_is_ready_for_input", side_effect=_becomes_ready) as ready_probe:
+        assert agent.wait_until_ready_for_input(timeout=5.0) is None
+
+    # It polled until the marker appeared rather than giving up on the first miss.
+    assert ready_probe.call_count >= 3
 
 
 @pytest.mark.skipif(
