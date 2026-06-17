@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
-from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -14,44 +13,32 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import SnapshotInfo
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SnapshotId
-from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
-from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
-from imbue.mngr_vps_docker.container_setup import host_volume_name_for
-from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -84,73 +71,6 @@ _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
 # The ``Name`` tag is set to ``mngr-<host_name>`` at launch; strip the prefix to
 # recover the host name when reconstructing a stopped host from tags.
 _HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
-
-# Self-stopping idle watcher (host-side). The in-container activity watcher
-# writes ``IDLE_SENTINEL_FILENAME`` into the host_dir/commands directory on the
-# shared volume when the host goes idle; a host-side systemd ``.path`` unit
-# (``IDLE_WATCHER_UNIT_NAME``) watches the corresponding outer-filesystem path
-# and triggers a oneshot ``.service`` that powers the instance off
-# (``shutdown -P now``). EC2 then applies the instance's
-# ``InstanceInitiatedShutdownBehavior`` -- ``stop`` (resumable idle-pause, the
-# default) or ``terminate`` -- so no IAM role or awscli is needed on the box.
-# See the README "Implementation details".
-IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-aws-idle-watcher"
-IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
-
-
-def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
-    """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
-
-    Unlike the base ``VpsDockerProvider`` shutdown script (which runs
-    ``kill -TERM 1`` to stop the container), the AWS variant only *signals*
-    that the host is idle: it touches a sentinel file on the shared volume.
-    The host-side systemd path unit observes that file and powers the whole
-    EC2 instance off (a container cannot power off its host, so the signal has
-    to cross the container boundary via the shared volume).
-    """
-    return f'#!/bin/bash\ntouch "{sentinel_in_container}"\n'
-
-
-def _build_idle_watcher_path_unit(sentinel_on_outer: str) -> str:
-    """Build the systemd ``.path`` unit that fires when the idle sentinel appears.
-
-    ``PathExists`` triggers the paired ``.service`` once the sentinel file
-    exists at ``sentinel_on_outer`` (the outer-filesystem location the
-    container's sentinel write maps to on the per-host btrfs subvolume).
-    """
-    return (
-        "[Unit]\n"
-        "Description=Watch for the mngr idle sentinel and stop this EC2 instance when idle\n"
-        "[Path]\n"
-        f"PathExists={sentinel_on_outer}\n"
-        f"Unit={IDLE_WATCHER_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-
-
-def _build_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
-    """Build the oneshot systemd ``.service`` that powers the host off when idle.
-
-    Powers the instance off with ``shutdown -P now``; EC2 then applies the
-    instance's ``InstanceInitiatedShutdownBehavior`` (``stop`` for resumable
-    idle-pause -- the default -- or ``terminate`` for ephemeral hosts), so no IAM
-    role or awscli is involved.
-
-    It removes the sentinel file BEFORE powering off. This is what makes resume
-    work: when ``mngr start`` boots the instance again, systemd re-arms the
-    ``.path`` unit -- if the sentinel were still present it would fire
-    immediately and re-power-off the just-resumed instance. Clearing it first
-    guarantees a clean slate on the next boot (the in-container watcher only
-    re-creates it if the host is idle again).
-    """
-    return (
-        "[Unit]\n"
-        "Description=Power off this instance when mngr signals the host is idle\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && shutdown -P now'\n"
-    )
 
 
 class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
@@ -185,7 +105,7 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AwsProvider(VpsDockerProvider):
+class AwsProvider(OfflineCapableVpsDockerProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -344,292 +264,22 @@ class AwsProvider(VpsDockerProvider):
         return vps_ips
 
     # =========================================================================
-    # Native EC2 stop/start (idle-pause + resume)
+    # Native EC2 stop/start + idle-watcher hooks (for OfflineCapableVpsDockerProvider)
     # =========================================================================
 
-    def stop_host(
-        self,
-        host: HostInterface | HostId,
-        create_snapshot: bool = True,
-        timeout_seconds: float = 60.0,
-        stop_reason: HostState | None = None,
-    ) -> None:
-        """Stop the agent container *and* the EC2 instance, preserving the EBS volume.
-
-        The base ``VpsDockerProvider.stop_host`` only stops the inner Docker
-        container, leaving the EC2 instance running and billing. This override
-        additionally calls ``ec2 stop-instances`` so a paused AWS agent costs
-        only EBS storage; the root volume (and all on-disk state) survives, so
-        ``start_host`` can resume it.
-
-        ``create_snapshot`` is intentionally ignored -- native EC2 stop preserves
-        the whole filesystem, so the base's docker-commit snapshot would be
-        redundant. The base container-stop + record-write is reused via ``super()``,
-        passing ``stop_reason=STOPPED`` so that single write marks the host STOPPED
-        (so the offline-state derivation reports STOPPED, not CRASHED, while the
-        instance is down) -- no second record write is needed. The write lands
-        before the instance stops, since the volume is unreachable once it does.
-        """
-        del create_snapshot
-        host_id = host.id if isinstance(host, HostInterface) else host
-        host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(self.name, host_id)
-        super().stop_host(
-            host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
-        )
+    def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
+        """Stop the EC2 instance; the EBS root volume and all on-disk state survive."""
         with log_span("Stopping EC2 instance"):
-            self.aws_client.stop_instance(host_record.config.vps_instance_id)
+            self.aws_client.stop_instance(instance_id)
 
-    def start_host(
-        self,
-        host: HostInterface | HostId,
-        snapshot_id: SnapshotId | None = None,
-    ) -> Host:
-        """Resume a stopped AWS agent: start the EC2 instance, then its container.
-
-        A stopped EC2 instance is not SSH-reachable and has no public IP, so it
-        is located by its ``mngr-host-id`` tag (not the SSH-based host-record
-        lookup), started, and its fresh public IP read back. The instance keeps
-        its SSH host keys across a stop/start (they live on the EBS volume), so
-        we re-point known_hosts at the new IP and rewrite the persisted record's
-        ``vps_ip`` before delegating the container start to ``super()`` (whose
-        ``_find_host_record`` reads our refreshed cache entry, so no stale
-        rediscovery is needed).
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            raise HostNotFoundError(self.name, host_id)
-        instance_id = VpsInstanceId(instance["id"])
+    def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
+        """Start the EC2 instance and return its fresh public IP (a stop/start reassigns it)."""
         with log_span("Starting EC2 instance"):
-            new_ip = self.aws_client.start_instance(instance_id)
-        # The cached instance list predates the start (stale state / no public
-        # IP); drop it so any later discovery sees the running instance + new IP.
-        self._instances_cache = None
-        # Rebind known_hosts to the new IP from mngr's local host keypairs BEFORE
-        # connecting -- the instance kept its host keys across the stop/start, but
-        # the IP changed, and the record (the other key source) can't be read
-        # until we can SSH in. The local keypairs are what was injected at create,
-        # so they match what the resumed instance presents.
-        self._rebind_known_hosts_pre_connect(new_ip)
-        with log_span("Waiting for VPS SSH after start"):
-            self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
-        with self._make_outer_for_vps_ip(new_ip) as outer:
-            host_store = open_host_store(outer, host_volume_name_for(host_id))
-            record = host_store.read_host_record()
-            if record is None or record.config is None:
-                raise HostNotFoundError(self.name, host_id)
-            self._rebind_known_hosts(record, new_ip)
-            # Clear any stale idle sentinel so the freshly-resumed instance isn't
-            # immediately re-stopped by the systemd path unit (belt-and-suspenders;
-            # the self-stop service also removes it when it fires).
-            outer.execute_idempotent_command(f"rm -f {self._idle_sentinel_path_on_outer(host_id)}")
-            certified = record.certified_host_data
-            updated_data = certified.model_copy_update(
-                to_update(certified.field_ref().stop_reason, None),
-                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
-            )
-            updated_record = record.model_copy_update(
-                to_update(record.field_ref().vps_ip, new_ip),
-                to_update(record.field_ref().certified_host_data, updated_data),
-            )
-            host_store.write_host_record(updated_record)
-        # Drop any cached Host bound to the old IP, then seed the record cache so
-        # super().start_host()'s _find_host_record returns the rebound record.
-        self._evict_cached_host(host_id)
-        self._host_record_cache[host_id] = updated_record
-        started = super().start_host(host_id, snapshot_id)
-        # The base ``start_host`` (called above) relaunches the in-container
-        # activity watcher and refreshes BOOT activity on resume, so auto-stop-on-
-        # idle keeps working across resumes without an AWS-specific step here.
-        return started
+            return self.aws_client.start_instance(instance_id)
 
-    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
-        """Locate this host's EC2 instance by its ``mngr-host-id`` tag (works while stopped).
-
-        Unlike ``_find_host_record`` (which SSHes into the VPS), this reads only
-        EC2 ``DescribeInstances`` tags, so it resolves an instance that is
-        stopped and therefore unreachable over SSH. ``list_instances`` already
-        filters out terminated instances, so a destroyed host returns ``None``.
-
-        Refuses (raises) when more than one non-terminated instance carries the
-        same ``mngr-host-id`` tag. ``mngr-host-id`` is meant to be unique, but the
-        tag is account-writable, so a duplicate could otherwise silently steer
-        ``mngr start`` (and the agent-tag writes keyed off this lookup) onto the
-        wrong instance; failing loudly is safer than acting on an ambiguous match.
-        """
-        matches = self._instances_matching_host_id(host_id)
-        if not matches:
-            # Not in the (possibly stale) cached list. During `mngr create` the
-            # cache can be populated -- e.g. by an earlier discovery/name-conflict
-            # check -- before the new instance exists, so `persist_agent_data` for
-            # the new agent would miss it. Refresh once and retry before giving up.
-            self._instances_cache = None
-            matches = self._instances_matching_host_id(host_id)
-        if len(matches) > 1:
-            ids = sorted(str(m.get("id")) for m in matches)
-            raise MngrError(
-                f"AWS provider {self.name!r}: {len(matches)} non-terminated EC2 instances are tagged "
-                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
-                "Resolve the duplicate tags (or terminate the stray instance) and retry."
-            )
-        return matches[0] if matches else None
-
-    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Return every cached non-terminated instance tagged ``mngr-host-id=<host_id>``."""
-        wanted_tag = f"mngr-host-id={host_id}"
-        return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
-
-    def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
-        """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
-
-        EC2 stop/start keeps the instance's SSH host keys, so only the IP
-        changes. Drop any stale entries for the old IP, then add the new IP with
-        the recorded VPS (port 22) and container host keys.
-        """
-        old_ip = record.vps_ip
-        if old_ip is not None and old_ip != new_ip:
-            remove_host_from_known_hosts(self._vps_known_hosts_path(), old_ip, 22)
-            remove_host_from_known_hosts(self._container_known_hosts_path(), old_ip, self.config.container_ssh_port)
-        if record.ssh_host_public_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path=self._vps_known_hosts_path(),
-                hostname=new_ip,
-                port=22,
-                public_key=record.ssh_host_public_key,
-            )
-        if record.container_ssh_host_public_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path=self._container_known_hosts_path(),
-                hostname=new_ip,
-                port=self.config.container_ssh_port,
-                public_key=record.container_ssh_host_public_key,
-            )
-
-    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
-        """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
-
-        Runs on resume *before* any SSH connection (the host record, the other key
-        source, can't be read until we can connect). The VPS/container host
-        keypairs are generated and held locally by mngr -- per provider instance,
-        in ``_key_dir()`` -- and injected into the instance at create time, so the
-        public keys here are exactly the ones the resumed instance presents.
-        Sourcing them locally (rather than from EC2 tags, which any principal with
-        ``ec2:CreateTags`` could rewrite) keeps SSH host-key verification anchored
-        to data mngr controls, not to account-writable instance metadata.
-        """
-        add_host_to_known_hosts(
-            known_hosts_path=self._vps_known_hosts_path(),
-            hostname=new_ip,
-            port=22,
-            public_key=self._get_vps_host_keypair()[1],
-        )
-        add_host_to_known_hosts(
-            known_hosts_path=self._container_known_hosts_path(),
-            hostname=new_ip,
-            port=self.config.container_ssh_port,
-            public_key=self._get_container_host_keypair()[1],
-        )
-
-    # =========================================================================
-    # Self-stopping idle watcher (in-container sentinel + host-side systemd)
-    # =========================================================================
-
-    def _create_shutdown_script(self, host: Host) -> None:
-        """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
-
-        The base ``VpsDockerProvider._create_shutdown_script`` writes a script
-        that runs ``kill -TERM 1`` to stop the container on idle. For AWS, an
-        idle container should stop the whole *instance* (so a paused agent costs
-        only EBS), but a container cannot power off its host. Instead, the
-        in-container watcher touches a sentinel file on the shared volume; a
-        host-side systemd path unit (installed in ``_on_host_finalized``) observes
-        it and powers the host off (EC2 then stops or terminates per
-        ``InstanceInitiatedShutdownBehavior``). Mirrors the base's
-        mkdir/write/chmod, swapping only the script body.
-        """
-        sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
-        shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
-
-    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the host-side systemd idle watcher that self-stops this instance.
-
-        Runs after the host record is durably written. Installs (on the outer
-        host) a systemd ``.path``/``.service`` pair: the path unit watches the
-        outer-filesystem location of the in-container idle sentinel and, when it
-        appears, the oneshot service powers the host off -- EC2 then stops or
-        terminates the instance per ``InstanceInitiatedShutdownBehavior`` (no IAM
-        or awscli needed).
-
-        This is best-effort: per the base-class contract, it MUST NOT raise.
-        Any failure (record lookup, SSH, unit install) is caught and logged at
-        WARNING; the only consequence is that the agent will not auto-stop on
-        idle (manual ``mngr stop --stop-host`` still works).
-        """
-        try:
-            self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            # The install only issues SSH / file-write / command operations, which
-            # surface as MngrError (HostConnectionError is a MngrError subclass);
-            # a failure just means no auto-stop on idle, so log and move on rather
-            # than fail create_host after the host record is already durable.
-            logger.warning(
-                "AWS idle watcher install failed for host {} ({}); the agent will not "
-                "auto-stop on idle, but `mngr stop --stop-host` still works",
-                host_id,
-                e,
-            )
-
-    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the systemd path/service idle watcher on the outer host.
-
-        Separated from ``_on_host_finalized`` so the no-raise wrapping stays a
-        thin try/except. Returns early (after a WARNING) when the host record is
-        missing. The watcher powers the host off when the in-container idle
-        sentinel appears; EC2's ``InstanceInitiatedShutdownBehavior`` decides
-        stop-vs-terminate, so no awscli or IAM is involved.
-        """
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            logger.warning(
-                "AWS idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
-                host_id,
-            )
-            return
-        sentinel_on_outer = self._idle_sentinel_path_on_outer(host_id)
-        with log_span("Installing AWS idle self-stop watcher"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.path"),
-                    _build_idle_watcher_path_unit(str(sentinel_on_outer)),
-                )
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
-                    _build_idle_watcher_service_unit(str(sentinel_on_outer)),
-                )
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
-        logger.info("AWS idle self-stop watcher installed for host {}", host_id)
-
-    def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of the in-container idle sentinel for this host.
-
-        The container writes the sentinel at ``<host_dir>/commands/<file>`` on the
-        shared volume; on the outer host that maps to
-        ``<btrfs_mount_path>/<host_id_hex>/host_dir/commands/<file>``.
-        """
-        return (
-            self.config.btrfs_mount_path
-            / host_id.get_uuid().hex
-            / HOST_DIR_SUBPATH
-            / "commands"
-            / IDLE_SENTINEL_FILENAME
-        )
+    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
+        """Idle action: power the host off; EC2 then applies InstanceInitiatedShutdownBehavior."""
+        return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
 
     # =========================================================================
     # Offline metadata via EC2 tags (so STOPPED hosts list + resolve by name)
@@ -706,116 +356,16 @@ class AwsProvider(VpsDockerProvider):
         keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
         self.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
-    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the host's persisted agent records, on-volume when reachable else from tags.
+    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
+        """Whether the EC2 instance's OS is down (stopping or stopped).
 
-        For a *running* host the base reads the authoritative on-volume records
-        (full agent data); for a *stopped* host the base raises
-        ``HostNotFoundError`` (the volume is unreadable), so we fall back to the
-        compact records mirrored into EC2 tags (returned by ``DescribeInstances``
-        regardless of instance state).
+        EC2 power state rides along for free in the ``DescribeInstances`` listing,
+        so this needs no extra call. Gate on state, not ``main_ip`` -- a
+        ``stopping`` instance can still report a public IP while its OS is already
+        off, and gating on the IP would make the host vanish for the (seconds-long)
+        stop transition.
         """
-        try:
-            return super().list_persisted_agent_data_for_host(host_id)
-        except HostNotFoundError:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return []
-            return self._persisted_agent_dicts_from_instance(instance)
-
-    def discover_hosts_and_agents(
-        self,
-        cg: ConcurrencyGroup,
-        include_destroyed: bool = False,
-    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Add STOPPED instances (which the SSH-based base discovery misses) from tags.
-
-        The base discovery reaches hosts over SSH via their public IP, so a
-        stopped instance (no IP) is invisible. Here we reconstruct those hosts
-        and their agents from EC2 tags so they still appear in ``mngr list`` and
-        resolve for ``mngr start``.
-        """
-        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
-        online_host_ids = {ref.host_id for ref in result}
-        for instance in self._list_instances_cached():
-            # Reconstruct hosts whose instance is stopping or fully stopped: the OS
-            # is down, so the SSH-based sweep above can't reach them. Gate on state,
-            # not main_ip -- a `stopping` instance can still report a public IP while
-            # its OS is already off, and gating on main_ip would make the host vanish
-            # for the (seconds-long) stop transition. A genuinely-reachable host
-            # lands in online_host_ids and is deduped just below, so a running host
-            # is never double-listed here.
-            if instance.get("state") not in _HOST_DOWN_STATES:
-                continue
-            try:
-                host_ref = self._discovered_host_from_tags(instance)
-            except ValueError as e:
-                # A corrupted / externally-edited mngr-host-id or Name tag yields an
-                # invalid HostId/HostName (both ValueError subclasses). Skip just
-                # this instance rather than letting one bad tag abort offline
-                # discovery for every other stopped host in the account.
-                logger.opt(exception=e).warning(
-                    "Skipping instance {} in offline discovery: malformed mngr host tag(s)",
-                    instance.get("id"),
-                )
-                continue
-            if host_ref is None or host_ref.host_id in online_host_ids:
-                continue
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_data in self._persisted_agent_dicts_from_instance(instance):
-                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
-                if ref is not None:
-                    agent_refs.append(ref)
-            result[host_ref] = agent_refs
-        return result
-
-    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
-        """Return [] for a stopped host instead of raising.
-
-        ``OfflineHost.get_state`` calls ``get_snapshots`` (-> ``list_snapshots``)
-        while deriving state. The base reads the snapshot list from the on-volume
-        host record, which is unreadable while the instance is stopped, so it
-        raises ``HostNotFoundError``. AWS has no EBS-snapshot lifecycle and a
-        stopped host's docker-commit snapshots (if any) live on that unreadable
-        volume, so a stopped host simply has no visible snapshots.
-        """
-        try:
-            return super().list_snapshots(host)
-        except HostNotFoundError:
-            return []
-
-    def get_host(self, host: HostId | HostName) -> HostInterface:
-        """Resolve a host, falling back to the tag-based offline host when stopped.
-
-        The base ``get_host`` reads the host record over SSH, so a stopped
-        instance (no public IP, unreachable) raises ``HostNotFoundError``.
-        ``mngr start`` calls ``get_host`` directly, so without this a paused host
-        could not be resumed by name. Recover by reconstructing the offline host
-        from EC2 tags. Only the ``HostId`` form is recovered (the resume path
-        passes a HostId); a bare ``HostName`` for a stopped host still surfaces
-        via discovery, so name resolution does not depend on this.
-        """
-        try:
-            return super().get_host(host)
-        except HostNotFoundError:
-            if isinstance(host, HostId):
-                return self.to_offline_host(host)
-            raise
-
-    def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a STOPPED instance's record from tags.
-
-        Falls back to the base (SSH/volume-backed) path first; if that can't find
-        the host (because it is stopped and unreachable), rebuild a minimal
-        ``CertifiedHostData`` from EC2 tags so the offline host is still usable.
-        """
-        try:
-            return super().to_offline_host(host_id)
-        except HostNotFoundError:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                raise
-            return self._offline_host_from_tags(host_id, instance)
+        return instance.get("state") in _HOST_DOWN_STATES
 
     def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
         """Render one agent field as a tag-value string, or ``None`` if absent/empty.
@@ -919,7 +469,7 @@ class AwsProvider(VpsDockerProvider):
             return HostName(name_tag)
         return HostName(tags.get("mngr-host-id", "unknown"))
 
-    def _discovered_host_from_tags(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED-state DiscoveredHost from an instance's tags, or None if not a mngr host."""
         tags = self._tag_dict_from_normalized(instance)
         host_id_str = tags.get("mngr-host-id")
@@ -932,7 +482,7 @@ class AwsProvider(VpsDockerProvider):
             host_state=HostState.STOPPED,
         )
 
-    def _offline_host_from_tags(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
         """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
         tags = self._tag_dict_from_normalized(instance)
         created_at_raw = tags.get("mngr-created-at")
