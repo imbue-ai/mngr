@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [list|ls] [OPTIONS]
+mngr [list|ls] [--stdin] [--schema] [--ids] [--addrs] [--fields FIELDS] [--sort CEL] [--include CEL] [--exclude CEL] [--provider PROVIDER] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT] [--limit N] [--on-error MODE]
 ```
 
 List all agents managed by mngr.

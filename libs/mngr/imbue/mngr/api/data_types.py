@@ -8,6 +8,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import LogFileInfo
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.data_types import WorkDirInfo
@@ -61,6 +62,9 @@ class GcResourceTypes(FrozenModel):
     is_work_dirs: bool = Field(default=False, description="Clean orphaned work directories")
     is_logs: bool = Field(default=False, description="Clean old log files")
     is_build_cache: bool = Field(default=False, description="Clean build cache entries")
+    is_provider_resources: bool = Field(
+        default=False, description="Clean orphaned provider-level cloud resources (e.g. Azure NICs/public IPs)"
+    )
 
 
 class GcResult(MutableModel):
@@ -104,6 +108,10 @@ class GcResult(MutableModel):
     build_cache_destroyed: list[BuildCacheInfo] = Field(
         default_factory=list,
         description="Build cache entries that were destroyed",
+    )
+    provider_resources_destroyed: list[ProviderResourceInfo] = Field(
+        default_factory=list,
+        description="Orphaned provider-level cloud resources (e.g. Azure NICs/public IPs) that were reclaimed",
     )
     failures: list[CleanupFailure] = Field(
         default_factory=list,

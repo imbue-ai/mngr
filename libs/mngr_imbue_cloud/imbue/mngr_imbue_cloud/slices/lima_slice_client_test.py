@@ -1,0 +1,106 @@
+import pytest
+
+from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.lima_slice_client import parse_listening_ports
+from imbue.mngr_lima.errors import LimaCommandError
+from imbue.mngr_vps.primitives import VpsInstanceId
+
+# Note: provision_slice_vm / destroy_instance / get_instance_status drive limactl
+# over SSH against a real box and are exercised by the live slice smoke test, not
+# here. These unit tests pin the parts that need no box: the interface contract,
+# the SSH command construction, and the listening-port parsing.
+
+
+def _client() -> LimaSliceVpsClient:
+    return LimaSliceVpsClient(box_address="box.example", box_ssh_user="limahost", private_key_path="/tmp/id")
+
+
+def test_cloud_only_operations_raise_not_implemented() -> None:
+    client = _client()
+    with pytest.raises(NotImplementedError):
+        client.create_instance("label", "region", "plan", "", (), {})
+    with pytest.raises(NotImplementedError):
+        client.upload_ssh_key("name", "ssh-ed25519 AAAA")
+
+
+def test_get_instance_ip_is_the_box_address() -> None:
+    # The slice's sshd is forwarded on the box's interface, so external consumers
+    # (and the laptop-side bake) reach it at the box's address, not loopback.
+    client = _client()
+    assert client.get_instance_ip(VpsInstanceId("mngr-slice-x")) == "box.example"
+
+
+def test_box_ssh_command_targets_the_lima_user_with_the_pool_key() -> None:
+    client = _client()
+    command = client._box_ssh_command("limactl list --json")
+    assert command[0] == "ssh"
+    assert "-i" in command and "/tmp/id" in command
+    assert "limahost@box.example" in command
+    # The remote command is the last arg, prefixed with an explicit PATH so a
+    # non-login shell still finds limactl (extracted to /usr/local/bin by prep).
+    assert command[-1].endswith("limactl list --json")
+    assert "/usr/local/bin" in command[-1]
+
+
+def test_box_ssh_command_requires_a_private_key() -> None:
+    client = LimaSliceVpsClient(box_address="box.example", box_ssh_user="limahost", private_key_path=None)
+    with pytest.raises(LimaCommandError):
+        client._box_ssh_command("limactl list --json")
+
+
+class _RecordingClient(LimaSliceVpsClient):
+    """LimaSliceVpsClient whose box SSH is replaced by a scripted command recorder.
+
+    Lets the teardown logic be unit-tested without a real box: each remote command
+    returns the (returncode, stdout, stderr) the test scripts by substring.
+    """
+
+    scripted_responses: dict[str, tuple[int | None, str, str]] = {}
+    recorded_commands: list[str] = []
+
+    def _run_on_box(
+        self, remote_command: str, *, timeout: float, label: str, is_streaming: bool = False
+    ) -> tuple[int | None, str, str]:
+        self.recorded_commands.append(remote_command)
+        for substring, response in self.scripted_responses.items():
+            if substring in remote_command:
+                return response
+        return 0, "", ""
+
+
+def _recording_client(scripted_responses: dict[str, tuple[int | None, str, str]]) -> _RecordingClient:
+    return _RecordingClient(
+        box_address="box.example",
+        box_ssh_user="limahost",
+        private_key_path="/tmp/id",
+        scripted_responses=scripted_responses,
+        recorded_commands=[],
+    )
+
+
+def test_destroy_instance_deletes_disk_when_instance_already_absent() -> None:
+    # A carve can fail after the disk was created but before the VM was registered.
+    # `limactl delete` then fails ("not found"), but the disk MUST still be deleted
+    # so the box slot's data area is not leaked.
+    client = _recording_client({"limactl delete": (1, "", "instance not found")})
+    client.destroy_instance(VpsInstanceId("mngr-slice-abc"))
+    recorded = client.recorded_commands
+    assert any("limactl delete --force" in cmd for cmd in recorded)
+    assert any("limactl disk delete --force" in cmd and "mngr-slice-abc-data" in cmd for cmd in recorded)
+
+
+def test_destroy_instance_raises_on_genuine_delete_failure() -> None:
+    client = _recording_client({"limactl delete": (1, "", "permission denied")})
+    with pytest.raises(LimaCommandError):
+        client.destroy_instance(VpsInstanceId("mngr-slice-abc"))
+
+
+def test_parse_listening_ports_extracts_ipv4_ipv6_and_wildcard() -> None:
+    ss_output = (
+        "LISTEN 0      128          0.0.0.0:22         0.0.0.0:*\n"
+        "LISTEN 0      128             [::]:22            [::]:*\n"
+        "LISTEN 0      128       127.0.0.1:5432       0.0.0.0:*\n"
+        "LISTEN 0      128                *:22001              *:*\n"
+        "garbage line with too few fields\n"
+    )
+    assert parse_listening_ports(ss_output) == {22, 5432, 22001}

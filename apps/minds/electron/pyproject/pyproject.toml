@@ -13,6 +13,7 @@ requires-python = "==3.12.13"
 dependencies = [
     "minds>=0.1.0",
     "imbue-mngr>=0.2.0",
+    "imbue-mngr-aws>=0.1.0",
     "imbue-mngr-claude>=0.2.0",
     "imbue-mngr-forward>=0.1.0",
     "imbue-mngr-imbue-cloud>=0.1.0",
@@ -20,7 +21,7 @@ dependencies = [
     "imbue-mngr-lima>=0.1.0",
     "imbue-mngr-modal>=0.2.0",
     "imbue-mngr-ovh>=0.1.0",
-    "imbue-mngr-vps-docker>=0.1.0",
+    "imbue-mngr-vps>=0.1.0",
     "imbue-common>=0.1.0",
     "concurrency-group>=0.1.0",
     "resource-guards>=0.1.0",
@@ -38,6 +39,7 @@ exclude-newer = "14 days"
 [tool.uv.sources]
 minds = { path = "../../../../apps/minds", editable = true }
 imbue-mngr = { path = "../../../../libs/mngr", editable = true }
+imbue-mngr-aws = { path = "../../../../libs/mngr_aws", editable = true }
 imbue-mngr-claude = { path = "../../../../libs/mngr_claude", editable = true }
 imbue-mngr-forward = { path = "../../../../libs/mngr_forward", editable = true }
 imbue-mngr-imbue-cloud = { path = "../../../../libs/mngr_imbue_cloud", editable = true }
@@ -45,7 +47,7 @@ imbue-mngr-latchkey = { path = "../../../../libs/mngr_latchkey", editable = true
 imbue-mngr-lima = { path = "../../../../libs/mngr_lima", editable = true }
 imbue-mngr-modal = { path = "../../../../libs/mngr_modal", editable = true }
 imbue-mngr-ovh = { path = "../../../../libs/mngr_ovh", editable = true }
-imbue-mngr-vps-docker = { path = "../../../../libs/mngr_vps_docker", editable = true }
+imbue-mngr-vps = { path = "../../../../libs/mngr_vps", editable = true }
 imbue-common = { path = "../../../../libs/imbue_common", editable = true }
 concurrency-group = { path = "../../../../libs/concurrency_group", editable = true }
 resource-guards = { path = "../../../../libs/resource_guards", editable = true }

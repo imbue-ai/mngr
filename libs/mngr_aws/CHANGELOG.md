@@ -6,6 +6,19 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.2] - 2026-06-16
+
+### Changed
+
+- Changed: `mngr aws prepare` and `mngr aws cleanup` now respect `--format`, emitting a structured `{security_group_id, region, created/deleted}` object in `json` mode and a `prepared`/`cleaned_up` event in `jsonl` mode; the `created`/`deleted` booleans let a caller distinguish a first-run create from an idempotent no-op.
+- Changed: Shortened the wide-open-CIDR warning emitted by `mngr aws prepare` with `0.0.0.0/0` ingress (the trailing dev-vs-production advice sentence was dropped).
+
+## [v0.1.1] - 2026-06-15
+
+### Changed
+
+- Changed: `mngr aws prepare` is now read-only-first: when the `mngr-aws` security group already exists with the required SSH ingress, it returns without any write API call. A re-run on an already-prepared region therefore succeeds with a key that only has `ec2:DescribeSecurityGroups`; `ec2:CreateSecurityGroup` / `ec2:AuthorizeSecurityGroupIngress` are only needed when the group or a rule is actually missing. Lets callers safely run `prepare` before every create regardless of the key's privileges.
+
 ## [v0.1.0] - 2026-06-13
 
 ### Added

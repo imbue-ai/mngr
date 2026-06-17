@@ -988,6 +988,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Get resources from the provider."""
         return self.provider_instance.get_host_resources(self)
 
+    def get_outer_ssh_port(self) -> int | None:
+        """Delegate to the provider, which knows whether this host has a distinct outer sshd port."""
+        return self.provider_instance.get_outer_ssh_port(self.id)
+
     def set_tags(self, tags: Mapping[str, str]) -> None:
         """Set tags via the provider and sync to certified data."""
         self.provider_instance.set_host_tags(self, tags)

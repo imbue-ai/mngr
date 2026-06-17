@@ -157,6 +157,19 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
+def test_no_import_layer_violations_mngr_imbue_cloud() -> None:
+    """Ensure mngr_imbue_cloud production code has zero import layer violations.
+
+    Enforces the ``mngr_imbue_cloud layers contract`` (the sub-package layering:
+    plugin > cli > bake > providers > hosts > slices > connector > config >
+    data_types > errors > primitives). See ``test_no_import_layer_violations``
+    for the flaky/timeout rationale.
+    """
+    check_no_import_lint_errors(_REPO_ROOT, contract_name="mngr_imbue_cloud layers contract")
+
+
 @pytest.mark.timeout(60)
 def test_no_type_errors() -> None:
     """Ensure the whole workspace has zero type errors (ty).
@@ -205,6 +218,11 @@ def test_no_ruff_errors() -> None:
         raise AssertionError("\n".join(errors) + "\n" + fix_hint)
 
 
+# Regenerating every command's docs spawns a fresh interpreter with all plugins loaded,
+# which takes several seconds locally and exceeds the default 10s pytest-timeout in the
+# slower offload sandbox (the bare-metal `admin server` + slice commands enlarged the CLI
+# surface). Match the other heavy meta-ratchet tests with a generous timeout.
+@pytest.mark.timeout(60)
 def test_cli_docs_are_up_to_date() -> None:
     """Committed CLI docs and the PyPI README must match scripts/make_cli_docs.py output.
 

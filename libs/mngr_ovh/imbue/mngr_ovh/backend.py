@@ -50,19 +50,19 @@ from imbue.mngr_ovh.pending_orders import write_pending_order_marker
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
-from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import parse_vps_build_args
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
+from imbue.mngr_vps.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.instance import parse_vps_build_args
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 OVH_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("ovh")
 
 _OVH_REBUILD_TASK_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 
-class OvhProvider(VpsDockerProvider):
-    """OVH classic-VPS provider built on top of ``VpsDockerProvider``.
+class OvhProvider(VpsProvider):
+    """OVH classic-VPS provider built on top of ``VpsProvider``.
 
     Implements the provider-specific VPS listing via OVH IAM v2 tags and
     overrides ``_provision_vps`` with OVH's order + rebuild + TOFU flow,
@@ -145,7 +145,7 @@ class OvhProvider(VpsDockerProvider):
     def _provider_state_dir(self) -> Path:
         """``<profile_dir>/providers/<backend>/<instance_name>/`` -- mngr's per-instance state dir.
 
-        Mirrors :meth:`VpsDockerProvider._key_dir` minus the ``keys/``
+        Mirrors :meth:`VpsProvider._key_dir` minus the ``keys/``
         leaf -- this is the dir under which all per-instance state lives
         (SSH keys, pending-order markers, ...).
         """
@@ -475,7 +475,7 @@ class OvhProvider(VpsDockerProvider):
                     # ``_provision_vps`` so a typo / reserved key has
                     # already failed before we got here. Just merge.
                     # ``MNGR_VPS_EXTRA_TAGS`` mirrors the contract
-                    # ``mngr_vps_docker.build_vps_tags`` honors for
+                    # ``mngr_vps.build_vps_tags`` honors for
                     # Vultr-style callers (e.g. the imbue_cloud pool
                     # bake setting ``minds_env=<name>``).
                     all_tags: dict[str, str] = {
@@ -515,7 +515,7 @@ class OvhProvider(VpsDockerProvider):
                 # not for root. TOFU + bootstrap happen as that user;
                 # the bootstrap sudo-copies the key to /root/.ssh so the
                 # rest of the provider (which operates as root via the
-                # base VpsDockerProvider) works without per-call sudos.
+                # base VpsProvider) works without per-call sudos.
                 vps_private_key_path, _ = self._get_vps_ssh_keypair()
                 bootstrap_user = self.ovh_config.bootstrap_ssh_user
                 pin_host_key_via_tofu(
@@ -546,12 +546,12 @@ class OvhProvider(VpsDockerProvider):
                 # the single shared source of truth (``apply_host_setup_on_outer``):
                 # pinned Docker, optional gVisor runsc (gated by
                 # ``install_gvisor_runtime``), sshd tuning, the base packages
-                # mngr_vps_docker needs (rsync/inotify-tools/jq), plus the
+                # mngr_vps needs (rsync/inotify-tools/jq), plus the
                 # OVH-specific qemu purge that disables the hypervisor's
                 # filesystem-freezing automated backups. Runs as the final
                 # outer-bootstrap step (on both the fresh-order and recycle
                 # paths -- the recycle rebuild reinstalls the qemu agent) before
-                # the base VpsDockerProvider takes over. Any failure raises and
+                # the base VpsProvider takes over. Any failure raises and
                 # aborts provisioning, so no half-set-up host is handed back.
                 with self._make_outer_for_vps_ip(service_name) as outer:
                     apply_host_setup_on_outer(

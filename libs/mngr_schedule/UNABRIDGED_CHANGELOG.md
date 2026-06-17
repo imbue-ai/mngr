@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+Marked the `test_schedule_run_local_deployed_trigger` integration test `@pytest.mark.flaky` with a longer per-test timeout. The test executes a deployed trigger's `run.sh`, which shells out to `mngr`; that subprocess startup is slow and variable under CI load and intermittently exceeded the default 10s pytest-timeout. No change to `mngr_schedule` runtime behavior.
+
+## 2026-06-14
+
+- Fixed: `mngr schedule remove` (and the redeploy path that calls it) now passes `--yes` when stopping a schedule's Modal app, so it no longer aborts with "no interactive terminal detected" under newer Modal CLIs when run non-interactively (e.g. from a deploy script).
+
 ## 2026-06-12
 
 Added a `--timezone` option to `mngr schedule add` that pins the IANA timezone

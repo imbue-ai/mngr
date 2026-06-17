@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr"
-version = "0.2.13"
+version = "0.2.15"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.12"
 license = "MIT"
@@ -141,7 +141,7 @@ omit = [
   # thresholds; excluding them from the combined report keeps the
   # combined 80% gate focused on the "main" set of packages and
   # prevents their lower coverage from dragging the combined mean down.
-  "*/mngr_vps_docker/*",
+  "*/mngr_vps/*",
   "*/mngr_vultr/*",
 ]
 

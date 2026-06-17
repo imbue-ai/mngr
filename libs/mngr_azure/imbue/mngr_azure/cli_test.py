@@ -9,22 +9,86 @@ from click.testing import CliRunner
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import AutoToggle
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_azure.backend import AZURE_BACKEND_NAME
+from imbue.mngr_azure.cli import _ensure_state_bucket_best_effort
 from imbue.mngr_azure.cli import _output_cleanup_result
 from imbue.mngr_azure.cli import _output_prepare_result
 from imbue.mngr_azure.cli import _perform_cleanup
+from imbue.mngr_azure.cli import _perform_host_identity_cleanup
+from imbue.mngr_azure.cli import _perform_state_bucket_cleanup
+from imbue.mngr_azure.cli import _provision_host_identity
+from imbue.mngr_azure.cli import _refuse_cleanup_if_vms_exist
 from imbue.mngr_azure.cli import _resolve_provider_config
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
+from imbue.mngr_azure.testing import FakeAuthorizationClient
+from imbue.mngr_azure.testing import FakeBlobStorageBackend
 from imbue.mngr_azure.testing import FakeComputeClient
+from imbue.mngr_azure.testing import FakeManagedServiceIdentityClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
+from imbue.mngr_azure.testing import _StubbedBlobStateBucket
+from imbue.mngr_azure.testing import _StubbedBlobStateHostIdentity
+
+
+def _stubbed_bucket(backend: FakeBlobStorageBackend) -> _StubbedBlobStateBucket:
+    return _StubbedBlobStateBucket(
+        credential=None,
+        subscription_id="sub-123",
+        resource_group="mngr",
+        region="westus",
+        account_name="mngrststateacct1234",
+        fake_backend=backend,
+    )
+
+
+def test_ensure_state_bucket_best_effort_creates_account() -> None:
+    bucket = _stubbed_bucket(FakeBlobStorageBackend())
+    account_name, was_created = _ensure_state_bucket_best_effort(bucket)
+    assert account_name == "mngrststateacct1234"
+    assert was_created is True
+
+
+def test_perform_state_bucket_cleanup_deletes_when_empty() -> None:
+    backend = FakeBlobStorageBackend()
+    bucket = _stubbed_bucket(backend)
+    bucket.ensure_bucket()
+    assert _perform_state_bucket_cleanup(bucket, purge_state=False) == "mngrststateacct1234"
+    assert backend.deleted_account is True
+
+
+def test_perform_state_bucket_cleanup_noop_when_account_absent() -> None:
+    bucket = _stubbed_bucket(FakeBlobStorageBackend())
+    assert _perform_state_bucket_cleanup(bucket, purge_state=False) is None
+
+
+def test_perform_state_bucket_cleanup_refuses_with_host_state() -> None:
+    backend = FakeBlobStorageBackend()
+    bucket = _stubbed_bucket(backend)
+    bucket.ensure_bucket()
+    bucket.write_host_record(HostId.generate(), "{}")
+    with pytest.raises(AzureProviderError, match="still holds offline host state"):
+        _perform_state_bucket_cleanup(bucket, purge_state=False)
+    # Refusal deletes nothing.
+    assert backend.deleted_account is False
+
+
+def test_perform_state_bucket_cleanup_purge_state_deletes_despite_host_state() -> None:
+    """``--purge-state`` deletes the account (and its leftover state) instead of refusing."""
+    backend = FakeBlobStorageBackend()
+    bucket = _stubbed_bucket(backend)
+    bucket.ensure_bucket()
+    bucket.write_host_record(HostId.generate(), "{}")
+    assert _perform_state_bucket_cleanup(bucket, purge_state=True) == "mngrststateacct1234"
+    assert backend.deleted_account is True
 
 
 def _operator_client(
@@ -54,7 +118,7 @@ def test_cleanup_logic_deletes_rg_when_no_vms() -> None:
 def test_cleanup_logic_refuses_when_vms_exist() -> None:
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure"})
+        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure"}, instance_view=None)
     ]
     client = _operator_client(compute=compute)
     with pytest.raises(AzureProviderError, match="Refusing to clean up"):
@@ -65,6 +129,28 @@ def test_cleanup_logic_noop_when_rg_missing() -> None:
     # Resource group get_result left None -> the fake raises 404 -> None returned.
     client = _operator_client()
     assert _perform_cleanup(client) is None
+
+
+def test_refuse_cleanup_if_vms_exist_aborts_before_teardown() -> None:
+    """The VM-exists refusal runs first, so the storage account is never torn down.
+
+    Reproduces the callback ordering: when a VM is still alive, the guard raises
+    before any bucket teardown, so a state account holding host state survives.
+    """
+    compute = FakeComputeClient()
+    compute.virtual_machines.list_result = [
+        SimpleNamespace(name="vm-live", tags={"managed-by": "mngr", "mngr-provider": "azure"}, instance_view=None)
+    ]
+    client = _operator_client(compute=compute)
+    backend = FakeBlobStorageBackend()
+    bucket = _stubbed_bucket(backend)
+    bucket.ensure_bucket()
+    bucket.write_host_record(HostId.generate(), "{}")
+    with pytest.raises(AzureProviderError, match="Refusing to clean up"):
+        _refuse_cleanup_if_vms_exist(client)
+    # The guard raised before any teardown, so the account and its state survive.
+    assert backend.deleted_account is False
+    assert bucket.has_any_host_state() is True
 
 
 def test_prepare_command_help_is_reachable() -> None:
@@ -88,24 +174,40 @@ def test_cleanup_command_help_is_reachable() -> None:
 
 
 def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
-    """HUMAN mode emits one result sentence to stdout (no bare echo line)."""
+    """HUMAN mode emits one result sentence to stdout when the bucket setup is skipped."""
     result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=True)
-    _output_prepare_result(result, OutputFormat.HUMAN)
+    _output_prepare_result(result, None, False, None, OutputFormat.HUMAN)
     assert capsys.readouterr().out == "Prepared Azure resource group mngr in region westus\n"
 
 
+def test_output_prepare_result_human_emits_bucket_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode emits a second line for the state storage account when it was set up."""
+    result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=True)
+    _output_prepare_result(result, "mngrstabc123", True, None, OutputFormat.HUMAN)
+    out = capsys.readouterr().out
+    assert "Prepared Azure resource group mngr in region westus\n" in out
+    assert "Created Azure state storage account mngrstabc123 in region westus\n" in out
+
+
 def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
-    """JSON mode emits a structured object including the created signal."""
+    """JSON mode emits a structured object including the created + state-bucket signals."""
     result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=False)
-    _output_prepare_result(result, OutputFormat.JSON)
+    _output_prepare_result(result, "mngrstabc123", False, "mngrid-mngrstabc123", OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
-    assert payload == {"resource_group": "mngr", "region": "westus", "created": False}
+    assert payload == {
+        "resource_group": "mngr",
+        "region": "westus",
+        "created": False,
+        "state_storage_account_name": "mngrstabc123",
+        "state_bucket_created": False,
+        "host_identity_name": "mngrid-mngrstabc123",
+    }
 
 
 def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
     """JSONL mode emits a ``prepared`` event with the same fields."""
     result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=True)
-    _output_prepare_result(result, OutputFormat.JSONL)
+    _output_prepare_result(result, None, False, None, OutputFormat.JSONL)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["event"] == "prepared"
     assert payload["created"] is True
@@ -114,22 +216,73 @@ def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.Capture
 
 def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=True when a resource group was removed."""
-    _output_cleanup_result("mngr", "sub-123", "westus", OutputFormat.JSON)
+    _output_cleanup_result("mngr", "sub-123", "westus", "mngrstabc123", "mngrid-mngrstabc123", OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload == {
         "resource_group": "mngr",
         "subscription_id": "sub-123",
         "region": "westus",
         "deleted": True,
+        "state_storage_account_deleted": "mngrstabc123",
+        "host_identity_deleted": "mngrid-mngrstabc123",
     }
 
 
 def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=False on the idempotent no-op path."""
-    _output_cleanup_result(None, "sub-123", "westus", OutputFormat.JSON)
+    _output_cleanup_result(None, "sub-123", "westus", None, None, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["deleted"] is False
     assert payload["resource_group"] is None
+    assert payload["state_storage_account_deleted"] is None
+
+
+# =============================================================================
+# host-dir identity provisioning (prepare --use-offline-host-dir tri-state)
+# =============================================================================
+
+
+def _stubbed_identity(*, exists: bool = False) -> _StubbedBlobStateHostIdentity:
+    msi = FakeManagedServiceIdentityClient()
+    msi.user_assigned_identities.exists = exists
+    return _StubbedBlobStateHostIdentity(
+        credential=None,
+        subscription_id="sub-123",
+        resource_group="mngr",
+        region="westus",
+        account_name="mngrstabc123",
+        fake_msi_client=msi,
+        fake_authorization_client=FakeAuthorizationClient(),
+    )
+
+
+def test_provision_host_identity_no_does_nothing() -> None:
+    identity = _stubbed_identity()
+    assert _provision_host_identity(identity, AutoToggle.NO) is None
+    assert identity.host_identity_exists() is False
+
+
+def test_provision_host_identity_auto_creates_identity() -> None:
+    identity = _stubbed_identity()
+    assert _provision_host_identity(identity, AutoToggle.AUTO) == identity.identity_name
+    assert identity.host_identity_exists() is True
+
+
+def test_provision_host_identity_yes_creates_identity() -> None:
+    identity = _stubbed_identity()
+    assert _provision_host_identity(identity, AutoToggle.YES) == identity.identity_name
+
+
+def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:
+    identity = _stubbed_identity()
+    identity.ensure_host_identity()
+    assert _perform_host_identity_cleanup(identity) == identity.identity_name
+    # Now absent: a second cleanup is a no-op (returns None).
+    assert _perform_host_identity_cleanup(identity) is None
+
+
+def test_perform_host_identity_cleanup_noop_when_absent() -> None:
+    assert _perform_host_identity_cleanup(_stubbed_identity(exists=False)) is None
 
 
 def test_prepare_command_fails_clearly_without_subscription(

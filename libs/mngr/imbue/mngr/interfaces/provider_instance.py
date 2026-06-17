@@ -28,6 +28,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
@@ -416,6 +417,17 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Handle actions to take when a connection error occurs with a host."""
         ...
 
+    def get_outer_ssh_port(self, host_id: HostId) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default (the agent connection from
+        ``get_ssh_connection_info`` is the only SSH endpoint, or the host is
+        local). Providers whose host has a separate outer/management sshd on a
+        non-obvious port (e.g. a slice's VM-root sshd reached via a box-forwarded
+        port) override this so ``mngr create --format json`` can report it.
+        """
+        return None
+
     @abstractmethod
     def get_max_destroyed_host_persisted_seconds(self) -> float:
         """
@@ -725,6 +737,23 @@ class ProviderInstanceInterface(MutableModel, ABC):
         Providers that *do* probe (Modal) override this to skip it.
         """
         return self.get_volume_for_host(host)
+
+    # =========================================================================
+    # Garbage Collection Hooks
+    # =========================================================================
+
+    def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
+        """Reclaim orphaned provider-level cloud resources not attached to any live host.
+
+        Default no-op. Providers whose create path can leave stray cloud resources
+        behind override this to reclaim them at GC time -- e.g. Azure provisions a
+        per-VM NIC + public IP before the VM and reserves them for 180s after a
+        failed create, so they cannot be cleaned up synchronously and are instead
+        reaped here. Called once per provider by ``mngr gc``; when ``dry_run`` is
+        True, report what would be reclaimed without deleting anything. Returns the
+        resources reclaimed (or, under dry-run, that would be).
+        """
+        return []
 
     # =========================================================================
     # Host Mutation Methods

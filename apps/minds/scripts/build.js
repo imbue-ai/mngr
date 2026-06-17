@@ -37,7 +37,7 @@ const MONOREPO_ROOT = path.resolve(ROOT, '../..');
  * path inside the monorepo.
  *
  * The packaged app only needs the transitive runtime closure of what minds
- * imports; other workspace members (e.g. mngr_vps_docker, mngr_kanpan) are
+ * imports; other workspace members (e.g. mngr_vps, mngr_kanpan) are
  * not included.
  *
  * This list is mirrored in electron/env-setup.js, electron/pyproject/
@@ -48,6 +48,7 @@ const MONOREPO_ROOT = path.resolve(ROOT, '../..');
 const WORKSPACE_PACKAGES = {
   'minds':                  'apps/minds',
   'imbue-mngr':             'libs/mngr',
+  'imbue-mngr-aws':         'libs/mngr_aws',
   'imbue-mngr-claude':      'libs/mngr_claude',
   'imbue-mngr-forward':     'libs/mngr_forward',
   'imbue-mngr-imbue-cloud': 'libs/mngr_imbue_cloud',
@@ -55,7 +56,7 @@ const WORKSPACE_PACKAGES = {
   'imbue-mngr-lima':        'libs/mngr_lima',
   'imbue-mngr-modal':       'libs/mngr_modal',
   'imbue-mngr-ovh':         'libs/mngr_ovh',
-  'imbue-mngr-vps-docker':  'libs/mngr_vps_docker',
+  'imbue-mngr-vps':  'libs/mngr_vps',
   'imbue-common':           'libs/imbue_common',
   'concurrency-group':      'libs/concurrency_group',
   'resource-guards':        'libs/resource_guards',

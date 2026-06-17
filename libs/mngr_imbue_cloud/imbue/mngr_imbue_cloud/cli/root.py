@@ -8,10 +8,13 @@ from imbue.mngr_imbue_cloud.cli.buckets import bucket
 from imbue.mngr_imbue_cloud.cli.hosts import hosts
 from imbue.mngr_imbue_cloud.cli.keys import keys
 from imbue.mngr_imbue_cloud.cli.paid import paid
+from imbue.mngr_imbue_cloud.cli.server import server
 from imbue.mngr_imbue_cloud.cli.tunnels import tunnels
 
-# Operator-only paid-list management lives under the existing `admin` group.
+# Operator-only paid-list management + bare-metal server/slice management live
+# under the existing `admin` group.
 admin.add_command(paid)
+admin.add_command(server)
 
 
 @click.group(name="imbue_cloud")

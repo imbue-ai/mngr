@@ -131,7 +131,7 @@ def _reclaim_orphan_test_network(network: Any) -> None:
 
     A test create that fails *after* provisioning the NIC + public IP but before
     the VM (e.g. ``SkuNotAvailable``) leaves those orphaned, and the production
-    reclaim runs only on the *next* create -- which may never come in a finished
+    reclaim runs at GC time (``mngr gc``) -- which may never run in a finished
     session. These are not a test bug (they stem from Azure capacity), so they are
     cleaned silently rather than failing the session. NICs go first (they hold the
     public IPs). Only mngr pytest-launched resources are touched.

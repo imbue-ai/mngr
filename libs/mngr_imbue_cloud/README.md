@@ -71,7 +71,7 @@ by `-b fast_mode=<require|prevent>`:
 - **`fast_mode=prevent`** -- the *slow path*, and the **default**. Lease any
   adequately-sized available host (resource attributes only;
   `repo_branch_or_tag`/`repo_url` are dropped), destroy its baked container,
-  and rebuild it from the FCT `Dockerfile` via the shared `mngr_vps_docker`
+  and rebuild it from the FCT `Dockerfile` via the shared `mngr_vps`
   setup path. mngr's standard create pipeline then does full client-side setup
   -- exactly as if this were a fresh OVH host. The rebuilt container keeps the
   lease's pre-baked `host_id`/`agent_id` so identity stays aligned with the

@@ -29,7 +29,7 @@ parallel worker.
 Also registers the shared plugin-test fixtures (including
 ``temp_mngr_ctx``) so backend-level unit tests can construct real
 provider instances; mirrors the conftest pattern used by
-``mngr_vps_docker`` and ``mngr_schedule``.
+``mngr_vps`` and ``mngr_schedule``.
 """
 
 from collections.abc import Generator
