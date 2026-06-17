@@ -2436,12 +2436,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def _create_host_tmux_config(self) -> Path:
         """Create a tmux config file for the host with hotkeys for agent management.
 
+        The config holds only mngr's own settings; tmux loads the user's
+        ~/.tmux.conf itself when the server starts.
+
         The config:
         1. Use mngr's preferred status-left-length (tmux default is 10)
         2. Enable set-titles so the agent's title reaches the outer terminal tab
-        3. Sources the user's default tmux config if it exists (~/.tmux.conf)
-        4. Adds a Ctrl-q binding that detaches and destroys the current agent
-        5. Adds a Ctrl-t binding that detaches and stops the current agent
+        3. Adds a Ctrl-q binding that detaches and destroys the current agent
+        4. Adds a Ctrl-t binding that detaches and stops the current agent
 
         This uses the tmux session_name format variable in the commands,
         which expands to the current session name at runtime. This approach
@@ -2471,9 +2473,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "# Forward the agent's title to the outer terminal tab (tmux default is off)",
             "set -g set-titles on",
             f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"',
-            "",
-            "# Source user's default tmux config if it exists",
-            "if-shell 'test -f ~/.tmux.conf' 'source-file ~/.tmux.conf'",
             "",
         ]
 
@@ -2988,8 +2987,8 @@ def _build_start_agent_shell_command(
 
     # Load the host tmux config (options and key bindings) into the server.
     # tmux reads a config file automatically only when it starts the server.
-    # Non-fatal: source-file exits 1 if any sourced line errors (including from
-    # the user's ~/.tmux.conf), and a cosmetic config must not block the agent.
+    # Non-fatal (|| true): this config is cosmetic (status bar, titles, hotkeys),
+    # so a sourcing error must not block agent startup.
     steps.append(f"tmux source-file {shlex.quote(str(tmux_config_path))} || true")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()

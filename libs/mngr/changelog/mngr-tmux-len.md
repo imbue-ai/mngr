@@ -7,8 +7,16 @@
   the `Ctrl-q` / `Ctrl-t` destroy/stop hotkeys. Session creation now runs
   `tmux source-file <config>` right after `new-session`, so these apply
   regardless of server state.
+
 - `libs/mngr`: the host tmux config now enables `set-titles` (`set -g
   set-titles on` with `set-titles-string "#S  #T"`), so the agent's session
   name and pane title are forwarded to the outer terminal's tab (e.g. the
-  iTerm2 tab title) instead of falling back to `<profile>(tmux)`. Placed before
-  the `~/.tmux.conf` source line so a user's own `set-titles` still wins.
+  iTerm2 tab title) instead of falling back to `<profile>(tmux)`.
+
+- `libs/mngr`: mngr's generated `~/.mngr/tmux.conf` no longer sources the
+  user's `~/.tmux.conf`, and the agent's tmux server is no longer started with
+  `-f` pointing at the mngr config. tmux loads `~/.tmux.conf` itself, once, when
+  the server starts; mngr's config (sourced at agent creation) now contains only
+  mngr's own settings. Re-sourcing `~/.tmux.conf` on every agent creation could
+  re-run non-idempotent user config (e.g. `set -ag`, plugin `run-shell`) and
+  corrupt the user's setup.
