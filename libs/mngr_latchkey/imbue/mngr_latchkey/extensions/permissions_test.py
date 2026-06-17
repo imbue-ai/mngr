@@ -233,9 +233,7 @@ def test_available_for_unknown_service_returns_404(node_extension: str) -> None:
 
 def _post_json(url: str, body: object) -> tuple[int, object]:
     data = json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=data, method="POST", headers={"Content-Type": "application/json"}
-    )
+    request = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=5.0) as response:
             return int(response.status), json.loads(response.read())
