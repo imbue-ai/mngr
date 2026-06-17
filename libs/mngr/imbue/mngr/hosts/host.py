@@ -2739,8 +2739,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         original default-command (queried via tmux show-option), so that
         user-created windows get both the env vars and the user's shell.
 
-        A custom tmux config is used that:
-        - Sources the user's default ~/.tmux.conf if it exists
+        A custom tmux config (holding only mngr's own settings; tmux loads the
+        user's ~/.tmux.conf itself at server start) is used that:
+        - Widens status-left-length and enables set-titles
         - Adds a Ctrl-q binding to detach and destroy the current agent
         - Adds a Ctrl-t binding to detach and halt (stop) the current agent
 
