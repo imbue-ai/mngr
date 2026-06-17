@@ -110,9 +110,9 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
-from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
@@ -122,6 +122,7 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
@@ -691,79 +692,83 @@ class AntigravityAgent(
     ) -> None:
         """Resume a prior conversation into this newly provisioned agent.
 
-        Two sources, mutually exclusive (the core session-adoption gate rejects
-        combining them):
+        Delegates to :func:`~imbue.mngr.api.preservation.adopt_sessions`, which copies every
+        ``--adopt`` conversation (``copy_explicit``) and the ``--from`` clone (``copy_clone``)
+        into this agent's antigravity home, then resumes one (``resume``): the clone when
+        ``--from`` is given, otherwise the LAST ``--adopt`` value (agy resumes a single
+        conversation). Every copied store coexists as a separate ``<id>.db`` in the per-agent
+        ``conversations/`` dir, so the rest stay available to agy's own session switcher. With
+        neither option set nothing is adopted (fresh start).
 
-        - ``--adopt`` (alias ``--adopt-session``): ``options.adopt_session`` is a tuple (the
-          option is ``multiple=True``); agy resumes a single conversation, so the LAST entry
-          wins. The adopt argument (a conversation id or an absolute path to a conversations
-          store / ``<id>.db`` file) is resolved, the matching store is copied into this agent's
-          antigravity home, and the id is written into the resume pointers.
-        - ``--from <agent>``: ``options.source_agent_state_location`` is the cloned source
-          agent's state dir, but a clone does not copy that state dir, so
-          ``_adopt_cloned_session`` transfers just the source's conversation store and resumes
-          its root conversation.
+        - ``--adopt`` (alias ``--adopt-session``): each value (a conversation id or an absolute
+          path to a conversations store / ``<id>.db`` file) is resolved and its store copied in
+          additively; the resolved id is returned.
+        - ``--from <agent>``: a clone copies the source *workspace* but not its state dir, so
+          ``copy_clone`` transfers just the source's conversation store and returns its root
+          conversation id.
 
         Either way ``assemble_command`` then resumes the recorded id via ``agy --conversation``.
-        The explicit-vs-clone dispatch lives in the shared ``dispatch_session_adoption``.
         """
-        dispatch_session_adoption(
+        adopt_sessions(
             options.adopt_session,
             options.source_agent_state_location,
-            on_explicit=lambda args: self._adopt_session(host, args[-1]),
-            on_clone=lambda location: self._adopt_cloned_session(host, location),
+            copy_explicit=lambda arg: self._copy_adopted_session(host, arg),
+            copy_clone=lambda location: self._copy_cloned_session(host, location),
+            resume=lambda conversation_id: self._finalize_adopted_session(host, conversation_id),
         )
 
-    def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
-        """Resolve, copy, and finalize an adopted agy conversation.
+    def _copy_adopted_session(self, host: OnlineHostInterface, adopt_arg: str) -> str:
+        """Resolve a ``--adopt`` argument and copy its conversation store into this agent's home.
 
-        agy resumes by conversation id and is directory-agnostic, so adoption is
-        simply: copy the source ``conversations/`` store into this agent's home
-        (additively, so any seeded store is preserved) and record the adopted id
-        as the resume pointer. No cwd rebind is needed (unlike claude, whose
-        sessions are filed by encoded work_dir).
+        agy resumes by conversation id and is directory-agnostic, so adoption is simply:
+        copy the source ``conversations/`` store into this agent's home (additively, so any
+        seeded store and other adopted stores are preserved as separate ``<id>.db`` files).
+        No cwd rebind is needed (unlike claude, whose sessions are filed by encoded work_dir),
+        and no resume pointer is written here -- the caller decides which id to resume.
+
+        Returns the resolved conversation id.
         """
         conversation_id, source_conversations_dir = _resolve_adopt_session(adopt_arg, self.mngr_ctx)
         dest_conversations_dir = get_antigravity_conversations_dir(self._get_agy_home_dir())
         with log_span("Adopting agy conversation {}", conversation_id):
             host.copy_directory(host, source_conversations_dir, dest_conversations_dir)
-        self._finalize_adopted_session(host, conversation_id)
         logger.info("Adopted agy conversation: {}", conversation_id)
+        return conversation_id
 
-    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
-        """Resume a ``--from <agent>`` clone's source conversation.
+    def _copy_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
+        """Transfer a ``--from <agent>`` clone's conversation store and return its resume id.
 
         A generic clone copies the source *workspace* but not the source agent's *state dir*,
         so the source's agy conversation store is transferred into this agent's home via the
         shared helper (just the ``conversations/`` relpath -- the same one preserved on
         destroy and scanned by ``_resolve_adopt_session``). agy resumes purely by conversation
         id and is directory-agnostic, so no cwd rebind is needed (unlike claude, whose
-        sessions are filed by encoded work_dir).
+        sessions are filed by encoded work_dir). No resume pointer is written here -- the
+        caller resumes the returned id.
 
         The conversation to resume is the source's root conversation (its
         ``ROOT_CONVERSATION_FILENAME``); if that pointer is absent or its store did not come
-        across, the most-recent transferred ``<id>.db`` is used. With nothing to adopt the
-        clone starts a fresh session.
+        across, the most-recent transferred ``<id>.db`` is used. Raises
+        :class:`AgentStartError` when the clone has nothing to resume (no store, or a store
+        with no usable conversation id) -- a ``--from`` that can't carry the source's
+        conversation forward is a failed adoption, not a silent fresh start.
         """
         transferred = transfer_cloned_agent_session_store(
             host, self._get_agent_dir(), source_location, _AGENT_CONVERSATIONS_RELPATH
         )
         if not transferred:
-            logger.warning(
-                "Clone adopt: source agent {} has no agy conversation store; cloned agent will start a fresh session",
-                source_location.path,
+            raise AgentStartError(
+                self.name,
+                f"Clone adopt: source agent {source_location.path} has no agy conversation store to resume.",
             )
-            return
         conversation_id = self._pick_cloned_conversation_id(host, source_location)
         if conversation_id is None:
-            logger.warning(
-                "Clone adopt: transferred agy store from {} has no resumable conversation; "
-                "cloned agent will start a fresh session",
-                source_location.path,
+            raise AgentStartError(
+                self.name,
+                f"Clone adopt: transferred agy store from {source_location.path} has no resumable conversation.",
             )
-            return
-        self._finalize_adopted_session(host, conversation_id)
         logger.info("Adopted cloned agy conversation: {}", conversation_id)
+        return conversation_id
 
     def _pick_cloned_conversation_id(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
         """Pick the conversation id to resume from a ``--from`` clone's transferred store.

@@ -16,6 +16,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
@@ -1493,22 +1494,28 @@ def test_finalize_adopted_session_writes_resume_pointers(antigravity_agent: Anti
 
 
 @pytest.mark.rsync
-def test_adopt_session_copies_store_and_writes_pointers(antigravity_agent: AntigravityAgent, tmp_path: Path) -> None:
-    """``_adopt_session`` copies the source store into the per-agent home and records the resume id."""
+def test_copy_adopted_session_copies_store_and_returns_id(antigravity_agent: AntigravityAgent, tmp_path: Path) -> None:
+    """``_copy_adopted_session`` copies the source store into the per-agent home and returns the id.
+
+    It writes no resume pointer (the caller decides which adopted id to resume).
+    """
     source_store_dir = tmp_path / "source_conversations"
     _seed_conversation_store(source_store_dir, "conv-adopt")
-    antigravity_agent._adopt_session(antigravity_agent.host, str(source_store_dir / "conv-adopt.db"))
+    conversation_id = antigravity_agent._copy_adopted_session(
+        antigravity_agent.host, str(source_store_dir / "conv-adopt.db")
+    )
 
+    assert conversation_id == "conv-adopt"
     dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
     assert (dest_dir / "conv-adopt.db").read_text() == "fake-store-bytes"
-    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-adopt"
+    assert not antigravity_agent._get_root_conversation_file_path().exists()
 
 
 @pytest.mark.rsync
-def test_adopt_session_dispatches_to_adopt_session_for_adopt_arg(
+def test_adopt_session_copies_every_adopt_value_and_resumes_last(
     antigravity_agent: AntigravityAgent, tmp_path: Path
 ) -> None:
-    """``adopt_session`` uses the LAST ``--adopt`` entry (agy resumes a single conversation)."""
+    """Multiple ``--adopt`` values all coexist as separate stores; the LAST one is resumed."""
     first_dir = tmp_path / "first"
     _seed_conversation_store(first_dir, "conv-first")
     last_dir = tmp_path / "last"
@@ -1518,7 +1525,33 @@ def test_adopt_session_dispatches_to_adopt_session_for_adopt_arg(
         adopt_session=(str(first_dir / "conv-first.db"), str(last_dir / "conv-last.db")),
     )
     antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+
+    dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
+    assert (dest_dir / "conv-first.db").read_text() == "fake-store-bytes"
+    assert (dest_dir / "conv-last.db").read_text() == "fake-store-bytes"
     assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-last"
+
+
+@pytest.mark.rsync
+def test_adopt_session_with_adopt_and_from_copies_both_and_resumes_clone(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """Combining ``--adopt`` and ``--from`` copies both stores in; the clone is the one resumed."""
+    adopt_dir = tmp_path / "adopt"
+    _seed_conversation_store(adopt_dir, "conv-explicit")
+    source_state = tmp_path / "source_agent_state"
+    _seed_source_agent_state(source_state, "conv-clone", with_root_pointer=True)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("antigravity"),
+        adopt_session=(str(adopt_dir / "conv-explicit.db"),),
+        source_agent_state_location=HostLocation(host=antigravity_agent.host, path=source_state),
+    )
+    antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+
+    dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
+    assert (dest_dir / "conv-explicit.db").read_text() == "fake-store-bytes"
+    assert (dest_dir / "conv-clone.db").read_text() == "fake-store-bytes"
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-clone"
 
 
 def test_adopt_session_noop_without_adopt_or_clone(antigravity_agent: AntigravityAgent) -> None:
@@ -1548,51 +1581,49 @@ def _seed_source_agent_state(state_dir: Path, conversation_id: str, *, with_root
 
 
 @pytest.mark.rsync
-def test_adopt_cloned_session_resumes_source_root_conversation(
+def test_copy_cloned_session_returns_source_root_conversation(
     antigravity_agent: AntigravityAgent, tmp_path: Path
 ) -> None:
-    """``--from`` transfers the source store and resumes the source's recorded root conversation."""
+    """``--from`` transfers the source store and returns the source's recorded root conversation.
+
+    The id is returned (not written) -- the caller resumes it.
+    """
     source_state = tmp_path / "source_agent_state"
     _seed_source_agent_state(source_state, "conv-clone-root", with_root_pointer=True)
     source_location = HostLocation(host=antigravity_agent.host, path=source_state)
 
-    antigravity_agent._adopt_cloned_session(antigravity_agent.host, source_location)
+    conversation_id = antigravity_agent._copy_cloned_session(antigravity_agent.host, source_location)
 
+    assert conversation_id == "conv-clone-root"
     dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
     assert (dest_dir / "conv-clone-root.db").read_text() == "fake-store-bytes"
-    assert (
-        antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path())
-        == "conv-clone-root"
-    )
+    assert not antigravity_agent._get_root_conversation_file_path().exists()
 
 
 @pytest.mark.rsync
-def test_adopt_cloned_session_falls_back_to_latest_store_without_root_pointer(
+def test_copy_cloned_session_falls_back_to_latest_store_without_root_pointer(
     antigravity_agent: AntigravityAgent, tmp_path: Path
 ) -> None:
-    """Without a root pointer, the most-recent transferred store id is resumed."""
+    """Without a root pointer, the most-recent transferred store id is returned."""
     source_state = tmp_path / "source_agent_state"
     _seed_source_agent_state(source_state, "conv-clone-latest", with_root_pointer=False)
     source_location = HostLocation(host=antigravity_agent.host, path=source_state)
 
-    antigravity_agent._adopt_cloned_session(antigravity_agent.host, source_location)
+    conversation_id = antigravity_agent._copy_cloned_session(antigravity_agent.host, source_location)
 
-    assert (
-        antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path())
-        == "conv-clone-latest"
-    )
+    assert conversation_id == "conv-clone-latest"
 
 
-def test_adopt_cloned_session_noop_when_source_has_no_store(
+def test_copy_cloned_session_raises_when_source_has_no_store(
     antigravity_agent: AntigravityAgent, tmp_path: Path
 ) -> None:
-    """A source agent with no conversations store leaves the clone with a fresh session."""
+    """A source agent with no conversations store is a failed clone adoption, not a fresh start."""
     source_state = tmp_path / "empty_source_state"
     source_state.mkdir()
     source_location = HostLocation(host=antigravity_agent.host, path=source_state)
 
-    antigravity_agent._adopt_cloned_session(antigravity_agent.host, source_location)
-
+    with pytest.raises(AgentStartError, match="no agy conversation store"):
+        antigravity_agent._copy_cloned_session(antigravity_agent.host, source_location)
     assert not antigravity_agent._get_root_conversation_file_path().exists()
 
 

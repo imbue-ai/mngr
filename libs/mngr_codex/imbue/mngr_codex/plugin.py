@@ -95,9 +95,9 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
-from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
@@ -107,6 +107,7 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
@@ -906,72 +907,92 @@ class CodexAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt an existing codex conversation into this newly provisioned agent.
+        """Adopt existing codex conversation(s) into this newly provisioned agent.
 
-        Two mutually exclusive sources, dispatched here:
+        Two sources, combined via the shared ``adopt_sessions`` orchestrator:
 
         - ``--adopt`` (``options.adopt_session``, the tuple of values passed to the
-          command-global ``multiple=True`` flag): adopt the last entry (a codex
-          session id or an absolute rollout ``.jsonl`` path). Resolve it to a
-          ``(session_id, source_sessions_dir)`` (see ``_resolve_adopt_session``), copy that
-          source ``sessions/`` tree into this agent's ``CODEX_HOME/sessions``, then rebind.
+          command-global ``multiple=True`` flag): each value (a codex session id or an
+          absolute rollout ``.jsonl`` path) is resolved to a
+          ``(session_id, source_sessions_dir)`` (see ``_resolve_adopt_session``) and its
+          source ``sessions/`` tree is copied into this agent's ``CODEX_HOME/sessions``.
+          Rollouts are date-nested, so multiple values coexist; each rollout's cwd is
+          rebound to this agent's work dir.
 
         - ``--from <agent>`` (``options.source_agent_state_location``): a generic clone that
-          copies the source workspace but *not* the source agent's state dir. Transfer just
-          the source's native session store, then resume its most-recent conversation.
+          copies the source workspace but *not* the source agent's state dir. The source's
+          native session store is transferred in, and its most-recent rollout rebound.
 
-        "Rebind" in both cases means: rewrite the adopted rollout's recorded cwd to this
-        agent's work dir (so ``codex resume`` does not pop the working-directory modal) and
-        write the session id as the resume pointer (``codex_root_session``) that
-        ``assemble_command``'s prelude reads. The explicit-vs-clone dispatch lives in the
-        shared ``dispatch_session_adoption``.
+        The session actually resumed -- via the resume pointer (``codex_root_session``) that
+        ``assemble_command``'s prelude reads -- is the ``--from`` clone's when given, else the
+        last ``--adopt`` value; any others are left available for codex's own session
+        switcher. With neither option set, nothing is adopted (fresh start). Rebinding a
+        rollout rewrites its recorded cwd to this agent's work dir so ``codex resume`` does
+        not pop the working-directory modal.
         """
-        dispatch_session_adoption(
+        adopt_sessions(
             options.adopt_session,
             options.source_agent_state_location,
-            on_explicit=lambda args: self._adopt_explicit_codex_session(host, args[-1], mngr_ctx),
-            on_clone=lambda location: self._adopt_cloned_codex_session(host, location),
+            copy_explicit=lambda arg: self._copy_explicit_codex_session(host, arg, mngr_ctx),
+            copy_clone=lambda location: self._copy_cloned_codex_session(host, location),
+            resume=lambda session_id: self._write_codex_resume_pointer(host, session_id),
         )
 
-    def _adopt_explicit_codex_session(self, host: OnlineHostInterface, adopt_arg: str, mngr_ctx: MngrContext) -> None:
-        """Resolve an explicit ``--adopt`` value, copy its ``sessions/`` tree in, and rebind."""
+    def _copy_explicit_codex_session(self, host: OnlineHostInterface, adopt_arg: str, mngr_ctx: MngrContext) -> str:
+        """Resolve an explicit ``--adopt`` value, copy its ``sessions/`` tree in, rebind its cwd.
+
+        Additive: each call copies one resolved source ``sessions/`` tree into this agent's
+        ``CODEX_HOME/sessions``. Rollouts are date-nested, so multiple ``--adopt`` values
+        coexist. Returns the resolved session id; the orchestrator decides which is resumed.
+        """
         user_codex_home = self._resolve_user_codex_home(host)
         session_id, source_sessions_dir = _resolve_adopt_session(adopt_arg, mngr_ctx, user_codex_home)
         dest_sessions_dir = self._get_codex_home() / "sessions"
         with log_span("Adopting codex session {}", session_id):
             host.copy_directory(host, source_sessions_dir, dest_sessions_dir)
-            self._rebind_codex_session(host, dest_sessions_dir, session_id)
+            self._rebind_adopted_rollout_cwd(host, dest_sessions_dir, session_id)
         logger.info("Adopted codex session {} into agent {}", session_id, self.id)
+        return session_id
 
-    def _adopt_cloned_codex_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
-        """Resume the cloned source agent's conversation after a ``--from`` clone.
+    def _copy_cloned_codex_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
+        """Transfer the cloned source agent's native session store in, rebind its latest rollout.
 
         Transfers the source's native session store (the same relpath the agent preserves
         and scans) into this agent's state dir, discovers the source's most-recent rollout
-        in the transferred store, and rebinds it (cwd rewrite + resume pointer). When the
-        source had no session store, warns and returns so the clone starts fresh.
+        in the transferred store, and rebinds its cwd. Returns the discovered session id.
+
+        Raises :class:`AgentStartError` when the source has no session store, or the
+        transferred store holds no rollout: a ``--from`` clone is an explicit request to
+        resume the source's conversation, so an empty source is a hard failure rather than a
+        silent fresh start.
         """
         transferred = transfer_cloned_agent_session_store(
             host, self._get_agent_dir(), source_location, _AGENT_SESSIONS_RELPATH
         )
         if not transferred:
-            logger.warning(
-                "Clone adopt: source agent {} has no codex session store; cloned agent will start a fresh session",
-                source_location.path,
+            raise AgentStartError(
+                str(self.name),
+                f"clone source agent {source_location.path} has no codex session store to resume",
             )
-            return
         dest_sessions_dir = self._get_codex_home() / "sessions"
         session_id = self._find_latest_session_id(host, dest_sessions_dir)
         if session_id is None:
-            logger.warning(
-                "Clone adopt: no rollout found in transferred codex session store at {}; "
-                "cloned agent will start a fresh session",
-                dest_sessions_dir,
+            raise AgentStartError(
+                str(self.name),
+                f"no rollout found in transferred codex session store at {dest_sessions_dir}",
             )
-            return
         with log_span("Adopting cloned codex session {}", session_id):
-            self._rebind_codex_session(host, dest_sessions_dir, session_id)
+            self._rebind_adopted_rollout_cwd(host, dest_sessions_dir, session_id)
         logger.info("Adopted cloned codex session {} into agent {}", session_id, self.id)
+        return session_id
+
+    def _write_codex_resume_pointer(self, host: OnlineHostInterface, session_id: str) -> None:
+        """Write ``session_id`` to ``codex_root_session`` so the launch prelude resumes it.
+
+        The resume pointer ``assemble_command``'s prelude reads. Called once by the
+        ``adopt_sessions`` orchestrator on the single session it selects to resume.
+        """
+        host.write_text_file(self._get_root_session_file_path(), session_id)
 
     def _find_latest_session_id(self, host: OnlineHostInterface, sessions_dir: Path) -> str | None:
         """Return the session id of the most-recent rollout under ``sessions_dir``, or None.
@@ -994,17 +1015,6 @@ class CodexAgent(
         if not latest:
             return None
         return _session_id_from_rollout_path(Path(latest))
-
-    def _rebind_codex_session(self, host: OnlineHostInterface, dest_sessions_dir: Path, session_id: str) -> None:
-        """Rebind a session already present in ``dest_sessions_dir`` to this agent.
-
-        Rewrites the adopted rollout's recorded cwd to this agent's work dir, then writes
-        ``session_id`` to ``codex_root_session`` so the launch prelude resumes it. Shared by
-        the ``--adopt`` and ``--from`` paths, which differ only in how the store
-        arrives in ``dest_sessions_dir``.
-        """
-        self._rebind_adopted_rollout_cwd(host, dest_sessions_dir, session_id)
-        host.write_text_file(self._get_root_session_file_path(), session_id)
 
     def _rebind_adopted_rollout_cwd(self, host: OnlineHostInterface, sessions_dir: Path, session_id: str) -> None:
         """Rewrite the recorded cwd in the adopted rollout to this agent's work dir.

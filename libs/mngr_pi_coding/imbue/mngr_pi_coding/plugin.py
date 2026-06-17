@@ -18,9 +18,9 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
-from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
@@ -149,6 +149,14 @@ def _load_resource(filename: str) -> str:
 # ``{path: bool}`` (see pi's core/trust-manager.ts). mngr seeds it so the interactive
 # agent never stalls at the dialog.
 _PI_TRUST_FILE_NAME: str = "trust.json"
+
+# pi's native "auto-trust this run" flag (``--approve``/``-a``, "Trust project-local
+# files for this run"). When passed, pi's ``resolveProjectTrusted`` short-circuits to
+# trusted regardless of any ``.pi``/``.agents/skills`` trust inputs in the cwd and
+# without a saved decision, so the interactive trust dialog never appears. mngr adds it
+# to the launch command when ``auto_dismiss_dialogs`` is set, so an unattended agent is
+# trusted via pi's own code path rather than relying solely on the seeded trust store.
+_PI_APPROVE_FLAG: str = "--approve"
 
 
 def _read_pi_trust(content: str | None, path: Path) -> dict[str, bool]:
@@ -362,8 +370,9 @@ class PiCodingAgentConfig(AgentTypeConfig):
         description=(
             "Trust the agent's workspace for pi without prompting, suppressing pi's "
             "'Trust project folder?' dialog (which would otherwise block the first message). "
-            "Also implied by `mngr create --yes`. When False and the source repo is not already "
-            "trusted, mngr prompts interactively and refuses to run non-interactively."
+            "When set, mngr launches pi with `--approve` so pi auto-trusts the project folder "
+            "for the run. Also implied by `mngr create --yes`. When False and the source repo is "
+            "not already trusted, mngr prompts interactively and refuses to run non-interactively."
         ),
     )
     preserve_on_destroy: bool = Field(
@@ -550,6 +559,11 @@ class PiCodingAgent(
         foreground (and lifecycle-detected) process is plain ``pi``
         (``get_expected_process_name`` pins ``"pi"`` regardless).
 
+        When ``auto_dismiss_dialogs`` is set, ``--approve`` is added so pi
+        auto-trusts the project folder for the run (its native unattended
+        path), and the interactive trust dialog never blocks the first message
+        even when the cwd carries trust inputs (``.pi``/``.agents/skills``).
+
         Resume (when ``resume_session``) appends ``--session <file>`` for the
         main session's file recorded by the extension in ``pi_session_file``.
         It is shell-evaluated here because the stored command is replayed on
@@ -564,6 +578,8 @@ class PiCodingAgent(
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         invocation = f"{base_command} -e {shlex.quote(str(self._get_lifecycle_extension_path()))}"
+        if self.agent_config.auto_dismiss_dialogs:
+            invocation = f"{invocation} {_PI_APPROVE_FLAG}"
         if not self.agent_config.resume_session:
             return CommandString(invocation)
         quoted_session_file = shlex.quote(str(self._get_agent_dir() / _SESSION_FILE_NAME))
@@ -889,90 +905,113 @@ class PiCodingAgent(
         self.adopt_session(host, options, mngr_ctx)
 
     def adopt_session(self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
-        """Adopt a session so the new agent resumes existing context.
+        """Adopt one or more sessions so the new agent resumes existing context.
 
-        Dispatches to ``_adopt_session`` (``--adopt``) or
-        ``_adopt_cloned_session`` (``--from <agent>``); the two are mutually
-        exclusive (rejected upstream by core session-adoption validation).
-
-        ``--adopt`` is ``multiple=True``, so ``options.adopt_session`` is a tuple;
-        when set, the last entry's session (resolved across the user-native store,
-        live mngr agents, and preserved agents) is copied into this agent's session
-        store, rebound to this agent's work_dir, and recorded as the resume pointer.
-        Empty (and no ``--from``) means no adoption (the agent starts fresh).
+        Delegates the copy/resume ordering to ``adopt_sessions``: every ``--adopt``
+        value is copied in (``_adopt_session``) and, additionally, a ``--from`` clone
+        is copied in (``_adopt_cloned_session``); each call rebinds its session to
+        this agent's work_dir and returns the resumable session-file path. The one
+        actually resumed is the clone's when ``--from`` is given, otherwise the last
+        ``--adopt`` value; ``_resume_adopted_session`` writes that as the
+        ``pi_session_file`` pointer. With neither option set, the agent starts fresh.
         """
-        dispatch_session_adoption(
+        adopt_sessions(
             options.adopt_session,
             options.source_agent_state_location,
-            on_explicit=lambda args: self._adopt_session(host, args[-1]),
-            on_clone=lambda location: self._adopt_cloned_session(host, location),
+            copy_explicit=lambda arg: self._adopt_session(host, arg),
+            copy_clone=lambda location: self._adopt_cloned_session(host, location),
+            resume=lambda session_file: self._resume_adopted_session(host, Path(session_file)),
         )
 
-    def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
-        """Copy the resolved session into this agent's store, rebind it, and point resume at it.
+    def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> str:
+        """Copy the resolved session into this agent's store, rebind it, and return its file path.
 
         Steps:
         1. Resolve ``adopt_arg`` (id or path) to a source JSONL on the local host.
         2. Copy the source's encoded-cwd subdir into this agent's ``sessions/`` so the
            store mirrors pi's own layout (the subdir name is cosmetic -- pi resumes by
-           the absolute path recorded below).
-        3. Rebind the adopted JSONL to this agent's work_dir and record it as the
-           resume pointer (see ``_rebind_adopted_session``).
+           the absolute path recorded later). Additive: multiple ``--adopt`` values
+           each land in their own subdir, so all are available in the new agent.
+        3. Rebind the adopted JSONL to this agent's work_dir (so pi never stalls at
+           its missing-cwd dialog) and return its absolute path; the resume pointer is
+           written separately, only for the session actually resumed.
         """
         source_file = _resolve_adopt_session(adopt_arg, self.mngr_ctx)
         sessions_dir = self.get_pi_config_dir() / "sessions"
         dest_subdir = sessions_dir / source_file.parent.name
         with log_span("Adopting pi session {} into {}", source_file, dest_subdir):
             host.copy_directory(host, source_file.parent, dest_subdir)
-        self._rebind_adopted_session(host, dest_subdir / source_file.name)
+        adopted_file = dest_subdir / source_file.name
+        self._rebind_adopted_session(host, adopted_file)
+        return str(adopted_file)
 
-    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
-        """Resume the source agent's pi session in a ``--from`` clone.
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
+        """Transfer the source agent's pi session into a ``--from`` clone and return its file path.
 
         A generic ``--from`` clone copies the source *workspace* but not the source
-        agent's *state dir*, so the cloned pi has no session to resume. This
-        transfers just the source's native session store (the same relpath that is
-        preserved and scanned) into this agent's store, picks the most-recent
-        session JSONL from it, and rebinds it to this agent's work_dir as the resume
-        pointer. If the source had no store, the clone starts a fresh session.
+        agent's *state dir*, so the cloned pi has no session to resume. This picks
+        the most-recent session JSONL *on the source* (so the choice is unaffected
+        by sessions an earlier ``--adopt`` may have already placed in the shared
+        destination store), transfers the source's native session store into this
+        agent's store, and rebinds the transferred copy of that session to this
+        agent's work_dir.
+
+        Raises ``AgentStartError`` if the source has no pi session store, or a store
+        with no resumable session JSONL: a ``--from`` clone of a pi agent is asked
+        for specifically to resume that agent's conversation, so silently starting
+        fresh would hide a real failure (e.g. a source that never started a session).
         """
         store_relpath = Path(_PI_SESSIONS_DIR_RELPATH)
-        transferred = transfer_cloned_agent_session_store(host, self._get_agent_dir(), source_location, store_relpath)
-        if not transferred:
-            logger.warning(
-                "Clone adopt: no pi session store at source {}; cloned agent will start a fresh session",
-                source_location.path / store_relpath,
+        source_store = source_location.path / store_relpath
+        source_host = source_location.host
+        if not source_host.path_exists(source_store):
+            raise AgentStartError(
+                str(self.name),
+                f"Clone adopt: no pi session store at source {source_store}; "
+                "the source agent has no pi conversation to resume.",
             )
-            return
-
-        sessions_dir = self._get_agent_dir() / store_relpath
-        latest = host.execute_idempotent_command(
-            f"ls -t {shlex.quote(str(sessions_dir))}/*/*.jsonl 2>/dev/null | head -n1",
+        # Choose on the source, where the store holds only the source agent's own
+        # sessions -- the destination store may already contain --adopt sessions.
+        latest_on_source = source_host.execute_idempotent_command(
+            f"ls -t {shlex.quote(str(source_store))}/*/*.jsonl 2>/dev/null | head -n1",
             timeout_seconds=5.0,
         )
-        if not (latest.success and latest.stdout.strip()):
-            logger.warning(
-                "Clone adopt: transferred pi session store {} has no session JSONL (ls success={}, stderr={!r}); "
-                "cloned agent will start a fresh session",
-                sessions_dir,
-                latest.success,
-                latest.stderr.strip(),
+        if not (latest_on_source.success and latest_on_source.stdout.strip()):
+            raise AgentStartError(
+                str(self.name),
+                f"Clone adopt: source pi session store {source_store} has no session JSONL "
+                f"(ls success={latest_on_source.success}, stderr={latest_on_source.stderr.strip()!r}); "
+                "the source agent has no pi conversation to resume.",
             )
-            return
-        self._rebind_adopted_session(host, Path(latest.stdout.strip()))
+        latest_relative = Path(latest_on_source.stdout.strip()).relative_to(source_store)
+
+        transfer_cloned_agent_session_store(host, self._get_agent_dir(), source_location, store_relpath)
+        adopted_file = self._get_agent_dir() / store_relpath / latest_relative
+        self._rebind_adopted_session(host, adopted_file)
+        return str(adopted_file)
 
     def _rebind_adopted_session(self, host: OnlineHostInterface, adopted_file: Path) -> None:
-        """Rebind an adopted session JSONL to this agent and point resume at it.
+        """Rebind an adopted session JSONL's embedded cwd to this agent's work_dir.
 
-        Rewrites the JSONL's embedded cwd to this agent's host-canonical work_dir
-        (so pi never stalls at its missing-cwd dialog) and writes its absolute path
-        to ``pi_session_file`` so the launch ``pi --session <file>`` resumes it.
+        pi binds a session to the cwd it was created in and refuses to resume when
+        that directory no longer exists, so the cwd is rewritten to this agent's
+        host-canonical work_dir. This does *not* write the resume pointer -- that is
+        ``_resume_adopted_session``, called only for the single session resumed.
         Shared by ``--adopt`` and ``--from``.
         """
         new_cwd = self._get_host_canonical_work_dir(host)
         host.write_text_file(adopted_file, _rewrite_pi_session_cwd(host.read_text_file(adopted_file), new_cwd))
+        logger.info("Adopted pi session {} (rebound cwd -> {})", adopted_file, new_cwd)
+
+    def _resume_adopted_session(self, host: OnlineHostInterface, adopted_file: Path) -> None:
+        """Point resume at an already-rebound adopted session.
+
+        Writes the session's absolute path to ``pi_session_file`` so the launch
+        ``pi --session <file>`` resumes it. Called once, for the single session
+        chosen by ``adopt_sessions`` (the ``--from`` clone, else the last ``--adopt``).
+        """
         host.write_text_file(self._get_agent_dir() / _SESSION_FILE_NAME, str(adopted_file))
-        logger.info("Adopted pi session, resuming {} (rebound cwd -> {})", adopted_file, new_cwd)
+        logger.info("Resuming adopted pi session {}", adopted_file)
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         preserve_agent_state(_pi_coding_preserved_items(), self, host)

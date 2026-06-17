@@ -30,6 +30,7 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentInstallationError
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
@@ -3860,6 +3861,49 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
     assert dest_session_file.exists()
 
 
+@pytest.mark.rsync
+def test_on_after_provisioning_multi_adopt_resumes_last(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """``--adopt A B`` copies both sessions in but resumes the *last* (B).
+
+    Claude can only resume one session at a time, so every named session is
+    made available under the destination's encoded project dir while
+    ``claude_session_id`` is set to the last named session.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Two sessions in distinct source project dirs (so both dirs are copied).
+    first_project = Path.home() / ".claude" / "projects" / "first-project"
+    second_project = Path.home() / ".claude" / "projects" / "second-project"
+    first_project.mkdir(parents=True)
+    second_project.mkdir(parents=True)
+    first_session_id = "first-session-id"
+    second_session_id = "second-session-id"
+    (first_project / f"{first_session_id}.jsonl").write_text('{"type":"first"}\n')
+    (second_project / f"{second_session_id}.jsonl").write_text('{"type":"second"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        adopt_session=(first_session_id, second_session_id),
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # The last named session is the one resumed.
+    assert (agent_state_dir / "claude_session_id").read_text() == second_session_id
+
+    # Both sessions are available under the destination's encoded project dir.
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
+    assert (dest_project_dir / f"{first_session_id}.jsonl").exists()
+    assert (dest_project_dir / f"{second_session_id}.jsonl").exists()
+
+
 # =============================================================================
 # Clone session-adoption tests
 #
@@ -3872,10 +3916,17 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
 
 
 def _run_clone_adoption(agent: ClaudeAgent, host: OnlineHostInterface, source_dir: Path) -> None:
-    """Drive both clone steps in order against the test agent/host."""
+    """Drive the clone flow end-to-end against the test agent/host.
+
+    Mirrors production: rsync the source plugin/, then run ``adopt_session`` with the
+    clone location so ``_adopt_cloned_session`` rekeys the subdir and the resume step
+    finalizes (writes ``claude_session_id``). Raises ``AgentStartError`` when the clone
+    has nothing to resume.
+    """
     location = HostLocation(host=host, path=source_dir)
     agent._transfer_source_plugin_data(location)
-    agent._adopt_cloned_session(host, location)
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"), source_agent_state_location=location)
+    agent.adopt_session(host, options, agent.mngr_ctx)
 
 
 @pytest.mark.rsync
@@ -3918,11 +3969,12 @@ def test_clone_adoption_copies_plugin_dir(
     assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / source_project_subdir).exists()
 
 
-def test_clone_adoption_skips_when_no_plugin_dir(
+def test_clone_adoption_raises_when_no_plugin_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """The rsync step is a no-op when the source has no plugin/ dir, and the
-    subsequent adopt step bails (logs a warning) without raising.
+    """The rsync step is a no-op when the source has no plugin/ dir, so the
+    subsequent adopt step finds no session JSONL. A ``--from`` clone is meant
+    to resume the source's conversation, so that is a hard ``AgentStartError``.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
@@ -3932,8 +3984,8 @@ def test_clone_adoption_skips_when_no_plugin_dir(
     source_dir = tmp_path / "source_agent_state"
     source_dir.mkdir()
 
-    # Should not raise
-    _run_clone_adoption(agent, host, source_dir)
+    with pytest.raises(AgentStartError, match="no session JSONL found at source"):
+        _run_clone_adoption(agent, host, source_dir)
 
 
 @pytest.mark.rsync
@@ -4016,6 +4068,53 @@ def test_clone_adoption_uses_jsonl_filename_not_source_session_id_file(
 
 
 @pytest.mark.rsync
+def test_adopt_and_from_resumes_clone(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """``--adopt A --from X`` copies both A and the clone, then resumes the *clone*.
+
+    The explicit ``--adopt`` session is made available alongside the clone, but
+    the resumed session (``claude_session_id``) is the clone's, since a ``--from``
+    clone is the session the new agent is meant to continue.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Explicit ``--adopt`` session lives under ~/.claude/.
+    adopt_project = Path.home() / ".claude" / "projects" / "adopt-project"
+    adopt_project.mkdir(parents=True)
+    adopt_session_id = "explicit-adopt-session-id"
+    (adopt_project / f"{adopt_session_id}.jsonl").write_text('{"type":"adopt"}\n')
+
+    # ``--from`` clone source: a separate agent state dir whose plugin/ holds
+    # the session to clone.
+    source_dir = tmp_path / "source_agent_state"
+    src_project = source_dir / "plugin" / "claude" / "anthropic" / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    clone_session_id = "11111111-2222-3333-4444-555555555555"
+    (src_project / f"{clone_session_id}.jsonl").write_text('{"type":"clone"}\n')
+
+    location = HostLocation(host=host, path=source_dir)
+    agent._transfer_source_plugin_data(location)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        adopt_session=(adopt_session_id,),
+        source_agent_state_location=location,
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.adopt_session(host, options, agent.mngr_ctx)
+
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
+    # Both sessions are available; the clone is the one resumed.
+    assert (dest_project_dir / f"{adopt_session_id}.jsonl").exists()
+    assert (dest_project_dir / f"{clone_session_id}.jsonl").exists()
+    assert (dest_dir / "claude_session_id").read_text().strip() == clone_session_id
+
+
+@pytest.mark.rsync
 def test_clone_adoption_refuses_to_clobber_existing_target(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -4023,8 +4122,8 @@ def test_clone_adoption_refuses_to_clobber_existing_target(
     the destination's encoded work_dir AND a separate, more-recently-active
     source-encoded subdir, the rsync brings both over and the rekey ``mv``
     would clobber the pre-existing target. _adopt_cloned_session refuses
-    the clobber and returns without writing claude_session_id, leaving
-    both subdirs intact for manual inspection. This guards a defensive
+    the clobber and raises ``AgentStartError`` without writing claude_session_id,
+    leaving both subdirs intact for manual inspection. This guards a defensive
     branch designed to prevent silent data loss when source has visited
     multiple cwds.
     """
@@ -4057,13 +4156,14 @@ def test_clone_adoption_refuses_to_clobber_existing_target(
     os.utime(older_jsonl, (1_000_000_000, 1_000_000_000))
     os.utime(newer_jsonl, (2_000_000_000, 2_000_000_000))
 
-    _run_clone_adoption(agent, host, source_dir)
+    with pytest.raises(AgentStartError, match="target dir already exists"):
+        _run_clone_adoption(agent, host, source_dir)
 
     dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
     # Both subdirs survive: the rekey was refused, no clobber happened.
     assert (dest_projects / dest_project_name / f"{older_session_id}.jsonl").exists()
     assert (dest_projects / "-Users-ev-some-source-workdir" / f"{newer_session_id}.jsonl").exists()
-    # claude_session_id was NOT written: the function bailed before finalize.
+    # claude_session_id was NOT written: the clone raised before finalize.
     assert not (dest_dir / "claude_session_id").exists()
 
 

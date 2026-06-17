@@ -41,8 +41,8 @@ from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
-from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
@@ -2331,10 +2331,16 @@ class ClaudeAgent(
     ) -> None:
         """Adopt a session so the agent's claude resumes existing context.
 
-        Dispatches (via ``dispatch_session_adoption``) to ``_adopt_explicit_sessions``
-        (``--adopt``, which takes the *whole* tuple -- every named session is made
-        available, the last is resumed) or ``_adopt_cloned_session`` (``--from <agent>``);
-        both end in ``_finalize_adopted_session``.
+        Delegates to :func:`~imbue.mngr.api.preservation.adopt_sessions`, which copies
+        every ``--adopt`` session (``copy_explicit``) and the ``--from`` clone
+        (``copy_clone``) into this agent, then resumes one (``resume``): the clone when
+        ``--from`` is given, otherwise the last ``--adopt`` value. The rest are left
+        available in the new agent's session switcher. With neither option set nothing
+        is adopted (fresh start). Claude can only resume a single session at a time.
+
+        Each ``copy_explicit`` call copies one named session's source project dir into the
+        destination's encoded project dir, deduplicating by source project dir name across
+        calls (multiple named sessions may share one project dir).
 
         Destination resolution depends on ``use_env_config_dir``:
         - Default (``False``): copies into the per-agent config dir at
@@ -2345,49 +2351,37 @@ class ClaudeAgent(
           in shared mode, and it only adds new project subdirs -- it never
           modifies existing user files.
         """
-        dispatch_session_adoption(
-            options.adopt_session,
-            options.source_agent_state_location,
-            on_explicit=lambda args: self._adopt_explicit_sessions(host, args),
-            on_clone=lambda location: self._adopt_cloned_session(host, location),
-        )
-
-    def _adopt_explicit_sessions(
-        self,
-        host: OnlineHostInterface,
-        adopt_session_args: tuple[str, ...],
-    ) -> None:
-        """Position sessions named on the command line under the destination's
-        encoded project dir and finalize. Used by ``--adopt``.
-
-        When multiple sessions are named, each one's source project dir is
-        copied into the destination so all of them are available in the new
-        agent's session list, but only the *last* named session is written to
-        ``claude_session_id`` and thus resumed on startup -- Claude can only
-        resume a single session at a time.
-        """
-        config_dir = self.get_claude_config_dir()
+        # Shared across copy_explicit calls so a project dir holding several named
+        # sessions is copied only once.
         copied_project_dirs: set[str] = set()
-        # Claude Code organizes sessions by encoded working directory path,
-        # so place adopted sessions under the project dir matching this
-        # agent's work_dir; see ``_resolve_work_dir_on_host`` for why we
-        # resolve through symlinks.
-        dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
-        dest_project_dir = config_dir / "projects" / dest_project_name
 
-        for arg in adopt_session_args:
+        def copy_explicit(arg: str) -> str:
             session_id, source_project_dir = _resolve_adopt_session(arg, self.mngr_ctx)
-            # Deduplicate project dir copies (multiple sessions may be in the same project)
             if source_project_dir.name not in copied_project_dirs:
                 with log_span("Adopting session {}", session_id):
-                    host.copy_directory(host, source_project_dir, dest_project_dir)
+                    host.copy_directory(host, source_project_dir, self._dest_adopted_project_dir())
                 copied_project_dirs.add(source_project_dir.name)
-            last_session_id = session_id
+            return session_id
 
-        assert last_session_id is not None, "adopt_session_args was non-empty but no session ID was set"
+        adopt_sessions(
+            options.adopt_session,
+            options.source_agent_state_location,
+            copy_explicit=copy_explicit,
+            copy_clone=lambda location: self._adopt_cloned_session(host, location),
+            resume=lambda session_id: self._finalize_adopted_session(
+                host, self._dest_adopted_project_dir(), session_id
+            ),
+        )
 
-        self._finalize_adopted_session(host, dest_project_dir, last_session_id)
-        logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
+    def _dest_adopted_project_dir(self) -> Path:
+        """Return the encoded project dir adopted sessions are placed under.
+
+        Claude Code organizes sessions by encoded working directory path, so adopted
+        sessions live under the project dir matching this agent's work_dir; see
+        ``_resolve_work_dir_on_host`` for why we resolve through symlinks.
+        """
+        dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
+        return self.get_claude_config_dir() / "projects" / dest_project_name
 
     def _finalize_adopted_session(
         self,
@@ -2404,7 +2398,7 @@ class ClaudeAgent(
         host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
         host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
 
-    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
         """Rewire the rsynced plugin/ so ``claude --resume`` finds the source's session.
 
         After ``_transfer_source_plugin_data`` rsyncs the source's
@@ -2416,7 +2410,11 @@ class ClaudeAgent(
         (``ls -t``, so we can bail without a second destination round-trip
         if there's nothing to adopt), carries ``claude_session_id_history``
         forward, renames the project subdir to the destination's encoded
-        work_dir, and hands off to ``_finalize_adopted_session``.
+        work_dir, and returns the discovered session id (the caller resumes it).
+
+        Raises :class:`AgentStartError` when the clone has nothing to resume --
+        no session JSONL at the source, or the project subdir can't be rekeyed
+        to the destination's encoded work_dir.
 
         Session id comes from the JSONL filename, not the source's
         ``claude_session_id`` file: ``claude -p`` ignores ``--session-id``
@@ -2444,17 +2442,13 @@ class ClaudeAgent(
             timeout_seconds=5.0,
         )
         if not (latest_on_source.success and latest_on_source.stdout.strip()):
-            # Either the source has no sessions (cloned agent gets a fresh
-            # claude session) or the ``ls`` failed; surface either case so
-            # a silent regression doesn't hide as DEBUG noise.
-            logger.warning(
-                "Clone adopt: no session JSONL found at source {} (ls success={}, stderr={!r}); "
-                "cloned agent will start a fresh claude session",
-                source_projects_dir,
-                latest_on_source.success,
-                latest_on_source.stderr.strip(),
+            # A ``--from`` clone is meant to resume the source's conversation, so
+            # nothing to resume (no session, or the ``ls`` failed) is a hard error.
+            raise AgentStartError(
+                str(self.name),
+                f"Clone adopt: no session JSONL found at source {source_projects_dir} "
+                f"(ls success={latest_on_source.success}, stderr={latest_on_source.stderr.strip()!r})",
             )
-            return
         latest_path = Path(latest_on_source.stdout.strip())
         source_project_name = latest_path.parent.name
         adopted_session_id = latest_path.stem
@@ -2470,25 +2464,21 @@ class ClaudeAgent(
             source_subdir = dest_projects_dir / source_project_name
             target_dir = dest_projects_dir / dest_project_name
             if host.path_exists(target_dir):
-                logger.warning(
-                    "Refusing to rekey cloned project subdir {} -> {}: target dir already exists. "
-                    "Cloned agent will not resume the source's session.",
-                    source_subdir,
-                    target_dir,
+                raise AgentStartError(
+                    str(self.name),
+                    f"Refusing to rekey cloned project subdir {source_subdir} -> {target_dir}: "
+                    "target dir already exists, so the cloned agent cannot resume the source's session.",
                 )
-                return
             rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
             rename_result = host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
             if not rename_result.success:
-                logger.warning(
-                    "Failed to rekey cloned project subdir {} -> {}: {}",
-                    source_subdir,
-                    target_dir,
-                    rename_result.stderr.strip(),
+                raise AgentStartError(
+                    str(self.name),
+                    f"Failed to rekey cloned project subdir {source_subdir} -> {target_dir}: "
+                    f"{rename_result.stderr.strip()}",
                 )
-                return
 
-        self._finalize_adopted_session(host, dest_projects_dir / dest_project_name, adopted_session_id)
+        return adopted_session_id
 
 
 def _claude_preserved_items(is_shared_config: bool) -> list[PreservedItem]:

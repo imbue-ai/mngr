@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import time
 import tomllib
 from collections.abc import Mapping
 from datetime import datetime
@@ -22,6 +23,7 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -1135,12 +1137,10 @@ def test_rewrite_rollout_text_cwd_preserves_blank_lines(codex_agent: CodexAgent)
     assert lines[1] == ""
 
 
-def test_rebind_codex_session_rewrites_cwd_and_writes_resume_pointer(codex_agent: CodexAgent, tmp_path: Path) -> None:
+def test_rebind_adopted_rollout_rewrites_cwd(codex_agent: CodexAgent, tmp_path: Path) -> None:
     sessions = tmp_path / "dest_sessions"
     _write_rollout(sessions, _SESSION_ID, cwd="/old/dir")
-    codex_agent._rebind_codex_session(codex_agent.host, sessions, _SESSION_ID)
-    # The resume pointer was written.
-    assert codex_agent._get_root_session_file_path().read_text() == _SESSION_ID
+    codex_agent._rebind_adopted_rollout_cwd(codex_agent.host, sessions, _SESSION_ID)
     # The rollout cwd now points at this agent's (canonical) work dir.
     rollout = codex_agent._find_adopted_rollout_path(codex_agent.host, sessions, _SESSION_ID)
     assert rollout is not None
@@ -1149,6 +1149,11 @@ def test_rebind_codex_session_rewrites_cwd_and_writes_resume_pointer(codex_agent
         record = json.loads(line)
         if record["type"] in ("session_meta", "turn_context"):
             assert record["payload"]["cwd"] == canonical_work
+
+
+def test_write_codex_resume_pointer_writes_root_session(codex_agent: CodexAgent) -> None:
+    codex_agent._write_codex_resume_pointer(codex_agent.host, _SESSION_ID)
+    assert codex_agent._get_root_session_file_path().read_text() == _SESSION_ID
 
 
 def test_rebind_adopted_rollout_cwd_warns_when_rollout_is_missing(
@@ -1193,28 +1198,68 @@ def test_adopt_cloned_session_transfers_store_and_rebinds(codex_agent: CodexAgen
     assert codex_agent._get_root_session_file_path().read_text() == _SESSION_ID
 
 
-def test_adopt_cloned_session_warns_when_source_has_no_store(
-    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
-) -> None:
+def test_adopt_cloned_session_raises_when_source_has_no_store(codex_agent: CodexAgent, tmp_path: Path) -> None:
     source_state_dir = tmp_path / "source_agent_state"
     source_state_dir.mkdir()
     source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
-    codex_agent._adopt_cloned_codex_session(codex_agent.host, source_location)
-    assert any("no codex session store" in m for m in log_warnings)
+    with pytest.raises(AgentStartError, match="no codex session store"):
+        codex_agent._copy_cloned_codex_session(codex_agent.host, source_location)
     assert not codex_agent._get_root_session_file_path().exists()
 
 
 @pytest.mark.rsync
-def test_adopt_cloned_session_warns_when_store_has_no_rollout(
-    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
-) -> None:
+def test_adopt_cloned_session_raises_when_store_has_no_rollout(codex_agent: CodexAgent, tmp_path: Path) -> None:
     source_state_dir = tmp_path / "source_agent_state"
     # The store dir exists (so transfer succeeds) but holds no rollout file.
     (source_state_dir / "plugin" / "codex" / "home" / "sessions").mkdir(parents=True)
     source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
-    codex_agent._adopt_cloned_codex_session(codex_agent.host, source_location)
-    assert any("no rollout found" in m for m in log_warnings)
+    with pytest.raises(AgentStartError, match="no rollout found"):
+        codex_agent._copy_cloned_codex_session(codex_agent.host, source_location)
     assert not codex_agent._get_root_session_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_adopt_multiple_sessions_resumes_the_last(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """``--adopt A B`` copies both source trees in and resumes the last named one."""
+    rollout_a = _write_rollout(tmp_path / "a" / "sessions", _SESSION_ID, cwd="/old", date="2026/06/15")
+    rollout_b = _write_rollout(tmp_path / "b" / "sessions", _OTHER_SESSION_ID, cwd="/old", date="2026/06/16")
+    options = CreateAgentOptions(agent_type=AgentTypeName("codex"), adopt_session=(str(rollout_a), str(rollout_b)))
+    codex_agent.adopt_session(codex_agent.host, options, codex_agent.mngr_ctx)
+    # The last named session is the one resumed.
+    assert codex_agent._get_root_session_file_path().read_text() == _OTHER_SESSION_ID
+    # Both rollouts coexist in the destination store (date-nested).
+    dest_sessions = codex_agent._get_codex_home() / "sessions"
+    assert codex_agent._find_adopted_rollout_path(codex_agent.host, dest_sessions, _SESSION_ID) is not None
+    assert codex_agent._find_adopted_rollout_path(codex_agent.host, dest_sessions, _OTHER_SESSION_ID) is not None
+
+
+@pytest.mark.rsync
+def test_adopt_and_from_resumes_the_clone(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """``--adopt A --from X`` copies the explicit session in but resumes the ``--from`` clone."""
+    explicit_rollout = _write_rollout(tmp_path / "explicit" / "sessions", _SESSION_ID, cwd="/old")
+    source_state_dir = tmp_path / "source_agent_state"
+    source_sessions = source_state_dir / "plugin" / "codex" / "home" / "sessions"
+    clone_rollout = _write_rollout(source_sessions, _OTHER_SESSION_ID, cwd="/old")
+    # The clone's rollout is the most-recent conversation. The clone path's ``ls -t``
+    # scan runs over the (now shared) dest store, and adopting the explicit session
+    # rewrites its rollout's cwd -- which bumps that file's mtime to "now". Give the
+    # clone source a far-future mtime so it is unambiguously the newest in the dest
+    # store regardless of that rewrite, so the resume pointer is the clone's.
+    os.utime(explicit_rollout, (1000, 1000))
+    far_future = time.time() + 1_000_000
+    os.utime(clone_rollout, (far_future, far_future))
+    source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("codex"),
+        adopt_session=(str(explicit_rollout),),
+        source_agent_state_location=source_location,
+    )
+    codex_agent.adopt_session(codex_agent.host, options, codex_agent.mngr_ctx)
+    # The clone wins the resume pointer.
+    assert codex_agent._get_root_session_file_path().read_text() == _OTHER_SESSION_ID
+    # The explicit session is still copied in (available in the session switcher).
+    dest_sessions = codex_agent._get_codex_home() / "sessions"
+    assert codex_agent._find_adopted_rollout_path(codex_agent.host, dest_sessions, _SESSION_ID) is not None
 
 
 # --- on_before_create -------------------------------------------------------
