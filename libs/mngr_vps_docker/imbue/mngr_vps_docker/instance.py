@@ -57,6 +57,7 @@ from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -120,6 +121,7 @@ from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.container_setup import stop_container
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps_docker.host_state_store import HostDirBackend
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
@@ -3103,6 +3105,60 @@ class TagMirrorVpsDockerProvider(OfflineCapableVpsDockerProvider):
         concrete providers (the bucket-existence probe runs at most once).
         """
         ...
+
+    @property
+    @abstractmethod
+    def _host_dir_backend(self) -> HostDirBackend:
+        """The offline ``host_dir`` capability: bucket-backed when enabled + present, else the no-op fallback.
+
+        The host_dir sibling of ``_state_store``: selecting one backend here lets
+        the host_dir paths below stop branching on ``is_offline_host_dir_enabled``
+        / bucket presence. Implemented as a cached property by the concrete
+        providers.
+        """
+        ...
+
+    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
+        """Push host_dir to the external store one final time before the instance pauses."""
+        self._host_dir_backend.trigger_final_sync(host_id, vps_ip)
+
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return the bucket-backed host_dir volume *reference* (cheap, no network probe), or None.
+
+        Delegates to the selected host_dir backend (the no-op backend returns None
+        when the feature is off or no bucket exists).
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        return self._host_dir_backend.volume_reference(host_id)
+
+    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return the bucket-backed host_dir volume, with a light existence probe, or None.
+
+        Delegates to the selected host_dir backend, which probes that the host's
+        ``host_dir/`` prefix has objects and, when empty, warns if the instance was
+        never granted the bucket-write identity. Returns None when unavailable.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        return self._host_dir_backend.volume(host_id)
+
+    def to_offline_host(self, host_id: HostId) -> OfflineHost:
+        """Return an offline host, reconstructing a stopped instance's record from the external store.
+
+        Falls back to the SSH/volume-backed base path first; if that can't find the
+        host (stopped and unreachable), reconstruct it from the external store --
+        the full ``VpsDockerHostRecord`` when the store has it (bucket
+        ``host_state.json``), otherwise the instance's own tags (which also covers a
+        bucket-mode host created before the bucket existed). Calls the SSH-only
+        ``VpsDockerProvider`` path directly so the ``OfflineCapableVpsDockerProvider``
+        tag fallback does not pre-empt this store-aware reconstruction.
+        """
+        try:
+            return VpsDockerProvider.to_offline_host(self, host_id)
+        except HostNotFoundError:
+            record = self._state_store.read_host_record_with_tag_fallback(host_id)
+            if record is None:
+                raise
+            return self._create_offline_host(record)
 
     def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
         self._state_store.persist_agent_record(host_id, agent_id, agent_data)

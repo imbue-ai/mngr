@@ -15,12 +15,9 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -47,7 +44,6 @@ from imbue.mngr_vps_docker.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -607,10 +603,6 @@ class AzureProvider(TagMirrorVpsDockerProvider):
                 e,
             )
 
-    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Push host_dir to the bucket one final time before the Azure VM deallocates."""
-        self._host_dir_backend.trigger_final_sync(host_id, vps_ip)
-
     def _write_idle_watcher_aux_files(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
         """Install the self-deallocate script the watcher ``.service`` runs (and ensure curl is present).
 
@@ -653,50 +645,6 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         misreported as STOPPED.
         """
         return self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) == VpsInstanceStatus.HALTED
-
-    def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a deallocated VM's record offline.
-
-        Falls back to the base (SSH/volume-backed) path first; if that can't find
-        the host (deallocated and unreachable), reconstruct it from the external
-        store: the *full* ``VpsDockerHostRecord`` when the store has it (Blob
-        ``host_state.json``), otherwise a minimal record rebuilt from the VM's own
-        tags -- which also covers a bucket-mode host created before the bucket
-        existed (so its ``host_state.json`` is absent). Mirrors
-        ``AwsProvider.to_offline_host``. Calls the SSH-only ``VpsDockerProvider``
-        path directly so the ``OfflineCapableVpsDockerProvider`` tag fallback does
-        not pre-empt the bucket-aware reconstruction below.
-        """
-        try:
-            return VpsDockerProvider.to_offline_host(self, host_id)
-        except HostNotFoundError:
-            record = self._state_store.read_host_record_with_tag_fallback(host_id)
-            if record is None:
-                raise
-            return self._create_offline_host(record)
-
-    # =========================================================================
-    # Offline host_dir volume (reads via the operator's credentials)
-    # =========================================================================
-
-    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return a bucket-backed host_dir volume *reference* (cheap, no network probe).
-
-        Delegates to the selected host_dir backend (the no-op backend returns None
-        when the feature is off or no bucket exists).
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        return self._host_dir_backend.volume_reference(host_id)
-
-    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return the bucket-backed host_dir volume, with a light existence probe.
-
-        Delegates to the selected host_dir backend, which probes that the host's
-        ``host_dir/`` prefix actually has blobs and, when empty, warns if the VM
-        has no attached user-assigned identity. Returns None when unavailable.
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        return self._host_dir_backend.volume(host_id)
 
 
 class _VmTagHostStateStore(HostStateStore):

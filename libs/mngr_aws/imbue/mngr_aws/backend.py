@@ -15,12 +15,9 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import TagLimitExceededError
-from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.volume import HostVolume
@@ -46,7 +43,6 @@ from imbue.mngr_vps_docker.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
@@ -453,10 +449,6 @@ class AwsProvider(TagMirrorVpsDockerProvider):
                 e,
             )
 
-    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Push host_dir to the bucket one final time before the EC2 instance stops."""
-        self._host_dir_backend.trigger_final_sync(host_id, vps_ip)
-
     # =========================================================================
     # Offline metadata via EC2 tags (so STOPPED hosts list + resolve by name)
     # =========================================================================
@@ -501,50 +493,6 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         stop transition.
         """
         return instance.get("state") in _HOST_DOWN_STATES
-
-    def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a STOPPED instance's record offline.
-
-        Falls back to the base (SSH/volume-backed) path first; if that can't find
-        the host (because it is stopped and unreachable), reconstruct it from the
-        external store: the *full* ``VpsDockerHostRecord`` when the store has it
-        (S3 ``host_state.json``), otherwise a minimal record rebuilt from the
-        instance's own EC2 tags -- which also covers a bucket-mode host created
-        before the bucket existed (so its ``host_state.json`` is absent). Calls
-        the SSH-only ``VpsDockerProvider`` path directly so the
-        ``OfflineCapableVpsDockerProvider`` tag fallback does not pre-empt the
-        bucket-aware reconstruction below.
-        """
-        try:
-            return VpsDockerProvider.to_offline_host(self, host_id)
-        except HostNotFoundError:
-            record = self._state_store.read_host_record_with_tag_fallback(host_id)
-            if record is None:
-                raise
-            return self._create_offline_host(record)
-
-    # =========================================================================
-    # Offline host_dir volume (reads via the operator's credentials)
-    # =========================================================================
-
-    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return a bucket-backed host_dir volume *reference* (cheap, no network probe).
-
-        Delegates to the selected host_dir backend (the no-op backend returns None
-        when the feature is off or no bucket exists).
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        return self._host_dir_backend.volume_reference(host_id)
-
-    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return the bucket-backed host_dir volume, with a light existence probe.
-
-        Delegates to the selected host_dir backend, which probes that the host's
-        ``host_dir/`` prefix actually has objects and, when empty, warns if the
-        instance has no attached IAM profile. Returns None when unavailable.
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        return self._host_dir_backend.volume(host_id)
 
 
 class _Ec2TagHostStateStore(HostStateStore):
