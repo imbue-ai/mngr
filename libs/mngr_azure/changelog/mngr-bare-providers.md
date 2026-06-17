@@ -29,3 +29,5 @@ longer report a just-resumed Azure VM as STOPPED until the next mirroring write.
 Updated the host_dir sync to call the realizer's `host_dir_path_on_outer`
 directly after the redundant `_host_dir_path_on_outer` forwarder was removed
 from the shared VPS provider. No behavior change.
+
+The idle-watcher install, the host_dir-to-bucket sync daemon install/before-pause, and the best-effort `_on_host_finalized` step runner all moved to the shared `OfflineCapableVpsProvider`. Azure now supplies only its hooks: the `Azure VM` display name; the ARM self-deallocate `.service` body and the curl-plus-deallocate-script outer prep (`_idle_watcher_service_unit` / `_prepare_idle_watcher_outer`); the bare-placement self-deallocate `shutdown.sh` (`_write_bare_idle_shutdown_script`); the sync gate (config flag + bucket + managed identity present), azcopy install, `azcopy sync` `.service` body, and blob target URL; and the self-deallocate role assignment prepended via `_post_finalize_steps`. The host-side systemd unit names changed from `mngr-azure-idle-watcher` / `mngr-azure-host-dir-sync` to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`. Behavior-preserving otherwise.

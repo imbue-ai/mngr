@@ -92,3 +92,13 @@ discover_hosts_and_agents log span, and the mutable-tags error messages), since
 the provider now supports both container and bare placements. Removed the
 redundant `_host_dir_path_on_outer` forwarder in favor of calling the realizer's
 `host_dir_path_on_outer` directly.
+
+Lifted three structurally-duplicated subsystems out of the aws/gcp/azure backends into the shared `OfflineCapableVpsProvider`, with small per-provider hooks:
+
+- The self-stopping idle watcher (in-container sentinel `shutdown.sh`, the host-side systemd `.path`/`.service` install, and the bare-placement shutdown script) is now shared. The systemd units use a single shared name (`mngr-idle-watcher`); providers customize the `.service` body via `_idle_watcher_service_unit` (AWS/GCP default to `shutdown -P now`; Azure overrides to its ARM self-deallocate) and prepare the outer via `_prepare_idle_watcher_outer` (Azure installs curl + its deallocate script). The bare shutdown action is `_write_bare_idle_shutdown_script` (default: the realizer's poweroff; Azure: ARM deallocate, since an Azure OS shutdown does not halt billing).
+
+- The host_dir-to-bucket sync daemon (install of the oneshot `.service` + `.timer`, and the before-pause flush) is now shared under the `mngr-host-dir-sync` unit name, gated on `_is_host_dir_sync_enabled` (off by default, so GCP installs nothing). Providers supply the sync CLI install (`_host_dir_sync_install_command`), the per-host `.service` body (`_host_dir_sync_service_unit`), and the target URI (`_host_dir_sync_target_uri`).
+
+- `_on_host_finalized` is now a shared best-effort step runner: each step's failure is logged at WARNING and the rest still run, preserving the prior non-fatal contract. Providers extend the step list via `_post_finalize_steps` (Azure prepends its self-deallocate role assignment).
+
+No user-visible behavior change; the host-side systemd unit names changed from per-provider (`mngr-aws-idle-watcher` etc.) to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`.

@@ -2236,6 +2236,99 @@ class VpsProvider(BaseProviderInstance):
 # offline-capable provider.
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 
+# Self-stopping idle watcher (host-side), shared by every offline-capable provider.
+# The in-container activity watcher writes ``IDLE_SENTINEL_FILENAME`` onto the
+# shared volume when idle; a host-side systemd ``.path`` unit (this unit name)
+# watches the corresponding outer-filesystem path and triggers a oneshot
+# ``.service`` that stops the instance. The action the ``.service`` takes is
+# per-provider (AWS/GCP power the host off via ``shutdown -P now``; Azure runs an
+# ARM self-deallocate, since an OS shutdown does not halt Azure compute billing) --
+# see ``OfflineCapableVpsProvider._idle_watcher_service_unit``.
+IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-idle-watcher"
+
+# Host-side host_dir-to-bucket sync daemon (Component 3 of specs/provider-state-bucket).
+# When a provider syncs host_dir to an object store, the create path installs (over
+# SSH on the outer) a systemd oneshot ``.service`` + ``.timer`` pair: every
+# ``HOST_DIR_SYNC_INTERVAL_SECONDS`` the oneshot syncs the per-host ``host_dir`` tree
+# to the bucket (AWS: ``aws s3 sync``; Azure: ``azcopy sync``). The same oneshot is
+# triggered once on graceful stop so the offline copy is current. GCP does not sync
+# host_dir (no object store), so its gate is off and nothing is installed.
+HOST_DIR_SYNC_UNIT_NAME: Final[str] = "mngr-host-dir-sync"
+HOST_DIR_SYNC_INTERVAL_SECONDS: Final[int] = 60
+
+
+def build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
+    """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
+
+    Unlike the base ``VpsProvider`` shutdown script (which stops only the
+    container), the self-stopping cloud variant only *signals* idle: it touches a
+    sentinel file on the shared volume. The host-side systemd path unit observes
+    that file and stops the whole instance (a container cannot stop its host, so
+    the signal has to cross the container boundary via the shared volume).
+    """
+    return f'#!/bin/bash\ntouch "{sentinel_in_container}"\n'
+
+
+def build_idle_watcher_path_unit(sentinel_on_outer: str, instance_kind: str) -> str:
+    """Build the systemd ``.path`` unit that fires when the idle sentinel appears.
+
+    ``PathExists`` triggers the paired ``.service`` once the sentinel file exists at
+    ``sentinel_on_outer`` (the outer-filesystem location the container's sentinel
+    write maps to on the per-host btrfs subvolume). ``instance_kind`` is the
+    provider's wording for the machine (``EC2 instance`` / ``GCE instance`` /
+    ``Azure VM``), used only in the human-readable ``Description=``.
+    """
+    return (
+        "[Unit]\n"
+        f"Description=Watch for the mngr idle sentinel and stop this {instance_kind} when idle\n"
+        "[Path]\n"
+        f"PathExists={sentinel_on_outer}\n"
+        f"Unit={IDLE_WATCHER_UNIT_NAME}.service\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def build_poweroff_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
+    """Build the oneshot systemd ``.service`` that powers the host off when idle.
+
+    Powers the instance off with ``shutdown -P now``; on AWS EC2 then applies the
+    instance's ``InstanceInitiatedShutdownBehavior`` (stop or terminate), and on GCE
+    a guest poweroff lands the instance in ``TERMINATED`` (stopped, disk preserved,
+    no compute billing) -- both with no IAM/API call.
+
+    It removes the sentinel file BEFORE powering off. This is what makes resume
+    work: when ``mngr start`` boots the instance again, systemd re-arms the ``.path``
+    unit -- if the sentinel were still present it would fire immediately and re-stop
+    the just-resumed instance. Clearing it first guarantees a clean slate on the next
+    boot (the in-container watcher only re-creates it if the host is idle again).
+    """
+    return (
+        "[Unit]\n"
+        "Description=Power off this instance when mngr signals the host is idle\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && shutdown -P now'\n"
+    )
+
+
+def build_host_dir_sync_timer_unit(interval_seconds: int) -> str:
+    """Build the systemd ``.timer`` that fires the host_dir sync every ``interval_seconds``.
+
+    ``OnBootSec`` gives the host a moment to finish bootstrapping before the first
+    sync; ``OnUnitActiveSec`` then repeats at the interval. Shared by AWS and Azure.
+    """
+    return (
+        "[Unit]\n"
+        "Description=Periodically sync this host's host_dir to the mngr state bucket\n"
+        "[Timer]\n"
+        f"OnBootSec={interval_seconds}\n"
+        f"OnUnitActiveSec={interval_seconds}\n"
+        f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
 
 class OfflineCapableVpsProvider(VpsProvider):
     """``VpsProvider`` for cloud providers whose hosts can be stopped while
@@ -2490,6 +2583,252 @@ class OfflineCapableVpsProvider(VpsProvider):
         ``<btrfs_mount_path>/<host_id_hex>/host_dir/commands/<file>``.
         """
         return self._realizer.host_dir_path_on_outer(host_id) / "commands" / IDLE_SENTINEL_FILENAME
+
+    # =========================================================================
+    # Self-stopping idle watcher (in-container sentinel + host-side systemd)
+    #
+    # An idle container should stop the whole instance (so a paused agent costs
+    # only disk), but a container cannot stop its host. Instead the in-container
+    # watcher touches a sentinel on the shared volume; a host-side systemd
+    # ``.path`` unit observes it and runs a oneshot ``.service`` that stops the
+    # instance. The install sequence and the sentinel-touch script are shared
+    # here; the ``.service`` body (poweroff vs Azure ARM deallocate) is a hook.
+    # =========================================================================
+
+    def _provider_instance_kind(self) -> str:
+        """Human-readable name for this provider's machine, used only in unit ``Description=``.
+
+        Default ``instance``; providers override with their own wording (``EC2
+        instance`` / ``GCE instance`` / ``Azure VM``).
+        """
+        return "instance"
+
+    def _create_shutdown_script(self, host: Host) -> None:
+        """Write the idle ``shutdown.sh``: a container signals via a sentinel, bare stops the host.
+
+        For the CONTAINER path an idle container should stop the whole instance,
+        but it cannot stop its host -- so the script only touches a sentinel on the
+        shared volume; a host-side systemd path unit (installed in
+        ``_on_host_finalized``) observes it and stops the instance.
+
+        For the BARE path the agent IS the VM's root, so the action depends on the
+        substrate: AWS/GCP power the VM off (the realizer's ``idle_shutdown_command``,
+        via ``super()._create_shutdown_script``); Azure must run an ARM deallocate
+        instead, since an OS poweroff does not halt Azure compute billing. The bare
+        branch is delegated to ``_write_bare_idle_shutdown_script`` so Azure can
+        override it. ``self._realizer.idle_shutdown_stops_host`` is True exactly for
+        the bare realizer.
+        """
+        if self._realizer.idle_shutdown_stops_host:
+            self._write_bare_idle_shutdown_script(host)
+            return
+        sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
+        shutdown_script = build_sentinel_shutdown_script(sentinel_in_container)
+        commands_dir = host.host_dir / "commands"
+        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
+        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
+        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+
+    def _write_bare_idle_shutdown_script(self, host: Host) -> None:
+        """Hook: write the BARE-placement idle ``shutdown.sh`` (default: the realizer's poweroff).
+
+        AWS/GCP use the realizer's ``idle_shutdown_command`` (``shutdown -P now``)
+        via the base ``VpsProvider._create_shutdown_script``. Azure overrides this to
+        write its ARM self-deallocate script instead, because an Azure OS shutdown
+        leaves the VM Stopped-but-allocated (still billing compute).
+        """
+        super()._create_shutdown_script(host)
+
+    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
+        """Hook: the oneshot ``.service`` body the host-side idle watcher runs.
+
+        Default (AWS/GCP) powers the host off with ``shutdown -P now`` (removing the
+        sentinel first so a resumed instance is not immediately re-stopped). Azure
+        overrides this to run its installed ARM self-deallocate script.
+        """
+        return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
+
+    def _prepare_idle_watcher_outer(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
+        """Hook: provider setup on the outer before the idle-watcher units are written.
+
+        ``sentinel_on_outer`` is the outer-filesystem path of the idle sentinel
+        (the same value the units reference). Default no-op (AWS/GCP need nothing).
+        Azure overrides this to install curl and write its self-deallocate script
+        (which removes that sentinel and then deallocates), run by its ``.service``.
+        """
+
+    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Install the systemd path/service idle watcher on the outer host.
+
+        The path unit watches the outer-filesystem location of the in-container idle
+        sentinel and, when it appears, the oneshot service stops the instance (the
+        action is the ``_idle_watcher_service_unit`` hook's body). Returns early
+        (after a WARNING) when the host record is missing.
+        """
+        record = self._find_host_record(host_id)
+        if record is None or record.config is None:
+            logger.warning(
+                "Idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
+                host_id,
+            )
+            return
+        sentinel_on_outer = str(self._idle_sentinel_path_on_outer(host_id))
+        with log_span("Installing idle self-stop watcher"):
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                self._prepare_idle_watcher_outer(outer, sentinel_on_outer)
+                outer.write_text_file(
+                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.path"),
+                    build_idle_watcher_path_unit(sentinel_on_outer, self._provider_instance_kind()),
+                )
+                outer.write_text_file(
+                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
+                    self._idle_watcher_service_unit(sentinel_on_outer),
+                )
+                outer.execute_idempotent_command("systemctl daemon-reload")
+                outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
+        logger.info("Idle self-stop watcher installed for host {}", host_id)
+
+    # =========================================================================
+    # Host-side host_dir-to-bucket sync daemon
+    #
+    # The install / before-pause sequences are uniform; the provider supplies the
+    # CLI install command, the per-host sync ``.service`` body, the target URI, and
+    # the enable gate (off for GCP, which has no object store).
+    # =========================================================================
+
+    def _is_host_dir_sync_enabled(self) -> bool:
+        """Whether this provider syncs host_dir to an object store for offline reads.
+
+        Default False (GCP inherits the no-op and installs nothing). AWS/Azure
+        override to gate on their config flag AND a state bucket being present.
+        """
+        return False
+
+    def _host_dir_sync_install_command(self) -> str | None:
+        """Best-effort CLI install command for the sync tool, or None to skip the install step.
+
+        AWS returns the awscli install; Azure returns the azcopy install. Default
+        None (no install). Only called when ``_is_host_dir_sync_enabled`` is True.
+        """
+        return None
+
+    def _host_dir_sync_service_unit(self, host_dir_on_outer: str, target: str) -> str:
+        """Provider's oneshot ``.service`` body that syncs ``host_dir_on_outer`` to ``target``.
+
+        AWS: ``aws s3 sync`` with IMDS instance-profile creds. Azure: ``azcopy sync``
+        with the MSI env pinning the bucket-write identity. Only reached when
+        ``_is_host_dir_sync_enabled`` is True, so a provider that enables sync must
+        override this; the default fails loudly rather than installing a no-op unit.
+        """
+        raise MngrError(
+            f"Provider {self.name!r} enabled host_dir sync but did not override _host_dir_sync_service_unit"
+        )
+
+    def _host_dir_sync_target_uri(self, host_id: HostId) -> str:
+        """The sync target for this host (AWS: ``s3://`` URI; Azure: blob prefix URL).
+
+        Only reached when ``_is_host_dir_sync_enabled`` is True, so a provider that
+        enables sync must override this; the default fails loudly.
+        """
+        raise MngrError(f"Provider {self.name!r} enabled host_dir sync but did not override _host_dir_sync_target_uri")
+
+    def _install_host_dir_sync(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Install the host-side host_dir-to-bucket sync daemon on the outer host.
+
+        Gated on ``_is_host_dir_sync_enabled``. Installs the sync CLI (best-effort,
+        when ``_host_dir_sync_install_command`` is non-None) and a systemd oneshot
+        ``.service`` + ``.timer`` pair that runs the provider sync every
+        ``HOST_DIR_SYNC_INTERVAL_SECONDS``. Returns early (no-op) when the feature is
+        off.
+        """
+        if not self._is_host_dir_sync_enabled():
+            return
+        host_dir_on_outer = str(self._realizer.host_dir_path_on_outer(host_id))
+        target = self._host_dir_sync_target_uri(host_id)
+        service_unit = self._host_dir_sync_service_unit(host_dir_on_outer, target)
+        timer_unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
+        install_command = self._host_dir_sync_install_command()
+        with log_span("Installing host_dir sync daemon"):
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                if install_command is not None:
+                    outer.execute_idempotent_command(install_command, timeout_seconds=300.0)
+                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
+                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
+                outer.execute_idempotent_command("systemctl daemon-reload")
+                outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
+        logger.info("host_dir sync daemon installed for host {} (target {})", host_id, target)
+
+    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
+        """Run the host_dir sync once (best-effort) so the offline copy is current before the pause.
+
+        Called by the base ``stop_host`` while the instance is still reachable.
+        Starts the oneshot sync service synchronously (``--wait`` blocks until it
+        finishes). Best-effort: any failure is logged at WARNING and swallowed so a
+        sync hiccup never blocks the stop -- the offline copy is then simply "as of
+        the last periodic sync". A no-op when ``_is_host_dir_sync_enabled`` is False.
+        """
+        if not self._is_host_dir_sync_enabled():
+            return
+        try:
+            with log_span("Triggering final host_dir sync before pause"):
+                with self._make_outer_for_vps_ip(vps_ip) as outer:
+                    outer.execute_idempotent_command(
+                        f"systemctl start --wait {HOST_DIR_SYNC_UNIT_NAME}.service", timeout_seconds=300.0
+                    )
+        except MngrError as e:
+            logger.warning(
+                "Final host_dir sync before stopping host {} failed; the offline copy will be as of "
+                "the last periodic sync: {}",
+                host_id,
+                e,
+            )
+
+    # =========================================================================
+    # Post-finalize provisioning (best-effort idle watcher + host_dir sync)
+    # =========================================================================
+
+    def _post_finalize_steps(self, *, host_id: HostId, vps_ip: str) -> list[tuple[str, Callable[[], None]]]:
+        """Extra best-effort post-finalize steps a provider prepends to the shared list.
+
+        Each entry is ``(failure_description, step)``; a failing step is logged at
+        WARNING (with the description) and the rest still run. Default empty. Azure
+        prepends its self-deallocate role assignment here.
+        """
+        return []
+
+    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Run the best-effort post-finalize steps after the host record is durable.
+
+        Runs an ordered list of steps, each best-effort: a step that raises
+        ``MngrError`` is logged at WARNING (with its description) and the rest still
+        run, so a failure here never fails an already-durable ``create_host``.
+
+        The shared list is: install the host-side idle watcher (skipped when the
+        realizer's idle command already stops the whole host -- the bare case --
+        since a bare placement self-stops directly) and install the host_dir-to-bucket
+        sync daemon (a no-op when ``_is_host_dir_sync_enabled`` is False, e.g. GCP).
+        Providers prepend their own steps via ``_post_finalize_steps`` (Azure: its
+        self-deallocate role assignment).
+        """
+        steps: list[tuple[str, Callable[[], None]]] = list(self._post_finalize_steps(host_id=host_id, vps_ip=vps_ip))
+        if not self._realizer.idle_shutdown_stops_host:
+            steps.append(
+                (
+                    "the agent will not auto-stop on idle, but `mngr stop` still works",
+                    lambda: self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip),
+                )
+            )
+        steps.append(
+            (
+                "the stopped host's host_dir will not be readable offline",
+                lambda: self._install_host_dir_sync(host_id=host_id, vps_ip=vps_ip),
+            )
+        )
+        for description, step in steps:
+            try:
+                step()
+            except MngrError as e:
+                logger.warning("Post-finalize step failed for host {} ({}); {}", host_id, e, description)
 
     @abstractmethod
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:

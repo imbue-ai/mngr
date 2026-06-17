@@ -6,8 +6,8 @@ from imbue.mngr_aws.backend import HOST_DIR_SYNC_UNIT_NAME
 from imbue.mngr_aws.backend import _build_awscli_install_command
 from imbue.mngr_aws.backend import _build_host_dir_sync_command
 from imbue.mngr_aws.backend import _build_host_dir_sync_service_unit
-from imbue.mngr_aws.backend import _build_host_dir_sync_timer_unit
 from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
+from imbue.mngr_vps.instance import build_host_dir_sync_timer_unit
 
 _HOST_DIR = "/mnt/mngr-btrfs/abc123/host_dir"
 _TARGET = "s3://mngr-state-bucket/hosts/abc123/host_dir/"
@@ -29,7 +29,7 @@ def test_service_unit_is_oneshot_and_runs_the_sync() -> None:
 
 
 def test_timer_unit_fires_at_the_interval() -> None:
-    unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
+    unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
     assert f"OnUnitActiveSec={HOST_DIR_SYNC_INTERVAL_SECONDS}" in unit
     assert f"OnBootSec={HOST_DIR_SYNC_INTERVAL_SECONDS}" in unit
     assert f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service" in unit

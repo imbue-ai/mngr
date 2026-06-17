@@ -7,7 +7,7 @@ from imbue.mngr_azure.backend import _build_azcopy_install_command
 from imbue.mngr_azure.backend import _build_host_dir_blob_url
 from imbue.mngr_azure.backend import _build_host_dir_sync_command
 from imbue.mngr_azure.backend import _build_host_dir_sync_service_unit
-from imbue.mngr_azure.backend import _build_host_dir_sync_timer_unit
+from imbue.mngr_vps.instance import build_host_dir_sync_timer_unit
 
 _HOST_DIR = "/mnt/mngr-btrfs/abc123/host_dir"
 _BLOB_URL = "https://mngrstabc.blob.core.windows.net/mngr-state/hosts/abc123/host_dir"
@@ -34,7 +34,7 @@ def test_service_unit_is_oneshot_and_authenticates_as_the_managed_identity() -> 
 
 
 def test_timer_unit_fires_at_the_interval() -> None:
-    unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
+    unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
     assert f"OnUnitActiveSec={HOST_DIR_SYNC_INTERVAL_SECONDS}" in unit
     assert f"OnBootSec={HOST_DIR_SYNC_INTERVAL_SECONDS}" in unit
     assert f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service" in unit

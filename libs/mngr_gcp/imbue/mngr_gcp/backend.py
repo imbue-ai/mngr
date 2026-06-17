@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
-from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -21,7 +20,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
@@ -43,7 +41,6 @@ from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
 from imbue.mngr_vps.host_store import VpsHostRecord
-from imbue.mngr_vps.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps.instance import OfflineCapableVpsProvider
 from imbue.mngr_vps.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps.instance import extract_git_depth
@@ -73,55 +70,14 @@ _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"STOPPING", "TERMINATED"})
 # recover the host name when reconstructing a stopped host.
 _HOST_NAME_PREFIX: Final[str] = "mngr-"
 
-# Self-stopping idle watcher (host-side). Identical mechanism to AWS: the
-# in-container activity watcher writes ``IDLE_SENTINEL_FILENAME`` onto the shared
-# volume when idle; a host-side systemd ``.path`` unit watches the outer path and
-# triggers a oneshot ``.service`` that runs ``shutdown -P now``. On GCE a guest
-# poweroff lands the instance in ``TERMINATED`` (stopped, disk preserved, no
-# compute billing) by default -- there is no GCE analog to AWS's
+# The self-stopping idle watcher (in-container sentinel + host-side systemd
+# ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
+# Identical mechanism to AWS: the GCP oneshot ``.service`` runs ``shutdown -P now``,
+# which on GCE lands the instance in ``TERMINATED`` (stopped, disk preserved, no
+# compute billing) -- there is no GCE analog to AWS's
 # ``InstanceInitiatedShutdownBehavior`` and none is needed (and no IAM/API call).
-IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-gcp-idle-watcher"
-
-
-def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
-    """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
-
-    Unlike the base ``VpsProvider`` shutdown script (``kill -TERM 1``, which
-    stops only the container), the GCP variant signals idle by touching a sentinel
-    file on the shared volume. A host-side systemd path unit observes it and powers
-    the whole GCE instance off (a container cannot power off its host).
-    """
-    return f'#!/bin/bash\ntouch "{sentinel_in_container}"\n'
-
-
-def _build_idle_watcher_path_unit(sentinel_on_outer: str) -> str:
-    """Build the systemd ``.path`` unit that fires when the idle sentinel appears."""
-    return (
-        "[Unit]\n"
-        "Description=Watch for the mngr idle sentinel and stop this GCE instance when idle\n"
-        "[Path]\n"
-        f"PathExists={sentinel_on_outer}\n"
-        f"Unit={IDLE_WATCHER_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-
-
-def _build_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
-    """Build the oneshot systemd ``.service`` that powers the host off when idle.
-
-    Runs ``shutdown -P now``; on GCE a guest poweroff stops the instance
-    (``TERMINATED``, disk preserved, no compute billing) with no API call. Removes
-    the sentinel BEFORE powering off so the rearmed ``.path`` unit does not
-    immediately re-stop a just-resumed instance.
-    """
-    return (
-        "[Unit]\n"
-        "Description=Power off this instance when mngr signals the host is idle\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && shutdown -P now'\n"
-    )
+# GCP does not sync host_dir to an object store, so it inherits the base no-op
+# ``_is_host_dir_sync_enabled`` and installs no sync daemon.
 
 
 def _resolve_credentials_project_and_zone_or_unavailable(
@@ -404,80 +360,14 @@ class GcpProvider(OfflineCapableVpsProvider):
         # (which on GCE stops it), so bare placement is supported.
         return True
 
-    def _create_shutdown_script(self, host: Host) -> None:
-        """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
+    def _provider_instance_kind(self) -> str:
+        return "GCE instance"
 
-        The base writes ``kill -TERM 1`` (stops the container); for GCP an idle
-        container should stop the whole *instance* (so a paused agent costs only
-        disk), but a container cannot power off its host. Instead the in-container
-        watcher touches a sentinel on the shared volume; a host-side systemd path
-        unit (installed in ``_on_host_finalized``) observes it and powers the host
-        off, which on GCE stops the instance. Mirrors ``AwsProvider._create_shutdown_script``.
-
-        A bare placement has no container -- the agent (the VM's root) powers the
-        instance off directly -- so it uses the base shutdown script instead.
-        """
-        if self._realizer.idle_shutdown_stops_host:
-            super()._create_shutdown_script(host)
-            return
-        sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
-        shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
-
-    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the host-side systemd idle watcher that self-stops this instance.
-
-        Best-effort (the base contract says this MUST NOT raise): any failure just
-        means no auto-stop on idle (manual ``mngr stop`` still works). Mirrors
-        ``AwsProvider._on_host_finalized``.
-
-        A bare placement self-stops the instance directly (its idle ``shutdown.sh``
-        runs ``shutdown -P now`` as the VM's root), so the watcher install is
-        skipped for bare.
-        """
-        if self._realizer.idle_shutdown_stops_host:
-            return
-        try:
-            self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            logger.warning(
-                "GCP idle watcher install failed for host {} ({}); the agent will not "
-                "auto-stop on idle, but `mngr stop` still works",
-                host_id,
-                e,
-            )
-
-    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the systemd path/service idle watcher on the outer host.
-
-        The watcher powers the host off when the in-container idle sentinel appears;
-        on GCE a guest poweroff stops the instance (no API/IAM). Returns early (after
-        a WARNING) when the host record is missing.
-        """
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            logger.warning(
-                "GCP idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
-                host_id,
-            )
-            return
-        sentinel_on_outer = self._idle_sentinel_path_on_outer(host_id)
-        with log_span("Installing GCP idle self-stop watcher"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.path"),
-                    _build_idle_watcher_path_unit(str(sentinel_on_outer)),
-                )
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
-                    _build_idle_watcher_service_unit(str(sentinel_on_outer)),
-                )
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
-        logger.info("GCP idle self-stop watcher installed for host {}", host_id)
+    # The base ``OfflineCapableVpsProvider`` owns the idle-watcher install and the
+    # shutdown-script write. GCP's ``.service`` body is the default
+    # ``shutdown -P now`` (a GCE guest poweroff stops the instance), so GCP
+    # overrides none of those hooks. GCP does not sync host_dir to an object store,
+    # so ``_is_host_dir_sync_enabled`` stays the base no-op and nothing is installed.
 
     # =========================================================================
     # Offline metadata via instance metadata (so STOPPED hosts list + resolve by name)

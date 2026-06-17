@@ -2,7 +2,6 @@ import os
 from collections.abc import Mapping
 from collections.abc import Sequence
 from functools import cached_property
-from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -18,7 +17,6 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
@@ -42,7 +40,6 @@ from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps.instance import AGENT_TAG_PREFIX
-from imbue.mngr_vps.instance import IDLE_SENTINEL_FILENAME
 from imbue.mngr_vps.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps.instance import TagMirrorVpsProvider
 from imbue.mngr_vps.instance import VpsProvider
@@ -68,88 +65,30 @@ _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
 # The host name is mirrored into the EC2 ``Name`` tag (as ``mngr-<host_name>``).
 _HOST_NAME_TAG_KEY: Final[str] = "Name"
 
-# Self-stopping idle watcher (host-side). The in-container activity watcher
-# writes ``IDLE_SENTINEL_FILENAME`` into the host_dir/commands directory on the
-# shared volume when the host goes idle; a host-side systemd ``.path`` unit
-# (``IDLE_WATCHER_UNIT_NAME``) watches the corresponding outer-filesystem path
-# and triggers a oneshot ``.service`` that powers the instance off
-# (``shutdown -P now``). EC2 then applies the instance's
-# ``InstanceInitiatedShutdownBehavior`` -- ``stop`` (resumable idle-pause, the
-# default) or ``terminate`` -- so no IAM role or awscli is needed on the box.
-# See the README "Implementation details".
-IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-aws-idle-watcher"
+# The self-stopping idle watcher (in-container sentinel + host-side systemd
+# ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
+# The AWS oneshot ``.service`` powers the instance off (``shutdown -P now``); EC2
+# then applies the instance's ``InstanceInitiatedShutdownBehavior`` -- ``stop``
+# (resumable idle-pause, the default) or ``terminate`` -- so no IAM role or awscli
+# is needed on the box. See the README "Implementation details".
 
 # Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
-# When ``is_host_dir_synced_to_bucket`` is on and a state bucket is present, the
-# create path attaches the prepare-provisioned IAM instance profile, then
-# installs (over SSH on the outer) a systemd oneshot ``.service`` + ``.timer``
-# pair: every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` the oneshot runs
+# The install / before-pause sequence is shared by the base; AWS supplies the
+# ``aws s3 sync`` service body and awscli install. When
+# ``is_host_dir_synced_to_bucket`` is on and a state bucket is present, the create
+# path attaches the prepare-provisioned IAM instance profile, then the base installs
+# a systemd oneshot ``.service`` + ``.timer`` pair that runs
 # ``aws s3 sync <host_dir_on_outer>/ s3://<bucket>/hosts/<id>/host_dir/ --delete``
-# using the instance profile's IMDS credentials (no long-lived keys on the box).
-# The same oneshot is also triggered once on graceful stop (``stop_host``) so the
-# offline copy is current. Offline reads are served from the bucket by the
-# operator's credentials via ``get_volume_for_host``.
-HOST_DIR_SYNC_UNIT_NAME: Final[str] = "mngr-aws-host-dir-sync"
-HOST_DIR_SYNC_INTERVAL_SECONDS: Final[int] = 60
+# every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` using the instance profile's IMDS
+# credentials (no long-lived keys on the box). The same oneshot is also triggered
+# once on graceful stop so the offline copy is current. Offline reads are served
+# from the bucket by the operator's credentials via ``get_volume_for_host``.
+# ``HOST_DIR_SYNC_UNIT_NAME`` / ``HOST_DIR_SYNC_INTERVAL_SECONDS`` are re-exported
+# from the base for the unit tests and the README.
 # host_dir can contain large transient build artifacts; exclude the obvious ones
 # so a periodic full-tree sync stays cheap. Conservative -- only mngr-irrelevant
 # caches that never need to be read offline.
 _HOST_DIR_SYNC_EXCLUDES: Final[tuple[str, ...]] = ("*.tmp", "*/__pycache__/*", "*/node_modules/*")
-
-
-def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
-    """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
-
-    Unlike the base ``VpsProvider`` shutdown script (which runs
-    ``kill -TERM 1`` to stop the container), the AWS variant only *signals*
-    that the host is idle: it touches a sentinel file on the shared volume.
-    The host-side systemd path unit observes that file and powers the whole
-    EC2 instance off (a container cannot power off its host, so the signal has
-    to cross the container boundary via the shared volume).
-    """
-    return f'#!/bin/bash\ntouch "{sentinel_in_container}"\n'
-
-
-def _build_idle_watcher_path_unit(sentinel_on_outer: str) -> str:
-    """Build the systemd ``.path`` unit that fires when the idle sentinel appears.
-
-    ``PathExists`` triggers the paired ``.service`` once the sentinel file
-    exists at ``sentinel_on_outer`` (the outer-filesystem location the
-    container's sentinel write maps to on the per-host btrfs subvolume).
-    """
-    return (
-        "[Unit]\n"
-        "Description=Watch for the mngr idle sentinel and stop this EC2 instance when idle\n"
-        "[Path]\n"
-        f"PathExists={sentinel_on_outer}\n"
-        f"Unit={IDLE_WATCHER_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-
-
-def _build_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
-    """Build the oneshot systemd ``.service`` that powers the host off when idle.
-
-    Powers the instance off with ``shutdown -P now``; EC2 then applies the
-    instance's ``InstanceInitiatedShutdownBehavior`` (``stop`` for resumable
-    idle-pause -- the default -- or ``terminate`` for ephemeral hosts), so no IAM
-    role or awscli is involved.
-
-    It removes the sentinel file BEFORE powering off. This is what makes resume
-    work: when ``mngr start`` boots the instance again, systemd re-arms the
-    ``.path`` unit -- if the sentinel were still present it would fire
-    immediately and re-power-off the just-resumed instance. Clearing it first
-    guarantees a clean slate on the next boot (the in-container watcher only
-    re-creates it if the host is idle again).
-    """
-    return (
-        "[Unit]\n"
-        "Description=Power off this instance when mngr signals the host is idle\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && shutdown -P now'\n"
-    )
 
 
 def _build_host_dir_sync_command(host_dir_on_outer: str, sync_target_uri: str) -> str:
@@ -177,24 +116,6 @@ def _build_host_dir_sync_service_unit(host_dir_on_outer: str, sync_target_uri: s
         "[Service]\n"
         "Type=oneshot\n"
         f"ExecStart=/bin/sh -c '{_build_host_dir_sync_command(host_dir_on_outer, sync_target_uri)}'\n"
-    )
-
-
-def _build_host_dir_sync_timer_unit(interval_seconds: int) -> str:
-    """Build the systemd ``.timer`` that fires the host_dir sync every ``interval_seconds``.
-
-    ``OnBootSec`` gives the host a moment to finish bootstrapping before the
-    first sync; ``OnUnitActiveSec`` then repeats at the interval.
-    """
-    return (
-        "[Unit]\n"
-        "Description=Periodically sync this host's host_dir to the mngr S3 state bucket\n"
-        "[Timer]\n"
-        f"OnBootSec={interval_seconds}\n"
-        f"OnUnitActiveSec={interval_seconds}\n"
-        f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=timers.target\n"
     )
 
 
@@ -515,163 +436,41 @@ class AwsProvider(TagMirrorVpsProvider):
         # via InstanceInitiatedShutdownBehavior, so bare placement is supported.
         return True
 
-    def _create_shutdown_script(self, host: Host) -> None:
-        """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
+    def _provider_instance_kind(self) -> str:
+        return "EC2 instance"
 
-        The base ``VpsProvider._create_shutdown_script`` writes a script
-        that runs ``kill -TERM 1`` to stop the container on idle. For AWS, an
-        idle container should stop the whole *instance* (so a paused agent costs
-        only EBS), but a container cannot power off its host. Instead, the
-        in-container watcher touches a sentinel file on the shared volume; a
-        host-side systemd path unit (installed in ``_on_host_finalized``) observes
-        it and powers the host off (EC2 then stops or terminates per
-        ``InstanceInitiatedShutdownBehavior``). Mirrors the base's
-        mkdir/write/chmod, swapping only the script body.
+    # The base ``OfflineCapableVpsProvider`` owns the idle-watcher install (the
+    # in-container sentinel ``shutdown.sh``, the host-side systemd ``.path``/
+    # ``.service`` pair, and the bare poweroff). AWS's ``.service`` body is the
+    # default ``shutdown -P now`` (EC2 then applies its
+    # ``InstanceInitiatedShutdownBehavior``), so AWS overrides none of those hooks.
 
-        A bare placement has no container -- the agent (the VM's root) powers the
-        instance off directly -- so it uses the base shutdown script instead.
-        """
-        if self._realizer.idle_shutdown_stops_host:
-            super()._create_shutdown_script(host)
-            return
-        sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
-        shutdown_script = _build_sentinel_shutdown_script(sentinel_in_container)
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+    # =========================================================================
+    # Host-side host_dir-to-bucket sync daemon -- the base owns the install /
+    # before-pause sequence; AWS supplies the gate, awscli install, ``aws s3 sync``
+    # service body, and s3 target URI.
+    # =========================================================================
 
-    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the host-side systemd idle watcher that self-stops this instance.
-
-        Runs after the host record is durably written. Installs (on the outer
-        host) a systemd ``.path``/``.service`` pair: the path unit watches the
-        outer-filesystem location of the in-container idle sentinel and, when it
-        appears, the oneshot service powers the host off -- EC2 then stops or
-        terminates the instance per ``InstanceInitiatedShutdownBehavior`` (no IAM
-        or awscli needed).
-
-        This is best-effort: per the base-class contract, it MUST NOT raise.
-        Any failure (record lookup, SSH, unit install) is caught and logged at
-        WARNING; the only consequence is that the agent will not auto-stop on
-        idle (manual ``mngr stop --stop-host`` still works).
-
-        A bare placement self-stops the instance directly (its idle ``shutdown.sh``
-        runs ``shutdown -P now`` as the VM's root), so it needs no host-side
-        watcher; the watcher install is skipped for bare. The host_dir-to-bucket
-        sync still runs for both shapes.
-        """
-        if not self._realizer.idle_shutdown_stops_host:
-            try:
-                self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
-            except MngrError as e:
-                # The install only issues SSH / file-write / command operations, which
-                # surface as MngrError (HostConnectionError is a MngrError subclass);
-                # a failure just means no auto-stop on idle, so log and move on rather
-                # than fail create_host after the host record is already durable.
-                logger.warning(
-                    "AWS idle watcher install failed for host {} ({}); the agent will not "
-                    "auto-stop on idle, but `mngr stop --stop-host` still works",
-                    host_id,
-                    e,
-                )
-        try:
-            self._install_host_dir_sync(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            # Same best-effort contract as the idle watcher: a failure just means
-            # the stopped host's host_dir won't be readable offline (manual reads
-            # over SSH while running still work), so log and move on.
-            logger.warning(
-                "AWS host_dir sync install failed for host {} ({}); the stopped host's host_dir "
-                "will not be readable offline",
-                host_id,
-                e,
-            )
-
-    def _install_host_dir_sync(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the host-side host_dir-to-bucket sync daemon on the outer host.
-
-        Gated on ``is_host_dir_synced_to_bucket`` AND a state bucket being
-        present (no bucket -> nothing to sync to). Installs awscli (best-effort,
-        apt) and a systemd oneshot ``.service`` + ``.timer`` pair that runs
-        ``aws s3 sync`` every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` using the
-        instance profile's IMDS credentials. Returns early (no-op) when the
-        feature is off or no bucket is configured.
-        """
+    def _is_host_dir_sync_enabled(self) -> bool:
+        """Enabled only when ``is_host_dir_synced_to_bucket`` is on AND a state bucket is present."""
         if not self.aws_config.is_host_dir_synced_to_bucket:
-            return
+            return False
+        if self._state_bucket is None:
+            logger.debug("No S3 state bucket; host_dir sync is disabled for this provider")
+            return False
+        return True
+
+    def _host_dir_sync_install_command(self) -> str | None:
+        return _build_awscli_install_command()
+
+    def _host_dir_sync_service_unit(self, host_dir_on_outer: str, target: str) -> str:
+        return _build_host_dir_sync_service_unit(host_dir_on_outer, target)
+
+    def _host_dir_sync_target_uri(self, host_id: HostId) -> str:
+        # ``_is_host_dir_sync_enabled`` guarantees a present bucket before this runs.
         bucket = self._state_bucket
-        if bucket is None:
-            logger.debug("No S3 state bucket; skipping host_dir sync install for host {}", host_id)
-            return
-        host_dir_on_outer = self._realizer.host_dir_path_on_outer(host_id)
-        sync_target_uri = host_dir_sync_target_for(bucket.bucket_name, host_id)
-        service_unit = _build_host_dir_sync_service_unit(str(host_dir_on_outer), sync_target_uri)
-        timer_unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
-        with log_span("Installing AWS host_dir sync daemon"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                outer.execute_idempotent_command(_build_awscli_install_command(), timeout_seconds=300.0)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
-        logger.info("AWS host_dir sync daemon installed for host {} (target {})", host_id, sync_target_uri)
-
-    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Run the host_dir sync once (best-effort) so the offline copy is current before the pause.
-
-        Called by the base ``stop_host`` while the instance is still reachable.
-        Starts the oneshot sync service synchronously (``--wait`` blocks until it
-        finishes). Best-effort: any failure is logged at WARNING and swallowed so
-        a sync hiccup never blocks the stop -- the offline copy is then simply
-        "as of the last periodic sync".
-        """
-        if not self.aws_config.is_host_dir_synced_to_bucket or self._state_bucket is None:
-            return
-        try:
-            with log_span("Triggering final host_dir sync before stop"):
-                with self._make_outer_for_vps_ip(vps_ip) as outer:
-                    outer.execute_idempotent_command(
-                        f"systemctl start --wait {HOST_DIR_SYNC_UNIT_NAME}.service", timeout_seconds=300.0
-                    )
-        except MngrError as e:
-            logger.warning(
-                "Final host_dir sync before stopping host {} failed; the offline copy will be as of "
-                "the last periodic sync: {}",
-                host_id,
-                e,
-            )
-
-    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the systemd path/service idle watcher on the outer host.
-
-        Separated from ``_on_host_finalized`` so the no-raise wrapping stays a
-        thin try/except. Returns early (after a WARNING) when the host record is
-        missing. The watcher powers the host off when the in-container idle
-        sentinel appears; EC2's ``InstanceInitiatedShutdownBehavior`` decides
-        stop-vs-terminate, so no awscli or IAM is involved.
-        """
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            logger.warning(
-                "AWS idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
-                host_id,
-            )
-            return
-        sentinel_on_outer = self._idle_sentinel_path_on_outer(host_id)
-        with log_span("Installing AWS idle self-stop watcher"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.path"),
-                    _build_idle_watcher_path_unit(str(sentinel_on_outer)),
-                )
-                outer.write_text_file(
-                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
-                    _build_idle_watcher_service_unit(str(sentinel_on_outer)),
-                )
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
-        logger.info("AWS idle self-stop watcher installed for host {}", host_id)
+        assert bucket is not None, "host_dir sync target requested without a state bucket"
+        return host_dir_sync_target_for(bucket.bucket_name, host_id)
 
     # =========================================================================
     # Offline metadata via EC2 tags (so STOPPED hosts list + resolve by name)
