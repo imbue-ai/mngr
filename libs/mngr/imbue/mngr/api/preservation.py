@@ -40,6 +40,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
@@ -136,6 +137,16 @@ def run_adopt_session_preflight(
     if not adopt_session:
         return
     resolved = resolve_agent_type(agent_type, mngr_ctx.config)
+    # The core gate (`_validate_session_adoption`, which runs before any on_before_create hook)
+    # has already rejected `--adopt` for a type that supports no adoption at all, so the resolved
+    # type is guaranteed adoption-capable here. A mismatch with *this* plugin's ``agent_class``
+    # therefore means the create is for a *different* adoption-capable agent -- whose own hook
+    # validates these ids -- not a silent drop. The assert keeps that invariant loud (rather than a
+    # silent no-op) if the core gate is ever bypassed or its capability check drifts out of sync.
+    assert issubclass(resolved.agent_class, HasSessionAdoptionMixin), (
+        f"--adopt reached the {agent_class.__name__} preflight for non-adoption type {agent_type!r}; "
+        "_validate_session_adoption should have rejected it first"
+    )
     if not issubclass(resolved.agent_class, agent_class):
         return
     for session_arg in adopt_session:
