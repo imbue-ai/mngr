@@ -399,9 +399,11 @@ class CodexAgent(
             policy["approval_policy"] = self.agent_config.config_overrides["approval_policy"]
         return policy
 
-    def get_version_policy(self) -> str:
-        # codex follows an update policy (ask / auto / never) rather than pinning a version.
-        return str(self.agent_config.update_policy)
+    def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        # codex follows an update policy (ask / auto / never) rather than pinning a version: a
+        # network-free check of the installed codex against its own recorded latest, then the
+        # update_policy action. Best-effort and never fatal -- an outdated codex still runs.
+        self._maybe_check_for_codex_update(host, self._resolve_user_codex_home(host), mngr_ctx)
 
     def get_install_binary_name(self) -> str:
         return "codex"
@@ -476,7 +478,7 @@ class CodexAgent(
         user_codex_home = self._resolve_user_codex_home(host)
         canonical_work_dir = self._resolve_canonical_path(host, self.work_dir)
         self._ensure_source_repo_trusted(host, user_codex_home, mngr_ctx)
-        self._maybe_check_for_codex_update(host, user_codex_home, mngr_ctx)
+        self.reconcile_installed_version(host, mngr_ctx)
         self._provision_codex_home(host, user_codex_home, canonical_work_dir)
         with mngr_ctx.concurrency_group.make_concurrency_group("codex_provisioning") as concurrency_group:
             provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)

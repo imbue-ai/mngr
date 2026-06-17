@@ -19,6 +19,7 @@ from pydantic import Field
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.live_output import LIVE_OUTPUT_POLL_INTERVAL
 from imbue.mngr.interfaces.live_output import LIVE_OUTPUT_POLL_TIMEOUT
@@ -159,11 +160,6 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     @abstractmethod
     def get_ready_timeout_seconds(self) -> float:
         """Return the timeout in seconds to wait for agent readiness."""
-        ...
-
-    @abstractmethod
-    def send_message(self, message: str) -> None:
-        """Send a message to the running agent via its stdin."""
         ...
 
     @abstractmethod
@@ -751,13 +747,20 @@ class HasVersionManagementMixin(ABC):
     Either by pinning a specific version or by following an update policy (the
     two faces of version control -- not pinning is itself a choice to track
     upstream). CLIs that simply assume whatever binary is on PATH do not have
-    this capability. This contract returns a short label of the instance's
-    version-management intent.
+    this capability. The agent calls ``reconcile_installed_version`` during
+    provisioning (once the binary is present) to enforce that intent: a pinning
+    agent verifies the installed version and raises on mismatch; an update-policy
+    agent runs its (best-effort) update check.
     """
 
     @abstractmethod
-    def get_version_policy(self) -> str:
-        """Return a short label of how this agent instance manages its binary version."""
+    def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        """Enforce this agent's version intent against the already-present binary.
+
+        Called during provisioning after the binary is known to be installed.
+        Pinning agents verify the installed version matches (raising on
+        mismatch); update-policy agents run their (best-effort) update check.
+        """
         ...
 
 
@@ -780,6 +783,38 @@ class HasAutoInstallMixin(ABC):
     def get_install_command(self) -> str:
         """Return the shell command that installs this agent's CLI binary."""
         ...
+
+
+class InteractiveAgentMixin(ABC):
+    """Mixin for agent types that accept interactive user messages at runtime.
+
+    The contract is a single ``send_message`` method. Headless and bare-command-less
+    agents do not take interactive input and so do not inherit this; the ``mngr message``
+    command checks ``isinstance(agent, InteractiveAgentMixin)`` to decide whether an
+    agent type can be messaged at all (rather than every agent carrying a rejecting
+    stub). The send mechanism differs by agent: keystroke injection into a tmux pane
+    (``SendKeysAgent`` / ``InteractiveTuiAgent``, used by claude/codex/antigravity and the
+    bare ``command`` runner) or an agent-native API (opencode's server, pi's extension).
+    """
+
+    @abstractmethod
+    def send_message(self, message: str) -> None:
+        """Send an interactive message to the running agent."""
+        ...
+
+
+def require_interactive_agent(agent: AgentInterface[Any]) -> InteractiveAgentMixin:
+    """Return ``agent`` narrowed to :class:`InteractiveAgentMixin`, or raise if it takes no messages.
+
+    Used by the message-delivery paths (``mngr message`` and the initial/resume-message
+    flows) to refuse a headless agent type with a clear error rather than an attribute
+    error, now that ``send_message`` lives only on interactive agents.
+    """
+    if not isinstance(agent, InteractiveAgentMixin):
+        raise SendMessageError(
+            str(agent.name), f"agent type '{agent.agent_type}' does not accept interactive messages"
+        )
+    return agent
 
 
 class CliBackedAgentMixin:

@@ -9,3 +9,5 @@ Also declares `HasAutoInstallMixin`: provisioning now checks whether the `openco
 The auto-allow permission apply-path (the wildcard `permission` config) now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
 
 `OpenCodeAgent` now also declares `CliBackedAgentMixin`, marking it as wrapping a specific external CLI so the CLI-only capability-matrix rows scope to it positively (rather than by the absence of a command-runner marker). Behavior is unchanged.
+
+`OpenCodeAgent` now also declares `InteractiveAgentMixin` -- the marker for agents that accept interactive messages, now that `send_message` is no longer a universal `AgentInterface` method. OpenCode already implemented `send_message` (it POSTs to its server), so this only adds the marker. Behavior is unchanged.

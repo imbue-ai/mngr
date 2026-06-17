@@ -11,8 +11,6 @@ from loguru import logger
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import SendMessageError
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
@@ -138,13 +136,6 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin, Ha
     def _get_stderr_path(self) -> Path:
         """Return the path to the stderr output file for this agent."""
         ...
-
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Headless agents do not accept interactive messages."""
-        raise SendMessageError(
-            str(self.name),
-            "Headless agents do not accept interactive messages.",
-        )
 
     def _is_agent_finished(self) -> bool:
         """Check if the agent process has exited (tmux lifecycle) or is no longer running."""

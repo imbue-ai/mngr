@@ -11,3 +11,5 @@ Test-only: removed a fragile install-path provision test that crashed on CI, and
 The auto-allow permission apply-path (`approval_policy="never"`) now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
 
 `CodexAgent` now also declares `CliBackedAgentMixin`, marking it as wrapping a specific external CLI so the CLI-only capability-matrix rows scope to it positively (rather than by the absence of a command-runner marker). Behavior is unchanged.
+
+`CodexAgent` now implements the functional `reconcile_installed_version` contract (replacing the descriptive `get_version_policy`): it runs codex's existing network-free update check + `update_policy` action (`_maybe_check_for_codex_update`) at the same point in provisioning, so the update behavior is unchanged.
