@@ -199,15 +199,23 @@ class BucketHostStateStore(HostStateStore):
         return self.bucket.list_agent_records(host_id)
 
     def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        record = self._read_bucket_host_record(host_id)
+        if record is None and self.fallback is not None:
+            # The bucket yielded no usable record (no host_state.json -- e.g. a host
+            # created before the bucket existed -- or a read error / malformed JSON):
+            # fall back to the tag store so it is still reconstructed from its tags.
+            return self.fallback.read_host_record(host_id)
+        return record
+
+    def _read_bucket_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        """Read+parse the host record from the bucket alone (no fallback). None on absent / error / malformed."""
         try:
             record_json = self.bucket.read_host_record_json(host_id)
         except self.bucket_error_type as e:
             logger.warning("Failed to read host record for {} from {}: {}", host_id, self.bucket_label, e)
-            record_json = None
+            return None
         if record_json is None:
-            # No host_state.json (e.g. a host created before the bucket existed): fall
-            # back to the tag store so it is still reconstructed from its instance tags.
-            return self.fallback.read_host_record(host_id) if self.fallback is not None else None
+            return None
         try:
             return VpsDockerHostRecord.model_validate_json(record_json)
         except ValueError as e:
