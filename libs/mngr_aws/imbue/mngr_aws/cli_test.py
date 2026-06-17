@@ -321,11 +321,6 @@ def test_provision_host_identity_creates_identity() -> None:
         assert identity.host_identity_exists() is True
 
 
-def test_provision_host_identity_warns_and_continues_when_unresolvable() -> None:
-    """An unresolvable identity (None) degrades to None rather than raising."""
-    assert _provision_host_identity(None) is None
-
-
 def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:
     """Cleanup deletes a provisioned identity and is a no-op when already absent."""
     with mock_aws():
@@ -346,7 +341,7 @@ def test_resolve_and_provision_host_identity_skips_when_bucket_not_set_up() -> N
     The identity's inline policy is scoped to the bucket, so provisioning it is
     meaningless without one; the gate must short-circuit before any IAM/STS call.
     """
-    result = _resolve_and_provision_host_identity(AwsProviderConfig(), region="us-east-1", was_bucket_set_up=False)
+    result = _resolve_and_provision_host_identity(AwsProviderConfig(), region="us-east-1", state_bucket_name=None)
     assert result is None
 
 

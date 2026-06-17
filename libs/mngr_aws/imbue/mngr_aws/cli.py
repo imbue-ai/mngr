@@ -206,20 +206,13 @@ def _build_host_identity(base: AwsProviderConfig, region: str | None) -> S3State
     return S3StateHostIdentity(session=session, region=effective_region, bucket_name=bucket_name)
 
 
-def _provision_host_identity(identity: S3StateHostIdentity | None) -> str | None:
+def _provision_host_identity(identity: S3StateHostIdentity) -> str | None:
     """Provision the bucket-write IAM host identity best-effort, returning its name or None.
 
-    A permission/API failure (or an unresolvable ``identity`` -- None when the
-    bucket name, and thus the identity name, could not be resolved) degrades to a
-    WARNING so the security-group + bucket prepare still succeed; offline host_dir
-    just won't work until prepare is re-run with sufficient IAM.
+    A permission/API failure degrades to a WARNING so the security-group + bucket
+    prepare still succeed; offline host_dir just won't work until prepare is re-run
+    with sufficient IAM.
     """
-    if identity is None:
-        logger.warning(
-            "Could not resolve a state-bucket name (AWS account id unavailable), so the host-dir IAM "
-            "identity cannot be provisioned. Offline host_dir reads will be unavailable."
-        )
-        return None
     try:
         return identity.ensure_host_identity()
     except S3StateHostIdentityError as e:
@@ -233,27 +226,31 @@ def _provision_host_identity(identity: S3StateHostIdentity | None) -> str | None
 
 
 def _resolve_and_provision_host_identity(
-    base: AwsProviderConfig, region: str | None, *, was_bucket_set_up: bool
+    base: AwsProviderConfig, region: str | None, *, state_bucket_name: str | None
 ) -> str | None:
-    """Resolve credentials, build the host identity, then provision it best-effort.
+    """Resolve credentials, build the host identity for the (already-resolved) bucket, then provision it.
 
-    Gates on the state bucket having been set up: the identity's inline policy is
-    scoped to the bucket, so provisioning it is only meaningful once the bucket
-    exists. When the bucket setup was skipped/failed (``was_bucket_set_up`` is
-    False), or credentials cannot be resolved, degrades to a WARNING and returns
-    None. Called only when ``is_offline_host_dir_enabled`` is set.
+    The identity's inline policy is scoped to the bucket, so provisioning it is
+    only meaningful once the bucket exists. ``state_bucket_name`` is the name
+    ``_ensure_state_bucket_best_effort`` resolved (None when bucket setup was
+    skipped/failed). When None, or when credentials cannot be resolved, this
+    degrades to a WARNING and returns None. Called only when
+    ``is_offline_host_dir_enabled`` is set.
     """
-    if not was_bucket_set_up:
+    if state_bucket_name is None:
         logger.warning(
             "Cannot provision the host-dir IAM identity: the S3 state bucket could not be set up "
             "(its inline policy is scoped to that bucket). Re-run with sufficient S3/STS permissions."
         )
         return None
     try:
-        identity = _build_host_identity(base, region)
+        session = base.get_session()
     except (ValueError, BotoCoreError) as e:
         logger.warning("Could not resolve credentials for the host-dir IAM identity; skipping it: {}", e)
         return None
+    identity = S3StateHostIdentity(
+        session=session, region=region or base.default_region, bucket_name=state_bucket_name
+    )
     return _provision_host_identity(identity)
 
 
@@ -511,7 +508,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     host_identity_name = None
     if base.is_offline_host_dir_enabled:
         host_identity_name = _resolve_and_provision_host_identity(
-            base, opts.region, was_bucket_set_up=state_bucket_name is not None
+            base, opts.region, state_bucket_name=state_bucket_name
         )
     _output_prepare_result(
         result, client.region, state_bucket_name, was_bucket_created, host_identity_name, output_opts.output_format
