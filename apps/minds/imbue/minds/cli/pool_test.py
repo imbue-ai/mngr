@@ -22,6 +22,7 @@ from imbue.minds.cli.pool import build_list_admin_args
 from imbue.minds.cli.pool import derive_public_key_from_private
 from imbue.minds.cli.pool import merge_ovh_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
+from imbue.minds.cli.pool import resolve_host_pool_dsn
 from imbue.minds.cli.pool import resolved_management_public_key_path
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
@@ -54,12 +55,16 @@ def test_build_create_admin_args_injects_minds_env_tag() -> None:
         env_name="alice",
         count=3,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json='{"cpus": 2}',
         workspace_dir="/path/to/workspace",
         management_public_key_file="/path/to/key.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     # The --tag injection is the whole reason for this layer's existence.
     tag_index = args.index("--tag")
@@ -71,12 +76,16 @@ def test_build_create_admin_args_forwards_all_other_flags_verbatim() -> None:
         env_name="alice",
         count=5,
         region="US-WEST-OR",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json='{"cpus": 4, "memory_gb": 16}',
         workspace_dir="/some/workspace",
         management_public_key_file="/path/to/key.pub",
         database_url="postgres://example",
         mngr_source="/path/to/mngr",
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     assert args[0] == "create"
     assert args[args.index("--count") + 1] == "5"
@@ -93,12 +102,16 @@ def test_build_create_admin_args_omits_mngr_source_when_none() -> None:
         env_name="alice",
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--mngr-source" not in args
 
@@ -108,12 +121,16 @@ def test_build_create_admin_args_omits_no_recycle_by_default() -> None:
         env_name="alice",
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--no-recycle" not in args
 
@@ -123,14 +140,56 @@ def test_build_create_admin_args_forwards_no_recycle_when_disabled() -> None:
         env_name="alice",
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=False,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--no-recycle" in args
+
+
+def test_build_create_admin_args_forwards_skip_deferred_install_wait_when_set() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        count=1,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=True,
+    )
+    assert "--skip-deferred-install-wait" in args
+
+
+def test_build_create_admin_args_omits_skip_deferred_install_wait_by_default() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        count=1,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert "--skip-deferred-install-wait" not in args
 
 
 def test_build_list_admin_args() -> None:
@@ -211,12 +270,16 @@ def test_pool_create_derives_production_from_default_root_name(
         env_name="production",
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir=str(_isolated_env),
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_deferred_install_wait_skipped=False,
     )
     tag_index = args.index("--tag")
     assert args[tag_index + 1] == "minds_env=production"
@@ -311,6 +374,22 @@ def test_resolved_management_public_key_path_explicit_override_yields_path_uncha
     with resolved_management_public_key_path("dev-x", explicit_path=str(pub_path)) as yielded:
         assert yielded == str(pub_path)
         assert Path(yielded).is_file()
+
+
+def test_resolve_host_pool_dsn_returns_explicit_when_given() -> None:
+    """An explicit --database-url wins and never touches Vault (even on staging)."""
+    # If this consulted Vault for the staging tier it would shell out / fail in
+    # the test env; returning the explicit value proves the precedence short-circuit.
+    assert resolve_host_pool_dsn("staging", "postgres://explicit") == "postgres://explicit"
+
+
+def test_resolve_host_pool_dsn_returns_none_for_dev_tier() -> None:
+    """Per-env tiers return None (no Vault read) so the admin CLI auto-resolves the DSN."""
+    assert resolve_host_pool_dsn("dev-josh-1", None) is None
+
+
+def test_resolve_host_pool_dsn_returns_none_for_ci_tier() -> None:
+    assert resolve_host_pool_dsn("ci-abc123", None) is None
 
 
 def test_merge_ovh_env_with_empty_ovh_returns_shell_copy() -> None:

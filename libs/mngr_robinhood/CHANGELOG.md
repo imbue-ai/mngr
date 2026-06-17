@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.5] - 2026-06-16
+
+### Changed
+
+- Changed: Best-effort agent teardown (`stop_agent` / `destroy_agent`) and the SDK restart-with-resume flow now also swallow the `CleanupFailedGroup` that `Host.stop_agents` / `Host.destroy_agent` raise when cleanup leaves a resource behind, matching the existing intent of logging and continuing rather than letting a teardown failure abort the run (or, for restart, abort the relaunch).
+
+## [v0.1.4] - 2026-06-16
+
+## [v0.1.3] - 2026-06-15
+
+### Changed
+
+- Changed: robinhood's stream-json producers (CLI token stream and the Agent-SDK synthesizer) now build their events through the shared `imbue.mngr_claude.stream_json` typed boundary, and the `assistant` summary's inner message is constructed through `anthropic.types.Message`. The CLI token stream stays byte-identical to the real `claude` binary; the framing events (`message_start` ... `message_stop`) and the `assistant` summary now carry the `anthropic` Python SDK's optional null-valued fields, so they are shape-compatible but not byte-identical (consumers validate leniently).
+
+## [v0.1.2] - 2026-06-13
+
 ## [v0.1.1] - 2026-06-08
 
 ### Added

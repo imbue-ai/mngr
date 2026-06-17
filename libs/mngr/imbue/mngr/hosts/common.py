@@ -14,11 +14,30 @@ from imbue.mngr.config.agent_config_registry import is_known_agent_type
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import WaitingReason
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
+
+
+@pure
+def get_agents_root_dir(host_dir: Path) -> Path:
+    """Return the directory under which all agents' state directories live.
+
+    This is the single source of truth for where agent state lives on disk, so
+    code that needs to enumerate agents (rather than address a single one) can do
+    so without duplicating the path structure.
+    """
+    return host_dir / "agents"
+
+
+@pure
+def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Compute the state directory path for an agent given the host directory and agent ID."""
+    return get_agents_root_dir(host_dir) / str(agent_id)
 
 
 def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
@@ -389,3 +408,29 @@ def determine_lifecycle_state(
         return AgentLifecycleState.DONE
 
     return replaced_state
+
+
+@pure
+def classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> WaitingReason | None:
+    """Classify why an agent is waiting from two marker signals, or None if running.
+
+    Shared by agent plugins so that a lifecycle reader (the RUNNING -> WAITING
+    promotion in ``get_lifecycle_state``) and a ``waiting_reason`` field generator
+    make the *same* decision from the same inputs and cannot drift. Callers differ
+    only in how they derive ``is_active`` -- e.g. from the live process plus an
+    ``active`` marker, or from a single cheap ``active`` marker read.
+
+    - not active -> END_OF_TURN (idle, turn complete)
+    - active and blocked on a permission dialog -> PERMISSIONS
+    - active and not blocked -> None (actively running)
+
+    PERMISSIONS is gated on ``is_active``: a permission dialog is only meaningful
+    during a live turn, so a *stranded* permission marker (one that outlived its
+    turn) reports END_OF_TURN rather than PERMISSIONS. Correctness therefore does
+    not depend on a cleanup hook having removed the marker.
+    """
+    if not is_active:
+        return WaitingReason.END_OF_TURN
+    if is_blocked_on_permission:
+        return WaitingReason.PERMISSIONS
+    return None

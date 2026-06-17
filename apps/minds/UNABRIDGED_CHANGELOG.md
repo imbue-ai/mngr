@@ -4,6 +4,308 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+In the predefined permission request dialog, the catch-all permission is now labelled `all` instead of `any` so it reads more clearly (the underlying value stored and granted is still `any`). While `all` is checked, the specific-permission checkboxes are disabled (they keep their own checked state); unchecking `all` re-enables them.
+
+Sped up in-app `mngr` invocations (e.g. the `mngr message` sent when a permission request is approved or denied) by adding `MngrCaller`, which runs the `mngr` CLI in a child forked from a pre-warmed `multiprocessing` forkserver instead of spawning a fresh Python interpreter each time.
+
+The forkserver imports `imbue.mngr.main` once at app startup (on a background thread, off the request path), so subsequent calls skip the multi-second interpreter-and-plugin import cost. Running in a forked child also keeps `mngr`'s global-state changes (loguru, `sys.argv`, stdout/stderr) out of the long-lived backend process.
+
+`MngrMessageSender` now always routes through this caller (defaulting to the shared, pre-warmed instance), so approving or denying a permission request no longer spawns a fresh `mngr` process. Other direct `mngr` CLI call sites can migrate onto `MngrCaller` incrementally.
+
+Approving or denying a permission request (both file-sharing and predefined-credential dialogs) no longer blocks on the agent nudge: `MngrMessageSender.send` now dispatches the `mngr message` onto a background thread tracked by the app's concurrency group and returns immediately, so the dialog responds without waiting for the (network-bound) delivery to complete.
+
+Correct `apps/minds/docs/release.md`: tag the **verified** mngr SHA, not `main` HEAD.
+
+The merge/tag steps assumed the merged `main` HEAD equals the SHA you built and verified in step 4. In practice `main` can advance past that SHA between verification and merge (unrelated PRs landing), so tagging `main` HEAD ships an unverified, vendor-mismatched tree. `release.md` now:
+
+- **Merge the mngr release PR with a merge commit, not a squash**, so the verified SHA stays reachable on `main` as the merge parent.
+- **Tag `minds-v<version>` on that verified SHA** (`GREEN_MNGR_SHA` from step 4) and on the FCT commit whose `vendor/mngr` is its archive — never `main` HEAD.
+- The step-6 vendor-match check now verifies the **commit that actually gets tagged** (FCT `origin/main` post-merge, extracted via `git archive origin/main:vendor/mngr`), not the local working copy — so a stale checkout can't pass the check while a different tree gets tagged. A `main`-HEAD mismatch is documented as **expected drift**, not an error.
+- The close-loop CI now reuses the already-verified build (the tag is the step-4 SHA), instead of repackaging.
+- Step 3 (vendor refresh) now points at the `just sync-vendor-mngr` recipe instead of inline `git archive`, so the doc and the recipe stay in sync, and documents the per-user `FCT_DIR` (set once in a gitignored, minds-scoped `apps/minds/.env`, alongside `GH_TOKEN`) so a release agent knows where to point the recipe, with explicit guidance to ask the user if `apps/minds/.env` is unset.
+- The runbook is now copy-paste-correct end to end: a new **Session setup** section defines `GH_TOKEN`, `MNGR`, `FCT`, and `FCT_DIR` once up front (steps 4/6/7 no longer reference undefined vars), **no personal path is hardcoded anywhere** (steps 6/7 use `$MNGR`/`$FCT`), and the FCT-PR-review note's verification command is fixed (`git archive <sha> | tar -x … && diff -r …` — the previous `git archive | diff -r` could not run).
+
+Caught while cutting `minds-v0.3.1`: `main` HEAD had drifted +58 unrelated files past the verified SHA, so the tag was placed on the verified merge parent.
+
+## 2026-06-15
+
+Remove potentially confusing parts of the messages sent to agents after approving or denying permission requests
+
+`minds pool create` gained a `--skip-deferred-install-wait` passthrough (forwarded to the admin bake) for faster dev pool bakes.
+
+imbue_cloud workspace creation now sends the form's repository to the lease, so the fast path can only adopt a pre-baked host that genuinely matches the requested repo (previously the repo was dropped and only an operator-chosen branch label was matched, so a request for one repo could silently adopt a host running another).
+
+- The desktop client passes the create form's repository through as `-b repo_url=<repository>` (a remote URL in production, a local clone path in dev); the imbue_cloud provider canonicalizes it (resolving a local path to its `origin` remote). The client does no git logic itself.
+
+- `minds pool create` (the OVH pool bake wrapper) now takes the bake source as exactly one of `--from-tag <tag>` (production) or `--workspace-dir <dir>` (dev) and derives the stamped identity from it; `--attributes` is optional and must not carry `repo_url` / `repo_branch_or_tag`.
+
+## test: mark a flaky desktop-client timeout test
+
+- `test_start_creation_subscription_ai_does_not_mint_litellm_key` is now `@pytest.mark.flaky`, matching its already-marked API_KEY twin: both occasionally exceed the 10s pytest-timeout when offload sandboxes are contended (unrelated to product behavior). No source change.
+
+minds: bump test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key timeout to 30s wallclock (pytest-timeout 30s, _wait_until_finished deadline 20s -- the 10s headroom lets the helper's "creation X did not finish within 20s" AssertionError surface instead of racing pytest-timeout's generic "Timeout (>30s)" message). The test occasionally exceeds 10s under heavy CI load -- same root cause as its already-@pytest.mark.flaky sibling.
+
+Fix the `macos_launch` cold-launch smoke test to match the redesigned welcome splash.
+
+- The `macos-launch.spec.js` Playwright smoke test (the `macos_launch` job in `minds-launch-to-msg.yml`, run on a vanilla `macos-latest` runner with no auth state) was asserting the old login screen: a `Create` link or a `Log in` **button**. The welcome screen was redesigned to a "Welcome to Minds" splash where `Sign Up` / `Log In` are now **links** (`ButtonLink` -> `<a>`) and there is a `Continue without an account` button. The stale `getByRole('button', { name: /^log in$/i })` selector matched nothing, so the test timed out at 120s and failed the whole launch-to-first-message run even though the app launched fine and the real `launch_to_msg` job (which auths via one-time code and drives the logged-in UI) passed.
+
+- The smoke test now asserts against the **content window** (`pickContentWindow`) rather than `firstWindow()`. `firstWindow()` races between the `/_chrome` title-bar view (which carries no auth/landing UI) and the content view, so the old assertion intermittently inspected the wrong window and timed out even when the app had launched correctly.
+
+- On the content window it keys off stable structural hooks instead of visible copy / role: the welcome splash is detected via the skip-account button id (`#skip-account-btn`) or the login link href (`a[href="/auth/login"]`), and the logged-in home via the `Create` link. Any one proves the cold-launch path completed, and a future wording or link-vs-button redesign of the splash no longer breaks the test.
+
+- Updated `test/e2e/README.md` to describe the new welcome-splash landing state and to point at the current workflow (`minds-launch-to-msg.yml` `macos_launch` job, twice-daily schedule + dispatch) instead of the retired `minds-macos-launch.yml`.
+
+- Fixed the `launch_to_msg` job's `mngr list` cross-check, which was aborting with `Provider 'aws' references unknown backend 'aws'` (empty output -> W1 looked absent). Root cause: the cross-check ran the bundled mngr inheriting the e2e's cwd (the mngr monorepo checkout), and mngr's project-config discovery walks up from cwd to the git-worktree root and reads `<root>/.mngr/settings.toml` -- which declares an `[providers.aws]` block for the repo's own image builds. A bundled mngr without the `aws` plugin rejects that project-layer block, aborting the parse before any agent is listed. This is a pure artifact of the cwd: minds.app spawns `mngr forward` / `mngr list` with `cwd=$HOME` (see `forward_cli.py` and `laptop_agent_types_seed.py`), where there is no `.mngr/` project layer. The cross-check now runs the subprocess with `cwd=Path.home()`, matching production exactly, so it reads only the minds host profile and never the repo's config. Parse stays strict, so a genuinely bad host-profile config still fails loudly. Verified against the bundled mngr: from the repo root the list aborts (exit 1); from `$HOME` it lists cleanly (exit 0).
+
+- Completed the bundling of `imbue-mngr-aws` so the packaged-app build resolves again. The AWS-provider work added `imbue-mngr-aws` as a minds dependency but did not add it to the four bundled-workspace-package lists (`scripts/build.js`, `electron/env-setup.js`, `scripts/build_test.py`, and `electron/pyproject/pyproject.toml`'s `[project] dependencies` + `[tool.uv.sources]`). Without a local-wheel source override, the build's `uv lock` resolved `imbue-mngr-aws` from PyPI, where the packaged app's 14-day dependency cooldown (`exclude-newer = "14 days"`) rejected the freshly-published `v0.1.1` -- failing `pnpm dist` on every build (including `main`'s scheduled runs). Added `imbue-mngr-aws` to all four lists (the `test_workspace_package_lists_are_consistent` drift guard enforces their agreement), so its wheel is bundled and `uv lock` resolves it locally, bypassing the cooldown. Verified: drift guard passes and `uv lock` against the updated pyproject resolves cleanly.
+
+- Hardened the `launch_to_msg` W2-destroy wait against slow lima teardown. The e2e polled `/api/destroying/<id>/status` and raised immediately on `status == "failed"`. But that status is derived fresh per poll as pid-dead + `is_host_still_active` (see `destroying.read_destroying`): the detached `mngr destroy` subprocess exits before the lima VM finishes dropping out of discovery, so on a slow runner the status reads `failed` transiently (subprocess gone, host not yet) before flipping to `done` once the host is actually torn down. A failure probe confirmed W2's VM was already absent from `limactl list` while the destroy was reported `failed`. The wait now polls for actual completion (`done`/404), treating `failed` as "not done yet", and only fails if the host is still active at the 240s deadline -- which still surfaces a genuine silent-orphan teardown. (The destroy endpoint reporting a transient `failed` during normal slow teardown is arguably worth smoothing server-side too, in the provider/destroy layer the AWS-era "destroy whole host" change introduced.)
+
+Cut minds `0.3.1` and standardize the release tag convention on the `minds-v<version>` prefix across both repos.
+
+- The minds release now tags **both** `imbue-ai/mngr` and `imbue-ai/forever-claude-template` with the same `minds-v<version>` tag (e.g. `minds-v0.3.1`). mngr already used the `minds-` prefix (`minds-v0.3.0`, `minds-v0.2.4`); FCT was the odd one out on a bare `v<version>` (`v0.3.0`). The `minds-` prefix namespaces minds-app releases so they don't collide with either repo's own `v<version>` / package versioning.
+- Bumped `apps/minds/package.json` `version` to `0.3.1` and `templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"` (the FCT tag the shipped binary clones at runtime).
+- Rewrote `apps/minds/docs/release.md` for the **`main`-based, two-PR flow**: a release is two PRs (mngr + FCT) that both target `main`, proven green as a pair, reviewed, merged, tagged `minds-v<version>` on each repo's `main`, then re-verified against the tags (which concludes the release). It documents the **vendor-match invariant** (FCT `vendor/mngr` must be the `git archive` of the exact mngr SHA it is tagged with), and records that the Apple-Silicon lima-VZ `cryptography` SIGILL is handled by the FCT template's `OPENSSL_armcap=0`, not an mngr pin.
+- Hardened the `launch_to_msg` e2e diagnostics. (1) Snapshot names are now slugified before use as filenames (`_safe_snap_name`): a failed-redirect snapshot embedded the agent's `/recovery?return_to=...` URL, and the `?` made `actions/upload-artifact` reject the whole artifact -- which lost *every* diagnostic for the failing run. (2) The whole-desktop `screencapture` "could not create image from display" failure (expected on the headless CI runner, which has no Aqua session) is downgraded from a per-snapshot warning to a single debug line; the Playwright per-page screenshots remain the real diagnostics there.
+
+## 2026-06-14
+
+Added **AWS** as a compute-provider option in the workspace create form, alongside Docker, Lima, Vultr, and Imbue Cloud. Selecting AWS launches the workspace in a runsc-hardened Docker container on an Amazon EC2 instance (the same outer-host/container model as the Vultr and OVH providers, so the secure latchkey gateway runs on the EC2 host outside the agent's container).
+
+- The create form requires picking an AWS region (from the regions with pinned default AMIs) and shows an inline note that AWS credentials are read from the environment (`AWS_*` / `AWS_PROFILE` / `~/.aws`).
+
+- The existing "Cloud" compute option was renamed to "Vultr" to name its provider plainly.
+
+- The workspace listing now shows a compute-provider label on every row (AWS, Vultr, Docker, Lima, Imbue Cloud).
+
+- AWS hosts are long-lived: they never idle-shut-down and have no max-lifetime timer.
+
+- minds writes one per-region AWS provider block into its mngr settings at startup (only when AWS credentials are present) and ensures the region's security group exists before each create.
+
+- minds now suppresses the default region-less `aws` provider in its mngr settings (the same way it already suppresses the default `imbue_cloud` provider), so `mngr list` no longer logs a spurious "credentials not configured" discovery warning every cycle. The usable AWS providers remain the per-region `aws-<region>` blocks.
+
+Destroying a workspace now reliably tears down its entire host, fixing a bug where a destroy could report success in the UI while the underlying cloud instance kept running (and billing).
+
+- Destroy always tears down the whole host (the workspace agent plus the per-host `system-services` agent), so the cloud instance is actually terminated. The previous single-agent fallback -- which could remove only the workspace agent and leave the host alive -- has been removed.
+
+- The destroy no longer shells out to a slow `mngr list` to find the workspace's host: the host id is immutable and already known from in-memory discovery. If the host genuinely can't be determined, the destroy is refused with a clear error instead of doing a partial teardown.
+
+- A workspace now stays visible (as "destroying", then "failed" if teardown didn't finish) until its host is confirmed gone, and is only removed from your account at that point. A failed or partial destroy no longer silently vanishes from the UI while the host keeps running.
+
+- The AWS region picker now offers only the US datacenters (`us-east-1`, `us-east-2`, `us-west-1`, `us-west-2`) by default. Each configured region adds a provider that `mngr list` queries every discovery cycle, and the non-US regions roughly doubled listing latency for little benefit.
+
+## 2026-06-13
+
+Fixed: a stopped or unresponsive workspace could get stranded on the "Loading workspace" loader and never advance to the recovery page. The desktop shell decides to show the recovery page from a one-shot "system interface status" event; if the chrome window reloaded after a workspace went stuck, that status was lost and never replayed, so the auto-redirect never fired even though the backend had correctly detected the stuck workspace.
+
+Two changes close the gap:
+
+- The Electron shell now replays the latest non-healthy workspace status when a chrome/sidebar view (re)loads, so a reloaded window re-learns which workspaces are stuck and redirects to the recovery page.
+
+- The backend's chrome event stream now periodically re-asserts non-healthy workspace statuses (in addition to the existing connect-time snapshot and per-transition pushes), so a desynced window self-heals within about 15 seconds even if it missed the original event.
+
+Also fixed: clicking into a mind whose container the landing page already shows as "Stopped" no longer waits through the multi-second stuck-detection window before a restart begins. The landing page now routes a known-stopped mind straight to the recovery page, which confirms the host is offline and cold-boots it immediately, instead of loading the workspace and waiting for repeated probe failures to first declare it stuck.
+
+Fix agent creation from a local git worktree (the dev `minds-start` flow, and any local-worktree source): `clone_git_repo` now checks out the fetched ref so the clone has a materialised working tree, matching what `git clone` produces. A recent rewrite that swapped `git clone` for `git init` + `git fetch` (to accept commit SHAs) dropped the checkout, so the worktree-overlay rsync's files landed untracked and the follow-up checkout aborted with "untracked working tree files would be overwritten by checkout", failing the create. This affected docker and lima local-worktree creates.
+
+## 2026-06-12
+
+The file-sharing permission dialog now accepts `~` / `~/...` notation for the current user's home directory when editing the path to share. The path is expanded to an absolute home-directory path (mirroring the gateway), the client-side within-roots check and Approve gating expand it too, and `~user` notation for another user's home is rejected with a clear error.
+
+Internal: routed the agents-root directory construction through the shared `get_agents_root_dir` helper (now in `imbue.mngr.hosts.common`). No behavior change.
+
+# minds
+
+`_build_mngr_create_command` now passes `--vultr-region=<region>` instead of `--vps-region=<region>` to the inner `mngr create --provider vultr` subprocess. The shared `--vps-*` build-args prefix was retired in this branch and the Vultr provider now rejects it with a migration error, so the CLOUD launch mode would otherwise fail on every host creation. The accompanying unit-test assertions are updated to the new prefix.
+
+Pool-host docs now point at the canonical `minds pool create` flow (via the
+new `just bake-pool-host` / `just list-pool-hosts` / `just destroy-pool-host`
+recipes) instead of the low-level `mngr imbue_cloud admin pool create` recipe
+with hand-exported OVH creds and a hand-passed `--management-public-key-file`.
+The env-aware wrapper derives the management SSH key + OVH credentials from the
+activated tier's Vault entries automatically; for staging/production it also
+resolves the host_pool DSN from Vault.
+
+`minds pool {create,list,destroy}` now resolve the staging/production host_pool
+DSN from `secrets/minds/<tier>/neon.DATABASE_URL` themselves (alongside the OVH
+creds and management key they already read from Vault), so the commands work on
+those tiers without a hand-passed `--database-url` even when invoked directly.
+An explicit `--database-url` still wins, and dev/ci continue to auto-resolve the
+DSN from their per-env `secrets.toml`.
+
+Did a broader accuracy pass over the minds docs, fixing things that had drifted
+since the Vultr->OVH pool migration:
+
+- Replaced stale Vultr references in the pool / env-teardown flows with OVH
+  (environments.md, vault-setup.md, host-pool-setup.md). Vultr mentions that
+  describe the CLOUD launch mode are left as-is -- that mode still uses
+  `--template vultr`.
+
+- Corrected the Modal app names in vault-setup.md (`llm-<tier>` / `rsc-<tier>`,
+  not `litellm-proxy-<tier>` / `remote-service-connector-<tier>`).
+
+- Fixed the `minds run` config-resolution description in design.md and
+  overview.md: there is no implicit `client.toml` fallback -- `minds run`
+  refuses to start when neither `--config-file` nor `MINDS_CLIENT_CONFIG_PATH`
+  is set.
+
+- Fixed the Electron backend invocation in desktop-app.md (`run`, not
+  `forward`, and it passes `--config-file`).
+
+- Dropped the stale `--id <id>` flag from the `mngr create` examples
+  (design.md, user_story.md) -- minds reads the agent id back from the
+  `created` JSONL event.
+
+- Corrected `minds` -> `minds run` (user_story.md), `mngr events` -> `mngr
+  event` (latchkey-permissions.md), the spurious `kv/` Vault path prefix
+  (host-pool-setup.md), and the broken `apps/minds/scripts/install.sh` install
+  snippet in the README (replaced with the real from-source dev flow).
+
+Pending permission requests whose originating agent's host can no longer be resolved (for example, after the agent's workspace has been shut down) are now hidden from the desktop client inbox instead of rendering with raw agent ids. The request is left untouched on the gateway, so it reappears in the inbox if the workspace comes back. The inbox badge count and the rendered cards are driven off the same filter, so they stay in agreement.
+
+## 2026-06-11
+
+Replace the SHA-derived per-workspace accent with a user-pickable palette + custom hex.
+
+- Workspaces now ship with one of 12 named palette colors (in picker order: `confusion`, `courage`, `envy`, `peace`, `belonging`, `energy`, `strength`, `comfort`, `inspiration`, `clarity`, then the two neutrals `indifference` and `white`) or an arbitrary `#rrggbb` hex chosen by the user. The previous SHA-from-agent-id OKLCH hue is gone.
+
+- A palette-only picker is added to the **Create** form at the top, above the launch / AI provider configuration. The selected color is written as an mngr `color=<hex>` label on the new primary agent at create time -- no follow-up write.
+
+- A fuller picker is added to **Workspace settings** above the Account section: the same 12 swatches plus an always-visible hex input that accepts lenient forms (`#fff`, `fff`, `#ffffff`, `ffffff`, any case) and normalizes to `#rrggbb` lowercase on save. Save is implicit -- a swatch pick saves immediately; a typed hex saves on blur. Inline errors cover invalid hex, the workspace being unreachable, and the underlying `mngr label` shell-out failing. Picker controls disable when the workspace's provider is in error state.
+
+- Titlebar text / nav icons / account button now use a **WCAG relative luminance** contrast picker server-side, so legibility holds across the full hex range -- previously a fixed black-on-light assumption. The foreground RGB triple is emitted as `accent_fg` on each SSE workspaces payload entry; the client just drops it into a CSS variable.
+
+- Color edits propagate live: the settings POST endpoint shells out to `mngr label <agent> -l color=<hex>` (CLI merge semantics, so concurrent writes against other label keys don't clobber each other), updates the resolver's snapshot optimistically, and fires the SSE wake-up so the chrome / sidebar / homepage tile repaint within one tick.
+
+- Workspaces created before the picker shipped that still have no `color` label render as `confusion` (`#0b292b`, the default) until the user picks something. The first save persists the choice as an on-disk mngr label.
+
+- Sidebar item spines on the dark sidebar (`bg-zinc-900`) currently paint the stored hex unchanged; dark palette entries (`indifference`, `confusion`, `courage`, `envy`) read as low-contrast spines on that surface. A separate PR will rework the sidebar treatment to address this.
+
+The sidebar is now a floating menu: dark panel with rounded corners,
+shadow, and a colored dot per workspace, matching the Figma "Space switcher
+menu" design. In Electron the page loads into the shared modal
+WebContentsView (transparent background), so the panel reads as a floating
+overlay above the workspace content. Each row's accent is shown by the dot
+alone -- the old left-edge vertical accent stripe (carried over from the
+docked sidebar) is removed as redundant.
+
+Every workspace row reveals its per-workspace settings gear on hover (and
+in Electron, an "Open in new window" button alongside it); the current
+workspace's row shows those icons at all times. Two new rows at the bottom
+of the menu: "New workspace"
+(navigates to /create) and "Manage account(s)" / "Log in" (replaces the
+account button that used to sit in the titlebar). The titlebar no longer
+shows the account button.
+
+The sidebar behaves like a modal: clicking anywhere outside the menu (or
+pressing Escape) closes it. The menu's height comes from its own flex
+layout -- no JS measurement or per-bundle bounds math.
+
+Each window now hosts three WebContentsView surfaces instead of four:
+chrome (titlebar), content (workspace), and a single shared overlay used
+by both the sidebar and the inbox. The sidebar URL (/_chrome/sidebar) is
+loaded into the same modalView that hosts /inbox, so dismissal,
+titlebar-drag suppression, transparent background, and Escape handling
+all come from the existing modal infrastructure.
+
+The menu's position is now driven entirely by the call site, not by an
+inferred ``is_mac`` flag. The chrome page reads the trigger button's
+``getBoundingClientRect`` and passes the rect + a caller-chosen offset
+through; the menu anchors at ``trigger.bottom-left + offset`` regardless
+of where the trigger lives. In Electron that goes over IPC into
+``/_chrome/sidebar``'s query string (``trigger_x`` / ``trigger_y`` /
+``trigger_w`` / ``trigger_h`` / ``offset_x`` / ``offset_y``); in browser
+mode chrome.js sets the inline panel's ``style.left`` / ``style.top``
+directly. The panel uses ``py-1.5`` (vertical padding only) so the
+row's ``px-2`` lines up exactly with the trigger button's icon offset
+inside its ``w-8`` shell -- icon columns line up automatically. Moving
+or restyling the trigger button in the future requires no template
+changes.
+
+An incoming permission request no longer yanks the open menu away. Now
+that the sidebar and the inbox share one overlay view, auto-opening the
+inbox is gated on no modal already being visible (previously it only
+checked whether the *inbox* was open, so it would load the inbox over an
+open sidebar). When a menu is up, the request surfaces via the live
+titlebar badge instead, and auto-opens once the menu is dismissed and
+the next request arrives.
+
+On macOS the titlebar's left padding grew from 72px to 76px so the first
+titlebar button's hover highlight clears the window's traffic lights with
+a little more breathing room. The workspace menu follows automatically
+(it anchors to that button's measured position), so no menu-side change
+was needed.
+
+The menu's internal spacing was tightened to a uniform grid: 4px padding
+on all four sides of the panel, 2px between every entry, and 2px above
+and below the divider line (the line is now a bare full-width rule that
+takes its spacing from the panel's row gap rather than its own padding).
+
+The menu is anchored 2px left of and 2px below the trigger button's
+bottom-left corner (anchor offset (-2, 2)). Its background is a flat pure
+black for now (was the dark-teal #0b292b) while the color treatment is
+being iterated on.
+
+The workspace row is now a single shared builder
+(window.mindsSidebarRow.buildRow) rather than markup duplicated across
+the Electron menu (sidebar.js) and the browser menu (chrome.js). The row
+carries no outer positioning -- spacing is the parent container's flex
+gap -- so it composes cleanly wherever it's dropped in. The styleguide's
+"Sidebar items" sample renders through that same builder, so the catalog
+can't drift from the live menu.
+
+The workspace menu is now 280px wide (was 244px).
+
+Each workspace row's action icons -- the settings gear and (in Electron)
+the "open in new window" arrow -- are now always visible rather than
+revealed on hover. The open-in-new icon is the lucide arrow-up-right
+diagonal arrow (matching the Figma "Space switcher menu"), replacing the
+older external-link box glyph.
+
+The landing page's workspace rows gain the same "open in new window"
+arrow, placed just left of the settings gear. In the desktop app it
+opens (or focuses) a dedicated window for that workspace; in a plain
+browser it opens the workspace in a new tab.
+
+The titlebar button that opens the workspace menu now uses a hamburger
+"menu" glyph (three horizontal lines) instead of the old panel-left
+sidebar glyph (Figma node 559-5101). The ICONS_24 catalog entry was
+renamed sidebar -> menu accordingly.
+
+The settings gear inside the floating workspace menu rows is rendered
+smaller (Figma node 560-5111) so it reads as a lighter secondary action
+next to the workspace name, rather than competing with it.
+
+Workspace rows now use the same hover highlight (``bg-white/10``) as the
+"New workspace" and account rows at the bottom of the menu, so the whole
+menu responds to hover consistently. The per-row action icons (open in
+new window, settings) keep their glyph sizes but sit in larger 24x24
+buttons, giving a bigger, easier click target.
+
+The shared Card component's row layouts (``row`` / ``row-spread``) now use
+a tighter ``gap-1.5`` (6px) between children instead of ``gap-3`` (12px),
+so the landing-page workspace rows, account rows, and settings rows pack
+their badges and action icons more closely.
+
+The desktop client's latchkey services catalog (`ServicesCatalog` / `ServicePermissionInfo`) moved to `imbue.mngr_latchkey.services_catalog` and now reads the bundled `services.json` directly instead of fetching it from the running gateway's `GET /permissions/available` endpoint.
+
+This removes the catalog's dependency on gateway liveness for what is static package data, and lets the same catalog serve both the desktop permission dialog and the server-side credential-sync path. The gateway client's now-unused `get_available_services` method (and its `AvailableServiceEntry` wire model) were removed; the client is otherwise unchanged and still drives the live `permission-requests` and `permissions` extensions.
+
+Replaced direct ValueError/RuntimeError raises in deploy-lifecycle config validation, the forward-CLI envelope stream consumer, and Telegram credential extraction with dedicated custom exception types.
+
+The Electron workspace-creation e2e driver (`create_workspace_via_electron`) now
+fails fast when creation fails. It previously only waited for the workspace-ready
+redirect, so any `mngr create` failure (e.g. an unregistered docker runtime) made
+the driver block for the full 10-minute navigation budget before timing out with
+an opaque Playwright error. It now races the workspace-ready URL against the
+create flow's failure view (`#failure-view`), raising `WorkspaceCreationFailedError`
+with the surfaced `#error-message` text the moment creation fails -- turning a
+silent 10-minute hang into an immediate, diagnosable failure. This affects only the
+e2e test/snapshot path, not the shipped app (which already surfaces the failure
+view to users).
+
 ## 2026-06-11
 
 agent_creator: clone_git_repo + checkout_branch now accept commit SHAs in addition to branch and tag names. Implementation switches from `git clone --single-branch --branch <ref>` to `git init && git fetch origin <ref> && git checkout -B <name> FETCH_HEAD`, which is uniform across all three input shapes. Non-shallow, mirror-pushable, no behavior change for existing branch/tag inputs.

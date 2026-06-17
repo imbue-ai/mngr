@@ -6,9 +6,45 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.5] - 2026-06-16
+
+### Changed
+
+- Changed: `destroy_host` now raises a `CleanupFailedGroup` carrying the classified cleanup failures (instead of returning them, or swallowing errors as warnings) when a resource is left behind, and returns normally otherwise. A leased VPS that cannot be released back to the pool is recorded as a `HOST_RESOURCE_REMAINS` failure (the data-wipe step on the VPS stays best-effort / warn-only because the released VPS is destroyed wholesale by `cleanup_released_hosts.py`), so `mngr destroy`/`cleanup` can surface it and exit with a cause-specific code. See `specs/cleanup-error-aggregation.md`.
+
+### Removed
+
+- Removed: Dead `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` stub overrides from `LimaSliceVpsClient`, matching the removal of those abstract methods from the shared `VpsClientInterface`.
+
+## [v0.1.4] - 2026-06-16
+
+### Added
+
+- Added: OVH bare-metal "slices" feature — carve VPS-like hosts (lima/QEMU VMs) out of rented OVH bare-metal servers as an alternative to ordering OVH VPSes. A slice is indistinguishable from a baked VPS pool host to minds and the imbue_cloud provider, with cleaner btrfs (the lima data disk, no loopback). Includes the slice data model + lifecycle (`bare_metal.py`), lima slice creation (`build_slice_lima_yaml`, `LimaSliceVpsClient`), and a `SliceVpsDockerProvider` that runs the shared vps_docker bake on the VM.
+- Added: `mngr imbue_cloud admin server` command group for the bare-metal lifecycle — `pricing` (per-slice OVH pricing table), `order` (places a real OVH eco order; **charges the account**), `await-delivery`, `setup` (resumable Debian reinstall + box prep), `register`, `list`, `set-status`. Codifies the full RAM-pricing → order → deliver → provision → slice flow that was previously done by hand.
+- Added: `mngr imbue_cloud admin pool create --backend [ovh_vps|slice]` unifies pool-host baking across backends — there is now a single command to bake a leasable pool host regardless of backend (the machine-provisioning step differs; the bake + row insert are shared). Slice rows go through the same lease-metadata path as OVH, carrying the operator's `--attributes` and `--region`.
+- Added: `--skip-deferred-install-wait` flag on `admin pool create` (slice + ovh_vps) for faster dev/throwaway pool bakes that skip the FCT deferred-install (heavy apt + Playwright/Chromium) wait; must not be used for production pool hosts.
+
+### Changed
+
+- Changed: Pool bake now waits for the FCT `deferred-install` service to finish before stopping the services agent, on both the OVH-VPS and slice paths. Stopping mid-apt previously corrupted dpkg, leaving the deferred install failing on every post-lease retry until repaired.
+- Changed: `admin pool create` no longer accepts hand-typed `repo_url` / `repo_branch_or_tag` in `--attributes`. The bake source is now exactly one of `--from-tag <tag>` (production — clones `--repo-url` at the tag into a fresh temp dir so the content provably equals the tag) or `--workspace-dir <dir>` (dev — bakes from a working tree). `--attributes` is now optional and rejects the `repo_url` / `repo_branch_or_tag` keys.
+- Changed: imbue_cloud fast path now matches on the **repository** as well as the branch/tag, so it can no longer adopt a pool host running different code than the request asked for. A new `repo_identity.canonicalize_repo_source` is the single source of truth applied identically at bake time and request time (normalizes ssh/https, `.git`, trailing slash, host case; resolves a local path to its `origin` remote). `fast_mode=require` now raises `FastPathUnavailableError` when canonical identity cannot be established, instead of matching on a subset.
+- Changed: Restructured the `mngr_imbue_cloud` plugin into layered sub-packages (`plugin`, `cli`, `bake`, `providers`, `hosts`, `slices`, `connector`) with an `import-linter` "mngr_imbue_cloud layers contract" enforcing the ordering. The slice/bare-metal subsystem is isolated in `slices/`, the provider-generic pool bake in `bake/`, and both provider backends are co-located in `plugin/backends.py`. Plugin entry points moved to `imbue.mngr_imbue_cloud.plugin.entrypoints` / `plugin.slice_entrypoints`. Pure refactor: no behavior, CLI, wire-format, or schema change.
+- Changed: Decomposed the oversized `providers/instance.py` (~2,000 lines) — extracted the pure listing-shaping helpers into `providers/listing.py`, the pre-release data-wipe script generator into `providers/wipe.py`, and the slow-path VPS-vs-slice rebuild provider/config builders into `providers/rebuild.py` (with their unit tests co-located).
+- Changed: The imbue_cloud provider now reaches a leased host's outer (VPS-root) sshd at the lease's `ssh_port` instead of a hardcoded 22, so `mngr list` / discovery and destroy-time wipe target the slice VM rather than the bare-metal box's own sshd.
+- Changed: The slow-path rebuild now pins the leased host's outer SSH host key in the rebuilding provider's known_hosts, so the certified-data sync over the outer connection passes strict host-key checking (applies to OVH VPSes and slices).
+
+## [v0.1.3] - 2026-06-15
+
+## [v0.1.2] - 2026-06-13
+
 ### Changed
 
 - Changed: A stopped (offline) host's files are now readable through the same interface as an online host (used e.g. by Claude session preservation when a host is destroyed while offline). The host's volume is resolved lazily on first read, so this adds no per-host probe to host discovery; when no volume is available, reads behave as "nothing there".
+- Changed: `_build_delegated_vps_provider` now returns a `MinimalVpsDockerProvider` (moved into `mngr_vps_docker`, since it's a generally useful role for any externally-managed-VPS host-setup path). Its `_parse_build_args` extracts `--git-depth=N` and forwards everything else to docker, which is the correct behavior for the no-provisioning path that pairs with `ExternallyManagedVpsClient`; without this, every slow-path container rebuild raised before any docker work happened (the base `_parse_build_args` is `@abstractmethod` now).
+- Changed: `mngr imbue_cloud admin pool create` now passes `--ovh-datacenter=` instead of the retired `--vps-datacenter=` to the inner `mngr create --provider ovh`, keeping pool creation working after the OVH provider's per-provider build-arg prefix rename.
+- Changed: Replaced direct ValueError/RuntimeError raises in build-arg parsing and host provisioning with dedicated custom exception types.
 
 ## [v0.1.1] - 2026-06-08
 

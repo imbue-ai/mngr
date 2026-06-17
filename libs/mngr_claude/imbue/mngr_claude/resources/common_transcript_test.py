@@ -11,12 +11,17 @@ so tests are fast and deterministic.
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from imbue.mngr import resources as mngr_resources
+from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 
 # -- Helpers --
 
@@ -120,10 +125,20 @@ class ScriptRunner:
         log_path.write_text(stub_mngr_log_sh)
         log_path.chmod(0o755)
 
+        # Write the real shared common-transcript lib: the converter sources it
+        # for the convert lock, mirroring Host._ensure_shared_shell_libs.
+        lib_path = self.agent_state_dir / "commands" / "mngr_common_transcript_lib.sh"
+        lib_path.write_text(
+            importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+        )
+        lib_path.chmod(0o755)
+
         # Standard paths
         self.script_path = Path(__file__).parent / "common_transcript.sh"
         self.input_file = self.agent_state_dir / "logs" / "claude_transcript" / "events.jsonl"
         self.output_file = self.agent_state_dir / "events" / "claude" / "common_transcript" / "events.jsonl"
+        # The mkdir-based mutex the converter takes around its read-modify-write.
+        self.lock_dir = self.agent_state_dir / ".common_transcript_convert.lock"
 
     def write_input(self, lines: list[str]) -> None:
         """Write lines to the input transcript file."""
@@ -146,11 +161,14 @@ class ScriptRunner:
                 events.append(json.loads(line))
         return events
 
-    def run_single_pass(self, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+    def run_single_pass(
+        self, timeout: float = 10.0, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """Run the script with --single-pass."""
         env = {
             **os.environ,
             "MNGR_AGENT_STATE_DIR": str(self.agent_state_dir),
+            **(extra_env or {}),
         }
         return subprocess.run(
             ["bash", str(self.script_path), "--single-pass"],
@@ -323,6 +341,43 @@ def test_handles_malformed_json(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     events = runner.get_output_events()
     assert len(events) == 1
     assert events[0]["content"] == "valid"
+
+
+def test_missing_output_file_emits_nothing_to_pane(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """On the first pass the output file does not exist yet; the watcher must
+    stay completely silent on stdout/stderr while still converting the event.
+    The converter's count is captured by the shell, never echoed to the pane.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input([_make_user_event(uuid4().hex, "2026-01-01T00:00:00Z", text="Hello")])
+    assert not runner.output_file.exists()
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
+    assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
+    # The conversion still happens; only the pane noise is gone.
+    assert len(runner.get_output_events()) == 1
+
+
+def test_dropped_lines_emit_nothing_to_pane(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Malformed and null-message lines are dropped silently and must produce no
+    output on the watcher's stdout/stderr; the valid line still converts.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    null_message = json.dumps(
+        {"type": "user", "uuid": uuid4().hex, "timestamp": "2026-01-01T00:00:00Z", "message": None}
+    )
+    valid = _make_user_event(uuid4().hex, "2026-01-01T00:00:01Z", text="kept")
+    runner.write_input(["not json", null_message, valid])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
+    assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
+    # The bad lines are dropped; the valid one still converts.
+    events = runner.get_output_events()
+    assert [e["content"] for e in events] == ["kept"]
 
 
 def test_skips_events_without_uuid(tmp_path: Path, stub_mngr_log_sh: str) -> None:
@@ -759,6 +814,38 @@ def test_user_text_quoting_stop_hook_marker_without_is_meta_stays_user(tmp_path:
     assert events[0]["type"] == "user_message"
 
 
+def test_emitted_common_records_conform_to_canonical_schema(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Every record claude's converter emits must validate against the shared envelope schema.
+
+    Guards against the claude emitter (common_transcript.sh) and the canonical schema
+    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives all three record
+    types and asserts each emitted record conforms.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    assistant = _make_assistant_event(
+        "uuid-assistant",
+        "2026-01-01T00:00:01Z",
+        text="hi there",
+        tool_calls=[{"id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}],
+        stop_reason="tool_use",
+    )
+    user = _make_user_event(
+        "uuid-user",
+        "2026-01-01T00:00:02Z",
+        text="hello",
+        tool_results=[{"tool_use_id": "toolu_1", "content": "file.txt", "is_error": False}],
+    )
+    runner.write_input([assistant, user])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    records = runner.get_output_events()
+    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
+
+
 def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Running twice with new input should append without duplicates."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
@@ -778,3 +865,70 @@ def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert len(events) == 2
     assert events[0]["content"] == "First"
     assert events[1]["content"] == "Second"
+
+
+def test_held_lock_skips_pass(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A pass that cannot take the convert lock (held by a concurrent pass)
+    skips its conversion rather than racing into duplicate output. Simulated by
+    pre-creating the (fresh) lock dir and giving the pass a short lock timeout."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input([_make_assistant_event(uuid4().hex, "2026-01-01T00:00:01Z", text="hi")])
+
+    # Hold the lock with a fresh mtime so the stale-break (>1min) does not fire.
+    runner.lock_dir.mkdir(parents=True)
+
+    result = runner.run_single_pass(extra_env={"MNGR_CONVERT_LOCK_TIMEOUT": "1"})
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    # Lock was held the whole time, so nothing was converted.
+    assert runner.get_output_events() == []
+
+    # Release the lock; the next pass converts normally.
+    runner.lock_dir.rmdir()
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert len(runner.get_output_events()) == 1
+
+
+def test_stale_lock_is_broken(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A convert lock older than a minute is treated as stale (left by a crashed
+    pass) and broken, so the converter never wedges permanently."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input([_make_assistant_event(uuid4().hex, "2026-01-01T00:00:01Z", text="hi")])
+
+    runner.lock_dir.mkdir(parents=True)
+    # Age the lock past the 1-minute stale threshold.
+    stale = time.time() - 120
+    os.utime(runner.lock_dir, (stale, stale))
+
+    result = runner.run_single_pass(extra_env={"MNGR_CONVERT_LOCK_TIMEOUT": "1"})
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    # The stale lock was broken, so conversion proceeded.
+    assert len(runner.get_output_events()) == 1
+
+
+def test_concurrent_passes_do_not_duplicate(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Two passes racing over the same input must not both append the same
+    events: the lock serializes them so the second sees the first's output in
+    its dedup set. Without the lock this produces duplicate event_ids."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input(
+        [_make_assistant_event(uuid4().hex, f"2026-01-01T00:00:{i:02d}Z", text=f"m{i}") for i in range(20)]
+    )
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(runner.agent_state_dir)}
+    procs = [
+        subprocess.Popen(
+            ["bash", str(runner.script_path), "--single-pass"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    for proc in procs:
+        assert proc.wait(timeout=30) == 0
+
+    events = runner.get_output_events()
+    event_ids = [e["event_id"] for e in events]
+    assert len(event_ids) == len(set(event_ids)), "convert lock failed to prevent duplicate events"
+    assert len(events) == 20

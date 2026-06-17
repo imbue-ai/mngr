@@ -161,6 +161,21 @@
       }
     }
 
+    // Expand a leading ``~`` / ``~/`` to the home directory the
+    // file-sharing dialog embeds on its path input, mirroring the
+    // server-side ``_expand_home_prefix``. A bare ``~`` or ``~/...``
+    // expands; ``~user`` (another user's home) is left unchanged so the
+    // within-roots check rejects it, matching the server. Returns the
+    // value unchanged when there is no home dir or no ``~`` prefix.
+    function expandSharePathHome(value, input) {
+      var home = String(input.getAttribute("data-home-dir") || "");
+      if (!home) return value;
+      if (value === "~" || value.indexOf("~/") === 0) {
+        return home + value.slice(1);
+      }
+      return value;
+    }
+
     // Whether ``value`` is at or beneath one of ``roots``. Case-insensitive
     // and purely lexical, mirroring the server-side check (and WsgiDAV's
     // share-prefix matching).
@@ -173,11 +188,32 @@
       });
     }
 
+    // The predefined-permission dialog offers a catch-all permission
+    // (stored as ``any``, shown to users as ``all``) alongside the
+    // specific permissions. While ``all`` is ticked, the specific
+    // checkboxes are disabled (they keep their own checked/unchecked
+    // state) to communicate that the catch-all already covers them;
+    // unticking ``all`` re-enables them. The browser omits disabled
+    // inputs from the submission, so only the active side is granted.
+    // The wildcard checkbox is tagged with ``data-wildcard`` in the
+    // template; dialogs without one (e.g. file-sharing) are left
+    // untouched.
+    function syncPermissionWildcardExclusivity() {
+      var form = document.getElementById("permissions-form");
+      if (!form) return;
+      var wildcard = form.querySelector('input[name="permissions"][data-wildcard]');
+      if (!wildcard) return;
+      form.querySelectorAll('input[name="permissions"]').forEach(function (box) {
+        if (box !== wildcard) box.disabled = wildcard.checked;
+      });
+    }
+
     function updateApproveState() {
       var form = document.getElementById("permissions-form");
       if (!form) return;
       var approveBtn = document.getElementById("permissions-approve-btn");
       if (!approveBtn) return;
+      syncPermissionWildcardExclusivity();
       var anyChecked = form.querySelector('input[name="permissions"]:checked') !== null;
       // The file-sharing dialog adds an editable path field. Its hidden
       // "permissions" checkbox is always checked, so gate Approve on the
@@ -189,7 +225,7 @@
       var pathInput = document.getElementById("file-sharing-path-input");
       var pathOk = true;
       if (pathInput) {
-        var value = pathInput.value.trim();
+        var value = expandSharePathHome(pathInput.value.trim(), pathInput);
         var withinRoots = isSharePathWithinRoots(value, sharePathRoots(pathInput));
         pathOk = value.length > 0 && withinRoots;
         var hint = document.getElementById("file-sharing-path-hint");

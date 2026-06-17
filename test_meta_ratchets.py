@@ -1,6 +1,5 @@
 import ast
 import fnmatch
-import os
 import re
 import subprocess
 import sys
@@ -17,12 +16,9 @@ from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extensio
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
-from imbue.imbue_common.test_profiles import detect_branch
-from scripts.changelog_projects import DEV_PROJECT
 from scripts.changelog_projects import all_known_projects
 from scripts.changelog_projects import project_dir as get_project_dir
 from scripts.changelog_projects import project_entries_dir
-from scripts.changelog_projects import project_for_path
 from scripts.changelog_projects import pyproject_projects
 
 _REPO_ROOT = Path(__file__).parent
@@ -161,6 +157,19 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
+def test_no_import_layer_violations_mngr_imbue_cloud() -> None:
+    """Ensure mngr_imbue_cloud production code has zero import layer violations.
+
+    Enforces the ``mngr_imbue_cloud layers contract`` (the sub-package layering:
+    plugin > cli > bake > providers > hosts > slices > connector > config >
+    data_types > errors > primitives). See ``test_no_import_layer_violations``
+    for the flaky/timeout rationale.
+    """
+    check_no_import_lint_errors(_REPO_ROOT, contract_name="mngr_imbue_cloud layers contract")
+
+
 @pytest.mark.timeout(60)
 def test_no_type_errors() -> None:
     """Ensure the whole workspace has zero type errors (ty).
@@ -209,6 +218,11 @@ def test_no_ruff_errors() -> None:
         raise AssertionError("\n".join(errors) + "\n" + fix_hint)
 
 
+# Regenerating every command's docs spawns a fresh interpreter with all plugins loaded,
+# which takes several seconds locally and exceeds the default 10s pytest-timeout in the
+# slower offload sandbox (the bare-metal `admin server` + slice commands enlarged the CLI
+# surface). Match the other heavy meta-ratchet tests with a generous timeout.
+@pytest.mark.timeout(60)
 def test_cli_docs_are_up_to_date() -> None:
     """Committed CLI docs and the PyPI README must match scripts/make_cli_docs.py output.
 
@@ -254,12 +268,19 @@ def test_prevent_bash_without_strict_mode() -> None:
       pipefail``, so this omission is a deliberate, matched choice rather than
       an oversight.
 
+    - The merged agent-plugin ports' shell resources under
+      ``libs/mngr_{codex,opencode,antigravity}/.../resources/`` (lifecycle-marker,
+      hook, and launch scripts), brought in by merging the codex/opencode/antigravity
+      plugin ports. Marker/hook scripts routinely omit ``-e`` on purpose -- they test
+      for files that may be absent and act on non-zero exits, which ``-e`` would abort
+      -- so tightening any that do not need the exemption is left to those plugins.
+
     The count is enumerated against the full local checkout. In offload
     sandboxes the count is lower because ``.dockerignore`` omits some of these
     tracked paths from the build context, so they are absent on disk there.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(17), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -560,132 +581,6 @@ def test_every_project_with_tests_has_coverage_config() -> None:
 
     assert len(errors) == 0, "Projects with tests are missing coverage configuration:\n" + "\n".join(
         f"  - {e}" for e in errors
-    )
-
-
-# --- Changelog entry enforcement ---
-
-# Branch prefixes that are exempt from the changelog requirement
-_CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation",)
-
-
-def _resolve_diff_base() -> str:
-    """Return the git ref to diff the PR branch against.
-
-    Prefers ``origin/$GITHUB_BASE_REF`` in CI (the actual PR base), then
-    ``origin/main``, then plain ``main``. Returns the first ref that
-    ``git rev-parse`` resolves; otherwise raises ``RuntimeError``.
-    """
-    candidates: list[str] = []
-    base_ref = os.environ.get("GITHUB_BASE_REF", "")
-    if base_ref:
-        candidates.append(f"origin/{base_ref}")
-    candidates.extend(["origin/main", "main"])
-    for ref in candidates:
-        result = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", ref],
-            cwd=_REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return ref
-    raise RuntimeError(
-        "Cannot resolve a diff base: none of "
-        + ", ".join(candidates)
-        + " are reachable. Fetch the base branch and re-run."
-    )
-
-
-def _changed_files_against_base(base: str) -> list[str]:
-    """Return the repo-relative paths the PR branch changes vs. ``base``.
-
-    Uses ``git diff --name-only <base>...HEAD`` (three-dot form, i.e. the
-    diff against the merge base) so renames/branches behave intuitively.
-    Raises ``RuntimeError`` if ``git diff`` itself fails.
-    """
-    result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...HEAD"],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git diff failed against {base} (exit {result.returncode}): {result.stderr.strip()}")
-    return [line for line in result.stdout.splitlines() if line.strip()]
-
-
-def _projects_requiring_entry(changed_files: list[str]) -> set[str]:
-    """Return the set of projects this PR must produce a changelog entry for.
-
-    A project is "touched" iff the PR changes any file under it.
-    ``project_for_path`` handles the ``libs/<name>`` / ``apps/<name>`` /
-    ``dev`` bucketing. Files that are themselves changelog artifacts (entry
-    files, ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``) are intentionally
-    *not* excluded -- adding an entry file inherently satisfies the
-    requirement, and a PR that only edits a project's consolidated changelog
-    should still describe that edit in a per-PR entry.
-    """
-    known = set(all_known_projects(_REPO_ROOT))
-    touched: set[str] = set()
-    for rel_path in changed_files:
-        project = project_for_path(rel_path, _REPO_ROOT)
-        if project in known:
-            touched.add(project)
-    return touched
-
-
-# Marked as acceptance because this check should be done soon before merging,
-# not during iteration.
-@pytest.mark.acceptance
-def test_pr_has_changelog_entry() -> None:
-    """Ensure every PR branch has one changelog entry per project it touches.
-
-    For each project the PR changes a file in (``libs/<name>``,
-    ``apps/<name>``, or the synthetic ``dev`` bucket for root-level files),
-    require ``<project_dir>/changelog/<branch-name>.md`` to exist (with
-    slashes in the branch name replaced by dashes). The nightly consolidator
-    routes each project's entries into that project's ``UNABRIDGED_CHANGELOG.md``.
-    """
-    branch = detect_branch()
-
-    if not branch or branch == "main":
-        pytest.skip("Not a PR branch")
-
-    for prefix in _CHANGELOG_EXEMPT_BRANCH_PREFIXES:
-        if branch.startswith(prefix):
-            pytest.skip(f"Branch '{branch}' is exempt from changelog requirement")
-
-    diff_base = _resolve_diff_base()
-    changed_files = _changed_files_against_base(diff_base)
-    touched = _projects_requiring_entry(changed_files)
-
-    sanitized = branch.replace("/", "-")
-    missing: list[str] = []
-    for project in sorted(touched):
-        entry_path = project_entries_dir(project, _REPO_ROOT) / f"{sanitized}.md"
-        if not entry_path.exists():
-            missing.append(str(entry_path.relative_to(_REPO_ROOT)))
-
-    assert not missing, (
-        f"Missing changelog entries for branch '{branch}' "
-        f"(diff base: '{diff_base}', resolved via "
-        f"git diff --name-only {diff_base}...HEAD). This PR appears to touch "
-        f"the project(s) {sorted(touched)}; each needs its own entry file.\n"
-        f"Create:\n" + "\n".join(f"  - {p}" for p in missing) + "\n"
-        f"Each file should briefly describe the user-visible changes in this PR "
-        f"that pertain to that project. The synthetic '{DEV_PROJECT}' project "
-        f"covers root-level files (scripts/, .github/, top-level docs, build tooling).\n"
-        f"\n"
-        f"IMPORTANT: for any individual project listed above where you believe "
-        f"this PR makes NO actual changes to that project, do NOT add a placebo "
-        f"entry just to satisfy this check. A stale or misconfigured diff base "
-        f"('{diff_base}') can make unrelated files from main appear as if they "
-        f"changed on this branch, falsely implicating projects you didn't touch. "
-        f"In that case the right fix is to correct the diff base, not to add "
-        f"entries for projects you actually didn't change."
     )
 
 

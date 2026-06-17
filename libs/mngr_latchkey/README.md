@@ -72,6 +72,30 @@ Both fields are overridable via the matching env vars
 CLI flags (`--latchkey-directory`, `--latchkey-binary`). Precedence is
 CLI flag > env var > settings.toml > built-in default.
 
+### Logs
+
+`mngr latchkey forward` writes its logs under the plugin data directory
+(`<latchkey_directory>/mngr_latchkey/`):
+
+- `events.jsonl` -- the supervisor's **structured** log, written via the
+  standard mngr/minds JSONL sink: one flat JSON object per line with a
+  nanosecond `timestamp`, `level`, `message`, and source location,
+  size-rotated (rotated copies `events.jsonl.<timestamp>`, oldest
+  pruned). Read this when you need to observe timing. The shared
+  `latchkey gateway` subprocess's output is routed through the same log
+  (each line at `DEBUG`, prefixed with `[latchkey gateway]`), so it is
+  timestamped and rotated too rather than living in a separate unrotated
+  file.
+
+- `latchkey_forward.log` -- the raw stdout/stderr capture of the detached
+  supervisor process. Its file descriptor is handed straight to the
+  process, so it cannot be rotated mid-write; instead the supervisor is
+  spawned with `--quiet`, so in steady state it logs nothing here (all
+  logging goes to `events.jsonl`). This file therefore stays effectively
+  empty and only ever captures rare startup-failure output (Click errors
+  or a pre-logging traceback) that never reaches the structured log -- so
+  it is the place to look if the supervisor dies before it starts logging.
+
 ## Embedding
 
 Embedders (such as the minds desktop client) typically want a single
@@ -188,7 +212,10 @@ consume the stream and approve/delete on resolution.
   `{"agent_id": "...", "rationale": "...", "type": "...", "payload": {...}}`.
   Two `type` values are accepted:
   * `"predefined"` -- detent scope/permission grant, with payload
-    `{"scope": "...", "permissions": ["...", ...]}`.
+    `{"scope": "...", "permissions": ["...", ...]}`. The scope must be
+    one named in the bundled `services.json` catalog, and each
+    permission must be either one the catalog lists for that scope or
+    the catch-all `any`.
   * `"file-sharing"` -- single-file access through the `minds-api-proxy`
     extension, with payload `{"path": "<absolute-path>"}`. The path
     must be absolute and free of `..` segments.
@@ -276,9 +303,12 @@ root is rejected with HTTP 403.
 * `GET /permissions/available/<service_name>` returns the permission
   catalog entries for `<service_name>` (e.g. `slack`, `google-gmail`)
   as an array, using the same value shape, or 404 if the service is
-  unknown. Both endpoints are backed by a `services.json` file (keyed
-  by raw service name) that ships alongside the extension; the path
-  query parameter is not consulted.
+  unknown. The catch-all `any` permission is always injected at index 0
+  of every scope's `permissions` array, so a caller can always
+  request unrestricted access under a known scope. This endpoint
+  is backed by a `services.json` file (keyed by raw service name)
+  that ships alongside the extension; the path query parameter
+  is not consulted.
 * `GET /permissions/rules?path=<file>&rule_key=<scope>` returns the
   rule for `<scope>`, or 404 if absent.
 * `POST /permissions/rules?path=<file>&rule_key=<scope>` with a JSON

@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Removed a redundant `register_marker("lima: ...")` call from the test conftest: the `lima` pytest marker is already auto-registered for the whole session by the resource_guards infrastructure (mngr_lima's `lima` resource guard), so the manual registration was duplicative. Test selection and the marker's meaning are unchanged.
+
+`destroy_host` now raises a `CleanupFailedGroup` carrying the classified cleanup failures (instead of returning them, or swallowing errors as warnings) when a resource is left behind, and returns normally otherwise. A resource that was already gone is treated as benign (no failure); a resource that exists but could not be destroyed is recorded as a `HOST_RESOURCE_REMAINS` failure (or `OTHER` for a bookkeeping/record write failure), so `mngr destroy`/`cleanup` can surface it and exit with an informative, cause-specific code. See `specs/cleanup-error-aggregation.md`.
+
+## 2026-06-12
+
+## AWS provider support: ProviderBackendInterface refactor
+
+`is_for_host_creation` was removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d in every other backend). Replaced with a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on the interface that Modal overrides. The Lima backend's now-unused `del`-of-`is_for_host_creation` is removed. No behavior change.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 50% to 65% to match the coverage CI already measures (~67%).

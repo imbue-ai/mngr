@@ -6,7 +6,9 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import LogFileInfo
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.data_types import WorkDirInfo
@@ -60,6 +62,9 @@ class GcResourceTypes(FrozenModel):
     is_work_dirs: bool = Field(default=False, description="Clean orphaned work directories")
     is_logs: bool = Field(default=False, description="Clean old log files")
     is_build_cache: bool = Field(default=False, description="Clean build cache entries")
+    is_provider_resources: bool = Field(
+        default=False, description="Clean orphaned provider-level cloud resources (e.g. Azure NICs/public IPs)"
+    )
 
 
 class GcResult(MutableModel):
@@ -104,10 +109,19 @@ class GcResult(MutableModel):
         default_factory=list,
         description="Build cache entries that were destroyed",
     )
-    errors: list[str] = Field(
+    provider_resources_destroyed: list[ProviderResourceInfo] = Field(
         default_factory=list,
-        description="Errors encountered during garbage collection",
+        description="Orphaned provider-level cloud resources (e.g. Azure NICs/public IPs) that were reclaimed",
     )
+    failures: list[CleanupFailure] = Field(
+        default_factory=list,
+        description="Real failures (resources left behind / not collected) encountered during garbage collection",
+    )
+
+    @property
+    def errors(self) -> list[str]:
+        """Formatted failure messages, for human output and legacy string consumers."""
+        return [f"[{failure.category}] {failure.message}" for failure in self.failures]
 
 
 class CleanupResult(MutableModel):
@@ -121,7 +135,12 @@ class CleanupResult(MutableModel):
         default_factory=list,
         description="Names of agents that were stopped",
     )
-    errors: list[str] = Field(
+    failures: list[CleanupFailure] = Field(
         default_factory=list,
-        description="Errors encountered during cleanup",
+        description="Real failures (resources left behind) encountered during cleanup",
     )
+
+    @property
+    def errors(self) -> list[str]:
+        """Formatted failure messages, for human output and legacy string consumers."""
+        return [f"[{failure.category}] {failure.message}" for failure in self.failures]

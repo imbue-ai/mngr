@@ -23,11 +23,12 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.agents.agent_registry import list_available_agent_types
+from imbue.mngr.agents.agent_registry import list_selectable_agent_type_names
 from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
+from imbue.mngr.api.create import bootstrap_backend_for_host_creation
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.data_types import ConnectionOptions
@@ -55,13 +56,14 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -218,10 +220,10 @@ def _resolve_agent_type_name(
     means nothing was supplied anywhere. ``is_type_explicit`` is True only
     when the user passed ``--type`` on the command line.
 
-    ``available_agent_types`` is the union of plugin-registered agent type
-    names (``list_registered_agent_types()``) and user-config-defined ones
-    (``mngr_ctx.config.agent_types`` keys). Used only to make the error
-    message concrete; never affects which value is returned.
+    ``available_agent_types`` is every name the user may pass for the type:
+    plugin-registered types, user-config-defined types, and registered
+    aliases (i.e. ``list_selectable_agent_type_names(config)``). Used only to
+    make the error message concrete; never affects which value is returned.
 
     Precedence:
       1. an explicitly-set ``--type`` flag (``is_type_explicit`` is True),
@@ -722,12 +724,16 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Detect headless agent types and enforce the --foreground flag.
         # --foreground is required for headless types (makes the behavior explicit)
         # and rejected for non-headless types (it doesn't apply).
-        resolved_agent_type = _resolve_agent_type_name(
+        selected_agent_type = _resolve_agent_type_name(
             opts.type,
             is_type_explicit,
             opts.positional_agent_type,
-            list_available_agent_types(mngr_ctx.config),
+            list_selectable_agent_type_names(mngr_ctx.config),
         )
+        # Normalize an alias (e.g. "agy") to its canonical type ("antigravity")
+        # at the single entry point, so headless detection, the persisted
+        # data.json "type", and everything downstream use the canonical name.
+        resolved_agent_type = normalize_agent_type_name(selected_agent_type)
         is_headless = is_streaming_headless_agent_type(resolved_agent_type, mngr_ctx.config)
 
         if is_headless and not opts.foreground:
@@ -1029,13 +1035,14 @@ def _create_agent(
     # edit-message send (which happens outside api_create's own teardown guard)
     # can still tear the new host down on failure. None when we adopted an
     # existing host -- in that case the guard below is a no-op and never destroys.
-    # Pass is_for_host_creation=True (matching api_create's own resolution) so a
-    # backend with one-time per-user bootstrap (Modal's environment) does not
-    # raise ProviderEmptyError here on the very first create: this is the create
-    # path, and the environment is about to be bootstrapped, not listed.
+    # Bootstrap first so backends with one-time per-user bootstrap (Modal's
+    # environment) do not raise ProviderEmptyError here on the very first create.
+    # ``api_create`` re-bootstraps the same (cached) instance below; bootstrap is
+    # idempotent, so doing it here too is cheap.
     new_host_provider: ProviderInstanceInterface | None = None
     if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
-        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx, is_for_host_creation=True)
+        bootstrap_backend_for_host_creation(resolved_target_host.provider, mngr_ctx)
+        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx)
 
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
@@ -1920,12 +1927,41 @@ def _find_agent_in_host(host: OnlineHostInterface, agent_id: AgentId) -> AgentIn
     raise AgentNotFoundError(str(agent_id))
 
 
+def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
+    """Build the machine-readable create result payload.
+
+    Always includes ``agent_id`` / ``host_id`` / ``host_name``. For a remote
+    host it adds the agent SSH connection (``ssh_user`` / ``ssh_host`` /
+    ``ssh_port`` / ``ssh_key_path``); when the provider exposes a separate
+    outer/management sshd (e.g. a slice's VM-root port reached via a
+    box-forwarded port) it also adds ``outer_ssh_port``. Pool-bake tooling
+    consumes these to build a pool row -- and to reach the host for any
+    post-bake SSH steps -- without a second ``mngr list`` round-trip.
+    """
+    result_data: dict[str, Any] = {
+        "agent_id": str(result.agent.id),
+        "host_id": str(result.host.id),
+        "host_name": str(result.host.get_name()),
+    }
+    ssh_connection = result.host.get_ssh_connection_info()
+    if ssh_connection is not None:
+        ssh_user, ssh_host, ssh_port, key_path = ssh_connection
+        result_data["ssh_user"] = ssh_user
+        result_data["ssh_host"] = ssh_host
+        result_data["ssh_port"] = ssh_port
+        result_data["ssh_key_path"] = str(key_path)
+    outer_ssh_port = result.host.get_outer_ssh_port()
+    if outer_ssh_port is not None:
+        result_data["outer_ssh_port"] = outer_ssh_port
+    return result_data
+
+
 def _output_result(result: CreateAgentResult, opts: OutputOptions) -> None:
     """Output the create result according to output options."""
     if opts.is_quiet:
         return
 
-    result_data = {"agent_id": str(result.agent.id), "host_id": str(result.host.id)}
+    result_data = _build_create_result_data(result)
     match opts.output_format:
         case OutputFormat.JSON:
             write_json_line(result_data)

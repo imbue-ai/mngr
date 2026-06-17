@@ -382,6 +382,17 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         """
         ...
 
+    def get_outer_ssh_port(self) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default. A provider whose host reaches a separate
+        outer sshd on a non-obvious port (e.g. a slice's VM-root sshd via a
+        box-forwarded port) surfaces it here so ``mngr create --format json``
+        can report it. The default is sufficient for hosts whose only SSH
+        endpoint is the one ``get_ssh_connection_info`` returns.
+        """
+        return None
+
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
 
@@ -619,7 +630,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def destroy_agent(self, agent: AgentInterface) -> None:
-        """Remove an agent and all its associated state from this host."""
+        """Remove an agent and all its associated state from this host.
+
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes; raises ``CleanupFailedGroup`` if any real resources were left behind.
+        See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -629,7 +646,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
-        """Stop the specified agents gracefully within the given timeout."""
+        """Stop the specified agents gracefully within the given timeout.
+
+        Best-effort and aggregate-and-continue: attempts every step for every agent and
+        collects every real failure. Returns normally on full success or benign "already
+        gone" outcomes; raises ``CleanupFailedGroup`` if any real resources were left
+        behind. See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod

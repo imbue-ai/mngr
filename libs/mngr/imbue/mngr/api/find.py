@@ -141,7 +141,7 @@ def _filter_all_agents(
 
 
 @pure
-def _filter_one_agent(
+def filter_one_agent(
     agent: AgentNameOrId,
     resolved_host: DiscoveredHost | None,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
@@ -215,7 +215,7 @@ def resolve_host_location_address(
     resolved_agent: DiscoveredAgent | None = None
     if parsed.agent is not None:
         with log_span("Resolving agent reference"):
-            resolved_host, resolved_agent = _filter_one_agent(parsed.agent, resolved_host, agents_by_host)
+            resolved_host, resolved_agent = filter_one_agent(parsed.agent, resolved_host, agents_by_host)
 
     with log_span("Getting host interface from provider"):
         if resolved_host is None:
@@ -618,13 +618,13 @@ def find_one_agent_and_agents_by_host(
 
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
-    agent cannot be resolved (see :func:`_filter_one_agent`).
+    agent cannot be resolved (see :func:`filter_one_agent`).
     """
     agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
     if not agents_by_host and address.host is not None:
         raise UserInputError(f"No hosts found matching {address.host}")
 
-    host_ref, agent_ref = _filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
+    host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     return host_ref, agent_ref, agents_by_host
 
 
