@@ -1,14 +1,20 @@
 """Direct-assertion coverage for the overlay-backed config merge wiring.
 
 These tests pin user-visible behaviors of the overlay node algebra as wired into
-``MngrConfig.merge_with``: container-entry subclass
-preservation through a top-level merge, and partial sub-model overrides carrying the
-base's unset sub-fields through (rather than reverting them to defaults) without
-spuriously narrowing. Each asserts on explicit values, not on a frozen reference.
+``MngrConfig.merge_with``: container-entry subclass preservation through a top-level
+merge, and partial sub-model overrides carrying the base's unset sub-fields through
+(rather than reverting them to defaults) without spuriously narrowing. Each asserts on
+explicit values, not on a frozen reference.
 
 Test instances are constructed the way the loader builds them: via ``model_construct``
 with only the keys the layer "wrote", so ``model_fields_set`` is faithful and sparse
 (exactly what both the merge and the pipeline's ``exclude_unset`` dump depend on).
+
+The pydantic adapter these exercise (``config/overlay_merge.py``: ``model_dump`` ->
+operator dict -> overlay -> ``model_validate``) is generic, not mngr-specific. We should
+pull a general version of that pydantic-model logic into the ``overlay`` library itself
+as a reusable adapter, so any pydantic consumer can merge models through the algebra
+without reimplementing the serialize/re-mark/reparse glue.
 """
 
 from collections.abc import Iterator
