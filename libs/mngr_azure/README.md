@@ -137,12 +137,11 @@ network prepare still succeeds, and offline state falls back to the VM-tag
 mirror. Existing deployments that never re-ran the new `prepare` keep working on
 that fallback.
 
-### Offline `host_dir` (Lima-style, on by default)
+### Offline `host_dir` (on by default)
 
 A deallocated VM's `host_dir` is also readable without SSH, so `mngr event` /
-`mngr transcript` work against a stopped agent (matching Lima's
-`is_host_data_volume_exposed`). When `is_offline_host_dir_enabled` is on (the
-default) and the state bucket exists, an on-box systemd oneshot + timer daemon
+`mngr transcript` work against a stopped agent. When `is_offline_host_dir_enabled`
+is on (the default) and the state bucket exists, an on-box systemd oneshot + timer daemon
 syncs the VM's `host_dir` to the state container's `hosts/<host_id>/host_dir/`
 prefix every 60s, and once more on `mngr stop` just before the VM deallocates
 (so the offline copy is current). The sync runs `azcopy sync` authenticating as
