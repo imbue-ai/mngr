@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+`mngr kanpan --help` synopsis: replace placeholder `[OPTIONS]` with an enumerated list of the filter flags users typically reach for -- `[--include CEL] [--exclude CEL] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT]`. The full agent-filter set is still available; rarely-used flags (`--label`, `--host-label`) are omitted from the synopsis but remain on the command.
+
 ## 2026-06-14
 
 Fixed the kanpan footer flickering when a background refresh and a user action (e.g. deleting a marked agent) ran at the same time. The footer is now driven by a single writer that picks what to show by priority (transient notification > active action > refresh spinner > marked-agent summary > steady text), so overlapping spinner loops can no longer overwrite each other on alternating ticks.

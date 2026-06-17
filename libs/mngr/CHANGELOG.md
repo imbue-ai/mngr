@@ -6,6 +6,37 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.16] - 2026-06-16
+
+### Added
+
+- Added: New `azure` provider backend wiring. `azure` joins the remote-backend list and the install-wizard plugin catalog; `mngr azure prepare` / `mngr azure cleanup` now take `--provider` (and the standard common options), so they read defaults from the selected `[providers.NAME]` block.
+- Added: `mngr gc` gained a provider garbage-collection hook (`ProviderInstanceInterface.gc_provider_resources`, no-op by default). Reclaimed resources are reported in the gc summary (human / JSON / JSONL) under "Provider resources" and honor `--dry-run`. The Azure provider uses it to reap NIC / public-IP orphans from failed VM creates.
+- Added: Shared agent-preservation wiring (`build_transcript_preserved_items`, `preserve_agent_state`, `preserve_host_agents_on_destroy`, `flag_gated_items`) so any plugin can mirror the claude preserve-on-destroy behavior with minimal code. The shared release lifecycle now asserts the agent's raw and common transcripts actually landed in `<local_host_dir>/preserved/<agent-name>--<agent-id>/` on destroy, so a swallowed preservation failure can no longer pass silently. Profiles can also declare `native_session_preserved_relpaths` so the lifecycle asserts the native resumable session store was preserved.
+- Added: Plugin install wizard (`mngr plugin install-wizard`, `mngr extras -i`) recommends the base `imbue-mngr-usage` plugin in phase 1 and offers each per-agent usage provider (claude/codex/opencode/pi-coding) in phase 2 only when both its agent plugin and the base usage plugin are present. Driven by a new per-entry `gate` field on catalog entries (`SignalGate` or `RequiredPackagesGate`) that replaces the previous separate `signal` / `requires_packages` fields.
+
+### Changed
+
+- Changed: `mngr stop`, `mngr destroy`, `mngr cleanup`, and `mngr gc` now aggregate and classify cleanup failures. Each cleanup step is bounded and classified as benign ("already gone", exit 0) or real failure; real failures aggregate across steps/agents/hosts, each tagged with a cause category (timeout, processes-remain, local-state-remain, host-resource-remain, provider-inaccessible), and surface via cause-specific exit codes (`2`/`3`/`4`/`5`/`6`, most severe wins; `1` other, `0` for clean/benign). `Host.stop_agents`, `Host.destroy_agent`, and `ProviderInstance.destroy_host` raise `CleanupFailedGroup` when a resource is left behind. Structured output (`--format json`) reports a `failures` list and an `exit_code` field, replacing the old `errors` string list. See `specs/cleanup-error-aggregation.md`.
+- Changed: `mngr git push`, `mngr git pull`, and `mngr rsync` now run the underlying `git` / `rsync` binary as a plain subprocess with the user's stdout/stderr (no redirection), so progress, errors, and pager output flow directly to the terminal; stdin is `/dev/null` so the binary cannot block waiting for input (credential / host-key prompts). The `_complete` JSONL terminating events and the trailing "Rsync complete" human line are gone; a non-zero exit raises `GitSyncError` / `MngrError`. `RsyncResult`, `imbue.mngr.utils.rsync_utils.parse_rsync_output`, and the whole `rsync_utils` module are removed.
+- Changed: `mngr_common_transcript_flush` takes an optional lock-acquire timeout (seconds), exported as `MNGR_CONVERT_LOCK_TIMEOUT` to each synchronous converter pass — lets a latency-sensitive caller (e.g. a SIGTERM/SIGINT handler) cap how long the flush blocks on the convert lock. Default 30s preserves existing behavior.
+- Changed: `ProviderUnavailableError` accepts an optional `user_help_text` override. The default still tells the user to start Docker / disable the provider, but cloud providers (whose "unavailable" cause is a credential / subscription problem) can pass curated guidance instead — so a cloud auth failure no longer advises "start Docker".
+- Changed: Concurrent SSH keypair creation is now race-free. `load_or_create_ssh_keypair` serializes first-time creation behind an exclusive file lock, and `save_ssh_keypair` writes both key files atomically (temp file + `os.replace`, via the shared `atomic_write` helper) before applying their permissions. Fixes intermittent `ValueError: Not enough fields for public blob` aborting `mngr create` during parallel host-discovery fan-out (observed on OVH and Vultr release tests). Paramiko's bare key-probe `ValueError` is now surfaced as a structured `HostConnectionError` so best-effort discovery treats it as an ordinary per-host failure.
+
+## [v0.2.15] - 2026-06-16
+
+### Added
+
+- Added: `mngr create --format json` (and `jsonl`) now also reports the created host's name, its agent SSH connection (`ssh_user` / `ssh_host` / `ssh_port` / `ssh_key_path`), and an `outer_ssh_port` when the provider exposes a separate outer/management sshd (e.g. an OVH-slice's box-forwarded VM-root port). Backed by a new default-`None` `HostInterface.get_outer_ssh_port` hook.
+- Added: `mngr capture --window` (`-w`) option for capturing a non-primary tmux window in the agent's session, by index (`--window 1`) or name.
+- Added: Shared `mngr_common_transcript_lib.sh` library, provisioned to every agent's `commands/` dir alongside `mngr_log.sh` and `mngr_transcript_lib.sh`. Centralizes the convert-lock mutex (serializes the converter's read-modify-write across the 5s daemon and on-demand `--single-pass` flushes) and the turn-end synchronous flush previously duplicated per agent plugin.
+- Added: `VpsDockerProvider.record_outer_host_key` pins an outer (VPS-root) sshd host key in the provider's known_hosts, so a provider operating on a VPS it did not order itself (e.g. the imbue_cloud rebuild on a leased host) passes strict host-key checking.
+
+### Changed
+
+- Changed: Centralized the Claude Code CLI presence check — `mngr extras` status and the `is_claude_installed` test helper now both defer to `CLAUDE.is_available()` instead of re-implementing `shutil.which("claude")` inline. `extras.py` now imports the shared `SUBPROCESS_ERRORS` from `imbue.mngr.utils.deps` rather than defining its own copy.
+- Changed: Regenerated the bundled CLI reference docs to include the new `mngr imbue_cloud admin server` command group (including `admin server pricing`).
+
 ## [v0.2.14] - 2026-06-15
 
 ### Changed

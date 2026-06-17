@@ -10,6 +10,10 @@ class ImbueCloudConnectorError(ImbueCloudError):
     """Raised when the remote_service_connector returns an unexpected response."""
 
 
+class SliceBakeTerminatedError(ImbueCloudError):
+    """Raised in the bake's main thread when a SIGTERM/SIGINT arrives, to trigger cleanup."""
+
+
 class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError):
     """Raised when authentication is missing or refresh fails."""
 
@@ -71,8 +75,34 @@ class ImbueCloudBucketLimitError(ImbueCloudBucketError):
     """Raised when the account is already at the per-account bucket cap."""
 
 
+class OvhCatalogPricingError(ImbueCloudError):
+    """Raised when an OVH catalog plan or add-on cannot be priced (missing entry or no month-to-month price)."""
+
+
+class BareMetalConfigError(ImbueCloudError, ValueError):
+    """Raised when a bare-metal server / slice has an invalid configuration (bad size, disk count, etc.)."""
+
+
+class SliceCapacityError(ImbueCloudError):
+    """Raised when no bare-metal server has free slots (or ports) to allocate a new slice."""
+
+
+class BareMetalProvisioningError(ImbueCloudError):
+    """Raised when ordering, installing, or carving a bare-metal server / slice fails."""
+
+
 class InvalidBuildArgError(ImbueCloudError, ValueError):
     """Raised when a recognized imbue_cloud build arg has a malformed value."""
+
+
+class RepoIdentityError(ImbueCloudError, ValueError):
+    """Raised when a repository's canonical identity cannot be established.
+
+    Covers an empty/malformed URL, a local path whose ``origin`` remote is
+    missing, and a local checkout on a detached HEAD. Callers decide how to
+    surface it: the fast path wraps it as ``FastPathUnavailableError`` (so it
+    falls back to the slow path); the bake tooling lets it fail the command.
+    """
 
 
 class FixedAgentIdError(ImbueCloudError, ValueError):

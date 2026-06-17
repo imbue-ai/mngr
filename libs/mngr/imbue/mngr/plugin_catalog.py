@@ -95,6 +95,24 @@ class LimaSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("limactl", "--version")
 
 
+class AwsSignalCheck(SignalCheck):
+    """Detects whether the AWS CLI is installed."""
+
+    command: tuple[str, ...] = ("aws", "--version")
+
+
+class GcloudSignalCheck(SignalCheck):
+    """Detects whether the Google Cloud CLI is installed."""
+
+    command: tuple[str, ...] = ("gcloud", "--version")
+
+
+class AzureSignalCheck(SignalCheck):
+    """Detects whether the Azure CLI is installed."""
+
+    command: tuple[str, ...] = ("az", "--version")
+
+
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
@@ -103,6 +121,79 @@ _ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
 _LIMA_SIGNAL: Final[LimaSignalCheck] = LimaSignalCheck()
+_AWS_SIGNAL: Final[AwsSignalCheck] = AwsSignalCheck()
+_GCLOUD_SIGNAL: Final[GcloudSignalCheck] = GcloudSignalCheck()
+_AZURE_SIGNAL: Final[AzureSignalCheck] = AzureSignalCheck()
+
+
+class SignalGate(FrozenModel):
+    """A gate keyed on a detectable tool.
+
+    On an INDEPENDENT entry the signal is probed to decide phase-1 preselection,
+    and once the entry is selected the signal becomes "accepted" for dependents.
+    A DEPENDENT entry carrying this gate is offered in phase 2 when its signal was
+    accepted in phase 1.
+    """
+
+    signal: SignalCheck
+
+    def detection_signal(self) -> SignalCheck | None:
+        return self.signal
+
+    def is_unlocked(self, *, accepted_signals: set[SignalCheck], present_packages: frozenset[str]) -> bool:
+        return self.signal in accepted_signals
+
+
+class RequiredPackagesGate(FrozenModel):
+    """A gate for a DEPENDENT entry, offered in phase 2 only when every named
+    package is present -- already installed, or selected earlier in the wizard.
+    """
+
+    packages: tuple[str, ...]
+
+    def detection_signal(self) -> SignalCheck | None:
+        return None
+
+    def is_unlocked(self, *, accepted_signals: set[SignalCheck], present_packages: frozenset[str]) -> bool:
+        return all(package in present_packages for package in self.packages)
+
+
+Gate = SignalGate | RequiredPackagesGate
+
+
+class SignalGate(FrozenModel):
+    """A gate keyed on a detectable tool.
+
+    On an INDEPENDENT entry the signal is probed to decide phase-1 preselection,
+    and once the entry is selected the signal becomes "accepted" for dependents.
+    A DEPENDENT entry carrying this gate is offered in phase 2 when its signal was
+    accepted in phase 1.
+    """
+
+    signal: SignalCheck
+
+    def detection_signal(self) -> SignalCheck | None:
+        return self.signal
+
+    def is_unlocked(self, *, accepted_signals: set[SignalCheck], present_packages: frozenset[str]) -> bool:
+        return self.signal in accepted_signals
+
+
+class RequiredPackagesGate(FrozenModel):
+    """A gate for a DEPENDENT entry, offered in phase 2 only when every named
+    package is present -- already installed, or selected earlier in the wizard.
+    """
+
+    packages: tuple[str, ...]
+
+    def detection_signal(self) -> SignalCheck | None:
+        return None
+
+    def is_unlocked(self, *, accepted_signals: set[SignalCheck], present_packages: frozenset[str]) -> bool:
+        return all(package in present_packages for package in self.packages)
+
+
+Gate = SignalGate | RequiredPackagesGate
 
 
 class CatalogEntry(FrozenModel):
@@ -111,8 +202,14 @@ class CatalogEntry(FrozenModel):
     entry_point_name: str = Field(description="Pluggy entry point name")
     package_name: str = Field(description="PyPI package name")
     description: str = Field(description="Human-readable description")
-    tier: PluginTier = Field(description="INDEPENDENT (works alone) or DEPENDENT (needs another plugin's signal)")
-    signal: SignalCheck | None = Field(default=None, description="Signal check, or None")
+    tier: PluginTier = Field(description="INDEPENDENT (works alone) or DEPENDENT (unlocked by its gate)")
+    gate: Gate | None = Field(
+        default=None,
+        description=(
+            "How the wizard decides to offer this entry: a SignalGate (a detected tool) or a"
+            " RequiredPackagesGate (other packages must be present). None means no gate."
+        ),
+    )
     is_recommended: bool = Field(default=False, description="Whether this plugin is recommended for most users")
     cli_command_names: tuple[str, ...] = Field(
         default=(),
@@ -128,7 +225,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-claude",
         description="Claude agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
-        signal=_CLAUDE_SIGNAL,
+        gate=SignalGate(signal=_CLAUDE_SIGNAL),
         is_recommended=True,
     ),
     CatalogEntry(
@@ -136,7 +233,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-opencode",
         description="OpenCode agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
-        signal=_OPENCODE_SIGNAL,
+        gate=SignalGate(signal=_OPENCODE_SIGNAL),
         is_recommended=True,
     ),
     CatalogEntry(
@@ -144,7 +241,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-codex",
         description="Codex agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
-        signal=_CODEX_SIGNAL,
+        gate=SignalGate(signal=_CODEX_SIGNAL),
         is_recommended=True,
     ),
     CatalogEntry(
@@ -152,7 +249,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-antigravity",
         description="Antigravity agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
-        signal=_ANTIGRAVITY_SIGNAL,
+        gate=SignalGate(signal=_ANTIGRAVITY_SIGNAL),
         is_recommended=True,
     ),
     CatalogEntry(
@@ -160,7 +257,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-pi-coding",
         description="Pi coding agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
-        signal=_PI_SIGNAL,
+        gate=SignalGate(signal=_PI_SIGNAL),
         is_recommended=True,
     ),
     CatalogEntry(
@@ -168,7 +265,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-modal",
         description="Modal provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
-        signal=_MODAL_SIGNAL,
+        gate=SignalGate(signal=_MODAL_SIGNAL),
         is_recommended=True,
     ),
     CatalogEntry(
@@ -176,7 +273,8 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-lima",
         description="Lima VM provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
-        signal=_LIMA_SIGNAL,
+        gate=SignalGate(signal=_LIMA_SIGNAL),
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="vultr",
@@ -189,18 +287,30 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-aws",
         description="AWS provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+        gate=SignalGate(signal=_AWS_SIGNAL),
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="gcp",
         package_name="imbue-mngr-gcp",
         description="GCP Compute Engine provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+        gate=SignalGate(signal=_GCLOUD_SIGNAL),
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="ovh",
         package_name="imbue-mngr-ovh",
         description="OVH Cloud VPS provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="azure",
+        package_name="imbue-mngr-azure",
+        description="Azure Virtual Machines provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        gate=SignalGate(signal=_AZURE_SIGNAL),
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="tutor",
@@ -215,23 +325,65 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-claude",
         description="Code guardian agent for mngr",
         tier=PluginTier.DEPENDENT,
-        signal=_CLAUDE_SIGNAL,
+        gate=SignalGate(signal=_CLAUDE_SIGNAL),
     ),
     CatalogEntry(
         entry_point_name="fixme_fairy",
         package_name="imbue-mngr-claude",
         description="Fixme fairy agent for mngr",
         tier=PluginTier.DEPENDENT,
-        signal=_CLAUDE_SIGNAL,
+        gate=SignalGate(signal=_CLAUDE_SIGNAL),
     ),
     CatalogEntry(
         entry_point_name="headless_claude",
         package_name="imbue-mngr-claude",
         description="Headless Claude agent for mngr",
         tier=PluginTier.DEPENDENT,
-        signal=_CLAUDE_SIGNAL,
+        gate=SignalGate(signal=_CLAUDE_SIGNAL),
+    ),
+    # Per-harness usage data providers: each only makes sense once you have both
+    # the matching agent plugin and the base usage plugin, so they are offered in
+    # phase 2 gated on both being present (installed or selected in phase 1).
+    CatalogEntry(
+        entry_point_name="claude_usage",
+        package_name="imbue-mngr-claude-usage",
+        description="Claude usage data provider for `mngr usage`",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        gate=RequiredPackagesGate(packages=("imbue-mngr-claude", "imbue-mngr-usage")),
+    ),
+    CatalogEntry(
+        entry_point_name="codex_usage",
+        package_name="imbue-mngr-codex-usage",
+        description="Codex usage data provider for `mngr usage`",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        gate=RequiredPackagesGate(packages=("imbue-mngr-codex", "imbue-mngr-usage")),
+    ),
+    CatalogEntry(
+        entry_point_name="opencode_usage",
+        package_name="imbue-mngr-opencode-usage",
+        description="OpenCode usage data provider for `mngr usage`",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        gate=RequiredPackagesGate(packages=("imbue-mngr-opencode", "imbue-mngr-usage")),
+    ),
+    CatalogEntry(
+        entry_point_name="pi_coding_usage",
+        package_name="imbue-mngr-pi-coding-usage",
+        description="pi usage data provider for `mngr usage`",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        gate=RequiredPackagesGate(packages=("imbue-mngr-pi-coding", "imbue-mngr-usage")),
     ),
     # --- INDEPENDENT, no signal ---
+    CatalogEntry(
+        entry_point_name="usage",
+        package_name="imbue-mngr-usage",
+        description="Cost / quota usage tracking for mngr agents (`mngr usage`)",
+        tier=PluginTier.INDEPENDENT,
+        is_recommended=True,
+    ),
     CatalogEntry(
         entry_point_name="ttyd",
         package_name="imbue-mngr-ttyd",

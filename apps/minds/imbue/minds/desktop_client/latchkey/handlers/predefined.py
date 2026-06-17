@@ -106,12 +106,12 @@ def _format_granted_message(service_display_name: str, granted: Sequence[str]) -
     permissions = ", ".join(granted)
     return (
         f"Your permission request for {service_display_name} was granted with the following "
-        f"permissions: {permissions}. Please retry the call that was blocked."
+        f"permissions: {permissions}."
     )
 
 
 def _format_denied_message(service_display_name: str) -> str:
-    return f"Your permission request for {service_display_name} was denied. Do not retry the blocked call."
+    return f"Your permission request for {service_display_name} was denied."
 
 
 def _format_auth_failed_message(service_display_name: str, detail: str) -> str:

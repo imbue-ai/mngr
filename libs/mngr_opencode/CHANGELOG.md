@@ -6,6 +6,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.16] - 2026-06-16
+
+### Added
+
+- Added: opencode agents now preserve transcripts (raw + common) and the root session-id history on destroy, matching the claude plugin. New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. opencode's native resumable session store (the SQLite `opencode.db` plus its `-wal`/`-shm` write-ahead-log sidecars and `storage/`) is preserved too, so the session can be resumed/adopted; the sibling `auth.json` (a symlink to shared credentials) and `log/` are excluded. WAL sidecars are copied alongside the db so recent (not-yet-checkpointed) turns are not lost.
+
+## [v0.2.15] - 2026-06-16
+
+### Added
+
+- Added: `waiting_reason` field in `mngr list` for opencode agents (matching claude and codex): `PERMISSIONS` while blocked on an `ask` permission prompt, `END_OF_TURN` when idle. The in-process plugin tracks opencode's `permission.asked` / `permission.replied` events (concurrent prompts handled, accepting both the binary's and the SDK's event names). The reason is gated on the agent's `active` marker via a shared `classify_waiting_reason` in mngr core so claude / codex / opencode cannot drift.
+
 ## [v0.2.14] - 2026-06-15
 
 ## [v0.2.13] - 2026-06-13

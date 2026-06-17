@@ -188,11 +188,32 @@
       });
     }
 
+    // The predefined-permission dialog offers a catch-all permission
+    // (stored as ``any``, shown to users as ``all``) alongside the
+    // specific permissions. While ``all`` is ticked, the specific
+    // checkboxes are disabled (they keep their own checked/unchecked
+    // state) to communicate that the catch-all already covers them;
+    // unticking ``all`` re-enables them. The browser omits disabled
+    // inputs from the submission, so only the active side is granted.
+    // The wildcard checkbox is tagged with ``data-wildcard`` in the
+    // template; dialogs without one (e.g. file-sharing) are left
+    // untouched.
+    function syncPermissionWildcardExclusivity() {
+      var form = document.getElementById("permissions-form");
+      if (!form) return;
+      var wildcard = form.querySelector('input[name="permissions"][data-wildcard]');
+      if (!wildcard) return;
+      form.querySelectorAll('input[name="permissions"]').forEach(function (box) {
+        if (box !== wildcard) box.disabled = wildcard.checked;
+      });
+    }
+
     function updateApproveState() {
       var form = document.getElementById("permissions-form");
       if (!form) return;
       var approveBtn = document.getElementById("permissions-approve-btn");
       if (!approveBtn) return;
+      syncPermissionWildcardExclusivity();
       var anyChecked = form.querySelector('input[name="permissions"]:checked') !== null;
       // The file-sharing dialog adds an editable path field. Its hidden
       // "permissions" checkbox is always checked, so gate Approve on the

@@ -8,6 +8,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: `MngrCaller` runs the `mngr` CLI in a child forked from a pre-warmed `multiprocessing` forkserver, so in-app `mngr` invocations (e.g. the `mngr message` after a permission decision) skip the multi-second interpreter-and-plugin import cost. `MngrMessageSender` routes through it by default.
+- Added: imbue_cloud workspace creation now passes the form's repository through to the lease as `-b repo_url=<repository>` (the imbue_cloud provider canonicalizes it via the new `repo_identity.canonicalize_repo_source`), so the fast path can only adopt a pre-baked host that genuinely matches the requested repo. Previously the repo was dropped and only an operator-chosen branch label was matched, so a request for one repo could silently adopt a host running another.
+- Added: `--skip-deferred-install-wait` passthrough on `minds pool create` (forwarded to the OVH admin pool bake) for faster dev pool bakes.
 - Added: 12-color palette workspace picker (replacing the SHA-derived per-workspace accent) with custom-hex input, exposed in the Create form and Workspace settings; the chosen color is persisted as an mngr `color=<hex>` label and propagates live via SSE. Titlebar text / nav icons / account button use a WCAG-luminance contrast picker server-side, so legibility holds across the full hex range.
 - Added: Floating sidebar menu (rounded dark panel, shadow, colored dot per workspace) opens from the titlebar hamburger button and replaces the docked sidebar. Each row hovers in a settings gear and an "Open in new window" arrow; two rows at the bottom go to Create and Manage account(s); the menu dismisses on outside-click / Escape, sharing the inbox's modal overlay so the workspace stays in place.
 - Added: Landing-page workspace rows gain the same "open in new window" arrow next to the settings gear.
@@ -57,6 +60,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: Predefined-permission dialog labels the catch-all permission `all` instead of `any` (the stored value is still `any`); while `all` is checked the specific-permission checkboxes are disabled, and unchecking it re-enables them.
+- Changed: Approving or denying a permission request no longer blocks on the agent nudge — `MngrMessageSender.send` dispatches the `mngr message` onto a background thread and returns immediately so the dialog responds without waiting for the network-bound delivery.
+- Changed: Cut minds `0.3.1` and standardized the release tag convention on the `minds-v<version>` prefix across both `imbue-ai/mngr` and `imbue-ai/forever-claude-template` (FCT had been the odd one out on bare `v<version>`). `apps/minds/package.json` bumped to `0.3.1`; `templates.py` `FALLBACK_BRANCH` repointed to `"minds-v0.3.1"` (the FCT tag the shipped binary clones at runtime). `apps/minds/docs/release.md` rewritten for the `main`-based, two-PR flow.
+- Changed: Trimmed potentially confusing parts of the messages sent to agents after approving or denying permission requests.
 - Changed: Workspace recovery self-heals across chrome/sidebar reloads (Electron replays the latest non-healthy workspace status on view (re)load; backend re-asserts statuses periodically) and routes a known-stopped mind from the landing page straight to recovery instead of through the stuck-detection delay.
 - Changed: `minds pool {create,list,destroy}` now resolves the staging/production host_pool DSN from Vault (`secrets/minds/<tier>/neon.DATABASE_URL`) automatically (alongside OVH creds and the management SSH key), so the commands work on those tiers without a hand-passed `--database-url`. An explicit `--database-url` still wins; dev/ci continue to auto-resolve from per-env `secrets.toml`.
 - Changed: Pool-host docs point at the canonical `minds pool create` flow (via new `just bake-pool-host` / `just list-pool-hosts` / `just destroy-pool-host` recipes) instead of the low-level `mngr imbue_cloud admin pool create` recipe with hand-exported OVH creds and `--management-public-key-file`.
@@ -143,6 +150,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
+- Fixed: `apps/minds/docs/release.md` now tags the verified mngr SHA (`GREEN_MNGR_SHA` from step 4), not `main` HEAD which can drift past it; the merge step now uses a merge commit (not squash) so the verified SHA stays reachable on `main`, the vendor-match check verifies the FCT commit that actually gets tagged, and a new Session setup section defines `GH_TOKEN`/`MNGR`/`FCT`/`FCT_DIR` once up front so the runbook is copy-paste-correct. Caught while cutting `minds-v0.3.1`, where `main` had drifted +58 unrelated files past the verified SHA.
 - Fixed: Pending permission requests whose originating agent's host can no longer be resolved (e.g. after the agent's workspace has been shut down) are now hidden from the desktop client inbox instead of rendering with raw agent ids. The request is left untouched on the gateway, so it reappears in the inbox if the workspace comes back. The inbox badge count and the rendered cards are driven off the same filter, so they stay in agreement.
 - Fixed: Hardened the workspace-restart command to use an exact tmux session-name match so the kill no longer silently lands on a sibling-prefix session's window.
 - Fixed: Startup race where the minds desktop client could cache a stale latchkey gateway port and then fail every call with `[Errno 111] Connection refused`; the gateway client now self-heals on `httpx.ConnectError`/`ConnectTimeout`, and supervisor restart + pre-warm now run sequentially on a single background thread.

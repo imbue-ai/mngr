@@ -15,6 +15,7 @@ from fastapi.responses import Response
 from fastapi.testclient import TestClient
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
@@ -43,6 +44,7 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
@@ -191,7 +193,12 @@ def _make_recording_handler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
         services_catalog=ServicesCatalog.from_catalog_payload(_TEST_SERVICES_CATALOG_PAYLOAD),
-        mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
+        mngr_message_sender=MngrMessageSender(
+            mngr_caller=RecordingMngrCaller(),
+            # ``_RecordingHandler`` overrides grant/deny, so the sender is never
+            # used; an un-entered group satisfies the required field.
+            concurrency_group=ConcurrencyGroup(name="permission-routes-test-unused"),
+        ),
         gateway_client=gateway_client,
         grant_outcome=grant_outcome,
         grant_message=grant_message,
@@ -299,6 +306,43 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     # user confirms / interacts with the form).
     assert 'id="permissions-approve-btn"' in body
     assert "disabled" in body
+
+
+def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path: Path) -> None:
+    """The catch-all ``any`` permission is shown to users as ``all``.
+
+    The underlying checkbox value stays ``any`` (Detent's wildcard that
+    is actually stored / submitted), but the user-facing label reads
+    ``all`` for clarity. The wildcard checkbox is also tagged with
+    ``data-wildcard`` so the inbox shell can make it mutually exclusive
+    with the specific permissions.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/inbox/detail/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # The checkbox keeps the wildcard value and is tagged so the shell's
+    # exclusivity JS can find it.
+    any_idx = body.find('value="any"')
+    assert any_idx != -1
+    any_tag_start = body.rfind("<input", 0, any_idx)
+    any_tag_end = body.find(">", any_idx)
+    assert 'data-wildcard="true"' in body[any_tag_start:any_tag_end]
+    # The wildcard is labelled ``all`` (in a <code> element), and never
+    # surfaced to the user as the raw ``any`` value.
+    assert ">all</code>" in body
+    assert ">any</code>" not in body
 
 
 def test_inbox_page_renders_as_modal(tmp_path: Path) -> None:

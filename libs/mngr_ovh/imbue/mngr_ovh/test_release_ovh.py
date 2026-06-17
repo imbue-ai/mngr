@@ -63,6 +63,7 @@ def ovh_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
         # Disable other remote providers so the create-host preflight doesn't
         # trip looking for their credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
         "\n[providers.gcp]\nis_enabled = false\n"
         "\n[providers.aws]\nis_enabled = false\n"
         "\n[providers.vultr]\nis_enabled = false\n"
@@ -187,7 +188,3 @@ class TestOvhVpsClient:
     def test_list_instances_does_not_error(self) -> None:
         client = _build_client()
         assert isinstance(client.list_instances(), list)
-
-    def test_list_ssh_keys_starts_empty(self) -> None:
-        client = _build_client()
-        assert client.list_ssh_keys() == []

@@ -56,6 +56,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
@@ -76,7 +77,6 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
 from imbue.mngr_claude.plugin import ProvisioningContext
-from imbue.mngr_claude.plugin import WaitingReason
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
@@ -1072,7 +1072,29 @@ def test_agent_field_generators_returns_correct_structure() -> None:
 def test_agent_field_generators_waiting_reason_returns_permissions(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """waiting_reason returns PERMISSIONS when permissions_waiting file exists."""
+    """waiting_reason returns PERMISSIONS when blocked mid-turn (active present and
+    permissions_waiting present)."""
+    result = agent_field_generators()
+    assert result is not None
+    _, generators = result
+    waiting_reason = generators["waiting_reason"]
+
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "active").touch()
+    (agent_dir / "permissions_waiting").touch()
+
+    assert waiting_reason(agent, host) == WaitingReason.PERMISSIONS
+
+
+def test_agent_field_generators_waiting_reason_ignores_stranded_permissions_marker(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A stranded permissions_waiting marker (active absent -> turn over) reports
+    END_OF_TURN, not PERMISSIONS: the PERMISSIONS verdict is gated on the active
+    marker so a marker that outlived its turn cannot mislabel an idle agent."""
     result = agent_field_generators()
     assert result is not None
     _, generators = result
@@ -1084,7 +1106,7 @@ def test_agent_field_generators_waiting_reason_returns_permissions(
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "permissions_waiting").touch()
 
-    assert waiting_reason(agent, host) == WaitingReason.PERMISSIONS
+    assert waiting_reason(agent, host) == WaitingReason.END_OF_TURN
 
 
 def test_agent_field_generators_waiting_reason_returns_end_of_turn(
@@ -1130,12 +1152,12 @@ def test_get_expected_process_name_returns_claude(
     assert agent.get_expected_process_name() == "claude"
 
 
-def test_tui_ready_indicator_is_claude_code(
+def test_tui_ready_indicator_is_input_prompt_glyph(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """ClaudeAgent inherits InteractiveTuiAgent's TUI_READY_INDICATOR class var."""
+    """ClaudeAgent uses the input-prompt glyph, which renders on both fresh start and resume."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    assert agent.get_tui_ready_indicator() == "Claude Code"
+    assert agent.get_tui_ready_indicator() == "❯"
 
 
 @pytest.mark.skipif(

@@ -9,7 +9,6 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 
@@ -228,60 +227,3 @@ def emit_format_template_lines(
         line = render_format_template(template, item)
         sys.stdout.write(line + "\n")
     sys.stdout.flush()
-
-
-def output_rsync_result(
-    result: RsyncResult,
-    output_format: OutputFormat,
-) -> None:
-    """Output an rsync result in the appropriate format."""
-    result_data = {
-        "files_transferred": result.files_transferred,
-        "bytes_transferred": result.bytes_transferred,
-        "source_path": result.source_path,
-        "destination_path": result.destination_path,
-    }
-
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(result_data)
-        case OutputFormat.JSONL:
-            emit_event("rsync_complete", result_data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            write_human_line(
-                "Rsync complete: {} files, {} bytes transferred",
-                result.files_transferred,
-                result.bytes_transferred,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def _output_git_sync_success(
-    output_format: OutputFormat,
-    event_name: str,
-    human_message: str,
-) -> None:
-    """Shared success output for ``mngr git push`` / ``mngr git pull``.
-
-    There's no structured result -- git's own stdout/stderr have already gone to the
-    user during the run. This just emits a terminating event/line so callers can
-    detect the operation finished.
-    """
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line({"success": True})
-        case OutputFormat.JSONL:
-            emit_event(event_name, {"success": True}, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            write_human_line(human_message)
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def output_git_push_success(output_format: OutputFormat) -> None:
-    _output_git_sync_success(output_format, "git_push_complete", "Git push complete")
-
-
-def output_git_pull_success(output_format: OutputFormat) -> None:
-    _output_git_sync_success(output_format, "git_pull_complete", "Git pull complete")

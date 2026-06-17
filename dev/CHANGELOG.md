@@ -4,6 +4,42 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-16
+
+### Added
+
+- Added: Root-level wiring for the new `azure` provider plugin — `--cov=imbue.mngr_azure` in pytest coverage, `azure` registered in `scripts/make_cli_docs.py` `SECONDARY_COMMANDS` (so `mngr azure` gets a generated doc page alongside `aws` / `gcp`), and an `azure` create template in `.mngr/settings.toml` that builds the project Dockerfile on the VM (so azure agents get `gh` and the full mngr toolchain). `[providers.azure] builder = "DEPOT"` builds on depot's cached remote builders (requires `DEPOT_TOKEN` at create time).
+- Added: Design specs — `specs/agent-usage-plugins/spec.md` (extending `mngr usage` to OpenCode, pi, and Codex), `specs/aws-ec2-stop-start-lifecycle/` (Modal-like idle-paused-but-resumable lifecycle for AWS agents via native EC2 stop/start; phases 1, 2, and 4 marked implemented), and `specs/cleanup-error-aggregation.md` (`mngr stop`/`destroy`/`cleanup` aggregate and classify failures with cause-specific exit codes).
+- Added: Documented the install-wizard surfacing of the usage plugins in `specs/agent-usage-plugins/spec.md` and recorded the antigravity gap in `specs/agent-plugin-parity/spec.md` (new "Usage tracking plugin" row).
+
+### Changed
+
+- Changed: Synced the root design specs to the removed VPS-client snapshot surface and `list_ssh_keys` (`specs/vps-docker-provider/`, `specs/ovh-vps-provider/`, `specs/azure-provider/concise.md`, `specs/aws-ec2-stop-start-lifecycle/spec.md`).
+- Changed: Extended the local-scratch `.gitignore` convention to Python and text files — `**/*.local.py` and `**/*.local.txt` are now ignored, mirroring the existing `**/*.local.md` and `**/*.local.sh` patterns. Lets one-off validation harnesses and probe scripts stay untracked and survive the stop hook's working-tree cleanup.
+- Changed: `justfile`'s `sync-vendor-mngr` recipe realigned with the current release flow — its comment now tells you to position the mngr checkout at the **verified release SHA** (not blindly `main`, which can drift past it), points at `apps/minds/docs/release.md`, and no longer hardcodes a personal FCT path: the FCT checkout path comes from the positional arg, else `FCT_DIR` read from a gitignored minds-scoped `apps/minds/.env` (template: committed `apps/minds/.env.example`), else `$FCT_DIR` in your shell.
+
+### Fixed
+
+- Fixed: `minds-launch-to-msg.yml` now resolves and renders the ref name **and** the resolved commit instead of a tag-object SHA. The Slack notification and step summaries previously resolved `commit_sha` / `template_ref` with `git ls-remote refs/tags/<tag>` (no peel), so a run against an **annotated** tag (e.g. `minds-v0.3.1`) displayed the tag-*object* SHA — a SHA you can't `git checkout`. The `check_should_run` compute step now peels annotated tags (`^{}`), so no step surfaces a tag-object SHA anymore.
+
+## 2026-06-15
+
+### Added
+
+- Added: `just minds-install` recipe that installs the minds desktop client's node deps (electron, etc.) using the Node version pinned in `apps/minds/.nvmrc` (selected via `select_node_version.sh`), so installs no longer fail with `ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's default node has drifted off the pin. `just minds-start`'s "not installed yet" hint points at it.
+- Added: Design doc `blueprint/ovh-baremetal-slices/` for extending the imbue_cloud pool to allocate lima/QEMU VM "slices" on rented OVH bare-metal servers, and `blueprint/mngr-imbue-cloud-module-layers/` proposing the layered sub-package structure for `mngr_imbue_cloud` (with the `import-linter` ordering contract).
+- Added: `import-linter` "mngr_imbue_cloud layers contract" (root `pyproject.toml`) plus a `test_meta_ratchets.py` test that enforces it.
+
+### Changed
+
+- Changed: Replaced `just bake-pool-host` with `just bake-pool-host-dev` (bake from a working tree — best-effort branch label) and `just bake-pool-host-prod` (clone an exact FCT tag — strict), reflecting that the imbue_cloud pool bake now derives the stamped repo identity from its source rather than from hand-typed `--attributes`. `just bake-pool-host-dev` also passes `--skip-deferred-install-wait` so dev pool bakes skip the few-minute deferred Playwright/apt install before stopping the services agent. The `minds-justfile` skill documents the dev-vs-production distinction.
+- Changed: Expanded CLAUDE.md flaky-test guidance — first investigate why a test is flaky and try to make it more robust; if it is correct but fundamentally needs more time, bump that test's timeout (avoid unreasonably long timeouts — prefer leaving it marked flaky for infrastructure-level flukes).
+- Changed: Bumped the per-test timeout on the `test_cli_docs_are_up_to_date` meta-ratchet — the enlarged imbue_cloud CLI surface (the new `admin server` + slice commands) made full CLI-doc regeneration exceed the default 10s pytest-timeout in the slower offload sandbox.
+
+### Fixed
+
+- Fixed: Per-PR changelog enforcement check, which had been passing vacuously in CI. The check previously ran as an acceptance test inside the offload Modal sandbox, but the sandbox's fresh `git init` made `main == HEAD` so the base-branch diff always came back empty — and any PR could merge without changelog entries. Enforcement now lives in a dedicated CI gate (`scripts/check_changelog_entries.py`, run via the `check-changelog` GitHub Actions job and `just check-changelog`) that computes the changed-file set against the real base branch on the orchestrator, and refuses to run with a non-zero exit if it cannot resolve a diff base distinct from HEAD.
+
 ## 2026-06-14
 
 ### Added

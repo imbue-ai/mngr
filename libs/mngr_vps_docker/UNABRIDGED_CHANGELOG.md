@@ -4,6 +4,57 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Fix `start_host` (the `mngr stop --stop-host` resume path) to restart the container's sshd after `docker start`. sshd is launched via `docker exec`, not the container entrypoint, so it does not survive a container stop/start (or a host VM reboot that takes the container down, e.g. an AWS instance stop/start) -- without restarting it, the resume timed out waiting for container SSH. This was a latent gap for every VPS-Docker provider; AWS's native instance stop/start surfaced it.
+
+`start_host` now also relaunches the in-container activity watcher on resume and records a fresh `BOOT` activity timestamp. The watcher is a backgrounded process that does not survive a container stop/start, so without relaunching it a resumed host would silently stop auto-stopping on idle (a latent gap for every VPS-Docker provider). Refreshing `BOOT` activity is required alongside the relaunch: otherwise a resumed-but-idle host keeps its pre-stop activity-file mtimes, and the watcher re-stops it within one poll -- so resuming an idle host would race a near-immediate auto-stop.
+
+## Stopped containers no longer misreport as CRASHED / vanish from `mngr conn`
+
+- Fixed: a VPS-Docker host whose container is stopped while the VPS itself is still reachable (the idle-watcher shutdown, a manual `mngr stop`, or a VPS reboot) is now reported as `STOPPED` and stays visible to `mngr conn` / `mngr start`, instead of being misreported as `CRASHED` and filtered out of the connect path entirely (which produced a confusing "Could not find agent" even though the agent had stopped cleanly and its data was intact).
+
+  Discovery now distinguishes a reachable-but-container-down host (clean stop) from an unreachable VPS (the genuine down/crash case). The latter is unchanged: it stays hidden from `include_destroyed=False` callers and surfaces as `CRASHED` in `mngr list`. This affects all VPS-Docker providers (aws/gcp/azure/vultr/ovh).
+
+- Fixed: `start_host` now re-starts sshd inside the container after restarting it, so `mngr start` (and `mngr conn`'s auto-start) actually recovers a stopped agent. The container's sshd is launched via `docker exec`, not its entrypoint (`tail -f /dev/null`), so a `docker start` brought the container back *without* sshd; `start_host` then waited for an sshd that never came up and timed out, leaving the agent unrecoverable (the user hit this after an idle-stop). It now calls `start_container_sshd` between the container start and the SSH wait. `docker start` is a no-op on an already-running container, so this also repairs a container-up-but-sshd-down host. This affects all VPS-Docker providers; it is exercised by the existing `test_provider_lifecycle_create_stop_start_destroy` release test (which create → stop → start → exec).
+
+Removed the dead disk-snapshot and SSH-key-listing surface from the VPS client layer. `VpsClientInterface` no longer declares the `create_snapshot`, `delete_snapshot`, `list_snapshots`, or `list_ssh_keys` abstract methods -- these had no production callers (provider-level host snapshots go through `docker commit`, a separate path). `ExternallyManagedVpsClient` correspondingly drops its stub overrides for those operations, and the now-unused `VpsSnapshotInfo` / `VpsSshKeyInfo` models and the `VpsSnapshotId` primitive were deleted. The remaining mandatory client surface is the instance lifecycle plus `upload_ssh_key` / `delete_ssh_key`.
+
+
+The `mngr_vps_docker` README's module list no longer claims `VpsClientInterface` provides snapshot operations.
+
+`destroy_host` now raises a `CleanupFailedGroup` carrying the classified cleanup failures (instead of returning them, or swallowing errors as warnings) when a resource is left behind, and returns normally otherwise. A resource that was already gone is treated as benign (no failure); a resource that exists but could not be destroyed is recorded as a `HOST_RESOURCE_REMAINS` failure (or `OTHER` for a host-record write failure), so `mngr destroy`/`cleanup` can surface it and exit with an informative, cause-specific code.
+
+Benign "already gone" is detected by signal rather than fragile error-text matching: the VPS API steps (instance destroy, SSH-key delete) classify by the `VpsApiError` HTTP status code (404/410), and `remove_container` gained a `tolerate_missing` option so an already-absent container is a no-op (matching `docker volume rm -f` semantics). See `specs/cleanup-error-aggregation.md`.
+
+- **Host discovery no longer aborts `mngr create` on a transient SSH keypair race.** Discovery SSHes every VPS the provider enumerates (and the OVH backend lists every VPS in the account), each lazily creating the local SSH keypair on first use. A racing, half-written `.pub` made paramiko's certificate probe raise a bare `ValueError` that escaped `_read_records_from_vps` (which only catches `MngrError`) and failed the whole sweep. The root cause is fixed in the shared `mngr` layer (race-free keypair creation plus wrapping that probe error as a structured `HostConnectionError`), so the existing best-effort `MngrError` handling now degrades a bad VPS to a warning rather than aborting create.
+
+## 2026-06-15
+
+The `host_backup` btrfs snapshot helper (`snapshot_helper.sh`, the `OUTER_TRIGGER` mechanism) no longer re-processes a request it has already serviced. The helper never consumes `request.json`, and both its startup path and (formerly) a missing-`inotifywait` crash-loop could re-run the last request; re-running a snapshot whose target path now exists overwrote a good `result.json` with a spurious "snapshot path already exists" failure, masking the successful backup. The helper now skips any request whose `request_id` already appears in `result.json`. request_ids are unique per request, so this never suppresses a real new request, and a genuinely-unserviced request still runs via the startup path.
+
+Clarified the `provision_snapshot_helper_on_outer` docstring: it still assumes `inotify-tools` and `jq` are pre-installed on the outer, and now notes the slice path installs them in its lima VM provisioning (in addition to the cloud-init and SSH host-setup paths).
+
+`prepare_btrfs_on_outer` now detects when the btrfs filesystem is already mounted at the configured mount path (and there is no loop image) and skips the loopback allocation/format/mount/fstab steps, just ensuring the per-host subvolume. This lets a host whose btrfs is provided by an already-mounted disk (an OVH bare-metal "slice" VM's lima data disk) reuse the shared vps_docker bake and slow-path rebuild unchanged -- no loopback image is created over the real mount.
+
+## host-setup: OS-aware Docker install
+
+- The pinned Docker install step derives the apt repo (`download.docker.com/linux/$ID`) and the full apt version suffix (`~$ID.$VERSION_ID~$VERSION_CODENAME`) from `/etc/os-release` at run time rather than hardcoding the Debian 12 / bookworm strings, so it is distro-aware across the Debian family. On the Debian 12 default it renders the same apt version (`5:29.5.1-1~debian.12~bookworm`) and repo URL (`linux/debian`) every backend already used; the derivation additionally covers a non-default `--gcp-image` (e.g. an Ubuntu LTS image) without a code change. `PINNED_DOCKER_APT_VERSION` is exported as the fully-rendered Debian 12 apt version string for any caller or test that needs the exact value rather than the runtime-derived suffix.
+
+## bootstrap: direct root-key injection
+
+- The first-boot bootstrap (cloud-init `user-data` and the GCE `startup-script`) writes the provider SSH public key straight into root's `authorized_keys`, independent of the copy-from-default-user (`admin` / `ec2-user` / `ubuntu` / `debian` / ...) step, via an `authorized_user_public_key` parameter that `_provision_vps` always passes. This removes any reliance on a cloud image's default-user key landing in root. It is the deciding fix for GCE, where the google guest agent provisions the `ssh-keys` metadata into the `ubuntu` user asynchronously and races the default-user copy, intermittently leaving root without the key. Additive and idempotent for the AWS / Vultr / OVH backends (the key also lands in root via the default-user copy, so the extra line is a no-op duplicate).
+
+## bootstrap: backend override hooks for non-cloud-init images
+
+- `VpsDockerProvider` gains two override hooks: `_generate_bootstrap_payload` (default cloud-init `user-data`; a backend whose images run the google-guest-agent instead of cloud-init, e.g. GCP, overrides it to render a `startup-script`) and `_wait_for_expected_host_key` (default no-op; overridden when the host key is installed post-boot, to wait for it before strict-checking). Provisioning is otherwise backend-agnostic -- both payloads render the same shared `host_setup.build_host_setup_steps` and write the same marker.
+
+- The `mngr-ready` first-boot completion marker path is now the single `host_setup.MNGR_READY_MARKER_PATH` constant, shared by both bootstrap renderers and the poller.
+
+## create_host: pre-create validation runs before any provider write
+
+- `VpsDockerProvider.create_host` now calls the `_validate_provider_args_for_create` hook before the first provider API write (the SSH key upload), instead of partway through `_provision_vps`. This means a provider-specific pre-create precondition that fails -- e.g. GCP's missing-firewall check -- aborts cleanly with no instance created, no SSH key uploaded, and no `Host creation failed, attempting cleanup...` path. The hook's docstring now reflects this contract (cheap, local or single read-only check, before any write). Behaviorally a no-op for providers whose hook is the default no-op or a cheap local guard (AWS's pytest auto-shutdown check).
+
 ## 2026-06-14
 
 Agent discovery on VPS Docker providers (AWS, OVH, Vultr) now reads agents **live** from each host's container instead of from the persisted `agents/*.json` outer store. The outer store is only written by the host-side mngr at agent-create time, so agents created *inside* a container (for example by an in-container `mngr create`) were never recorded there and were invisible to `mngr message`, `mngr connect`, and any other command that resolves agents through discovery -- even though `mngr list` showed them (it already read live). This caused, among other things, onboarding messages to an in-container chat agent to never be delivered. Discovery now uses the same live read that imbue_cloud already used, and derives each host's running state from that same read (removing a separate per-host inspect round-trip). If only the live read fails (for example a `docker exec` racing a container restart) after a host's record has already been read, that host still appears in the listing as offline rather than disappearing.

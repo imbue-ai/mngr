@@ -315,7 +315,9 @@ root is rejected with HTTP 403.
   body of permission-schema names (`["any"]`,
   `["slack-read-all", ...]`, ...) adds or replaces the rule for
   `<scope>`. Everything in the file other than the matching rule is
-  preserved verbatim.
+  preserved verbatim. The target file (and any missing parent
+  directories, e.g. `hosts/<host_id>/`) is created if it does not yet
+  exist.
 * `DELETE /permissions/rules?path=<file>&rule_key=<scope>` removes
   the named rule.
 
