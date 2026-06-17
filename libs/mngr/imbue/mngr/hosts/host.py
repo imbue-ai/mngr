@@ -3339,18 +3339,17 @@ def _build_start_agent_shell_command(
     tmux_width = int(tmux_options.width) if tmux_options.width is not None else _DEFAULT_TMUX_WIDTH
     tmux_height = int(tmux_options.height) if tmux_options.height is not None else _DEFAULT_TMUX_HEIGHT
     steps.append(
-        f"tmux new-session -d"
+        "tmux new-session -d"
         f" -s {shlex.quote(session_name)}"
         f" -x {tmux_width} -y {tmux_height}"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
 
-    # Source mngr's own tmux config (options and key bindings) at agent creation.
-    # The user's own config is pulled in at tmux server start.
-    # The subshell scopes '|| true' to this step alone (&& and || share precedence
-    # and left-associate, so an unparenthesized '|| true' would rescue the whole
-    # preceding && chain); it keeps a cosmetic-config error from blocking agent startup.
+    # Source mngr's own tmux config (options and key bindings) at agent creation;
+    # the user's own config is pulled in at tmux server start. Parenthesized so the
+    # '|| true' (a cosmetic-config error must not block startup) scopes to this step,
+    # not the whole && chain.
     steps.append(f"(tmux source-file {shlex.quote(str(tmux_config_path))} || true)")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()

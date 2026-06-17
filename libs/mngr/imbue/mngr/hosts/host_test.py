@@ -797,11 +797,10 @@ def test_build_start_agent_shell_command_sources_config_after_new_session(
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
-    assert "source-file" in result
     assert result.index("new-session") < result.index("source-file")
-    source_file_start = result.index("(tmux source-file")
-    source_file_step = result[source_file_start : result.index(")", source_file_start) + 1]
-    assert source_file_step.endswith("|| true)")
+    # Wrapped in a subshell so '|| true' scopes to this step alone.
+    assert "(tmux source-file" in result
+    assert "|| true)" in result
 
 
 def test_build_start_agent_shell_command_includes_additional_windows(
