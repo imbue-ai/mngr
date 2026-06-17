@@ -252,11 +252,6 @@ class AutoToggle(UpperCaseStrEnum):
     NO = auto()
 
 
-def auto_toggle_choices() -> list[str]:
-    """Lowercase CLI choice strings for :class:`AutoToggle`, in YES/AUTO/NO order."""
-    return [m.value.lower() for m in AutoToggle]
-
-
 # Reusable help suffix describing the three :class:`AutoToggle` values. Compose it
 # after a feature-specific lead-in sentence in a CLI option's ``help``.
 AUTO_TOGGLE_HELP_SUFFIX: Final[str] = (

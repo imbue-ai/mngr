@@ -44,7 +44,6 @@ from imbue.mngr.primitives import AUTO_TOGGLE_HELP_SUFFIX
 from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import auto_toggle_choices
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -142,7 +141,7 @@ def add_use_offline_host_dir_option(command: TDecorated) -> TDecorated:
     return optgroup.option(
         "--use-offline-host-dir",
         "use_offline_host_dir",
-        type=click.Choice(auto_toggle_choices()),
+        type=click.Choice([m.value.lower() for m in AutoToggle]),
         default=AutoToggle.AUTO.value.lower(),
         show_default=True,
         help=(
