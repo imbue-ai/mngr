@@ -6,13 +6,10 @@ through the shared agent release lifecycle (create -> WAITING -> message -> RUNN
 arc and assertions live in ``imbue.mngr.agents.agent_release_testing``; this file
 supplies claude's plumbing via an :class:`AgentReleaseProfile`.
 
-claude exercises the richest end of the shared lifecycle: it observes the RUNNING
-marker (its UserPromptSubmit hook touches the ``active`` marker; observing it is a
-universal harness requirement), forces a bash tool call (so the transcript carries a
-tool_result), and reports token usage in the common envelope. Only ``forces_tool_call``
-and ``asserts_usage`` remain per-profile capability flags.
-
-claude's only real specifics over the sibling ports:
+claude runs the same shared arc as every other port: it observes the RUNNING marker (its
+UserPromptSubmit hook touches the ``active`` marker), forces a bash tool call, and -- with
+``asserts_usage`` on -- reports token usage. Its plumbing differs from the sibling ports
+only in:
 
 * Repo-local ``.gitignore``. claude's preflight refuses to write hooks to
   ``.claude/settings.local.json`` unless the repository's *own* ``.gitignore``
@@ -20,11 +17,11 @@ claude's only real specifics over the sibling ports:
   ``_init_claude_workspace`` seeds that rule for both the seed worktree and the fresh
   adoption worktree; the sibling ports don't need this.
 
-* Auth/dialog dismissal. ``mngr create --yes`` (auto-approve) dismisses claude's
-  first-run dialogs (onboarding/effort) and trusts the work dir in the per-agent
-  ``~/.claude.json``, and the plugin's ``approve_api_key_for_claude`` pre-approves the
-  ``ANTHROPIC_API_KEY`` so claude doesn't block on its custom-key dialog. Both cover the
-  seed worktree and the fresh adoption worktree, so the test needs no seeded config.
+* Custom-API-key approval. The plugin's ``approve_api_key_for_claude`` pre-approves the
+  passed-in ``ANTHROPIC_API_KEY`` during provision, so claude doesn't block on its
+  custom-key dialog (no sibling port has one). claude's other first-run dialogs
+  (onboarding/effort) and work-dir trust are dismissed by the ``--yes`` the harness
+  already passes for every agent -- not a claude specific -- so the test seeds no config.
 
 * Post-``--`` args. ``--dangerously-skip-permissions`` lets the forced bash tool call
   run without a permission pause, ``--pass-env ANTHROPIC_API_KEY`` carries the key to the
