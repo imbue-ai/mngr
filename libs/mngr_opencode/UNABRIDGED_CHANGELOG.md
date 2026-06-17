@@ -4,6 +4,18 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+OpenCode agents now preserve their transcripts on destroy, matching the claude plugin.
+
+- New `preserve_on_destroy` config option (default `true`): before an opencode agent's state directory is deleted on destroy, its raw and common transcripts and the root session-id history are copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`, mirroring the agent's state-directory layout. For remote agents the files are pulled to the local machine so they survive host destruction. Set to `false` to discard transcript data on destroy.
+
+- Works for both online destroys and offline host destruction (where the agent state is read off the host's persisted volume).
+
+- The opencode release lifecycle test now asserts the transcripts are actually preserved on destroy (previously destroy was bare cleanup), so the feature is covered end-to-end against the real `opencode` binary.
+
+- OpenCode's native resumable session store (the SQLite `opencode.db` plus its `-wal`/`-shm` write-ahead-log sidecars, and `storage/`) is now also preserved on destroy, targeting those specific paths so the session can be resumed/adopted; the sibling `auth.json` (a symlink to shared credentials) and `log/` are deliberately excluded. The WAL sidecars are copied alongside the db so recent (not-yet-checkpointed) turns are not lost.
+
 ## 2026-06-15
 
 Implemented the `waiting_reason` listing field for the `opencode` agent type, matching claude and codex. `mngr list` now reports *why* a WAITING opencode agent is blocked: `PERMISSIONS` when a tool is waiting on an approval prompt (an `ask` permission policy), or `END_OF_TURN` when the agent is idle with its turn complete.

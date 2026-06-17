@@ -41,7 +41,7 @@
 //     declared locally as the minimal structural types we read.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 // --- Minimal structural types for the bits of pi we read. -------------------
 // These mirror pi's public AgentMessage / event shapes (see pi docs/session.md)
@@ -64,6 +64,10 @@ interface PiUsage {
   output?: number;
   cacheRead?: number;
   cacheWrite?: number;
+  // pi computes per-message cost client-side; `total` is the message's USD cost
+  // (verified live -- input/output/cacheRead/cacheWrite + total). Used by the
+  // usage writer below; authoritative over any token-derived estimate.
+  cost?: { total?: number };
 }
 interface UserMessage {
   role: "user";
@@ -229,6 +233,17 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   const commonPath = join(stateDir, "events", agentType, "common_transcript", "events.jsonl");
   const commonSource = `${agentType}/common_transcript`;
 
+  // Usage events (per-message cost/tokens for `mngr usage`). Written only when
+  // mngr_pi_coding_usage provisioned its gate marker -- that package ships the
+  // reader claiming the "pi-coding" source, so emitting without it would let
+  // `mngr usage` mis-aggregate pi's per-message events. The source is the fixed
+  // harness id "pi-coding" (not agentType), so usage from any pi subtype lumps
+  // together. Kept in sync with mngr_pi_coding_usage's USAGE_GATE_FILENAME /
+  // USAGE_SOURCE_NAME.
+  const emitUsage = existsSync(join(stateDir, "pi_emit_usage"));
+  const usagePath = join(stateDir, "events", "pi-coding", "usage", "events.jsonl");
+  let usageSeq = emitUsage ? countLines(usagePath) : 0;
+
   // event_id must be unique within commonPath so `mngr transcript`'s dedupe set
   // never drops a real record. Seed the counter from the existing line count so
   // ids keep climbing across stop/start (a `--continue` restart reuses the same
@@ -353,6 +368,22 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       if (emitRaw) {
         appendLine(rawPath, JSON.stringify({ type: "message", timestamp: isoTimestamp(message), message }));
       }
+      if (emitUsage) {
+        // Session id comes from the session file recorded on session_start (which
+        // always fires before message_end); reading it is robust to whether this
+        // handler's ctx exposes the session manager.
+        const sessionFile = (() => {
+          try {
+            return readFileSync(sessionFilePath, "utf8").trim();
+          } catch {
+            return "";
+          }
+        })();
+        const usageRecord = toUsageRecord(message, sessionFile, () => `evt-pi-usage-${usageSeq++}`);
+        if (usageRecord !== null) {
+          appendLine(usagePath, JSON.stringify(usageRecord));
+        }
+      }
       if (!emitCommon) {
         return;
       }
@@ -362,6 +393,57 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       }
     });
   });
+}
+
+// Convert a pi AgentMessage into an mngr usage cost_snapshot record, or null when
+// there is nothing to report (non-assistant message, no usage, or no session id).
+// pi reports per-message cost (`usage.cost.total`), so this is REPORTED cost; the
+// reader sums these per session (session-incremental). `sessionFile` is the live
+// pi session file path -- its basename (a timestamp + uuid) is the session id.
+export function toUsageRecord(
+  message: AgentMessage,
+  sessionFile: string,
+  nextId: () => string,
+): Record<string, unknown> | null {
+  if (message.role !== "assistant") {
+    return null;
+  }
+  const assistant = message as AssistantMessage;
+  const usage = assistant.usage;
+  if (!usage) {
+    return null;
+  }
+  const sessionId = sessionFile ? basename(sessionFile, ".jsonl") : "";
+  if (!sessionId) {
+    return null;
+  }
+  const cost = usage.cost?.total;
+  const hasCost = typeof cost === "number";
+  const hasTokens =
+    usage.input != null || usage.output != null || usage.cacheRead != null || usage.cacheWrite != null;
+  if (!hasCost && !hasTokens) {
+    return null;
+  }
+  const model =
+    assistant.provider && assistant.model ? `${assistant.provider}/${assistant.model}` : (assistant.model ?? null);
+  return {
+    source: "pi-coding/usage",
+    type: "cost_snapshot",
+    event_id: nextId(),
+    timestamp: isoTimestamp(message),
+    session_id: sessionId,
+    cost: hasCost ? { total_cost_usd: cost } : null,
+    tokens: hasTokens
+      ? {
+          input: usage.input ?? null,
+          output: usage.output ?? null,
+          cache_read: usage.cacheRead ?? null,
+          cache_creation: usage.cacheWrite ?? null,
+        }
+      : null,
+    model,
+    cost_mode: "API_KEY",
+  };
 }
 
 // Convert a pi AgentMessage into an mngr common-transcript record, or null for

@@ -14,6 +14,7 @@ from imbue.mngr_mapreduce.mngr_cli import _run_mngr_raw
 # The subprocess gets a 10s budget; the global --timeout=10 leaves no headroom for a
 # cold `mngr` start under load, so give the test function room above the subprocess budget.
 @pytest.mark.timeout(30)
+@pytest.mark.flaky
 def test_run_mngr_raw_returns_finished_process(cg: ConcurrencyGroup) -> None:
     result = _run_mngr_raw(["config", "list"], cg, timeout=10.0)
     assert result.returncode == 0

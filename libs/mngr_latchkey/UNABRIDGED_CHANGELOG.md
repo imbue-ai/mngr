@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Exposed the catch-all permission name as a public `WILDCARD_PERMISSION_NAME` constant (still `any`) so the minds permission dialog can present it to users as `all` while keeping the stored/granted value unchanged.
+
 ## 2026-06-15
 
 `mngr latchkey forward` now has a structured, rotated, timestamped log, reusing the standard mngr/minds JSONL logging rather than the previous unrotated, untimestamped files.
