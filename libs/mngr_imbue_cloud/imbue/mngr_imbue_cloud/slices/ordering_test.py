@@ -41,12 +41,57 @@ def test_select_eco_option_codes_raises_for_unavailable_storage() -> None:
         select_eco_option_codes(_eco_options(), memory_gb=64, storage_short="softraid-4x3840nvme")
 
 
-def test_select_eco_option_codes_raises_when_mandatory_family_is_ambiguous() -> None:
+def test_select_eco_option_codes_raises_when_mandatory_family_is_ambiguous_without_prices() -> None:
+    # Two bandwidth offers with no comparable prices cannot be auto-picked: there is no basis to
+    # tell the included baseline from a paid upgrade, so we refuse rather than guess.
     options = _eco_options() + [
         {"family": "bandwidth", "planCode": "bandwidth-3000-unguaranteed-rise-gen2-us", "mandatory": True}
     ]
     with pytest.raises(BareMetalConfigError):
         select_eco_option_codes(options, memory_gb=64, storage_short="softraid-2x512nvme")
+
+
+def _priced_option(family: str, plan_code: str, monthly_usd: str) -> dict:
+    # Shape mirrors the OVH `GET /order/cart/{id}/eco/options` payload: each offer carries a `prices`
+    # list keyed by pricingMode + duration. We only price the month-to-month (default / P1M) entry.
+    return {
+        "family": family,
+        "planCode": plan_code,
+        "mandatory": True,
+        "prices": [{"pricingMode": "default", "duration": "P1M", "price": {"value": float(monthly_usd)}}],
+    }
+
+
+def test_select_eco_option_codes_picks_cheapest_offer_for_multi_offer_mandatory_family() -> None:
+    # Models the 24sys032-us plan: bandwidth + vrack are each mandatory with a free included baseline
+    # plus a paid upgrade. Auto-pick must take the free baseline of each (what the pricing table quotes).
+    options = [
+        _priced_option("memory", "ram-128g-ecc-2666-24sys-us", "40.00"),
+        _priced_option("storage", "softraid-2x960nvme-24sys-us", "0.00"),
+        _priced_option("bandwidth", "bandwidth-1000-24sys-us", "0.00"),
+        _priced_option("bandwidth", "bandwidth-2000-24sys-us", "120.00"),
+        _priced_option("vrack", "vrack-bandwidth-500-24sys-us", "0.00"),
+        _priced_option("vrack", "vrack-bandwidth-1000-24sys-us", "23.00"),
+    ]
+    codes = select_eco_option_codes(options, memory_gb=128, storage_short="softraid-2x960nvme")
+    assert set(codes) == {
+        "ram-128g-ecc-2666-24sys-us",
+        "softraid-2x960nvme-24sys-us",
+        "bandwidth-1000-24sys-us",
+        "vrack-bandwidth-500-24sys-us",
+    }
+
+
+def test_select_eco_option_codes_raises_when_cheapest_offer_is_tied() -> None:
+    # Two equally-priced offers in a mandatory family: refuse rather than silently pick one.
+    options = [
+        _priced_option("memory", "ram-128g-ecc-2666-24sys-us", "40.00"),
+        _priced_option("storage", "softraid-2x960nvme-24sys-us", "0.00"),
+        _priced_option("bandwidth", "bandwidth-1000-24sys-us", "0.00"),
+        _priced_option("bandwidth", "bandwidth-1000b-24sys-us", "0.00"),
+    ]
+    with pytest.raises(BareMetalConfigError):
+        select_eco_option_codes(options, memory_gb=128, storage_short="softraid-2x960nvme")
 
 
 def test_select_eco_option_codes_handles_plan_without_vrack() -> None:

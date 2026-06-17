@@ -10,6 +10,7 @@ client-driven steps are exercised live against a real order.
 from collections import defaultdict
 from collections.abc import Mapping
 from collections.abc import Sequence
+from decimal import Decimal
 from typing import Any
 from typing import Final
 from urllib.parse import urlencode
@@ -53,6 +54,49 @@ _TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset({"done", "ovhError", 
 
 
 @pure
+def _eco_option_monthly_price(option: Mapping[str, Any]) -> Decimal | None:
+    """Return an eco option's month-to-month recurring price (the cart's pricingMode + duration), or None.
+
+    The eco-options payload carries a ``prices`` list per offer; we read the price for the SAME
+    ``pricingMode`` / ``duration`` the cart is built with so "cheapest" compares like-for-like monthly
+    cost. Returns None when no matching priced entry is present (so the caller can treat it as
+    not-comparable rather than free).
+    """
+    for price_entry in option.get("prices") or []:
+        if price_entry.get("pricingMode") == ECO_PRICING_MODE and price_entry.get("duration") == ECO_DURATION:
+            value = (price_entry.get("price") or {}).get("value")
+            if value is not None:
+                return Decimal(str(value))
+    return None
+
+
+@pure
+def _pick_cheapest_mandatory_option_code(family: str, family_options: Sequence[Mapping[str, Any]]) -> str:
+    """Pick the single cheapest offer (by month-to-month price) for a multi-offer mandatory family.
+
+    OVH groups the included baseline and its paid upgrades in the same mandatory family (e.g. bandwidth:
+    the free 1Gbps baseline plus a paid 2Gbps upgrade). The pricing table prices every plan at its
+    cheapest mandatory options, so auto-picking the cheapest here reproduces exactly what was quoted.
+    Raises ``BareMetalConfigError`` if any offer lacks a comparable price or if the cheapest is tied
+    (so we never silently guess which of two equally-priced upgrades was intended).
+    """
+    priced = [(str(option["planCode"]), _eco_option_monthly_price(option)) for option in family_options]
+    if any(price is None for _code, price in priced):
+        raise BareMetalConfigError(
+            f"cannot auto-pick the {family} option: offers {sorted(code for code, _p in priced)} "
+            "lack comparable monthly prices"
+        )
+    cheapest_price = min(price for _code, price in priced if price is not None)
+    cheapest_codes = sorted(code for code, price in priced if price == cheapest_price)
+    if len(cheapest_codes) != 1:
+        raise BareMetalConfigError(
+            f"cannot auto-pick the {family} option: {cheapest_codes} tie at the cheapest monthly price; "
+            "none is unambiguously the included baseline"
+        )
+    return cheapest_codes[0]
+
+
+@pure
 def select_eco_option_codes(
     eco_options: Sequence[Mapping[str, Any]],
     memory_gb: int,
@@ -61,41 +105,39 @@ def select_eco_option_codes(
     """Choose the eco cart option planCodes: the requested memory + storage, plus every other mandatory family.
 
     ``eco_options`` is the ``GET /order/cart/{id}/eco/options`` payload (each item has ``family``,
-    ``planCode``, and ``mandatory``). Memory is matched by parsed GB; storage by the availability short
-    code (prefix). Every *other* family OVH flags mandatory (e.g. bandwidth, and vrack where offered) is
-    auto-picked and must have exactly one offer; optional families are skipped. Raises
-    ``BareMetalConfigError`` if a required choice can't be resolved.
+    ``planCode``, ``mandatory``, and ``prices``). Memory is matched by parsed GB; storage by the
+    availability short code (prefix). Every *other* family OVH flags mandatory (e.g. bandwidth, vrack)
+    is auto-picked: a single-offer family takes its only offer, and a multi-offer family takes its
+    cheapest month-to-month offer (the included baseline -- the same config the pricing table quotes).
+    Optional families are skipped. Raises ``BareMetalConfigError`` if a required choice can't be resolved.
     """
-    codes_by_family: dict[str, list[str]] = defaultdict(list)
+    options_by_family: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     is_family_mandatory: dict[str, bool] = {}
     for option in eco_options:
         family = str(option["family"])
-        codes_by_family[family].append(str(option["planCode"]))
+        options_by_family[family].append(option)
         # A family counts as mandatory if any of its offers is flagged mandatory.
         is_family_mandatory[family] = is_family_mandatory.get(family, False) or bool(option.get("mandatory"))
 
-    memory_code = next(
-        (code for code in codes_by_family.get("memory", []) if parse_memory_gb(code) == memory_gb), None
-    )
+    def _codes_for(family: str) -> list[str]:
+        return [str(option["planCode"]) for option in options_by_family.get(family, [])]
+
+    memory_code = next((code for code in _codes_for("memory") if parse_memory_gb(code) == memory_gb), None)
     if memory_code is None:
         raise BareMetalConfigError(
-            f"no {memory_gb}GB memory option for this plan; offered: {sorted(codes_by_family.get('memory', []))}"
+            f"no {memory_gb}GB memory option for this plan; offered: {sorted(_codes_for('memory'))}"
         )
     storage_code = next(
-        (
-            code
-            for code in codes_by_family.get("storage", [])
-            if code == storage_short or code.startswith(storage_short + "-")
-        ),
+        (code for code in _codes_for("storage") if code == storage_short or code.startswith(storage_short + "-")),
         None,
     )
     if storage_code is None:
         raise BareMetalConfigError(
-            f"storage {storage_short!r} not offered for this plan; offered: {sorted(codes_by_family.get('storage', []))}"
+            f"storage {storage_short!r} not offered for this plan; offered: {sorted(_codes_for('storage'))}"
         )
 
-    # Auto-pick the single offer for every other mandatory family (e.g. bandwidth,
-    # and vrack on the plans that include it); optional families are skipped.
+    # Auto-pick every other mandatory family (e.g. bandwidth, and vrack on the plans that include it):
+    # the only offer when there is one, else the cheapest offer. Optional families are skipped.
     chosen = [memory_code, storage_code]
     auto_pick_families = sorted(
         family
@@ -103,12 +145,11 @@ def select_eco_option_codes(
         if is_mandatory and family not in _USER_SELECTED_OPTION_FAMILIES
     )
     for family in auto_pick_families:
-        family_codes = codes_by_family.get(family, [])
-        if len(family_codes) != 1:
-            raise BareMetalConfigError(
-                f"expected exactly one {family} option to auto-pick, got {sorted(family_codes)}"
-            )
-        chosen.append(family_codes[0])
+        family_options = options_by_family.get(family, [])
+        if len(family_options) == 1:
+            chosen.append(str(family_options[0]["planCode"]))
+        else:
+            chosen.append(_pick_cheapest_mandatory_option_code(family, family_options))
     return chosen
 
 
