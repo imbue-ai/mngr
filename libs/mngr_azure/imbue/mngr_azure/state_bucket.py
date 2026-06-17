@@ -40,11 +40,6 @@ from imbue.mngr_vps_docker.state_bucket_base import BaseStateBucket
 # lowercase alphanumeric only) -- see ``AzureProviderConfig`` for derivation.
 DEFAULT_STATE_CONTAINER_NAME: Final[str] = "mngr-state"
 
-# Tag/metadata marking the storage account as mngr-managed, mirroring the AWS
-# bucket's ``managed-by=mngr`` tag (so a future cleanup can prove ownership).
-_MANAGED_BY_TAG_KEY: Final[str] = "managed-by"
-_MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
-
 # Storage account SKU + kind for the state account: locally-redundant standard
 # storage with a general-purpose-v2 account (the modern default), private.
 _STORAGE_ACCOUNT_SKU: Final[str] = "Standard_LRS"
@@ -196,7 +191,7 @@ class BlobStateBucket(BaseStateBucket):
             sku=Sku(name=_STORAGE_ACCOUNT_SKU),
             kind=_STORAGE_ACCOUNT_KIND,
             location=self.region,
-            tags={_MANAGED_BY_TAG_KEY: _MANAGED_BY_TAG_VALUE},
+            tags={state_keys.MANAGED_BY_TAG_KEY: state_keys.MANAGED_BY_TAG_VALUE},
             properties=StorageAccountPropertiesCreateParameters(
                 allow_blob_public_access=False,
                 minimum_tls_version="TLS1_2",
@@ -367,7 +362,7 @@ class BlobStateHostIdentity(MutableModel):
             identity = self._msi().user_assigned_identities.create_or_update(
                 self.resource_group,
                 self.identity_name,
-                Identity(location=self.region, tags={_MANAGED_BY_TAG_KEY: _MANAGED_BY_TAG_VALUE}),
+                Identity(location=self.region, tags={state_keys.MANAGED_BY_TAG_KEY: state_keys.MANAGED_BY_TAG_VALUE}),
             )
             principal_id = identity.principal_id
             if not principal_id:
