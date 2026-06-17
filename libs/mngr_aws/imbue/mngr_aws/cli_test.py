@@ -249,7 +249,7 @@ def test_refuse_cleanup_if_instances_exist_aborts_before_teardown() -> None:
         session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
         bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-refuse-first")
         bucket.ensure_bucket()
-        bucket.write_host_record(HostId.generate(), "{}")
+        bucket.write_host_record_json(HostId.generate(), "{}")
         ec2_stubber.activate()
         try:
             with pytest.raises(click.ClickException, match="Refusing"):
@@ -268,7 +268,7 @@ def test_perform_state_bucket_cleanup_refuses_while_host_state_remains() -> None
         session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
         bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-refuse")
         bucket.ensure_bucket()
-        bucket.write_host_record(HostId.generate(), "{}")
+        bucket.write_host_record_json(HostId.generate(), "{}")
         with pytest.raises(click.ClickException, match="still holds offline host state"):
             _perform_state_bucket_cleanup(bucket, force=False)
         # The bucket must still exist after a refusal.
@@ -281,7 +281,7 @@ def test_perform_state_bucket_cleanup_force_deletes_despite_host_state() -> None
         session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
         bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-purge")
         bucket.ensure_bucket()
-        bucket.write_host_record(HostId.generate(), "{}")
+        bucket.write_host_record_json(HostId.generate(), "{}")
         assert _perform_state_bucket_cleanup(bucket, force=True) == "mngr-state-cleanup-purge"
         assert bucket.bucket_exists() is False
 

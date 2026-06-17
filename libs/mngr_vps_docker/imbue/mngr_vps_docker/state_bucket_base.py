@@ -62,11 +62,11 @@ class BaseStateBucket(MutableModel, ABC):
     def _store_label(self) -> str:
         """Human-readable bucket/container name for log messages."""
 
-    def write_host_record(self, host_id: HostId, record_json: str) -> None:
+    def write_host_record_json(self, host_id: HostId, record_json: str) -> None:
         """Write the host record JSON for a host, overwriting any existing object."""
         self._put_object(state_keys.host_state_key(host_id), record_json)
 
-    def read_host_record(self, host_id: HostId) -> str | None:
+    def read_host_record_json(self, host_id: HostId) -> str | None:
         """Return the host record JSON for a host, or None if no object exists."""
         return self._get_object(state_keys.host_state_key(host_id))
 

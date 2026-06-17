@@ -73,7 +73,7 @@ def test_perform_state_bucket_cleanup_refuses_with_host_state() -> None:
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
-    bucket.write_host_record(HostId.generate(), "{}")
+    bucket.write_host_record_json(HostId.generate(), "{}")
     with pytest.raises(AzureProviderError, match="still holds offline host state"):
         _perform_state_bucket_cleanup(bucket, force=False)
     # Refusal deletes nothing.
@@ -85,7 +85,7 @@ def test_perform_state_bucket_cleanup_force_deletes_despite_host_state() -> None
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
-    bucket.write_host_record(HostId.generate(), "{}")
+    bucket.write_host_record_json(HostId.generate(), "{}")
     assert _perform_state_bucket_cleanup(bucket, force=True) == "mngrststateacct1234"
     assert backend.deleted_account is True
 
@@ -144,7 +144,7 @@ def test_refuse_cleanup_if_vms_exist_aborts_before_teardown() -> None:
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
-    bucket.write_host_record(HostId.generate(), "{}")
+    bucket.write_host_record_json(HostId.generate(), "{}")
     with pytest.raises(AzureProviderError, match="Refusing to clean up"):
         _refuse_cleanup_if_vms_exist(client)
     # The guard raised before any teardown, so the account and its state survive.

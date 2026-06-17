@@ -111,7 +111,7 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(temp_mngr
 
     bucket = provider._state_bucket
     assert bucket is not None
-    assert bucket.read_host_record(host_id) is not None
+    assert bucket.read_host_record_json(host_id) is not None
 
     # to_offline_host first tries the base SSH/volume path (no reachable VM here =>
     # HostNotFoundError), then the override reconstructs the full record from the bucket.
@@ -165,7 +165,7 @@ def test_delete_host_externally_removes_bucket_state(temp_mngr_ctx: MngrContext)
     host_id = HostId.generate()
     bucket = provider._state_bucket
     assert bucket is not None
-    bucket.write_host_record(host_id, "{}")
+    bucket.write_host_record_json(host_id, "{}")
     bucket.write_agent_record(host_id, "agent-1", {"id": "agent-1"})
     assert bucket.has_any_host_state() is True
 

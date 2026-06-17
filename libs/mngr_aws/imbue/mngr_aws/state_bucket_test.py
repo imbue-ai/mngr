@@ -61,10 +61,10 @@ def test_ensure_bucket_creates_in_other_region_with_location_constraint() -> Non
 def test_host_record_round_trip(aws_session: boto3.Session) -> None:
     bucket = _make_bucket(aws_session, _US_EAST_1, "mngr-state-record")
     host_id = HostId.generate()
-    assert bucket.read_host_record(host_id) is None
+    assert bucket.read_host_record_json(host_id) is None
     record_json = '{"certified_host_data": {"host_id": "x"}}'
-    bucket.write_host_record(host_id, record_json)
-    assert bucket.read_host_record(host_id) == record_json
+    bucket.write_host_record_json(host_id, record_json)
+    assert bucket.read_host_record_json(host_id) == record_json
 
 
 def test_agent_records_round_trip_and_remove(aws_session: boto3.Session) -> None:
@@ -88,11 +88,11 @@ def test_agent_records_round_trip_and_remove(aws_session: boto3.Session) -> None
 def test_delete_host_state_removes_record_and_agents(aws_session: boto3.Session) -> None:
     bucket = _make_bucket(aws_session, _US_EAST_1, "mngr-state-delete")
     host_id = HostId.generate()
-    bucket.write_host_record(host_id, "{}")
+    bucket.write_host_record_json(host_id, "{}")
     bucket.write_agent_record(host_id, "agent-1", {"id": "agent-1"})
     assert bucket.has_any_host_state() is True
     bucket.delete_host_state(host_id)
-    assert bucket.read_host_record(host_id) is None
+    assert bucket.read_host_record_json(host_id) is None
     assert bucket.list_agent_records(host_id) == []
     assert bucket.has_any_host_state() is False
     # Deleting an already-empty host prefix is idempotent.
@@ -104,7 +104,7 @@ def test_has_any_host_state_isolated_per_host(aws_session: boto3.Session) -> Non
     assert bucket.has_any_host_state() is False
     host_a = HostId.generate()
     host_b = HostId.generate()
-    bucket.write_host_record(host_a, "{}")
+    bucket.write_host_record_json(host_a, "{}")
     assert bucket.has_any_host_state() is True
     bucket.delete_host_state(host_b)
     # Deleting an unrelated empty host leaves host_a's state intact.
@@ -114,7 +114,7 @@ def test_has_any_host_state_isolated_per_host(aws_session: boto3.Session) -> Non
 def test_delete_bucket_empties_then_deletes(aws_session: boto3.Session) -> None:
     bucket = _make_bucket(aws_session, _US_EAST_1, "mngr-state-teardown")
     host_id = HostId.generate()
-    bucket.write_host_record(host_id, "{}")
+    bucket.write_host_record_json(host_id, "{}")
     bucket.delete_bucket()
     assert bucket.bucket_exists() is False
     # Deleting an already-absent bucket is idempotent.

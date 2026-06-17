@@ -137,9 +137,9 @@ class StateBucket(Protocol):
     method raises the provider's bucket-error exception on a storage failure.
     """
 
-    def write_host_record(self, host_id: HostId, record_json: str) -> None: ...
+    def write_host_record_json(self, host_id: HostId, record_json: str) -> None: ...
 
-    def read_host_record(self, host_id: HostId) -> str | None: ...
+    def read_host_record_json(self, host_id: HostId) -> str | None: ...
 
     def write_agent_record(self, host_id: HostId, agent_id: str, data: Mapping[str, object]) -> None: ...
 
@@ -172,7 +172,7 @@ class BucketHostStateStore(HostStateStore):
     def persist_host_record(self, record: VpsDockerHostRecord) -> None:
         host_id = HostId(record.certified_host_data.host_id)
         try:
-            self.bucket.write_host_record(host_id, record.model_dump_json(indent=2))
+            self.bucket.write_host_record_json(host_id, record.model_dump_json(indent=2))
         except self.bucket_error_type as e:
             logger.warning("Failed to mirror host record for {} to {}: {}", host_id, self.bucket_label, e)
 
@@ -201,7 +201,7 @@ class BucketHostStateStore(HostStateStore):
 
     def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
         try:
-            record_json = self.bucket.read_host_record(host_id)
+            record_json = self.bucket.read_host_record_json(host_id)
         except self.bucket_error_type as e:
             logger.warning("Failed to read host record for {} from {}: {}", host_id, self.bucket_label, e)
             return None
