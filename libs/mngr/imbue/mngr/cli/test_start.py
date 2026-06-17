@@ -12,7 +12,6 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_start_restart_running_agent(
     cli_runner: CliRunner,
@@ -43,7 +42,6 @@ def test_start_restart_running_agent(
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_start_restart_stopped_agent(
     cli_runner: CliRunner,
