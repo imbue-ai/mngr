@@ -603,6 +603,11 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         when the target is absent (non-latchkey request) or the host is
         not yet known to discovery.
         """
+        if not isinstance(
+            event,
+            (LatchkeyPredefinedPermissionRequestEvent, LatchkeyFileSharingPermissionRequestEvent),
+        ):
+            return
         target = event.permissions_target_path
         if target is None:
             return
