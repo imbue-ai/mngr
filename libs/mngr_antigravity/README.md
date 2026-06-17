@@ -2,7 +2,7 @@
 
 Plugin that registers the `antigravity` agent type for mngr.
 
-[Antigravity CLI](https://antigravity.google/docs/cli-overview) is Google's terminal-based AI coding assistant, the successor to the legacy Gemini CLI. This plugin runs the new CLI (`agy`) as an mngr agent.
+[Antigravity CLI](https://antigravity.google/docs/cli-overview) is Google's terminal-based AI coding assistant. This plugin runs the CLI (`agy`) as an mngr agent.
 
 ## Authentication
 

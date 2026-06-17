@@ -1,6 +1,6 @@
 # Concurrency Group
 
-A library for managing threads and processes in a structured way. The `ConcurrencyGroup` class tracks the threads and processes you start within a context manager, then waits for and shuts them down gracefully on exit, avoiding accidental leaks.
+A library for managing threads and processes in a structured way. It provides the `ConcurrencyGroup` class which helps avoid accidentally leaking threads and processes, and helps shut them down gracefully.
 
 ## Key Features
 
