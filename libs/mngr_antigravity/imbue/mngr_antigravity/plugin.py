@@ -779,6 +779,11 @@ class AntigravityAgent(
             recorded = source_location.host.read_text_file(source_root_file).strip()
             if recorded:
                 return recorded
+        logger.debug(
+            "Clone adopt: source {} has no recorded root conversation; falling back to the "
+            "most-recently modified store in the transferred conversations dir",
+            source_location.path,
+        )
         dest_conversations_dir = get_antigravity_conversations_dir(self._get_agy_home_dir())
         globs = " ".join(
             f"{shlex.quote(str(dest_conversations_dir))}/*{suffix}" for suffix in _CONVERSATION_STORE_SUFFIXES
