@@ -49,6 +49,7 @@ from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 
@@ -62,6 +63,20 @@ _CLAUDE_PROJECTS_RELPATH = "plugin/claude/anthropic/projects"
 # model would only add cost and latency to the release run. ``haiku`` is Claude Code's alias
 # for the current Haiku.
 _MODEL = "haiku"
+
+
+def _init_claude_workspace(path: Path) -> None:
+    """Init a git repo whose own .gitignore excludes Claude's settings.local.json.
+
+    mngr's claude preflight refuses to write hooks to .claude/settings.local.json
+    unless the repository's *own* .gitignore excludes it (a global rule is rejected,
+    since remote hosts lack it). Both the seed worktree and the fresh adoption
+    worktree must carry that rule, so this replaces the bare init_git_repo for each.
+    """
+    init_git_repo(path, initial_commit=False)
+    (path / ".gitignore").write_text(".claude/settings.local.json\n")
+    run_git_command(path, "add", ".gitignore")
+    run_git_command(path, "commit", "-m", "Add .gitignore")
 
 
 class _ClaudeReleaseProfile(AgentReleaseProfile):
@@ -115,8 +130,13 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
         env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
 
         work_dir = tmp_path / "claude-source"
-        init_git_repo(work_dir, initial_commit=True)
+        _init_claude_workspace(work_dir)
         return AgentReleaseContext(env=env, workspace=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
+
+    def prepare_adoption_workspace(self, work_dir: Path) -> None:
+        # The adoption worktree is also a claude source, so it needs the same
+        # repo-local .gitignore rule the seed worktree carries (see _init_claude_workspace).
+        _init_claude_workspace(work_dir)
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
         # Pass the work dir via --source (so mngr runs from the checkout under ``uv run``)

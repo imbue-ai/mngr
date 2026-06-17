@@ -69,10 +69,12 @@ class _CodexReleaseProfile(AgentReleaseProfile):
     common_transcript_subdir = "codex"
     # codex's send_message blocks until the agent reads RUNNING (its UserPromptSubmit hook
     # fires a tmux wait-for signal *after* setting the marker), so the marker is reliably
-    # present once a message returns -- observe it. codex's turn does not force a tool call
-    # and it does not report token usage in the common envelope.
+    # present once a message returns -- observe it. The seed turn forces a bash tool call
+    # (create passes approval_policy=never, below, so it runs unattended), and codex's
+    # converter surfaces that call as a nested assistant tool_call. codex does not report
+    # token usage in the common envelope.
     observes_running_marker = True
-    forces_tool_call = False
+    forces_tool_call = True
     asserts_usage = False
     # This is the store the adopt-from-preserved arc adopts: after destroy, a fresh agent
     # in a new worktree adopts the just-preserved session by id and must recall the
@@ -118,7 +120,17 @@ class _CodexReleaseProfile(AgentReleaseProfile):
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
         # Pass the work dir via --source (rather than the mngr cwd) so ``mngr`` can run from
         # the checkout under ``uv run`` -- matching the sibling release tests.
-        return ["--no-ensure-clean", "--source", str(ctx.workspace), "-S", f"agent_types.codex.model={_CODEX_MODEL}"]
+        # auto_allow_permissions sets approval_policy=never, so the forced bash tool call
+        # runs without pausing on an approval prompt.
+        return [
+            "--no-ensure-clean",
+            "--source",
+            str(ctx.workspace),
+            "-S",
+            f"agent_types.codex.model={_CODEX_MODEL}",
+            "-S",
+            "agent_types.codex.auto_allow_permissions=true",
+        ]
 
     def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
         # ``uv run mngr`` from the checkout (the default cwd), so local changes are exercised,
