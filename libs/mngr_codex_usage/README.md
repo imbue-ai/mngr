@@ -11,5 +11,5 @@ from tokens via the pricing table (provenance `ESTIMATED`). The model is
 `openai/<model>` from the rollout's `turn_context`.
 
 In ChatGPT-plan (subscription) mode, Codex also reports 5h/7d rate-limit windows,
-so subscription agents get Claude-style windows and are classified `SUBSCRIPTION`
-(imputed). Without rate limits the session is `API_KEY` (real spend).
+so those agents are classified `SUBSCRIPTION` (imputed). Without rate limits the
+session is `API_KEY` (real spend).

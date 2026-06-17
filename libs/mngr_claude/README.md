@@ -19,9 +19,8 @@ When enabled:
 
 - `$CLAUDE_CONFIG_DIR` must be set in the parent shell; mngr errors out otherwise.
 - Only local hosts are supported.
-- mngr is hands-off here: it uses your config dir as-is and does no trust,
-  onboarding, or dialog handling for you (unlike the default per-agent mode). Complete
-  interactive `claude` setup yourself first: trust the work_dir, finish onboarding, log in.
+- mngr uses your config dir as-is and does not modify it; you just need to be
+  logged in to Claude.
 - Other sync/override/auto-dismiss fields are ignored in this mode.
 
 ## Approximate response streaming (`streaming_snapshot_interval_seconds`)
