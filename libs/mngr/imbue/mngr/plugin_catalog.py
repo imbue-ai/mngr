@@ -95,6 +95,24 @@ class LimaSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("limactl", "--version")
 
 
+class AwsSignalCheck(SignalCheck):
+    """Detects whether the AWS CLI is installed."""
+
+    command: tuple[str, ...] = ("aws", "--version")
+
+
+class GcloudSignalCheck(SignalCheck):
+    """Detects whether the Google Cloud CLI is installed."""
+
+    command: tuple[str, ...] = ("gcloud", "--version")
+
+
+class AzureSignalCheck(SignalCheck):
+    """Detects whether the Azure CLI is installed."""
+
+    command: tuple[str, ...] = ("az", "--version")
+
+
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
@@ -103,6 +121,44 @@ _ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
 _LIMA_SIGNAL: Final[LimaSignalCheck] = LimaSignalCheck()
+_AWS_SIGNAL: Final[AwsSignalCheck] = AwsSignalCheck()
+_GCLOUD_SIGNAL: Final[GcloudSignalCheck] = GcloudSignalCheck()
+_AZURE_SIGNAL: Final[AzureSignalCheck] = AzureSignalCheck()
+
+
+class SignalGate(FrozenModel):
+    """A gate keyed on a detectable tool.
+
+    On an INDEPENDENT entry the signal is probed to decide phase-1 preselection,
+    and once the entry is selected the signal becomes "accepted" for dependents.
+    A DEPENDENT entry carrying this gate is offered in phase 2 when its signal was
+    accepted in phase 1.
+    """
+
+    signal: SignalCheck
+
+    def detection_signal(self) -> SignalCheck | None:
+        return self.signal
+
+    def is_unlocked(self, *, accepted_signals: set[SignalCheck], present_packages: frozenset[str]) -> bool:
+        return self.signal in accepted_signals
+
+
+class RequiredPackagesGate(FrozenModel):
+    """A gate for a DEPENDENT entry, offered in phase 2 only when every named
+    package is present -- already installed, or selected earlier in the wizard.
+    """
+
+    packages: tuple[str, ...]
+
+    def detection_signal(self) -> SignalCheck | None:
+        return None
+
+    def is_unlocked(self, *, accepted_signals: set[SignalCheck], present_packages: frozenset[str]) -> bool:
+        return all(package in present_packages for package in self.packages)
+
+
+Gate = SignalGate | RequiredPackagesGate
 
 
 class SignalGate(FrozenModel):
@@ -218,6 +274,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Lima VM provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         gate=SignalGate(signal=_LIMA_SIGNAL),
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="vultr",
@@ -230,12 +287,16 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-aws",
         description="AWS provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+        gate=SignalGate(signal=_AWS_SIGNAL),
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="gcp",
         package_name="imbue-mngr-gcp",
         description="GCP Compute Engine provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+        gate=SignalGate(signal=_GCLOUD_SIGNAL),
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="ovh",
@@ -248,6 +309,8 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-azure",
         description="Azure Virtual Machines provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+        gate=SignalGate(signal=_AZURE_SIGNAL),
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="tutor",
