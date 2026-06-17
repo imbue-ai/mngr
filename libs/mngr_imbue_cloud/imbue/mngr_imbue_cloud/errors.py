@@ -10,6 +10,10 @@ class ImbueCloudConnectorError(ImbueCloudError):
     """Raised when the remote_service_connector returns an unexpected response."""
 
 
+class SliceBakeTerminatedError(ImbueCloudError):
+    """Raised in the bake's main thread when a SIGTERM/SIGINT arrives, to trigger cleanup."""
+
+
 class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError):
     """Raised when authentication is missing or refresh fails."""
 

@@ -2,12 +2,22 @@ from typing import Final
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_base_image_path
+from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
 
 # Lima release to install on the box (matches what the slice path is tested against).
 DEFAULT_LIMA_VERSION: Final[str] = "2.1.2"
 
+# Swapfile size (GiB) to provision on the box. Slice hosts run RAM near capacity, so a
+# real swapfile is cheap OOM insurance against transient spikes (idle baked agents
+# don't thrash steady-state). Replaces the OS-install default (two tiny ~0.5GiB swap
+# partitions), which is too small to matter.
+_SWAPFILE_SIZE_GIB: Final[int] = 32
+_SWAPFILE_PATH: Final[str] = "/swapfile"
+
 # Packages the box needs to run lima/QEMU VMs and the slice bake (Docker lives
-# inside each VM, not on the box).
+# inside each VM, not on the box). ``libguestfs-tools`` provides ``virt-customize``,
+# used to pre-install Docker + inotify-tools into the golden slice image so per-VM
+# first-boot provisioning skips those downloads.
 _BOX_APT_PACKAGES: Final[tuple[str, ...]] = (
     "qemu-system-x86",
     "qemu-utils",
@@ -17,6 +27,7 @@ _BOX_APT_PACKAGES: Final[tuple[str, ...]] = (
     "curl",
     "ca-certificates",
     "iproute2",
+    "libguestfs-tools",
 )
 
 
@@ -34,13 +45,18 @@ def build_box_prep_script(
     the ``kvm`` group, with the pool management key authorized so the admin CLI and
     the connector can reach it), installs ``uv`` for that user, and stages the slice
     guest OS image (``slice_base_image_url``) once so VM boots never depend on the
-    Debian mirror. limactl is only ever installed here, never invoked as root (lima
-    refuses to run as root). Intended to be piped to ``sudo bash`` on the box.
+    Debian mirror. The staged image is additionally customized (via ``virt-customize``)
+    to pre-install the pinned Docker Engine + inotify-tools, so each slice VM's
+    first-boot provisioning finds them present and skips the per-VM download/install.
+    limactl is only ever installed here, never invoked as root (lima refuses to run as
+    root). Intended to be piped to ``sudo bash`` on the box.
     """
     apt_packages = " ".join(_BOX_APT_PACKAGES)
     lima_tarball = f"lima-{lima_version}-Linux-x86_64.tar.gz"
     lima_url = f"https://github.com/lima-vm/lima/releases/download/v{lima_version}/{lima_tarball}"
     base_image_path = slice_base_image_path(lima_service_user)
+    swapfile_path = _SWAPFILE_PATH
+    swapfile_size_gib = _SWAPFILE_SIZE_GIB
     return f"""\
 #!/bin/bash
 set -euo pipefail
@@ -75,20 +91,56 @@ chmod 600 /home/{lima_service_user}/.ssh/authorized_keys
 # 5. Install uv for the service user (used to run the vendored mngr that drives the bake).
 sudo -u {lima_service_user} bash -lc 'command -v uv >/dev/null 2>&1 || curl -fsSL https://astral.sh/uv/install.sh | sh'
 
-# 6. Stage the slice guest OS image once (idempotent). The slice bake references it
-#    via file:// so VM boots never hit the Debian mirror (lima otherwise does a
-#    per-boot last-modified HEAD that fatally fails when the mirror is flaky).
-#    Download to a temp file, validate it is a real qcow2, then atomically move it
-#    into place so a partial/corrupt fetch never becomes the base. Retries hard so a
-#    flaky mirror at prep time still succeeds (prep is a one-time, re-runnable step).
-sudo -u {lima_service_user} bash -lc 'set -euo pipefail
+# 6. Stage + customize the golden slice guest image once (idempotent). Download the
+#    base Debian qcow2, then pre-install the pinned Docker Engine + inotify-tools INTO
+#    the image with virt-customize, so each slice VM's first-boot provisioning finds
+#    them already present and skips the per-VM download/install (those guards are
+#    presence-only). Customize the temp copy and only atomically move it into place on
+#    success, so a partial/failed download or customize never becomes the base. Runs
+#    as root (virt-customize needs /dev/kvm); the finished image is chowned to the lima
+#    user that limactl reads it as. Referenced via file:// so VM boots never hit the
+#    Debian mirror. To re-stage with a new customization, delete the image and re-run.
 img={base_image_path}
-mkdir -p "$(dirname "$img")"
+install -d -m 755 -o {lima_service_user} -g {lima_service_user} "$(dirname "$img")"
 if [ ! -f "$img" ]; then
     curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors --retry-connrefused -o "$img.tmp" {slice_base_image_url}
     qemu-img info "$img.tmp" >/dev/null
+    # In-guest customization run offline by virt-customize (so cloud-init still runs
+    # fresh per VM). Installs the SAME pinned Docker (apt repo + exact =version) the
+    # OVH path pins, plus inotify-tools, then trims apt caches to keep the image lean.
+    # No systemctl here (no init in the appliance); the per-VM boot script enables +
+    # starts docker. `set -eu` only (no pipefail): the appliance shell may be dash.
+    cat > /tmp/mngr-slice-image-customize.sh <<'MNGR_SLICE_CUSTOMIZE'
+set -eux
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y ca-certificates curl gnupg
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y --allow-downgrades docker-ce="{PINNED_DOCKER_APT_VERSION}" docker-ce-cli="{PINNED_DOCKER_APT_VERSION}" containerd.io docker-buildx-plugin docker-compose-plugin inotify-tools
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+MNGR_SLICE_CUSTOMIZE
+    virt-customize -a "$img.tmp" --network --run /tmp/mngr-slice-image-customize.sh
+    rm -f /tmp/mngr-slice-image-customize.sh
+    chown {lima_service_user}:{lima_service_user} "$img.tmp"
     mv "$img.tmp" "$img"
-fi'
+fi
+
+# 7. Provision a real swapfile (idempotent). Slice hosts run RAM near capacity; the
+#    OS-install default swap (two ~0.5GiB partitions) is too small to cushion spikes.
+if ! swapon --show=NAME --noheadings 2>/dev/null | grep -qx {swapfile_path}; then
+    if [ ! -f {swapfile_path} ]; then
+        fallocate -l {swapfile_size_gib}G {swapfile_path} || dd if=/dev/zero of={swapfile_path} bs=1M count=$(({swapfile_size_gib} * 1024))
+        chmod 600 {swapfile_path}
+        mkswap {swapfile_path}
+    fi
+    swapon {swapfile_path}
+fi
+grep -q "^{swapfile_path} " /etc/fstab || echo "{swapfile_path} none swap sw 0 0" >> /etc/fstab
 
 echo MNGR_BOX_PREP_DONE
 """

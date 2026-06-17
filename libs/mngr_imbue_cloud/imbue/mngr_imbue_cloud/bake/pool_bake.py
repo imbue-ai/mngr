@@ -288,6 +288,7 @@ def bake_pool_host(
     workspace_dir: Path,
     extra_create_args: Sequence[str] = (),
     extra_create_env: Mapping[str, str] | None = None,
+    mngr_create_timeout_seconds: int = _MNGR_CREATE_TIMEOUT_SECONDS,
 ) -> BakedPoolHost:
     """Run ``mngr create`` for one FCT pool host and return its resolved details.
 
@@ -312,7 +313,13 @@ def bake_pool_host(
         attributes_json=attributes_json,
         extra_args=extra_create_args,
     )
-    create_result = run_mngr_command(create_command, cwd=workspace_dir, is_streaming=True, extra_env=extra_create_env)
+    create_result = run_mngr_command(
+        create_command,
+        cwd=workspace_dir,
+        timeout=mngr_create_timeout_seconds,
+        is_streaming=True,
+        extra_env=extra_create_env,
+    )
     if create_result.returncode != 0:
         raise PoolBakeError(
             f"`mngr create {full_address}` failed (exit {create_result.returncode}): {create_result.stderr.strip()}"
