@@ -63,7 +63,7 @@ _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"STOPPING", "TERMINATED"})
 # compute billing) -- there is no GCE analog to AWS's
 # ``InstanceInitiatedShutdownBehavior`` and none is needed (and no IAM/API call).
 # GCP does not sync host_dir to an object store, so it inherits the base no-op
-# ``_is_host_dir_sync_enabled`` and installs no sync daemon.
+# ``NullHostDirBackend`` (the default ``_host_dir_backend``) and installs no sync daemon.
 
 
 def _resolve_credentials_project_and_zone_or_unavailable(
@@ -344,7 +344,7 @@ class GcpProvider(KeyValueMirrorVpsProvider):
     # shutdown-script write. GCP's ``.service`` body is the default
     # ``shutdown -P now`` (a GCE guest poweroff stops the instance), so GCP
     # overrides none of those hooks. GCP does not sync host_dir to an object store,
-    # so ``_is_host_dir_sync_enabled`` stays the base no-op and nothing is installed.
+    # so ``_host_dir_backend`` stays the base ``NullHostDirBackend`` and nothing is installed.
 
     # =========================================================================
     # Offline metadata via instance metadata (so STOPPED hosts list + resolve by name)

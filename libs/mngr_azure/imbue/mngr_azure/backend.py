@@ -684,10 +684,7 @@ class _VmTagHostStateStore(HostStateStore):
         self.provider.azure_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
     def list_agent_records(self, host_id: HostId) -> list[dict]:
-        instance = self.provider._find_instance_for_host(host_id)
-        if instance is None:
-            return []
-        return self.provider._persisted_agent_dicts_from_instance(instance)
+        return self.provider._agent_dicts_from_tags(host_id)
 
     def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
         return self.provider._host_record_from_instance_tags(host_id)

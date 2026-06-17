@@ -281,15 +281,6 @@ class OfflineCapableVpsProvider(VpsProvider):
         """Start the cloud instance and return its SSH address (a fresh IP, or the static one)."""
         ...
 
-    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Hook: flush the host's offline ``host_dir`` mirror while still reachable, before pausing.
-
-        Runs in ``stop_host`` after the placement has stopped (host_dir quiesced)
-        and before the instance is paused (still SSH-reachable). Default no-op; a
-        provider that mirrors host_dir to an external store overrides this to push a
-        final copy so the offline view is current the moment the instance pauses.
-        """
-
     def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
         """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
 
