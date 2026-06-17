@@ -92,14 +92,16 @@ Modal's state volume.
 2. **`host_dir` is synced to the bucket by the instance (instance-push)**, the Modal model: an
    on-box daemon syncs `host_dir` to the bucket periodically and on graceful stop; offline reads are
    served from the bucket via a new bucket-backed volume. **On by default** (matches Lima).
-3. **`prepare` provisions the bucket-write identity, best-effort by default**: an AWS IAM role +
+3. **`prepare` provisions the bucket-write identity, best-effort**: an AWS IAM role +
    instance profile, and an Azure user-assigned managed identity + a `Storage Blob Data Contributor`
    role assignment on the container (mirrors the existing `mngr-self-deallocate` custom-role pattern
-   in `mngr_azure`). Identity provisioning is governed by a tri-state flag (Decision 6) so the
-   default `prepare` **warns and continues** if it lacks IAM permissions rather than failing the
-   whole command, and a programmatic caller can choose "require" (fail on inability) or "skip"
-   (don't attempt). `prepare` is idempotent: re-running after a bucket-only prepare adds just the
-   identity (bucket creation no-ops).
+   in `mngr_azure`). Identity provisioning is gated on the `is_offline_host_dir_enabled` provider
+   config field (default `True`): when on, `prepare` **warns and continues** if it lacks the
+   permissions rather than failing the whole command; set it to `False` to skip the identity step.
+   `prepare` is idempotent: re-running after a bucket-only prepare adds just the
+   identity (bucket creation no-ops). `[CLAUDE: superseded — the tri-state flag was replaced by the
+   is_offline_host_dir_enabled config field (default True); prepare now provisions the identity
+   best-effort when enabled]`
 
 ### Proposed (please confirm — these shape most of the implementation)
 
@@ -126,22 +128,30 @@ Modal's state volume.
      point-in-time periodic copy arises, reuse that helper.
 6. **`prepare` reintroduces IAM/identity provisioning** that `aws-ec2-stop-start-lifecycle`
    deliberately removed (it made `prepare` security-group-only). The bucket-write role is the reason.
-   To keep `prepare` usable for operators without IAM permissions, identity provisioning is a
-   **tri-state flag** (e.g. `--use-offline-host-dir {yes,auto,no}`, default `auto`):
-   - `auto` (default): attempt to provision the identity; on permission failure, **log a warning and
-     continue** — the bucket (a/b) is still set up, only offline `host_dir` (c) is unavailable.
-   - `yes`: attempt and **fail** the command if the identity cannot be provisioned (clean
-     programmatic "this prepare must yield working offline host_dir").
-   - `no`: do not attempt identity provisioning at all (clean programmatic "bucket only").
-   The bucket-only steps are unconditional and idempotent, so a later `prepare --use-offline-host-dir
-   yes` adds just the missing identity.
+   To keep `prepare` usable for operators without IAM permissions, identity provisioning is
+   **best-effort and gated on the `is_offline_host_dir_enabled` provider config field** (default
+   `True`):
+   - When `is_offline_host_dir_enabled` is on (default): attempt to provision the identity; on a
+     missing-permission / API failure, **log a warning and continue** — the bucket (a/b) is still set
+     up, only offline `host_dir` (c) is unavailable until `prepare` is re-run with sufficient
+     permissions.
+   - When `is_offline_host_dir_enabled` is off: do not attempt identity provisioning at all
+     (bucket-only prepare).
+   The bucket-only steps are unconditional and idempotent, so re-running `prepare` (once sufficient
+   permissions are granted) adds just the missing identity. `[CLAUDE: superseded — the tri-state flag
+   `--use-offline-host-dir {yes,auto,no}` was replaced by the is_offline_host_dir_enabled config
+   field (default True); prepare now provisions the identity best-effort when enabled, and "skip" is
+   expressed by setting the field to False]`
 7. **Offline `host_dir` detects a missing identity and tells the user to re-run `prepare`.** When
    `get_volume_for_host` is used against a host whose instance was never granted the bucket-write
    identity, we detect it directly from cloud state — AWS: `DescribeInstances`'
    `IamInstanceProfile` association is absent (and/or the role/instance-profile does not exist in
    IAM); Azure: the VM has no assigned managed identity / role assignment — and raise a clear error:
-   re-run `mngr <provider> prepare --use-offline-host-dir yes` (and recreate/restart the host so it
-   picks up the identity). This avoids silently returning an empty/stale volume.
+   re-run `mngr <provider> prepare` with sufficient IAM/permissions (and recreate/restart the host so
+   it picks up the identity). This avoids silently returning an empty/stale volume. `[CLAUDE:
+   superseded — the original text referenced `mngr <provider> prepare --use-offline-host-dir yes`; the
+   tri-state flag was replaced by the is_offline_host_dir_enabled config field (default True), so the
+   re-run is just `mngr <provider> prepare` with sufficient permissions]`
 
 ### Defaults (will implement unless you object)
 
@@ -213,26 +223,27 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
   `make_readable_offline_host()` already upgrades the offline host to `OfflineHostWithVolume` when a
   volume is available (`libs/mngr/imbue/mngr/hosts/offline_host.py`). `mngr event` / `mngr transcript`
   then work against a stopped instance.
-- **Default on**; a provider config flag (e.g. `is_host_dir_synced_to_bucket`, default `True`)
+- **Default on**; a provider config flag (`is_offline_host_dir_enabled`, default `True`)
   disables it, matching Lima's `is_host_data_volume_exposed` knob.
 
 ### Component 4 — `prepare` / `cleanup`
 
 - `prepare`: idempotently create the bucket/container (Decision 8), then provision the bucket-write
-  identity per the `--use-offline-host-dir {yes,auto,no}` tri-state (Decisions 3 & 6).
+  identity best-effort when `is_offline_host_dir_enabled` is on (Decisions 3 & 6).
   Read-only-first where possible (head/list before create), matching the existing SG-prepare style.
-  `auto` swallows an identity-provisioning permission error into a warning; `yes` re-raises it;
-  `no` bypasses the identity step. The bucket steps always run and are idempotent.
+  When the feature is on, an identity-provisioning permission / API error is swallowed into a
+  warning; when off, the identity step is bypassed entirely. The bucket steps always run and are
+  idempotent.
 - `cleanup`: delete identity + bucket, refusing while managed-host state remains (Decision 9).
 - Offline `host_dir` read (Decision 7) first checks that the host's instance actually has the
   identity attached (AWS `DescribeInstances.IamInstanceProfile`; Azure VM identity) and raises a
-  clear "re-run `prepare --use-offline-host-dir yes`" error if not, instead of returning an empty
-  volume.
+  clear "re-run `mngr <provider> prepare` (with sufficient IAM/permissions)" error if not, instead of
+  returning an empty volume.
 - New IAM perms for `prepare`: S3 `CreateBucket`/`PutBucketPolicy`/`PutEncryptionConfiguration` +
   IAM `CreateRole`/`PutRolePolicy`/`CreateInstanceProfile`/`PassRole`; Azure storage-account
-  create + role-assignment write + managed-identity create. With `--use-offline-host-dir auto`, missing
-  IAM perms degrade to a warning (bucket-only prepare). Per-host create path additionally needs
-  `iam:PassRole` for the instance profile (AWS) / identity assignment (Azure).
+  create + role-assignment write + managed-identity create. When `is_offline_host_dir_enabled` is on,
+  missing IAM perms degrade to a warning (bucket-only prepare). Per-host create path additionally
+  needs `iam:PassRole` for the instance profile (AWS) / identity assignment (Azure).
 
 ## Data model notes
 
@@ -242,7 +253,7 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
   the provisioned profile/identity name is recorded so create can attach it and cleanup can remove
   it.
 - New provider-config fields: `state_bucket_name` (override; default derived), and
-  `is_host_dir_synced_to_bucket` (default `True`).
+  `is_offline_host_dir_enabled` (default `True`).
 
 ## Testing
 
@@ -272,9 +283,10 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
   and whether large transient files (e.g. build caches) should be excluded by default.
 - **Crash freshness.** Instance-push means an ungraceful crash leaves `host_dir` "as of last sync"
   (same tradeoff Modal accepts). Acceptable per Decision 2.
-- **Reintroducing IAM into `prepare`** (Decisions 6 & 7) — resolved: `--use-offline-host-dir auto`
-  (default) degrades a missing-IAM-permission failure to a warning so bucket-only `prepare` still
-  succeeds, `yes` enforces it, `no` opts out; offline `host_dir` raises a "re-run prepare"
-  error when the identity is detectably absent.
+- **Reintroducing IAM into `prepare`** (Decisions 6 & 7) — resolved: identity provisioning is gated
+  on the `is_offline_host_dir_enabled` config field (default `True`) and is best-effort, degrading a
+  missing-IAM-permission failure to a warning so bucket-only `prepare` still succeeds; setting the
+  field to `False` opts out; offline `host_dir` raises a "re-run prepare" error when the identity is
+  detectably absent.
 - **Azure storage-account global-name collisions** — derive deterministically from
   subscription+RG+region and surface a clear error / override on collision.

@@ -27,7 +27,6 @@ from moto import mock_aws
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
@@ -303,7 +302,7 @@ def test_perform_state_bucket_cleanup_none_is_noop() -> None:
 
 
 # =============================================================================
-# host-dir identity provisioning (prepare --use-offline-host-dir tri-state)
+# host-dir identity provisioning (best-effort, gated on is_offline_host_dir_enabled)
 # =============================================================================
 
 _IDENTITY_BUCKET = "mngr-state-identity-cli"
@@ -314,38 +313,17 @@ def _moto_identity() -> S3StateHostIdentity:
     return S3StateHostIdentity(session=session, region="us-east-1", bucket_name=_IDENTITY_BUCKET)
 
 
-def test_provision_host_identity_no_does_nothing() -> None:
-    """'no' provisions no identity and creates nothing, even when one is available."""
+def test_provision_host_identity_creates_identity() -> None:
+    """Provisioning the identity when IAM is available returns its name."""
     with mock_aws():
         identity = _moto_identity()
-        assert _provision_host_identity(identity, AutoToggle.NO) is None
-        assert identity.host_identity_exists() is False
-
-
-def test_provision_host_identity_auto_creates_identity() -> None:
-    """'auto' provisions the identity when IAM is available, returning its name."""
-    with mock_aws():
-        identity = _moto_identity()
-        assert _provision_host_identity(identity, AutoToggle.AUTO) == host_identity_name_for_bucket(_IDENTITY_BUCKET)
+        assert _provision_host_identity(identity) == host_identity_name_for_bucket(_IDENTITY_BUCKET)
         assert identity.host_identity_exists() is True
 
 
-def test_provision_host_identity_yes_creates_identity() -> None:
-    """'yes' provisions the identity when possible (same success path as auto)."""
-    with mock_aws():
-        identity = _moto_identity()
-        assert _provision_host_identity(identity, AutoToggle.YES) == host_identity_name_for_bucket(_IDENTITY_BUCKET)
-
-
-def test_provision_host_identity_auto_warns_and_continues_when_unresolvable() -> None:
-    """'auto' degrades to None when the identity is unresolvable (None)."""
-    assert _provision_host_identity(None, AutoToggle.AUTO) is None
-
-
-def test_provision_host_identity_yes_raises_when_unresolvable() -> None:
-    """'yes' raises a ClickException when the identity can't be provisioned."""
-    with pytest.raises(click.ClickException):
-        _provision_host_identity(None, AutoToggle.YES)
+def test_provision_host_identity_warns_and_continues_when_unresolvable() -> None:
+    """An unresolvable identity (None) degrades to None rather than raising."""
+    assert _provision_host_identity(None) is None
 
 
 def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:
@@ -363,30 +341,12 @@ def test_perform_host_identity_cleanup_none_is_noop() -> None:
 
 
 def test_resolve_and_provision_host_identity_skips_when_bucket_not_set_up() -> None:
-    """'auto' provisions nothing (and touches no credentials) when the bucket was not set up.
+    """Provisioning is skipped (and touches no credentials) when the bucket was not set up.
 
     The identity's inline policy is scoped to the bucket, so provisioning it is
     meaningless without one; the gate must short-circuit before any IAM/STS call.
     """
-    result = _resolve_and_provision_host_identity(
-        AwsProviderConfig(), region="us-east-1", use_offline_host_dir=AutoToggle.AUTO, was_bucket_set_up=False
-    )
-    assert result is None
-
-
-def test_resolve_and_provision_host_identity_yes_raises_when_bucket_not_set_up() -> None:
-    """'yes' fails loudly when the bucket was not set up: it cannot deliver offline host_dir."""
-    with pytest.raises(click.ClickException):
-        _resolve_and_provision_host_identity(
-            AwsProviderConfig(), region="us-east-1", use_offline_host_dir=AutoToggle.YES, was_bucket_set_up=False
-        )
-
-
-def test_resolve_and_provision_host_identity_no_is_noop_even_without_bucket() -> None:
-    """'no' provisions nothing regardless of bucket state, and never raises."""
-    result = _resolve_and_provision_host_identity(
-        AwsProviderConfig(), region="us-east-1", use_offline_host_dir=AutoToggle.NO, was_bucket_set_up=False
-    )
+    result = _resolve_and_provision_host_identity(AwsProviderConfig(), region="us-east-1", was_bucket_set_up=False)
     assert result is None
 
 

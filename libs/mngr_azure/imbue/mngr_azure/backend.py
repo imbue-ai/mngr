@@ -70,7 +70,7 @@ AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
 
 # Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
-# When ``is_host_dir_synced_to_bucket`` is on and a state bucket exists, the
+# When ``is_offline_host_dir_enabled`` is on and a state bucket exists, the
 # create path attaches the prepare-provisioned user-assigned managed identity,
 # then installs (over SSH on the outer) a systemd oneshot ``.service`` + ``.timer``
 # pair: every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` the oneshot runs ``azcopy sync``
@@ -489,7 +489,7 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         credentials to hold the identity's ``.../assign/action``. Mirrors
         ``AwsProvider._host_dir_sync_instance_profile``.
         """
-        if not self.azure_config.is_host_dir_synced_to_bucket:
+        if not self.azure_config.is_offline_host_dir_enabled:
             return None
         if self._state_bucket is None:
             return None
@@ -500,7 +500,7 @@ class AzureProvider(TagMirrorVpsDockerProvider):
             if not identity.host_identity_exists():
                 logger.warning(
                     "host_dir sync is on but the bucket-write managed identity {} does not exist; launching "
-                    "without it (run `mngr azure prepare --use-offline-host-dir yes` to enable offline host_dir)",
+                    "without it (re-run `mngr azure prepare` with sufficient permissions to enable offline host_dir)",
                     identity.identity_name,
                 )
                 return None
@@ -621,7 +621,7 @@ class AzureProvider(TagMirrorVpsDockerProvider):
     def _install_host_dir_sync(self, *, host_id: HostId, vps_ip: str) -> None:
         """Install the host-side host_dir-to-bucket sync daemon on the outer host.
 
-        Gated on ``is_host_dir_synced_to_bucket`` AND a state bucket being present
+        Gated on ``is_offline_host_dir_enabled`` AND a state bucket being present
         (no bucket -> nothing to sync to) AND the bucket-write managed identity
         actually existing (azcopy authenticates as it via MSI; without it the sync
         would just 403). Installs azcopy (best-effort) and a systemd oneshot
@@ -631,7 +631,7 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         off, no bucket is configured, or the identity is absent. Mirrors
         ``AwsProvider._install_host_dir_sync``.
         """
-        if not self.azure_config.is_host_dir_synced_to_bucket:
+        if not self.azure_config.is_offline_host_dir_enabled:
             return
         bucket = self._state_bucket
         if bucket is None:
@@ -642,7 +642,7 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         if identity_client_id is None:
             logger.warning(
                 "host_dir sync is on but the bucket-write managed identity for host {} is absent; skipping "
-                "the sync daemon install (run `mngr azure prepare --use-offline-host-dir yes`)",
+                "the sync daemon install (re-run `mngr azure prepare` with sufficient permissions)",
                 host_id,
             )
             return
@@ -668,7 +668,7 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         hiccup never blocks the stop -- the offline copy is then simply "as of the
         last periodic sync". Mirrors ``AwsProvider._trigger_final_host_dir_sync``.
         """
-        if not self.azure_config.is_host_dir_synced_to_bucket or self._state_bucket is None:
+        if not self.azure_config.is_offline_host_dir_enabled or self._state_bucket is None:
             return
         try:
             with log_span("Triggering final host_dir sync before deallocate"):
@@ -767,7 +767,7 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         is off or no bucket is configured. Mirrors
         ``AwsProvider.get_volume_reference_for_host``.
         """
-        if not self.azure_config.is_host_dir_synced_to_bucket:
+        if not self.azure_config.is_offline_host_dir_enabled:
             return None
         bucket = self._state_bucket
         if bucket is None:
@@ -781,9 +781,9 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         Like ``get_volume_reference_for_host`` but additionally confirms the host's
         ``host_dir/`` prefix actually has blobs (a cheap prefix list). When the
         prefix is empty, runs the missing-identity diagnostic (Decision 7) -- a
-        clear WARNING pointing at ``mngr azure prepare --use-offline-host-dir yes``
-        if the VM has no attached user-assigned identity -- and returns None
-        (callers treat None as "not available"). This never raises. Mirrors
+        clear WARNING pointing at re-running ``mngr azure prepare`` if the VM has
+        no attached user-assigned identity -- and returns None (callers treat None
+        as "not available"). This never raises. Mirrors
         ``AwsProvider.get_volume_for_host``.
         """
         reference = self.get_volume_reference_for_host(host)
@@ -810,10 +810,9 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         Detects the Decision-7 case directly from cloud state: when the host's VM
         has no attached user-assigned managed identity, the on-box sync daemon
         could never push host_dir, which is why the prefix is empty. Points the user
-        at ``mngr azure prepare --use-offline-host-dir yes`` (and recreating the
-        host so it picks up the identity). Best-effort: any probe failure is
-        swallowed (this is purely advisory). Mirrors
-        ``AwsProvider._warn_if_host_dir_identity_missing``.
+        at re-running ``mngr azure prepare`` (and recreating the host so it picks up
+        the identity). Best-effort: any probe failure is swallowed (this is purely
+        advisory). Mirrors ``AwsProvider._warn_if_host_dir_identity_missing``.
         """
         try:
             instance = self._find_instance_for_host(host_id)
@@ -828,8 +827,8 @@ class AzureProvider(TagMirrorVpsDockerProvider):
         if not identity_ids:
             logger.warning(
                 "Host {}'s VM has no attached user-assigned managed identity, so its host_dir was never "
-                "pushed to the bucket and is not readable offline. Run `mngr azure prepare "
-                "--use-offline-host-dir yes`, then recreate the host so it picks up the identity.",
+                "pushed to the bucket and is not readable offline. Re-run `mngr azure prepare` "
+                "with sufficient permissions, then recreate the host so it picks up the identity.",
                 host_id,
             )
 

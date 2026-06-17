@@ -9,7 +9,6 @@ from click.testing import CliRunner
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
@@ -238,7 +237,7 @@ def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[s
 
 
 # =============================================================================
-# host-dir identity provisioning (prepare --use-offline-host-dir tri-state)
+# host-dir identity provisioning (best-effort, gated on is_offline_host_dir_enabled)
 # =============================================================================
 
 
@@ -256,21 +255,10 @@ def _stubbed_identity(*, exists: bool = False) -> _StubbedBlobStateHostIdentity:
     )
 
 
-def test_provision_host_identity_no_does_nothing() -> None:
+def test_provision_host_identity_creates_identity() -> None:
     identity = _stubbed_identity()
-    assert _provision_host_identity(identity, AutoToggle.NO) is None
-    assert identity.host_identity_exists() is False
-
-
-def test_provision_host_identity_auto_creates_identity() -> None:
-    identity = _stubbed_identity()
-    assert _provision_host_identity(identity, AutoToggle.AUTO) == identity.identity_name
+    assert _provision_host_identity(identity) == identity.identity_name
     assert identity.host_identity_exists() is True
-
-
-def test_provision_host_identity_yes_creates_identity() -> None:
-    identity = _stubbed_identity()
-    assert _provision_host_identity(identity, AutoToggle.YES) == identity.identity_name
 
 
 def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:

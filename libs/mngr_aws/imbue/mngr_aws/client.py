@@ -708,8 +708,8 @@ class AwsVpsClient(VpsClientInterface):
         Reads ``DescribeInstances``' ``IamInstanceProfile`` association. Used by
         the offline host_dir path to detect an instance that was never granted
         the bucket-write identity (Decision 7), so it can tell the user to re-run
-        ``mngr aws prepare --use-offline-host-dir yes``. Returns None for a
-        nonexistent instance too (no association to report).
+        ``mngr aws prepare``. Returns None for a nonexistent instance too (no
+        association to report).
         """
         instance = self._describe_instance(instance_id)
         if instance is None:

@@ -68,7 +68,7 @@ _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
 _HOST_NAME_TAG_KEY: Final[str] = "Name"
 
 # Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
-# When ``is_host_dir_synced_to_bucket`` is on and a state bucket is present, the
+# When ``is_offline_host_dir_enabled`` is on and a state bucket is present, the
 # create path attaches the prepare-provisioned IAM instance profile, then
 # installs (over SSH on the outer) a systemd oneshot ``.service`` + ``.timer``
 # pair: every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` the oneshot runs
@@ -381,7 +381,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         attached -- offline host_dir just won't work) rather than blocking create.
         Attaching a profile requires the create credentials to hold iam:PassRole.
         """
-        if not self.aws_config.is_host_dir_synced_to_bucket:
+        if not self.aws_config.is_offline_host_dir_enabled:
             return None
         if self._state_bucket is None:
             return None
@@ -392,7 +392,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
             if not identity.host_identity_exists():
                 logger.warning(
                     "host_dir sync is on but the bucket-write IAM identity {} does not exist; launching "
-                    "without it (run `mngr aws prepare --use-offline-host-dir yes` to enable offline host_dir)",
+                    "without it (re-run `mngr aws prepare` with sufficient IAM to enable offline host_dir)",
                     identity.identity_name,
                 )
                 return None
@@ -465,14 +465,14 @@ class AwsProvider(TagMirrorVpsDockerProvider):
     def _install_host_dir_sync(self, *, host_id: HostId, vps_ip: str) -> None:
         """Install the host-side host_dir-to-bucket sync daemon on the outer host.
 
-        Gated on ``is_host_dir_synced_to_bucket`` AND a state bucket being
+        Gated on ``is_offline_host_dir_enabled`` AND a state bucket being
         present (no bucket -> nothing to sync to). Installs awscli (best-effort,
         apt) and a systemd oneshot ``.service`` + ``.timer`` pair that runs
         ``aws s3 sync`` every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` using the
         instance profile's IMDS credentials. Returns early (no-op) when the
         feature is off or no bucket is configured.
         """
-        if not self.aws_config.is_host_dir_synced_to_bucket:
+        if not self.aws_config.is_offline_host_dir_enabled:
             return
         bucket = self._state_bucket
         if bucket is None:
@@ -500,7 +500,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         a sync hiccup never blocks the stop -- the offline copy is then simply
         "as of the last periodic sync".
         """
-        if not self.aws_config.is_host_dir_synced_to_bucket or self._state_bucket is None:
+        if not self.aws_config.is_offline_host_dir_enabled or self._state_bucket is None:
             return
         try:
             with log_span("Triggering final host_dir sync before stop"):
@@ -596,7 +596,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         credentials, so no instance identity is needed here. Returns None when the
         feature is off or no bucket is configured.
         """
-        if not self.aws_config.is_host_dir_synced_to_bucket:
+        if not self.aws_config.is_offline_host_dir_enabled:
             return None
         bucket = self._state_bucket
         if bucket is None:
@@ -610,10 +610,9 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         Like ``get_volume_reference_for_host`` but additionally confirms the
         host's ``host_dir/`` prefix actually has objects (a cheap ``list`` with
         ``MaxKeys=1``). When the prefix is empty, runs the missing-identity
-        diagnostic (Decision 7) -- a clear WARNING pointing at
-        ``mngr aws prepare --use-offline-host-dir yes`` if the instance has no
-        attached IAM profile -- and returns None (callers treat None as "not
-        available"). This never raises.
+        diagnostic (Decision 7) -- a clear WARNING pointing at re-running
+        ``mngr aws prepare`` if the instance has no attached IAM profile -- and
+        returns None (callers treat None as "not available"). This never raises.
         """
         reference = self.get_volume_reference_for_host(host)
         if reference is None:
@@ -639,9 +638,9 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         Detects the Decision-7 case directly from cloud state: when the host's
         instance has no attached IAM instance profile, the on-box sync daemon
         could never push host_dir, which is why the prefix is empty. Points the
-        user at ``mngr aws prepare --use-offline-host-dir yes`` (and recreating
-        the host so it picks up the profile). Best-effort: any probe failure is
-        swallowed (this is purely advisory).
+        user at re-running ``mngr aws prepare`` (and recreating the host so it
+        picks up the profile). Best-effort: any probe failure is swallowed (this
+        is purely advisory).
         """
         try:
             instance = self._find_instance_for_host(host_id)
@@ -654,8 +653,8 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         if profile_arn is None:
             logger.warning(
                 "Host {}'s instance has no attached IAM instance profile, so its host_dir was never "
-                "pushed to the bucket and is not readable offline. Run `mngr aws prepare "
-                "--use-offline-host-dir yes`, then recreate the host so it picks up the profile.",
+                "pushed to the bucket and is not readable offline. Re-run `mngr aws prepare` "
+                "with sufficient IAM, then recreate the host so it picks up the profile.",
                 host_id,
             )
 

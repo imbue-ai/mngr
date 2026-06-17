@@ -35,7 +35,7 @@ def aws_mock() -> Iterator[None]:
 
 
 def _build_bucket_provider(
-    mngr_ctx: MngrContext, is_host_dir_synced_to_bucket: bool = True
+    mngr_ctx: MngrContext, is_offline_host_dir_enabled: bool = True
 ) -> tuple[AwsProvider, Stubber]:
     """Build an AwsProvider configured with an S3 state bucket (moto-backed) + a stubbed EC2.
 
@@ -47,7 +47,7 @@ def _build_bucket_provider(
         default_ami_id="ami-x",
         auto_shutdown_seconds=3600,
         state_bucket_name=_BUCKET_NAME,
-        is_host_dir_synced_to_bucket=is_host_dir_synced_to_bucket,
+        is_offline_host_dir_enabled=is_offline_host_dir_enabled,
     )
     session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
     ec2 = session.client("ec2", region_name="us-east-1")
@@ -329,7 +329,7 @@ def test_host_dir_sync_instance_profile_none_when_identity_absent(aws_mock: None
 
 def test_host_dir_sync_instance_profile_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
     """No attachment when host_dir sync is disabled, even if the identity exists."""
-    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_offline_host_dir_enabled=False)
     identity = provider._host_identity()
     assert identity is not None
     identity.ensure_host_identity()
@@ -337,7 +337,7 @@ def test_host_dir_sync_instance_profile_none_when_feature_disabled(aws_mock: Non
 
 
 def test_get_volume_reference_is_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """With is_host_dir_synced_to_bucket=False, no offline host_dir volume is returned."""
-    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    """With is_offline_host_dir_enabled=False, no offline host_dir volume is returned."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_offline_host_dir_enabled=False)
     assert provider.get_volume_reference_for_host(HostId.generate()) is None
     assert provider.get_volume_for_host(HostId.generate()) is None

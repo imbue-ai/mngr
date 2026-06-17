@@ -216,15 +216,16 @@ class AzureProviderConfig(VpsDockerProviderConfig):
             "dropped in favor of the bucket; without it, mngr falls back to the tag mirror."
         ),
     )
-    is_host_dir_synced_to_bucket: bool = Field(
+    is_offline_host_dir_enabled: bool = Field(
         default=True,
         description=(
             "Whether the VM syncs its host_dir to the Blob state bucket so it is readable while the VM "
             "is deallocated (a Lima-style offline host_dir; mirrors Lima's is_host_data_volume_exposed). "
-            "On by default. When on (and a bucket exists), the create path attaches the prepare-provisioned "
-            "user-assigned managed identity, an on-box daemon periodically `azcopy sync`s host_dir "
-            "to hosts/<host_id>/host_dir/, and get_volume_for_host serves offline reads from the bucket. Set "
-            "False to disable the host_dir sync entirely (offline host metadata still works via the bucket)."
+            "On by default. When on, `mngr azure prepare` provisions (best-effort) the bucket-write "
+            "user-assigned managed identity, the create path attaches it, an on-box daemon periodically "
+            "`azcopy sync`s host_dir to hosts/<host_id>/host_dir/, and get_volume_for_host serves offline "
+            "reads from the bucket. Set False to disable the host_dir sync entirely (offline host metadata "
+            "still works via the bucket)."
         ),
     )
 

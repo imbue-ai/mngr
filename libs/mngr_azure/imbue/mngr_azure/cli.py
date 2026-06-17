@@ -28,14 +28,12 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
-from imbue.mngr.cli.common_opts import add_use_offline_host_dir_option
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
@@ -65,8 +63,6 @@ class _AzureOperatorCliOptions(CommonCliOptions):
 
 class _AzurePrepareCliOptions(_AzureOperatorCliOptions):
     allowed_ssh_cidrs: tuple[str, ...]
-    # Raw CLI choice string ("yes"/"auto"/"no"); parsed to AutoToggle in ``prepare``.
-    use_offline_host_dir: str
 
 
 class _AzureCleanupCliOptions(_AzureOperatorCliOptions):
@@ -257,29 +253,17 @@ def _build_host_identity(base: AzureProviderConfig, client: AzureVpsClient) -> B
     )
 
 
-def _provision_host_identity(identity: BlobStateHostIdentity, use_offline_host_dir: AutoToggle) -> str | None:
-    """Provision the bucket-write managed identity per the tri-state flag, returning its name or None.
+def _provision_host_identity(identity: BlobStateHostIdentity) -> str | None:
+    """Provision the bucket-write managed identity best-effort, returning its name or None.
 
-    ``NO`` does nothing (returns None). ``AUTO`` attempts provisioning and
-    degrades a permission/API failure to a WARNING so the network + bucket prepare
+    A permission/API failure degrades to a WARNING so the network + bucket prepare
     still succeed -- offline host_dir just won't work until prepare is re-run with
-    sufficient role-assignment permissions. ``YES`` raises a
-    ``click.ClickException`` when the identity cannot be provisioned, for a clean
-    programmatic "this prepare must yield a working offline host_dir". Mirrors
+    sufficient role-assignment permissions. Mirrors
     ``mngr_aws.cli._provision_host_identity``.
     """
-    if use_offline_host_dir is AutoToggle.NO:
-        return None
-    is_required = use_offline_host_dir is AutoToggle.YES
     try:
         identity.ensure_host_identity()
     except BlobStateHostIdentityError as e:
-        if is_required:
-            raise click.ClickException(
-                f"Failed to provision the host-dir managed identity {identity.identity_name!r} "
-                "(needs Microsoft.ManagedIdentity/userAssignedIdentities/write + "
-                f"Microsoft.Authorization/roleAssignments/write -- Owner or User Access Administrator): {e}"
-            ) from e
         logger.warning(
             "Failed to provision the host-dir managed identity {!r} (offline host_dir reads will be "
             "unavailable until prepare is re-run with sufficient permissions): {}",
@@ -291,26 +275,24 @@ def _provision_host_identity(identity: BlobStateHostIdentity, use_offline_host_d
 
 
 def _provision_host_identity_for_prepare(
-    base: AzureProviderConfig, client: AzureVpsClient, use_offline_host_dir: AutoToggle, *, was_account_set_up: bool
+    base: AzureProviderConfig, client: AzureVpsClient, *, was_account_set_up: bool
 ) -> str | None:
-    """Provision the host-dir identity during prepare, gating on the state account existing.
+    """Provision the host-dir identity during prepare best-effort, gating on the state account.
 
     The identity's Storage Blob Data Contributor role assignment is scoped to the
     state account, so provisioning is only meaningful once that account is set up.
-    When the account setup was skipped (``was_account_set_up`` is False): ``YES``
-    raises (it cannot deliver a working offline host_dir), while ``AUTO`` / ``NO``
-    return None (no identity, the documented degraded outcome). When the account is
-    present, defer to ``_provision_host_identity`` for the tri-state behavior.
+    When the account setup was skipped (``was_account_set_up`` is False), degrades
+    to a WARNING and returns None. Called only when ``is_offline_host_dir_enabled``
+    is set.
     """
-    if was_account_set_up:
-        return _provision_host_identity(_build_host_identity(base, client), use_offline_host_dir)
-    if use_offline_host_dir is AutoToggle.YES:
-        raise click.ClickException(
+    if not was_account_set_up:
+        logger.warning(
             "Cannot provision the host-dir managed identity: the state storage account could not be set up "
             "(its Storage Blob Data Contributor role assignment is scoped to that account). Re-run with "
-            "sufficient Microsoft.Storage permissions, or use --use-offline-host-dir auto/no."
+            "sufficient Microsoft.Storage permissions."
         )
-    return None
+        return None
+    return _provision_host_identity(_build_host_identity(base, client))
 
 
 def _perform_host_identity_cleanup(identity: BlobStateHostIdentity) -> str | None:
@@ -467,7 +449,6 @@ def azure_cli_group() -> None:
         "Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production."
     ),
 )
-@add_use_offline_host_dir_option
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
@@ -516,19 +497,16 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # to a warning so the network prepare still succeeds (offline state then falls
     # back to the VM tag mirror).
     state_account_name, was_bucket_created = _ensure_state_bucket_best_effort(_build_state_bucket(base, client))
-    # Provision the bucket-write managed identity per --use-offline-host-dir
-    # (Decisions 3 & 6). 'auto' degrades a failure to a warning; 'yes' raises;
-    # 'no' returns None. The bucket-only steps above are unconditional, so a
-    # later `prepare --use-offline-host-dir yes` adds just the identity. The
-    # identity's role assignment is scoped to the state account, so it is only
-    # meaningful when the account was set up; skip it when the bucket setup was
-    # itself skipped (state_account_name is None).
-    host_identity_name = _provision_host_identity_for_prepare(
-        base,
-        client,
-        AutoToggle(opts.use_offline_host_dir.upper()),
-        was_account_set_up=state_account_name is not None,
-    )
+    # Provision the bucket-write managed identity (best-effort) when the offline
+    # host_dir feature is enabled. The bucket-only steps above are unconditional,
+    # so flipping is_offline_host_dir_enabled on and re-running prepare adds just
+    # the identity. The identity's role assignment is scoped to the state account,
+    # so it is only meaningful when the account was set up.
+    host_identity_name = None
+    if base.is_offline_host_dir_enabled:
+        host_identity_name = _provision_host_identity_for_prepare(
+            base, client, was_account_set_up=state_account_name is not None
+        )
     _output_prepare_result(
         result, state_account_name, was_bucket_created, host_identity_name, output_opts.output_format
     )

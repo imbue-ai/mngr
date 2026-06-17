@@ -210,7 +210,7 @@ class _IdentityInjectingAzureProvider(AzureProvider):
 def _build_provider_with_identity(
     mngr_ctx: MngrContext,
     *,
-    is_host_dir_synced_to_bucket: bool = True,
+    is_offline_host_dir_enabled: bool = True,
     identity_exists: bool = True,
     compute: FakeComputeClient | None = None,
 ) -> tuple[_IdentityInjectingAzureProvider, FakeComputeClient]:
@@ -219,7 +219,7 @@ def _build_provider_with_identity(
         subscription_id="sub-123",
         auto_shutdown_seconds=3600,
         state_storage_account_name=_ACCOUNT_NAME,
-        is_host_dir_synced_to_bucket=is_host_dir_synced_to_bucket,
+        is_offline_host_dir_enabled=is_offline_host_dir_enabled,
     )
     compute = compute or FakeComputeClient()
     client = _StubbedAzureVpsClient(
@@ -316,7 +316,7 @@ def test_get_volume_for_host_warns_when_vm_has_no_managed_identity(temp_mngr_ctx
 
 
 def test_get_volume_reference_is_none_when_feature_disabled(temp_mngr_ctx: MngrContext) -> None:
-    provider, _compute = _build_provider_with_identity(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx, is_offline_host_dir_enabled=False)
     assert provider.get_volume_reference_for_host(HostId.generate()) is None
     assert provider.get_volume_for_host(HostId.generate()) is None
 
@@ -336,6 +336,6 @@ def test_host_dir_sync_identity_resource_id_none_when_identity_absent(temp_mngr_
 
 def test_host_dir_sync_identity_resource_id_none_when_feature_disabled(temp_mngr_ctx: MngrContext) -> None:
     provider, _compute = _build_provider_with_identity(
-        temp_mngr_ctx, is_host_dir_synced_to_bucket=False, identity_exists=True
+        temp_mngr_ctx, is_offline_host_dir_enabled=False, identity_exists=True
     )
     assert provider._host_dir_sync_identity_resource_id() is None

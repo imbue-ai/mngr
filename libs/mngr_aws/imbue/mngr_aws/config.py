@@ -175,16 +175,17 @@ class AwsProviderConfig(VpsDockerProviderConfig):
             "the bucket; without one, mngr falls back to the tag mirror."
         ),
     )
-    is_host_dir_synced_to_bucket: bool = Field(
+    is_offline_host_dir_enabled: bool = Field(
         default=True,
         description=(
             "Whether the instance syncs its host_dir to the S3 state bucket so it is readable "
             "while the instance is stopped (a Lima-style offline host_dir; mirrors Lima's "
-            "is_host_data_volume_exposed). On by default. When on (and a bucket is present), the "
-            "create path attaches the prepare-provisioned IAM instance profile, an on-box daemon "
-            "periodically `aws s3 sync`s host_dir to hosts/<host_id>/host_dir/, and "
-            "get_volume_for_host serves offline reads from the bucket. Set False to disable the "
-            "host_dir sync entirely (offline host metadata still works via the bucket)."
+            "is_host_data_volume_exposed). On by default. When on, `mngr aws prepare` provisions "
+            "(best-effort) the bucket-write IAM identity, the create path attaches it as an "
+            "instance profile, an on-box daemon periodically `aws s3 sync`s host_dir to "
+            "hosts/<host_id>/host_dir/, and get_volume_for_host serves offline reads from the "
+            "bucket. Set False to disable the host_dir sync entirely (offline host metadata still "
+            "works via the bucket)."
         ),
     )
     terminate_on_shutdown: bool = Field(
