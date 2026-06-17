@@ -366,7 +366,7 @@ class VpsProvider(BaseProviderInstance):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    config: VpsProviderConfig = Field(frozen=True, description="VPS Docker provider configuration")
+    config: VpsProviderConfig = Field(frozen=True, description="VPS provider configuration")
     vps_client: VpsClientInterface = Field(frozen=True, description="VPS provider API client")
 
     _host_record_cache: dict[HostId, VpsHostRecord] = PrivateAttr(default_factory=dict)
@@ -765,7 +765,7 @@ class VpsProvider(BaseProviderInstance):
                     authorized_keys=authorized_keys,
                 )
 
-            logger.info("VPS Docker host {} created successfully (VPS: {}, IP: {})", name, vps_instance_id, vps_ip)
+            logger.info("VPS host {} created successfully (VPS: {}, IP: {})", name, vps_instance_id, vps_ip)
             return host
 
         except Exception:
@@ -1302,7 +1302,7 @@ class VpsProvider(BaseProviderInstance):
             # The in-container activity watcher is a backgrounded process that does
             # not survive the container restart, so relaunch it -- else auto-stop-
             # on-idle would silently stop working after the first resume (for every
-            # vps_docker provider, not just AWS). Best-effort: a resumed host that
+            # vps provider, not just AWS). Best-effort: a resumed host that
             # can't auto-stop is better than a failed resume.
             with log_span("Relaunching activity watcher"):
                 try:
@@ -1530,7 +1530,7 @@ class VpsProvider(BaseProviderInstance):
         live read reports the container's running state, so no separate
         inspect round-trip is needed.
         """
-        with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
+        with log_span("VPS discover_hosts_and_agents for provider={}", self.name):
             discovery = self._discover_host_records_with_agents()
         agent_data_by_host_id = discovery.live_agent_data_by_host_id
 
@@ -2129,13 +2129,13 @@ class VpsProvider(BaseProviderInstance):
         return dict(host_record.certified_host_data.user_tags)
 
     def set_host_tags(self, host: HostInterface | HostId, tags: Mapping[str, str]) -> None:
-        raise MngrError("VPS Docker provider does not support mutable tags")
+        raise MngrError("VPS provider does not support mutable tags")
 
     def add_tags_to_host(self, host: HostInterface | HostId, tags: Mapping[str, str]) -> None:
-        raise MngrError("VPS Docker provider does not support mutable tags")
+        raise MngrError("VPS provider does not support mutable tags")
 
     def remove_tags_from_host(self, host: HostInterface | HostId, keys: Sequence[str]) -> None:
-        raise MngrError("VPS Docker provider does not support mutable tags")
+        raise MngrError("VPS provider does not support mutable tags")
 
     def rename_host(self, host: HostInterface | HostId, name: HostName) -> HostInterface:
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -2482,15 +2482,6 @@ class OfflineCapableVpsProvider(VpsProvider):
         wanted_tag = f"mngr-host-id={host_id}"
         return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
 
-    def _host_dir_path_on_outer(self, host_id: HostId) -> Path:
-        """Outer-filesystem path of this host's host_dir tree, per the active realizer.
-
-        Container realizer: ``<btrfs_mount_path>/<host_id_hex>/host_dir`` (the
-        subvolume layout the idle sentinel path uses). Bare realizer: ``host_dir``
-        under the fixed root-disk store.
-        """
-        return self._realizer.host_dir_path_on_outer(host_id)
-
     def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
         """Outer-filesystem path of the in-container idle sentinel for this host.
 
@@ -2498,7 +2489,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         shared volume; on the outer host that maps to
         ``<btrfs_mount_path>/<host_id_hex>/host_dir/commands/<file>``.
         """
-        return self._host_dir_path_on_outer(host_id) / "commands" / IDLE_SENTINEL_FILENAME
+        return self._realizer.host_dir_path_on_outer(host_id) / "commands" / IDLE_SENTINEL_FILENAME
 
     @abstractmethod
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:

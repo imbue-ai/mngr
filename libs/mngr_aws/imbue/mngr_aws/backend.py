@@ -604,7 +604,7 @@ class AwsProvider(TagMirrorVpsProvider):
         if bucket is None:
             logger.debug("No S3 state bucket; skipping host_dir sync install for host {}", host_id)
             return
-        host_dir_on_outer = self._host_dir_path_on_outer(host_id)
+        host_dir_on_outer = self._realizer.host_dir_path_on_outer(host_id)
         sync_target_uri = host_dir_sync_target_for(bucket.bucket_name, host_id)
         service_unit = _build_host_dir_sync_service_unit(str(host_dir_on_outer), sync_target_uri)
         timer_unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)

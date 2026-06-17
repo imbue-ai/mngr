@@ -85,3 +85,10 @@ The VPS provider's host-record updates use the type-safe `model_copy_update` /
 checked by the type system.
 
 The shared ``OfflineCapableVpsProvider`` now owns the cloud stop/start lifecycle: ``stop_host`` pauses the whole instance (so a paused agent costs only disk) and ``start_host`` resumes it, doing the resumed record's on-volume write *and* its external-store mirror together in one place. Providers supply only the cloud-API hooks (``_pause_cloud_instance`` / ``_resume_cloud_instance``) and override ``_sync_host_dir_before_pause`` / the known_hosts rebind where their behavior differs.
+
+Scrubbed leftover "VPS Docker" wording from the provider's user-facing strings
+(the config field description, the host-created success log, the
+discover_hosts_and_agents log span, and the mutable-tags error messages), since
+the provider now supports both container and bare placements. Removed the
+redundant `_host_dir_path_on_outer` forwarder in favor of calling the realizer's
+`host_dir_path_on_outer` directly.

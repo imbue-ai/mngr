@@ -711,7 +711,7 @@ class AzureProvider(TagMirrorVpsProvider):
                 host_id,
             )
             return
-        host_dir_on_outer = str(self._host_dir_path_on_outer(host_id))
+        host_dir_on_outer = str(self._realizer.host_dir_path_on_outer(host_id))
         blob_prefix_url = _build_host_dir_blob_url(bucket.account_name, bucket.container_name, host_id)
         service_unit = _build_host_dir_sync_service_unit(host_dir_on_outer, blob_prefix_url, identity_client_id)
         timer_unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)

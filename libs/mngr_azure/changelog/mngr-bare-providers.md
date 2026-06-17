@@ -25,3 +25,7 @@ record to the external (Blob bucket) store, so offline / `mngr list` reads no
 longer report a just-resumed Azure VM as STOPPED until the next mirroring write.
 
 ``stop_host`` / ``start_host`` moved to the shared base ``OfflineCapableVpsProvider``; Azure now supplies only the deallocate/start hooks plus the static-IP known_hosts rebind no-ops. The shared base is what now guarantees the resume-mirror above happens on every provider.
+
+Updated the host_dir sync to call the realizer's `host_dir_path_on_outer`
+directly after the redundant `_host_dir_path_on_outer` forwarder was removed
+from the shared VPS provider. No behavior change.

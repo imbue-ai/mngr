@@ -20,3 +20,7 @@ caught: `start_host` read the host record via the Docker volume, which a bare ho
 does not have, so it now resolves the store through the realizer.
 
 ``stop_host`` / ``start_host`` moved to the shared base ``OfflineCapableVpsProvider``; AWS now supplies only the EC2 ``_pause_cloud_instance`` / ``_resume_cloud_instance`` hooks (and the final host_dir-to-bucket sync before pause). Behavior-preserving.
+
+Updated the host_dir sync to call the realizer's `host_dir_path_on_outer`
+directly after the redundant `_host_dir_path_on_outer` forwarder was removed
+from the shared VPS provider. No behavior change.
