@@ -74,11 +74,10 @@ class _CodexReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = False
     asserts_usage = False
+    # The non-empty store also drives the adopt-from-preserved arc: after destroy, a fresh
+    # agent in a new worktree adopts the just-preserved session by id and must recall the
+    # pre-destroy secret -- proving the rollout store resumes and the cwd rebind avoids the modal.
     native_session_preserved_relpaths = ("plugin/codex/home/sessions",)
-    # Exercise the adopt-from-preserved arc: after destroy, a fresh agent in a new
-    # worktree adopts the just-preserved session by id and must recall the pre-destroy
-    # secret -- proving the rollout store resumes and the cwd rebind avoids the modal.
-    adopts_preserved_session = True
 
     def adopt_session_arg(self, preserved_dir: Path) -> str:
         # The preserved tree records the root codex session id at ``codex_root_session``

@@ -46,8 +46,8 @@ class _PiReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = True
     asserts_usage = True
+    # The non-empty store also drives the adopt-from-preserved arc (see adopt_session_arg).
     native_session_preserved_relpaths = ("plugin/pi_coding/sessions",)
-    adopts_preserved_session = True
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("pi") is None or not os.environ.get("ANTHROPIC_API_KEY"):

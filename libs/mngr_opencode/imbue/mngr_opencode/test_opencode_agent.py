@@ -78,11 +78,11 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
     # the storage/ dir are conditional (created only when there are uncheckpointed writes
     # / on-disk message parts), so the plugin preserves them when present but the arc does
     # not require them.
+    # The non-empty store also drives adoption: after destroy, the arc adopts the preserved
+    # session into a fresh agent (new worktree) and asserts it recalls the pre-destroy secret
+    # -- proving the preserved db resumes once the plugin copies it in and rebinds the stored
+    # source-worktree path to the new work dir.
     native_session_preserved_relpaths = ("plugin/opencode/data/opencode/opencode.db",)
-    # After destroy, the arc adopts the preserved session into a fresh agent (new worktree)
-    # and asserts it recalls the pre-destroy secret -- proving the preserved db resumes once
-    # the plugin copies it in and rebinds the stored source-worktree path to the new work dir.
-    adopts_preserved_session = True
 
     def adopt_session_arg(self, preserved_dir: Path) -> str:
         # The launch script records the root session id here; the plugin resolves this id

@@ -5,7 +5,7 @@ Every agent-type plugin ships a ``@pytest.mark.release`` test that drives the re
 
     create -> WAITING -> message -> turn runs -> transcript captured
            -> stop -> start -> recall a pre-restart secret -> destroy
-           -> (opt-in) adopt the preserved session into a fresh agent -> recall again
+           -> adopt the preserved session into a fresh agent -> recall again
 
 The arc and its assertions are identical across agents; only the *plumbing* differs
 (how the binary is launched and authenticated, how the workspace is seeded, which
@@ -106,16 +106,14 @@ class AgentReleaseProfile(abc.ABC):
     # in addition to the transcripts (e.g. codex's `plugin/codex/home/sessions`). The arc
     # asserts each exists and is non-empty after destroy. Empty when the agent has no
     # native store worth preserving. Only checked when ``preserves_on_destroy`` is set.
+    #
+    # A non-empty value also drives the adoption step: after destroy, the arc creates a
+    # *fresh* agent (a new worktree) that adopts the just-preserved store via
+    # ``--adopt-session`` and asserts it recalls the pre-destroy secret -- proving the
+    # store actually resumes, not merely that its bytes landed on disk. Any agent with a
+    # native store must therefore implement ``adopt_session_arg`` (resolve the store,
+    # rebind it to the new agent's work_dir, write the resume pointer).
     native_session_preserved_relpaths: Sequence[str] = ()
-    # Whether the arc exercises adoption: after destroy, create a *fresh* agent (a new
-    # worktree) that adopts the just-preserved session and assert it recalls the
-    # pre-destroy secret -- proving the preserved store actually resumes, not merely that
-    # its bytes landed on disk. Off by default; an agent flips it on once its plugin
-    # implements adoption of a preserved session (resolve the native store, rebind it to
-    # the new agent's work_dir, write the resume pointer) behind ``--adopt-session``.
-    # Requires ``preserves_on_destroy`` and a non-empty ``native_session_preserved_relpaths``
-    # (the store the fresh agent adopts).
-    adopts_preserved_session: bool = False
 
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
@@ -155,11 +153,11 @@ class AgentReleaseProfile(abc.ABC):
 
         Computed from the just-preserved agent dir (``preserved/<name>--<id>/``): either a
         session/conversation id the plugin can resolve, or an absolute path to the agent's
-        native session file/dir under ``preserved_dir``. Only called when
-        ``adopts_preserved_session`` is set; the default refuses so an opted-in profile
-        that forgets to supply it fails loudly.
+        native session file/dir under ``preserved_dir``. Called whenever the agent has a
+        native session store (non-empty ``native_session_preserved_relpaths``); the default
+        refuses so a profile that forgets to supply it fails loudly.
         """
-        raise NotImplementedError(f"{type(self).__name__} sets adopts_preserved_session but has no adopt_session_arg")
+        raise NotImplementedError(f"{type(self).__name__} has a native session store but no adopt_session_arg")
 
     def prepare_adoption_workspace(self, work_dir: Path) -> None:
         """Seed the fresh worktree the adopting agent is created against.
@@ -260,9 +258,9 @@ def _assert_transcripts_preserved(
     ``native_session_relpaths`` entry (the agent's own resumable session store).
 
     This asserts the bytes landed on disk; that they actually *resume* is exercised
-    separately by the adopt-from-preserved arc step (gated on ``adopts_preserved_session``),
-    which adopts this store into a fresh agent and asserts it recalls the pre-destroy
-    secret. Adoption into a fresh agent (a new worktree) needs per-agent handling of the
+    separately by the adopt-from-preserved arc step (run whenever the agent has a native
+    session store), which adopts this store into a fresh agent and asserts it recalls the
+    pre-destroy secret. Adoption into a fresh agent (a new worktree) needs per-agent handling of the
     native session's original-cwd binding -- a plain file copy is not enough:
       - antigravity: nothing extra; resumes by conversation id, directory-agnostic.
       - codex: resumes by session id, but the recorded cwd (the destroyed source worktree)
@@ -275,8 +273,8 @@ def _assert_transcripts_preserved(
         `wal_checkpoint`. The bytes (db + `-wal`/`-shm`) are sufficient; content lives entirely
         in the db, so `storage/` being empty on current opencode is fine.
       - pi-coding: rewrite the `pi_session_file` pointer to the adopted jsonl's new path,
-        AND clear pi's blocking "cwd from session file does not exist" dialog (the cwd is
-        embedded in the session jsonl) -- by rewriting that cwd before launch.
+        AND rewrite the cwd embedded in the session jsonl before launch, so pi's blocking
+        "cwd from session file does not exist" dialog never fires.
     """
     preserved_dir = _preserved_agent_dir(host_dir, agent_name)
     common = preserved_dir / "events" / subdir / "common_transcript" / "events.jsonl"
@@ -467,9 +465,10 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
 
             # 9. Adopt the just-preserved session into a fresh agent (new worktree) and prove
             #    it recalls the pre-destroy secret -- that the preserved store *resumes*, not
-            #    just that its bytes survived. Opt-in per agent (its plugin must implement the
-            #    resolve + cwd-rebind path the ADOPT_SESSION_ENV_VAR seam triggers).
-            if profile.adopts_preserved_session:
+            #    just that its bytes survived. Runs for any agent with a native session store
+            #    (its plugin implements the resolve + cwd-rebind path the ADOPT_SESSION_ENV_VAR
+            #    seam triggers).
+            if profile.native_session_preserved_relpaths:
                 _adopt_preserved_and_recall(
                     profile,
                     ctx,
