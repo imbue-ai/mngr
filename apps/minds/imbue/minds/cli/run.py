@@ -623,7 +623,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
                 opaque_permissions_path=Path(target),
             )
         except LatchkeyStoreError as e:
-            logger.warning(
+            logger.opt(exception=e).error(
                 "Could not recover missing latchkey permissions file for host {} (agent {}): {}",
                 host_id,
                 event.agent_id,
