@@ -1,1 +1,0 @@
-Removed the dead VPS client methods `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` (and the now-unused `_safe_get_snapshot` and `_snapshot_info_from_payload` helpers) from `OvhVpsClient`. These had no production callers and are being dropped from the shared `VpsClientInterface`. The corresponding unit and release tests were removed as well.

@@ -1,0 +1,1 @@
+Fixed resuming a Claude agent and immediately sending it a message. The TUI-ready indicator is now the input-prompt glyph (`❯`) instead of the "Claude Code" welcome banner. The banner only renders on a fresh start, not when resuming a saved session, so resumes previously skipped the readiness wait and could drop the message into a still-replaying transcript.

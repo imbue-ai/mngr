@@ -1,13 +1,13 @@
 [project]
 name = "imbue-mngr-pi-coding-usage"
-version = "0.1.1"
+version = "0.1.0"
 description = "pi usage data provider for `mngr usage` (reader + writer gate; the per-message writer lives in mngr_pi_coding's lifecycle extension)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.15",
-    "imbue-mngr-pi-coding==0.1.12",
-    "imbue-mngr-usage==0.1.4",
+    "imbue-mngr==0.2.16",
+    "imbue-mngr-pi-coding==0.1.13",
+    "imbue-mngr-usage==0.1.5",
 ]
 
 [project.entry-points.mngr]

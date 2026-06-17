@@ -1,4 +1,0 @@
-Removed the dead disk-snapshot and SSH-key-listing surface from the VPS client layer. `VpsClientInterface` no longer declares the `create_snapshot`, `delete_snapshot`, `list_snapshots`, or `list_ssh_keys` abstract methods -- these had no production callers (provider-level host snapshots go through `docker commit`, a separate path). `ExternallyManagedVpsClient` correspondingly drops its stub overrides for those operations, and the now-unused `VpsSnapshotInfo` / `VpsSshKeyInfo` models and the `VpsSnapshotId` primitive were deleted. The remaining mandatory client surface is the instance lifecycle plus `upload_ssh_key` / `delete_ssh_key`.
-
-
-The `mngr_vps_docker` README's module list no longer claims `VpsClientInterface` provides snapshot operations.
