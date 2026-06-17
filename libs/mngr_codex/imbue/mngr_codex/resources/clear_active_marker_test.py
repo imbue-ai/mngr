@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr_codex.resources.testing import install_common_transcript_flush_stub
 from imbue.mngr_codex.resources.testing import provision_commands_dir
 from imbue.mngr_codex.resources.testing import run_codex_hook
 
@@ -270,6 +271,38 @@ def test_nested_session_stop_leaves_permissions_waiting(tmp_path: Path) -> None:
     _permissions_waiting(tmp_path).touch()
     _clear(tmp_path, _NESTED_SESSION)
     assert _permissions_waiting(tmp_path).exists()
+
+
+def test_root_stop_flushes_common_transcript_when_waiting(tmp_path: Path) -> None:
+    """Once the root Stop leaves the agent WAITING (no subagents in flight), the
+    hook runs the turn-end common-transcript flush so a consumer reading the
+    final message on the WAITING signal doesn't race the 5s converter daemon."""
+    provision_commands_dir(tmp_path, _ALL_SCRIPTS)
+    _set_root(tmp_path, _ROOT_SESSION)
+    _root_active(tmp_path).touch()
+    _marker(tmp_path).touch()
+    sentinel = tmp_path / "flush_ran"
+    install_common_transcript_flush_stub(tmp_path, sentinel)
+
+    _clear(tmp_path, _ROOT_SESSION)
+
+    assert not _marker(tmp_path).exists()
+    assert sentinel.exists(), "turn-end flush must run once the agent goes WAITING"
+
+
+def test_root_stop_skips_flush_while_subagent_in_flight(tmp_path: Path) -> None:
+    """The flush fires only on the WAITING transition: if a subagent is still in
+    flight after the root Stop (the marker stays), the flush must not run."""
+    provision_commands_dir(tmp_path, _ALL_SCRIPTS)
+    _prompt(tmp_path, _ROOT_SESSION)
+    _subagent_start(tmp_path, _AGENT_A)
+    sentinel = tmp_path / "flush_ran"
+    install_common_transcript_flush_stub(tmp_path, sentinel)
+
+    _clear(tmp_path, _ROOT_SESSION)
+
+    assert _marker(tmp_path).exists()
+    assert not sentinel.exists(), "flush must not run while the agent is still RUNNING"
 
 
 def test_lock_stale_break_lets_hook_proceed(tmp_path: Path) -> None:
