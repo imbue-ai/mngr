@@ -34,3 +34,12 @@ Updated imports for `TagMirrorVpsProvider`, `AGENT_TAG_PREFIX`, `AGENT_TAG_FIELD
 The shared offline read-side reconstruction moved up into the new `KeyValueMirrorVpsProvider` base that `TagMirrorVpsProvider` now extends, so the AWS provider's host-name hook was renamed `_host_name_tag_key` -> `_host_name_key` and its tag-mirror agent-record write call now invokes the renamed `_agent_field_items` (formerly `_agent_field_tags`). The EC2 256-char tag-value cap is still applied (the base reads it from the new `_max_value_len` hook). Internal refactor; no user-visible behavior change.
 
 The host_dir-sync daemon now runs its `aws s3 sync` command from an installed `/usr/local/sbin/mngr-host-dir-sync.sh` script (referenced directly by the oneshot `.service`'s `ExecStart`) instead of an inline `ExecStart=/bin/sh -c '...'`, removing a layer of systemd + shell quoting around the host_dir path and S3 URI. The `.service` unit is now rendered via the shared `render_systemd_unit` helper. No behavior change.
+
+`S3Volume` is now a thin subclass of the shared `BaseObjectStoreVolume` (in
+`mngr_vps.state_bucket_base`), supplying only the boto3 S3 primitives and an
+error seam (`_translate_errors` / `_is_not_found` / `_bucket_error_type`); the
+listing / existence / read / write / delete logic it duplicated with the Azure
+`BlobVolume` now lives on the base. `S3StateBucket`'s `_get_object` /
+`_delete_object` / `_prefix_has_objects` likewise moved to `BaseStateBucket`,
+leaving the bucket with just its raw S3 primitives and the seam. The 1000-key
+`DeleteObjects` batching stays S3-specific. No user-visible behavior change.

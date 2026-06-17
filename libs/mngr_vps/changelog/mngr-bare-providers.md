@@ -142,3 +142,19 @@ Moved the offline / tag-mirror provider subsystem (`OfflineCapableVpsProvider`, 
 Extracted the offline read-side reconstruction shared by the tag-mirror (AWS/Azure) and GCE-metadata (GCP) providers into a new `KeyValueMirrorVpsProvider` base in `instance_offline`, sitting between `OfflineCapableVpsProvider` and `TagMirrorVpsProvider` (which now extends it). The base owns reconstruction over a `dict[str, str]` key-value mirror: reassembling per-agent records, computing the per-field upsert/delete set (`_agent_field_items`), building STOPPED discovered/offline hosts, parsing the created-at value, and resolving instances by host id. Providers supply the map (`_offline_kv_map`), the optional per-value length cap (`_max_value_len`, 256 for tags and uncapped for metadata), and the host-name key (`_host_name_key`, renamed from the old `_host_name_tag_key`). The bucket-or-tags routing and the external `_state_store` stay on `TagMirrorVpsProvider`; GCP inherits no bucket machinery, and the per-provider agent-record write side is unchanged. Internal refactor; no user-visible behavior change.
 
 Hardened systemd unit generation. A new `imbue.mngr_vps.systemd.render_systemd_unit` helper centralizes the unit-file format so the offline-capable provider's `.path` / `.service` / `.timer` units are no longer hand-assembled as `[Section]\nKey=Value\n` strings. The idle-watcher poweroff action moved from an inline `ExecStart=/bin/sh -c 'rm -f <sentinel> && shutdown -P now'` to an installed `/usr/local/sbin/mngr-idle-watcher.sh` script (written by the default `_prepare_idle_watcher_outer`), matching the existing Azure self-deallocate script pattern, so the sentinel path no longer has to survive systemd's plus the shell's nested quoting. The host_dir-sync command is likewise installed at `/usr/local/sbin/mngr-host-dir-sync.sh` (see `build_host_dir_sync_script`) and referenced by `ExecStart` directly. No behavior change.
+
+Deduplicated the cloud state-bucket / offline-read-volume layer. A new
+`BaseObjectStoreVolume` in `state_bucket_base.py` implements the six `Volume`
+methods (`listdir`, `path_exists`, `read_file`, `remove_file`,
+`remove_directory`, `write_files`) plus the `_as_dir_prefix` normalization once,
+in terms of a small set of per-cloud SDK primitives (`_iter_delimited_entries`,
+`_prefix_has_any_object`, `_has_object_at_key`, `_read_object_bytes`,
+`_delete_single_object`, `_delete_prefix`, `_write_object`) and a normalized
+`ObjectStoreEntry` listing shape; `S3Volume` / `BlobVolume` become thin
+subclasses. A shared `_ObjectStoreErrorSeam` (`_translate_errors` /
+`_is_not_found` / `_bucket_error_type`) lets the base run each SDK op inside the
+cloud's error translation and special-case not-found, and `_get_object` /
+`_delete_object` / `_prefix_has_objects` now live on `BaseStateBucket` in terms
+of that seam. Internal refactor; no user-visible behavior change (the only edge
+the two clouds previously disagreed on -- `path_exists("")` on an unscoped raw
+volume, never reached in practice -- is now uniformly `False`).
