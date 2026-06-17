@@ -39,6 +39,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -88,6 +89,28 @@ def iter_agent_session_paths(local_host_dir: Path, relpath: Path) -> list[Path]:
             if candidate.exists():
                 paths.append(candidate)
     return paths
+
+
+def transfer_cloned_agent_session_store(
+    dest_host: OnlineHostInterface,
+    dest_state_dir: Path,
+    source_location: HostLocation,
+    store_relpath: Path,
+) -> bool:
+    """Copy a cloned source agent's native session store into the destination agent (``--from``).
+
+    A generic ``--from`` clone copies the source *workspace* but not the source agent's
+    *state dir*, so an agent that wants the clone to resume the source's conversation
+    transfers just its native session store (``store_relpath``, the same relpath it
+    preserves and scans) from the source state dir into its own. The agent then rebinds
+    that store to its new work_dir. Returns True if the source store existed and was
+    copied, else False (the clone starts a fresh session).
+    """
+    source_store = source_location.path / store_relpath
+    if not source_location.host.path_exists(source_store):
+        return False
+    dest_host.copy_directory(source_location.host, source_store, dest_state_dir / store_relpath)
+    return True
 
 
 def get_preserved_agent_dir(host_dir: Path, agent_name: AgentName, agent_id: AgentId) -> Path:
