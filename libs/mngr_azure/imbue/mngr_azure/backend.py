@@ -271,7 +271,7 @@ class AzureProvider(TagMirrorVpsProvider):
     azure_client: AzureVpsClient = Field(frozen=True, description="Azure VM API client")
     azure_config: AzureProviderConfig = Field(frozen=True, description="Azure-specific configuration")
 
-    def _host_name_tag_key(self) -> str:
+    def _host_name_key(self) -> str:
         return HOST_NAME_TAG_KEY
 
     @cached_property
@@ -696,7 +696,7 @@ class AzureProvider(TagMirrorVpsProvider):
         if instance is None:
             logger.warning("No Azure VM found for host {}; cannot persist agent tags", host_id)
             return
-        set_tags, delete_keys = self._agent_field_tags(agent_id, agent_data, instance)
+        set_tags, delete_keys = self._agent_field_items(agent_id, agent_data, instance)
         self.azure_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
         if delete_keys:
             self.azure_client.remove_tags(VpsInstanceId(instance["id"]), delete_keys)

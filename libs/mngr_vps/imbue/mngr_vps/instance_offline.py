@@ -827,33 +827,234 @@ class OfflineCapableVpsProvider(VpsProvider):
             return self._offline_agent_dicts_for(host_id)
 
 
-# Per-agent records are mirrored into instance tags as up to three tags per agent,
-# keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the tag key), so a
-# stopped instance still surfaces its agents in discovery and resolves by name.
+# Per-agent records are mirrored into a key-value map (instance tags or GCE
+# metadata) as up to three entries per agent, keyed ``mngr-agent-<agent_id>-<field>``
+# (the agent id lives in the key), so a stopped instance still surfaces its agents
+# in discovery and resolves by name.
 AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
 AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
 # Max length of a single instance/VM tag value (EC2 and Azure both cap at 256).
 _MAX_TAG_VALUE_LEN: Final[int] = 256
-# The host-name tag value is stored as ``mngr-<host_name>``; strip the prefix to
+# The host-name value is stored as ``mngr-<host_name>``; strip the prefix to
 # recover the bare host name when reconstructing a stopped host.
-_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
+_HOST_NAME_VALUE_PREFIX: Final[str] = "mngr-"
+# Key constants mngr writes at launch, shared by every key-value mirror (tags and
+# GCE metadata use the same keys for host-id and created-at; only the host-name key
+# differs per provider).
+_HOST_ID_KEY: Final[str] = "mngr-host-id"
+_CREATED_AT_KEY: Final[str] = "mngr-created-at"
 
 
-class TagMirrorVpsProvider(OfflineCapableVpsProvider):
-    """``OfflineCapableVpsProvider`` whose offline mirror lives in key=value instance tags.
+class KeyValueMirrorVpsProvider(OfflineCapableVpsProvider):
+    """``OfflineCapableVpsProvider`` whose offline mirror lives in a key-value map.
 
-    AWS (EC2 tags) and Azure (VM tags) mirror the host name and per-agent records
-    into the instance's own ``mngr-*`` tags, so a stopped instance still lists and
-    resolves by name from the tag listing alone. This class supplies that shared
-    tag reconstruction; the only per-provider knob is the host-name tag key
-    (``_host_name_tag_key``). GCP differs (it mirrors into GCE metadata, not tags)
-    and so extends ``OfflineCapableVpsProvider`` directly instead.
+    The mirror is a ``dict[str, str]`` derived from the instance -- GCE *metadata*
+    (GCP) or the instance's ``key=value`` *tags* (AWS/Azure, via
+    ``TagMirrorVpsProvider``). This class owns the entire read-side reconstruction
+    over that map: reassembling per-agent records, building STOPPED discovered/offline
+    hosts, and resolving instances by host id. Subclasses supply the map
+    (``_offline_kv_map``), the optional per-value length cap (``_max_value_len``),
+    and the host-name key (``_host_name_key``); the agent-record *write* side stays
+    per-provider (the tag vs metadata write APIs differ too much to share).
     """
 
     @abstractmethod
-    def _host_name_tag_key(self) -> str:
-        """Tag key whose value holds ``mngr-<host_name>`` (EC2: ``Name``; Azure: ``mngr-host-name``)."""
+    def _offline_kv_map(self, instance: Mapping[str, Any]) -> dict[str, str]:
+        """The instance's offline mirror as a key-value map (GCE metadata, or split ``key=value`` tags)."""
         ...
+
+    def _max_value_len(self) -> int | None:
+        """Max length of one mirrored value, or None when uncapped.
+
+        Tag-backed providers cap at 256 (EC2/Azure); GCE metadata is uncapped (None).
+        """
+        return None
+
+    def _host_id_key(self) -> str:
+        """Key whose value holds the host id. Shared by tags and GCE metadata."""
+        return _HOST_ID_KEY
+
+    @abstractmethod
+    def _host_name_key(self) -> str:
+        """Key whose value holds ``mngr-<host_name>`` (EC2: ``Name``; Azure/GCP: ``mngr-host-name``)."""
+        ...
+
+    def _created_at_key(self) -> str:
+        """Key whose value holds the ISO-8601 created-at timestamp. Shared by tags and GCE metadata."""
+        return _CREATED_AT_KEY
+
+    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
+        """Return every cached instance whose host-id key in the mirror equals ``host_id``."""
+        wanted = str(host_id)
+        return [
+            instance
+            for instance in self._list_instances_cached()
+            if self._offline_kv_map(instance).get(self._host_id_key()) == wanted
+        ]
+
+    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
+        """Render one agent field as a mirror-value string, or ``None`` if absent/empty.
+
+        ``name``/``type`` are stored raw; ``labels`` as compact JSON (empty labels
+        are treated as absent so no ``-labels`` entry is written).
+        """
+        if field == "labels":
+            labels = agent_data.get("labels")
+            return json.dumps(labels, separators=(",", ":")) if labels else None
+        value = agent_data.get(field)
+        return None if value is None else str(value)
+
+    def _agent_field_items(
+        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
+    ) -> tuple[dict[str, str], list[str]]:
+        """Compute the ``mngr-agent-<id>-<field>`` entries to set, and stale ones to delete.
+
+        Returns ``(items_to_set, keys_to_delete)``. ``persist_agent_data`` is an
+        upsert that is sometimes called with a *partial* record (e.g. an update
+        carrying only ``id``/``type``), so a field absent from ``agent_data`` means
+        "unchanged" -- it is left alone, NOT removed (deleting it would clobber the
+        ``name`` entry that offline resolve-by-name depends on). A field that *is*
+        present but renders empty (e.g. ``labels={}``, an explicit removal) or
+        overflows ``_max_value_len`` (realistically only ``labels``, and only when a
+        cap is set) is dropped and its existing entry, if any, is deleted so no stale
+        value lingers. The agent id is carried in the *key*, not a value.
+        """
+        max_len = self._max_value_len()
+        set_items: dict[str, str] = {}
+        delete_keys: list[str] = []
+        for field in AGENT_TAG_FIELDS:
+            if field not in agent_data:
+                continue
+            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
+            value = self._agent_field_value(field, agent_data)
+            if value is not None and (max_len is None or len(value) <= max_len):
+                set_items[key] = value
+                continue
+            # Present but empty (an explicit removal, e.g. labels={}) or too large
+            # for a single entry: drop it, and delete any existing entry so no stale
+            # value lingers. Only oversized values warrant a warning.
+            if value is not None and max_len is not None:
+                logger.warning(
+                    "Agent {} {} ({} chars) exceeds the {}-char tag limit; omitted from the stopped-host tag mirror",
+                    agent_data.get("name", agent_id),
+                    field,
+                    len(value),
+                    max_len,
+                )
+            delete_keys.append(key)
+        existing = set(self._offline_kv_map(instance))
+        return set_items, [key for key in delete_keys if key in existing]
+
+    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
+        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` mirror entries.
+
+        Groups the per-field entries by agent id (recovered from the key, split on
+        the final ``-`` so ids may themselves contain dashes), and rebuilds one
+        dict per agent. A malformed/externally-edited ``-labels`` entry (not valid
+        JSON, or not a JSON object) is skipped for that field with a warning rather
+        than crashing the discovery sweep.
+        """
+        by_id: dict[str, dict] = {}
+        for key, value in self._offline_kv_map(instance).items():
+            if not key.startswith(AGENT_TAG_PREFIX):
+                continue
+            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
+            if not sep or field not in AGENT_TAG_FIELDS:
+                continue
+            record = by_id.setdefault(agent_id, {"id": agent_id})
+            if field == "labels":
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping unparseable agent labels mirror entry {!r}", key)
+                    continue
+                if not isinstance(parsed, dict):
+                    logger.warning("Skipping agent labels mirror entry {!r}: value is not a JSON object", key)
+                    continue
+                record["labels"] = parsed
+            else:
+                record[field] = value
+        return list(by_id.values())
+
+    def _host_name_from_kv_map(self, kv_map: Mapping[str, str]) -> HostName:
+        """Recover the host name from the ``<host_name_key>=mngr-<host_name>`` entry (fallback: host-id)."""
+        name_value = kv_map.get(self._host_name_key(), "")
+        if name_value.startswith(_HOST_NAME_VALUE_PREFIX):
+            return HostName(name_value[len(_HOST_NAME_VALUE_PREFIX) :])
+        if name_value:
+            return HostName(name_value)
+        return HostName(kv_map.get(self._host_id_key(), "unknown"))
+
+    def _created_at_from_kv_map(self, kv_map: Mapping[str, str], host_id: HostId) -> datetime | None:
+        """Parse the created-at entry (ISO-8601 UTC) written verbatim at launch, or None on failure.
+
+        ``create_instance`` writes ``datetime.isoformat()``, so reconstruct with
+        ``datetime.fromisoformat``. A malformed/externally-edited value yields None
+        (the caller falls back to now()) and is surfaced at WARNING -- a parse
+        failure means the entry was edited/corrupted, not something to swallow.
+        """
+        raw = kv_map.get(self._created_at_key())
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError as e:
+            logger.opt(exception=e).warning(
+                "Malformed mngr-created-at value {!r} on host {}; falling back to now()", raw, host_id
+            )
+            return None
+
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        """Build a STOPPED-state DiscoveredHost from an instance's mirror, or None if not a mngr host."""
+        kv_map = self._offline_kv_map(instance)
+        host_id_str = kv_map.get(self._host_id_key())
+        if host_id_str is None:
+            return None
+        return DiscoveredHost(
+            host_id=HostId(host_id_str),
+            host_name=self._host_name_from_kv_map(kv_map),
+            provider_name=self.name,
+            host_state=HostState.STOPPED,
+        )
+
+    def _host_record_from_instance(self, instance: Mapping[str, Any]) -> VpsHostRecord:
+        """Build a minimal STOPPED host record from a stopped instance's own ``mngr-*`` mirror entries.
+
+        Uses only the base entries mngr writes at launch (host-id, host-name,
+        created-at), so it works regardless of the external-store mode -- including a
+        bucket-mode host created before the bucket existed (whose ``host_state.json``
+        is absent).
+        """
+        kv_map = self._offline_kv_map(instance)
+        host_id = HostId(kv_map.get(self._host_id_key(), ""))
+        now = datetime.now(timezone.utc)
+        created_at = self._created_at_from_kv_map(kv_map, host_id) or now
+        certified = CertifiedHostData(
+            host_id=str(host_id),
+            host_name=str(self._host_name_from_kv_map(kv_map)),
+            created_at=created_at,
+            updated_at=now,
+            stop_reason=HostState.STOPPED.value,
+        )
+        return VpsHostRecord(certified_host_data=certified)
+
+    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its mirror."""
+        del host_id
+        return self._create_offline_host(self._host_record_from_instance(instance))
+
+
+class TagMirrorVpsProvider(KeyValueMirrorVpsProvider):
+    """``KeyValueMirrorVpsProvider`` whose offline mirror lives in key=value instance tags.
+
+    AWS (EC2 tags) and Azure (VM tags) mirror the host name and per-agent records
+    into the instance's own ``mngr-*`` tags, so a stopped instance still lists and
+    resolves by name from the tag listing alone. This class supplies the tag-backed
+    key-value map and the external-store (object-storage bucket, when present)
+    routing on top of the shared read-side reconstruction. GCP differs (it mirrors
+    into GCE metadata, not tags) and so extends ``KeyValueMirrorVpsProvider``
+    directly instead.
+    """
 
     @property
     @abstractmethod
@@ -865,6 +1066,18 @@ class TagMirrorVpsProvider(OfflineCapableVpsProvider):
         concrete providers (the bucket-existence probe runs at most once).
         """
         ...
+
+    def _offline_kv_map(self, instance: Mapping[str, Any]) -> dict[str, str]:
+        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
+        tags: dict[str, str] = {}
+        for kv in instance.get("tags", ()):
+            key, sep, value = kv.partition("=")
+            if sep:
+                tags[key] = value
+        return tags
+
+    def _max_value_len(self) -> int | None:
+        return _MAX_TAG_VALUE_LEN
 
     def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
         self._state_store.persist_agent_record(host_id, agent_id, agent_data)
@@ -898,158 +1111,6 @@ class TagMirrorVpsProvider(OfflineCapableVpsProvider):
         the instance drops its tags).
         """
         self._state_store.delete_host_state(host_id)
-
-    def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
-        tags: dict[str, str] = {}
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if sep:
-                tags[key] = value
-        return tags
-
-    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
-        """Render one agent field as a tag-value string, or ``None`` if absent/empty.
-
-        ``name``/``type`` are stored raw; ``labels`` as compact JSON (empty labels
-        are treated as absent so no ``-labels`` tag is written).
-        """
-        if field == "labels":
-            labels = agent_data.get("labels")
-            return json.dumps(labels, separators=(",", ":")) if labels else None
-        value = agent_data.get(field)
-        return None if value is None else str(value)
-
-    def _agent_field_tags(
-        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
-    ) -> tuple[dict[str, str], list[str]]:
-        """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
-
-        Returns ``(tags_to_set, keys_to_delete)``. ``persist_agent_data`` is an
-        upsert that is sometimes called with a *partial* record (e.g. an update
-        carrying only ``id``/``type``), so a field absent from ``agent_data`` means
-        "unchanged" -- it is left alone, NOT removed (deleting it would clobber the
-        ``name`` tag that offline resolve-by-name depends on). A field that *is*
-        present but renders empty (e.g. ``labels={}``, an explicit removal) or
-        overflows the tag-value limit (realistically only ``labels``) is dropped and
-        its existing tag, if any, is deleted so no stale value lingers. The agent id
-        is carried in the tag *key*, not a value.
-        """
-        set_tags: dict[str, str] = {}
-        delete_keys: list[str] = []
-        for field in AGENT_TAG_FIELDS:
-            if field not in agent_data:
-                continue
-            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
-            value = self._agent_field_value(field, agent_data)
-            if value is not None and len(value) <= _MAX_TAG_VALUE_LEN:
-                set_tags[key] = value
-                continue
-            # Present but empty (an explicit removal, e.g. labels={}) or too large
-            # for a single tag: drop it, and delete any existing tag so no stale
-            # value lingers. Only oversized values warrant a warning.
-            if value is not None:
-                logger.warning(
-                    "Agent {} {} ({} chars) exceeds the {}-char tag limit; omitted from the stopped-host tag mirror",
-                    agent_data.get("name", agent_id),
-                    field,
-                    len(value),
-                    _MAX_TAG_VALUE_LEN,
-                )
-            delete_keys.append(key)
-        existing = set(self._tag_dict_from_normalized(instance))
-        return set_tags, [key for key in delete_keys if key in existing]
-
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` tags.
-
-        Groups the per-field tags by agent id (recovered from the tag key, split on
-        the final ``-`` so ids may themselves contain dashes), and rebuilds one
-        dict per agent. A malformed/externally-edited ``-labels`` tag (not valid
-        JSON, or not a JSON object) is skipped for that field with a warning rather
-        than crashing the discovery sweep.
-        """
-        by_id: dict[str, dict] = {}
-        for key, value in self._tag_dict_from_normalized(instance).items():
-            if not key.startswith(AGENT_TAG_PREFIX):
-                continue
-            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
-            if not sep or field not in AGENT_TAG_FIELDS:
-                continue
-            record = by_id.setdefault(agent_id, {"id": agent_id})
-            if field == "labels":
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping unparseable agent labels tag {!r}", key)
-                    continue
-                if not isinstance(parsed, dict):
-                    logger.warning("Skipping agent labels tag {!r}: value is not a JSON object", key)
-                    continue
-                record["labels"] = parsed
-            else:
-                record[field] = value
-        return list(by_id.values())
-
-    def _host_name_from_tags(self, tags: Mapping[str, str]) -> HostName:
-        """Recover the host name from the ``<key>=mngr-<host_name>`` tag (fallback: host-id)."""
-        name_tag = tags.get(self._host_name_tag_key(), "")
-        if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
-            return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
-        if name_tag:
-            return HostName(name_tag)
-        return HostName(tags.get("mngr-host-id", "unknown"))
-
-    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from an instance's tags, or None if not a mngr host."""
-        tags = self._tag_dict_from_normalized(instance)
-        host_id_str = tags.get("mngr-host-id")
-        if host_id_str is None:
-            return None
-        return DiscoveredHost(
-            host_id=HostId(host_id_str),
-            host_name=self._host_name_from_tags(tags),
-            provider_name=self.name,
-            host_state=HostState.STOPPED,
-        )
-
-    def _host_record_from_instance(self, instance: Mapping[str, Any]) -> VpsHostRecord:
-        """Build a minimal STOPPED host record from a stopped instance's own ``mngr-*`` tags.
-
-        Uses only the base tags mngr writes at launch (host-id, host-name, created-at),
-        so it works regardless of the external-store mode -- including a bucket-mode
-        host created before the bucket existed (whose ``host_state.json`` is absent).
-        """
-        tags = self._tag_dict_from_normalized(instance)
-        host_id = HostId(tags.get("mngr-host-id", ""))
-        now = datetime.now(timezone.utc)
-        created_at = now
-        created_at_raw = tags.get("mngr-created-at")
-        if created_at_raw:
-            try:
-                created_at = datetime.fromisoformat(created_at_raw)
-            except ValueError as e:
-                # mngr writes this tag at launch, so a parse failure means the tag
-                # was externally edited/corrupted: surface it rather than silently
-                # using now() (which would misreport a long-stopped host as fresh).
-                logger.opt(exception=e).warning(
-                    "Malformed mngr-created-at tag {!r} on host {}; falling back to now()",
-                    created_at_raw,
-                    host_id,
-                )
-        certified = CertifiedHostData(
-            host_id=str(host_id),
-            host_name=str(self._host_name_from_tags(tags)),
-            created_at=created_at,
-            updated_at=now,
-            stop_reason=HostState.STOPPED.value,
-        )
-        return VpsHostRecord(certified_host_data=certified)
-
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
-        del host_id
-        return self._create_offline_host(self._host_record_from_instance(instance))
 
     def _host_record_from_instance_tags(self, host_id: HostId) -> VpsHostRecord | None:
         """Rebuild a minimal STOPPED host record from the instance's own ``mngr-*`` tags, or None.

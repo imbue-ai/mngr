@@ -683,10 +683,10 @@ def _normalized_instance(metadata: dict[str, str]) -> dict:
     return {"id": "i-1", "tags": [], "metadata": metadata}
 
 
-def test_agent_metadata_items_builds_one_entry_per_field(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_builds_one_entry_per_field(temp_mngr_ctx: MngrContext) -> None:
     """name/type/labels each map to their own mngr-agent-<id>-<field> metadata entry."""
     provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
-    updates, delete_keys = provider._agent_metadata_items(
+    updates, delete_keys = provider._agent_field_items(
         "agent-1",
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}},
         _normalized_instance({}),
@@ -699,7 +699,7 @@ def test_agent_metadata_items_builds_one_entry_per_field(temp_mngr_ctx: MngrCont
     assert delete_keys == []
 
 
-def test_agent_metadata_items_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
     """An agent with absent or empty labels gets no -labels entry."""
     provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance({})
@@ -707,11 +707,11 @@ def test_agent_metadata_items_omits_empty_labels(temp_mngr_ctx: MngrContext) -> 
         {"id": "agent-1", "name": "a1", "type": "command"},
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {}},
     ):
-        updates, _ = provider._agent_metadata_items("agent-1", agent_data, instance)
+        updates, _ = provider._agent_field_items("agent-1", agent_data, instance)
         assert "mngr-agent-agent-1-labels" not in updates
 
 
-def test_agent_metadata_items_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
     """When an update carries empty labels (an explicit removal), the stale -labels key is deleted."""
     provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance(
@@ -721,14 +721,14 @@ def test_agent_metadata_items_deletes_stale_labels_on_explicit_removal(temp_mngr
             "mngr-agent-agent-1-labels": '{"env":"prod"}',
         }
     )
-    updates, delete_keys = provider._agent_metadata_items(
+    updates, delete_keys = provider._agent_field_items(
         "agent-1", {"id": "agent-1", "name": "a1", "type": "command", "labels": {}}, instance
     )
     assert "mngr-agent-agent-1-labels" not in updates
     assert delete_keys == ["mngr-agent-agent-1-labels"]
 
 
-def test_agent_metadata_items_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
     """A partial persist (e.g. only id+type) must NOT delete the agent's existing name/labels.
 
     persist_agent_data is an upsert sometimes called with a partial record.
@@ -743,7 +743,7 @@ def test_agent_metadata_items_preserves_absent_fields_on_partial_update(temp_mng
             "mngr-agent-agent-1-labels": '{"env":"prod"}',
         }
     )
-    updates, delete_keys = provider._agent_metadata_items("agent-1", {"id": "agent-1", "type": "claude"}, instance)
+    updates, delete_keys = provider._agent_field_items("agent-1", {"id": "agent-1", "type": "claude"}, instance)
     assert updates == {"mngr-agent-agent-1-type": "claude"}
     # name and labels are absent from this update, so their keys are left untouched.
     assert delete_keys == []

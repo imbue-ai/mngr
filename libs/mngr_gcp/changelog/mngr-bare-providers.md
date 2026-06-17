@@ -23,3 +23,5 @@ The idle-watcher install (in-container sentinel `shutdown.sh` plus the host-side
 Updated the VPS build-arg parsing imports to point at the new `imbue.mngr_vps.build_args` module (moved out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
 
 Updated the `OfflineCapableVpsProvider` import to the new `imbue.mngr_vps.instance_offline` module (split out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
+
+`GcpProvider` now extends the new shared `KeyValueMirrorVpsProvider`, which owns the offline read-side reconstruction over a key-value mirror (previously duplicated between GCP's metadata code and the AWS/Azure tag code). GCP supplies only the metadata-map hook (`_offline_kv_map`) and the host-name key (`_host_name_key`); the per-agent metadata *write* side (the single `setMetadata` round-trip) is unchanged, and GCP inherits no object-store/bucket machinery. The GCP-local `_agent_metadata_items` / `_agent_metadata_value` / `_persisted_agent_dicts_from_instance` / host/created-at reconstruction helpers collapse into the shared base. Behavior-preserving.

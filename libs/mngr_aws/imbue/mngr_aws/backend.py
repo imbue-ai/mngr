@@ -167,7 +167,7 @@ class AwsProvider(TagMirrorVpsProvider):
     aws_client: AwsVpsClient = Field(frozen=True, description="EC2 API client")
     aws_config: AwsProviderConfig = Field(frozen=True, description="AWS-specific configuration")
 
-    def _host_name_tag_key(self) -> str:
+    def _host_name_key(self) -> str:
         return _HOST_NAME_TAG_KEY
 
     def _host_identity(self) -> S3StateHostIdentity | None:
@@ -480,7 +480,7 @@ class AwsProvider(TagMirrorVpsProvider):
         if instance is None:
             logger.warning("No EC2 instance found for host {}; cannot persist agent tags", host_id)
             return
-        set_tags, delete_keys = self._agent_field_tags(agent_id, agent_data, instance)
+        set_tags, delete_keys = self._agent_field_items(agent_id, agent_data, instance)
         try:
             self.aws_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
         except VpsApiError as e:

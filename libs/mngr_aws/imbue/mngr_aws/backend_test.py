@@ -642,10 +642,10 @@ def _normalized_instance(tag_pairs: dict[str, str]) -> dict:
     return {"id": "i-1", "tags": [f"{k}={v}" for k, v in tag_pairs.items()]}
 
 
-def test_agent_field_tags_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -> None:
     """name/type/labels each map to their own mngr-agent-<id>-<field> tag; the id is in the key."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    set_tags, delete_keys = provider._agent_field_tags(
+    set_tags, delete_keys = provider._agent_field_items(
         "agent-1",
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}},
         _normalized_instance({"mngr-host-id": "h"}),
@@ -658,7 +658,7 @@ def test_agent_field_tags_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -
     assert delete_keys == []
 
 
-def test_agent_field_tags_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
     """An agent with absent or empty labels gets no -labels tag."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance({})
@@ -666,16 +666,16 @@ def test_agent_field_tags_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None
         {"id": "agent-1", "name": "a1", "type": "command"},
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {}},
     ):
-        set_tags, _ = provider._agent_field_tags("agent-1", agent_data, instance)
+        set_tags, _ = provider._agent_field_items("agent-1", agent_data, instance)
         assert "mngr-agent-agent-1-labels" not in set_tags
 
 
-def test_agent_field_tags_drops_oversized_labels_with_warning(
+def test_agent_field_items_drops_oversized_labels_with_warning(
     temp_mngr_ctx: MngrContext, log_warnings: list[str]
 ) -> None:
     """Labels too large for a 256-char tag are dropped (name/type kept) with a warning, not a failure."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    set_tags, _ = provider._agent_field_tags(
+    set_tags, _ = provider._agent_field_items(
         "agent-1",
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {"k": "x" * 300}},
         _normalized_instance({}),
@@ -684,7 +684,7 @@ def test_agent_field_tags_drops_oversized_labels_with_warning(
     assert any("exceeds the" in w and "labels" in w for w in log_warnings), log_warnings
 
 
-def test_agent_field_tags_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
     """When an update carries empty labels (an explicit removal), the stale -labels tag is deleted."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance(
@@ -694,14 +694,14 @@ def test_agent_field_tags_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx
             "mngr-agent-agent-1-labels": '{"env":"prod"}',
         }
     )
-    set_tags, delete_keys = provider._agent_field_tags(
+    set_tags, delete_keys = provider._agent_field_items(
         "agent-1", {"id": "agent-1", "name": "a1", "type": "command", "labels": {}}, instance
     )
     assert "mngr-agent-agent-1-labels" not in set_tags
     assert delete_keys == ["mngr-agent-agent-1-labels"]
 
 
-def test_agent_field_tags_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
     """A partial persist (e.g. only id+type) must NOT delete the agent's existing name/labels tags.
 
     Regression: persist_agent_data is an upsert sometimes called with a partial
@@ -717,7 +717,7 @@ def test_agent_field_tags_preserves_absent_fields_on_partial_update(temp_mngr_ct
             "mngr-agent-agent-1-labels": '{"env":"prod"}',
         }
     )
-    set_tags, delete_keys = provider._agent_field_tags("agent-1", {"id": "agent-1", "type": "claude"}, instance)
+    set_tags, delete_keys = provider._agent_field_items("agent-1", {"id": "agent-1", "type": "claude"}, instance)
     assert set_tags == {"mngr-agent-agent-1-type": "claude"}
     # name and labels are absent from this update, so their tags are left untouched.
     assert delete_keys == []
