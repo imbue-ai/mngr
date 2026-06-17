@@ -70,7 +70,7 @@ class _AzurePrepareCliOptions(_AzureOperatorCliOptions):
 
 
 class _AzureCleanupCliOptions(_AzureOperatorCliOptions):
-    purge_state: bool
+    force: bool
 
 
 def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AzureProviderConfig:
@@ -217,24 +217,24 @@ def _ensure_state_bucket_best_effort(bucket: BlobStateBucket) -> tuple[str | Non
     return bucket.account_name, was_created
 
 
-def _perform_state_bucket_cleanup(bucket: BlobStateBucket, *, purge_state: bool) -> str | None:
+def _perform_state_bucket_cleanup(bucket: BlobStateBucket, *, force: bool) -> str | None:
     """Delete the state storage account, refusing while any managed-host state remains.
 
     Returns the deleted account name, or ``None`` when none existed. Unless
-    ``purge_state`` is set, raises ``AzureProviderError`` when the account still
+    ``force`` is set, raises ``AzureProviderError`` when the account still
     holds ``hosts/`` state. By the time this runs the VM-exists check has already
     passed, so any remaining state is *orphaned* offline state (a host whose VM
     is gone but whose ``delete_host_state`` never ran, or one deleted outside
     mngr) -- deleting it silently could drop offline records the operator still
-    wants, so we refuse and let ``--purge-state`` opt into deleting it. Split out
+    wants, so we refuse and let ``--force`` opt into deleting it. Split out
     so the refuse/delete decision is unit-testable.
     """
     if not bucket.account_exists():
         return None
-    if not purge_state and bucket.container_exists() and bucket.has_any_host_state():
+    if not force and bucket.container_exists() and bucket.has_any_host_state():
         raise AzureProviderError(
             f"Refusing to delete Azure state storage account {bucket.account_name!r}: it still holds offline "
-            "host state (from hosts that are no longer running VMs). Re-run with `--purge-state` to delete "
+            "host state (from hosts that are no longer running VMs). Re-run with `--force` to delete "
             "the account and the remaining state."
         )
     bucket.delete_bucket()
@@ -566,8 +566,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     help="Resource group to delete. Defaults to the resolved provider config's resource_group.",
 )
 @optgroup.option(
-    "--purge-state",
-    "purge_state",
+    "--force",
+    "force",
     is_flag=True,
     default=False,
     help=(
@@ -609,9 +609,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     # (its own refusal mirrors the VM check, as defense in depth). The storage
     # account lives in the resource group, so it is deleted first (its own
     # delete, before the RG cascade).
-    deleted_account_name = _perform_state_bucket_cleanup(
-        _build_state_bucket(base, client), purge_state=opts.purge_state
-    )
+    deleted_account_name = _perform_state_bucket_cleanup(_build_state_bucket(base, client), force=opts.force)
     # Delete the bucket-write managed identity (best-effort, idempotent) before the
     # RG cascade. The RG delete would reap it anyway, but the explicit delete keeps
     # cleanup well-defined when the identity outlives a partial prior cleanup.

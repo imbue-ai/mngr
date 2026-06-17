@@ -104,7 +104,7 @@ group it owns (tagged `managed-by=mngr`). It also deletes the state storage
 account; because the VM check above has already passed, any remaining state is
 **orphaned** offline state (from hosts no longer running as VMs), so it
 **refuses** to delete a non-empty account rather than silently dropping records
-you may still want -- pass `--purge-state` to delete the account and its
+you may still want -- pass `--force` to delete the account and its
 remaining state. Idempotent.
 
 ```bash

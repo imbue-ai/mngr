@@ -61,13 +61,13 @@ def test_perform_state_bucket_cleanup_deletes_when_empty() -> None:
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
-    assert _perform_state_bucket_cleanup(bucket, purge_state=False) == "mngrststateacct1234"
+    assert _perform_state_bucket_cleanup(bucket, force=False) == "mngrststateacct1234"
     assert backend.deleted_account is True
 
 
 def test_perform_state_bucket_cleanup_noop_when_account_absent() -> None:
     bucket = _stubbed_bucket(FakeBlobStorageBackend())
-    assert _perform_state_bucket_cleanup(bucket, purge_state=False) is None
+    assert _perform_state_bucket_cleanup(bucket, force=False) is None
 
 
 def test_perform_state_bucket_cleanup_refuses_with_host_state() -> None:
@@ -76,18 +76,18 @@ def test_perform_state_bucket_cleanup_refuses_with_host_state() -> None:
     bucket.ensure_bucket()
     bucket.write_host_record(HostId.generate(), "{}")
     with pytest.raises(AzureProviderError, match="still holds offline host state"):
-        _perform_state_bucket_cleanup(bucket, purge_state=False)
+        _perform_state_bucket_cleanup(bucket, force=False)
     # Refusal deletes nothing.
     assert backend.deleted_account is False
 
 
-def test_perform_state_bucket_cleanup_purge_state_deletes_despite_host_state() -> None:
-    """``--purge-state`` deletes the account (and its leftover state) instead of refusing."""
+def test_perform_state_bucket_cleanup_force_deletes_despite_host_state() -> None:
+    """``--force`` deletes the account (and its leftover state) instead of refusing."""
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
     bucket.write_host_record(HostId.generate(), "{}")
-    assert _perform_state_bucket_cleanup(bucket, purge_state=True) == "mngrststateacct1234"
+    assert _perform_state_bucket_cleanup(bucket, force=True) == "mngrststateacct1234"
     assert backend.deleted_account is True
 
 

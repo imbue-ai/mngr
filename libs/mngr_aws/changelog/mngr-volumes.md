@@ -2,7 +2,7 @@ Added an optional S3 state bucket that holds mngr's control-plane state (the ful
 
 - `mngr aws prepare` now also creates (idempotently) a private, encrypted S3 state bucket, named `mngr-state-<account_id>-<region>` by default or overridable via the new `state_bucket_name` provider config field. Bucket setup is best-effort: a missing S3/STS permission degrades to a warning so the security-group prepare still succeeds.
 
-- `mngr aws cleanup` now also deletes the state bucket. Since it runs after the refuse-while-instances-exist check, any state left in the bucket is orphaned (hosts no longer present as instances), so cleanup refuses to delete a non-empty bucket rather than silently dropping offline records; pass the new `--purge-state` flag to delete the bucket and its remaining state.
+- `mngr aws cleanup` now also deletes the state bucket. Since it runs after the refuse-while-instances-exist check, any state left in the bucket is orphaned (hosts no longer present as instances), so cleanup refuses to delete a non-empty bucket rather than silently dropping offline records; pass the new `--force` flag to delete the bucket and its remaining state.
 
 - When a state bucket is configured, the per-agent `mngr-agent-<id>-*` EC2 tags are no longer written; agent records and the full offline host record live in the bucket instead. This removes both the silent 256-char `labels` drop and the `TagLimitExceeded` failure at EC2's 50-tag ceiling. Without a configured bucket, the EC2 tag mirror is retained unchanged as a graceful fallback.
 

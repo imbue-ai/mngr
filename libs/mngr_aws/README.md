@@ -146,7 +146,7 @@ mngr aws cleanup --region us-east-1
 
 It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group is already gone. It needs only `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
 
-`cleanup` also deletes the S3 state bucket. Because the instance check above has already passed, any state left in the bucket is **orphaned** offline state (from hosts that are no longer running instances), so `cleanup` **refuses** to delete a non-empty bucket rather than silently dropping records you may still want -- pass `--purge-state` to delete the bucket and its remaining state. It additionally deletes the bucket-write IAM identity (role + instance profile) provisioned by `prepare`, best-effort and idempotent.
+`cleanup` also deletes the S3 state bucket. Because the instance check above has already passed, any state left in the bucket is **orphaned** offline state (from hosts that are no longer running instances), so `cleanup` **refuses** to delete a non-empty bucket rather than silently dropping records you may still want -- pass `--force` to delete the bucket and its remaining state. It additionally deletes the bucket-write IAM identity (role + instance profile) provisioned by `prepare`, best-effort and idempotent.
 
 ## Required IAM permissions
 

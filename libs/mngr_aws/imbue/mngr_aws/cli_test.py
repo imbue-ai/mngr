@@ -271,19 +271,19 @@ def test_perform_state_bucket_cleanup_refuses_while_host_state_remains() -> None
         bucket.ensure_bucket()
         bucket.write_host_record(HostId.generate(), "{}")
         with pytest.raises(click.ClickException, match="still holds offline host state"):
-            _perform_state_bucket_cleanup(bucket, purge_state=False)
+            _perform_state_bucket_cleanup(bucket, force=False)
         # The bucket must still exist after a refusal.
         assert bucket.bucket_exists() is True
 
 
-def test_perform_state_bucket_cleanup_purge_state_deletes_despite_host_state() -> None:
-    """``--purge-state`` deletes the bucket (and its leftover state) instead of refusing."""
+def test_perform_state_bucket_cleanup_force_deletes_despite_host_state() -> None:
+    """``--force`` deletes the bucket (and its leftover state) instead of refusing."""
     with mock_aws():
         session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
         bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-purge")
         bucket.ensure_bucket()
         bucket.write_host_record(HostId.generate(), "{}")
-        assert _perform_state_bucket_cleanup(bucket, purge_state=True) == "mngr-state-cleanup-purge"
+        assert _perform_state_bucket_cleanup(bucket, force=True) == "mngr-state-cleanup-purge"
         assert bucket.bucket_exists() is False
 
 
@@ -293,13 +293,13 @@ def test_perform_state_bucket_cleanup_deletes_empty_bucket() -> None:
         session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
         bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-empty")
         bucket.ensure_bucket()
-        assert _perform_state_bucket_cleanup(bucket, purge_state=False) == "mngr-state-cleanup-empty"
+        assert _perform_state_bucket_cleanup(bucket, force=False) == "mngr-state-cleanup-empty"
         assert bucket.bucket_exists() is False
 
 
 def test_perform_state_bucket_cleanup_none_is_noop() -> None:
     """A None bucket (none configured) is a harmless no-op."""
-    assert _perform_state_bucket_cleanup(None, purge_state=False) is None
+    assert _perform_state_bucket_cleanup(None, force=False) is None
 
 
 # =============================================================================

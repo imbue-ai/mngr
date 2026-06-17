@@ -67,7 +67,7 @@ class _AwsPrepareCliOptions(_AwsOperatorCliOptions):
 
 
 class _AwsCleanupCliOptions(_AwsOperatorCliOptions):
-    purge_state: bool
+    force: bool
 
 
 def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AwsProviderConfig:
@@ -338,27 +338,27 @@ def _perform_cleanup(client: AwsVpsClient) -> str | None:
     return client.delete_security_group()
 
 
-def _perform_state_bucket_cleanup(bucket: S3StateBucket | None, *, purge_state: bool) -> str | None:
+def _perform_state_bucket_cleanup(bucket: S3StateBucket | None, *, force: bool) -> str | None:
     """Delete the state bucket, refusing while any managed-host state remains.
 
     Returns the deleted bucket name, or ``None`` when no bucket is configured /
-    none existed. Unless ``purge_state`` is set, raises ``click.ClickException``
+    none existed. Unless ``force`` is set, raises ``click.ClickException``
     when the bucket still holds ``hosts/`` state. By the time this runs the
     instance-exists check has already passed, so any remaining state is
     *orphaned* offline state (a host whose instance is gone but whose
     ``delete_host_state`` never ran, or one terminated outside mngr) -- deleting
     it silently could drop offline records the operator still wants, so we refuse
-    and let ``--purge-state`` opt into deleting it. Split out so the
+    and let ``--force`` opt into deleting it. Split out so the
     refuse/delete decision is unit-testable.
     """
     if bucket is None:
         return None
     if not bucket.bucket_exists():
         return None
-    if not purge_state and bucket.has_any_host_state():
+    if not force and bucket.has_any_host_state():
         raise click.ClickException(
             f"Refusing to delete S3 state bucket {bucket.bucket_name!r}: it still holds offline host "
-            "state (from hosts that are no longer running instances). Re-run with `--purge-state` to "
+            "state (from hosts that are no longer running instances). Re-run with `--force` to "
             "delete the bucket and the remaining state."
         )
     bucket.delete_bucket()
@@ -584,8 +584,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     help="VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise.",
 )
 @optgroup.option(
-    "--purge-state",
-    "purge_state",
+    "--force",
+    "force",
     is_flag=True,
     default=False,
     help=(
@@ -639,7 +639,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         bucket = _build_state_bucket(base, opts.region)
     except (ValueError, BotoCoreError) as e:
         raise click.ClickException(str(e)) from e
-    deleted_bucket_name = _perform_state_bucket_cleanup(bucket, purge_state=opts.purge_state)
+    deleted_bucket_name = _perform_state_bucket_cleanup(bucket, force=opts.force)
     # Delete the bucket-write IAM identity after the bucket (best-effort,
     # idempotent). Build errors mirror the bucket-build credential errors.
     try:
