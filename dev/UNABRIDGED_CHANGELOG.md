@@ -6,6 +6,10 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-06-16
 
+Regenerated `uv.lock` to match the version revert of `imbue-mngr-opencode-usage` and `imbue-mngr-pi-coding-usage` back to 0.1.0.
+
+## 2026-06-16
+
 Added `specs/agent-usage-plugins/spec.md`: a design spec for extending `mngr usage` cost/usage tracking beyond Claude to the OpenCode, pi, and Codex harnesses. The spec generalizes the usage event schema to report raw token counts (with the reader deriving and provenance-flagging cost via a canonical pricing table), keeps dollars as the cross-harness comparable unit, and lays out three thin per-harness writer plugins. Antigravity and the Claude-subagent-proxy are documented as out of scope. The
 per-harness data exposure was verified against the locally installed harnesses
 (OpenCode 1.16.2, Codex 0.138.0, pi 0.79.1): OpenCode reports cost+tokens
