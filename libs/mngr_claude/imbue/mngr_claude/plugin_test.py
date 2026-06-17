@@ -97,9 +97,12 @@ from imbue.mngr_claude.plugin import _sync_user_resources
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
+from imbue.mngr_claude.plugin import compute_claude_json_flags
+from imbue.mngr_claude.plugin import compute_settings_json_flags
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import on_before_host_destroy
+from imbue.mngr_claude.plugin import should_trust_work_dir
 
 # =============================================================================
 # Test Helpers
@@ -4722,6 +4725,42 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "skipDangerousModePermissionPrompt" in data
     # Local (attended) context does not force fastMode
     assert "fastMode" not in data
+
+
+def test_compute_claude_json_flags_auto_approve_dismisses_dialogs_but_not_permission_mode() -> None:
+    """--yes (is_auto_approve) on a local agent dismisses the cosmetic first-run dialogs, but does
+    NOT accept bypass-permissions mode (that stays an unattended/auto_allow_permissions concern)."""
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=True))
+    assert flags["effortCalloutDismissed"] is True
+    assert flags["hasCompletedOnboarding"] is True
+    assert flags["hasAcknowledgedCostThreshold"] is True
+    assert "bypassPermissionsModeAccepted" not in flags
+
+
+def test_compute_claude_json_flags_unattended_also_accepts_permission_mode() -> None:
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=True))
+    assert flags["bypassPermissionsModeAccepted"] is True
+    assert flags["hasCompletedOnboarding"] is True
+
+
+def test_compute_claude_json_flags_attended_no_auto_approve_only_cost() -> None:
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=False))
+    assert flags == {"hasAcknowledgedCostThreshold": True}
+
+
+def test_compute_settings_json_flags_auto_approve_does_not_change_permissions() -> None:
+    """--yes must not silently flip tool-permission settings; only a genuinely unattended agent does."""
+    assert compute_settings_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=True)) == {}
+    assert (
+        compute_settings_json_flags(ProvisioningContext(is_unattended=True))["skipDangerousModePermissionPrompt"]
+        is True
+    )
+
+
+def test_should_trust_work_dir_auto_approve() -> None:
+    config = ClaudeAgentConfig(check_installation=False)
+    assert should_trust_work_dir(config, ProvisioningContext(is_unattended=False, is_auto_approve=True)) is True
+    assert should_trust_work_dir(config, ProvisioningContext(is_unattended=False, is_auto_approve=False)) is False
 
 
 # =============================================================================

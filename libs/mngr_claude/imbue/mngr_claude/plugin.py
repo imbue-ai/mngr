@@ -334,17 +334,27 @@ class ProvisioningContext(FrozenModel):
     """Runtime context derived from host type and transfer mode."""
 
     is_unattended: bool = Field(description="Agent runs without user interaction (remote/deploy)")
+    is_auto_approve: bool = Field(
+        default=False,
+        description="The human auto-approved mngr's prompts (`mngr create --yes`). Dismisses first-run "
+        "*dialogs* (onboarding/effort/trust), but -- unlike `is_unattended` -- does not accept "
+        "bypass-permissions mode (tool auto-allow is governed by `auto_allow_permissions`).",
+    )
     copy_project_config_from: Path | None = Field(
         default=None, description="Source dir to copy project config from (worktree mode)"
     )
 
 
 _ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"hasAcknowledgedCostThreshold": True}
-_UNATTENDED_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
-    "bypassPermissionsModeAccepted": True,
+# First-run *dialog* dismissals (cosmetic startup prompts). Dismissed for an unattended agent
+# OR when the human auto-approved mngr's prompts (--yes) -- neither changes tool permissions.
+_DIALOG_DISMISS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
     "effortCalloutDismissed": True,
     "hasCompletedOnboarding": True,
 }
+# Accepting bypass-permissions mode is a tool-permission change, so it applies only to a
+# genuinely unattended (remote/deploy) agent -- NOT merely because the human passed --yes.
+_PERMISSION_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"bypassPermissionsModeAccepted": True}
 _UNATTENDED_SETTINGS_FLAGS: Final[Mapping[str, Any]] = {
     "skipDangerousModePermissionPrompt": True,
     # fastMode off by default in unattended mode (API limitation)
@@ -354,15 +364,27 @@ _UNATTENDED_SETTINGS_FLAGS: Final[Mapping[str, Any]] = {
 
 @pure
 def compute_claude_json_flags(ctx: ProvisioningContext) -> Mapping[str, bool]:
-    """Compute .claude.json flags based on provisioning context."""
+    """Compute .claude.json flags based on provisioning context.
+
+    Cosmetic first-run dialogs are dismissed when unattended OR when the human auto-approved
+    mngr's prompts (--yes); the bypass-permissions-mode acceptance is added only when unattended.
+    """
+    flags = dict(_ALWAYS_CLAUDE_JSON_FLAGS)
+    if ctx.is_unattended or ctx.is_auto_approve:
+        flags.update(_DIALOG_DISMISS_CLAUDE_JSON_FLAGS)
     if ctx.is_unattended:
-        return {**_ALWAYS_CLAUDE_JSON_FLAGS, **_UNATTENDED_CLAUDE_JSON_FLAGS}
-    return dict(_ALWAYS_CLAUDE_JSON_FLAGS)
+        flags.update(_PERMISSION_CLAUDE_JSON_FLAGS)
+    return flags
 
 
 @pure
 def compute_settings_json_flags(ctx: ProvisioningContext) -> Mapping[str, Any]:
-    """Compute settings.json flags based on provisioning context."""
+    """Compute settings.json flags based on provisioning context.
+
+    These govern tool-permission behavior (skip the dangerous-mode prompt), so they apply only
+    to an unattended agent -- not on a bare --yes, which auto-approves prompts but must not
+    silently change tool permissions.
+    """
     if ctx.is_unattended:
         return dict(_UNATTENDED_SETTINGS_FLAGS)
     return {}
@@ -370,8 +392,8 @@ def compute_settings_json_flags(ctx: ProvisioningContext) -> Mapping[str, Any]:
 
 @pure
 def should_trust_work_dir(config: ClaudeAgentConfig, ctx: ProvisioningContext) -> bool:
-    """Determine whether work_dir should be auto-trusted."""
-    return ctx.is_unattended or config.auto_dismiss_dialogs
+    """Determine whether work_dir should be auto-trusted (a dialog-consent decision)."""
+    return ctx.is_unattended or ctx.is_auto_approve or config.auto_dismiss_dialogs
 
 
 _MNGR_AGENT_CONFIG_DIR_MARKER: Final[str] = f"/{_AGENT_CLAUDE_CONFIG_RELPATH.as_posix()}/"
@@ -1667,7 +1689,11 @@ class ClaudeCoreAgent(
         copy_project_config_from: Path | None = None
         if host.is_local and options.transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
             copy_project_config_from = self._find_git_source_path(mngr_ctx.concurrency_group)
-        ctx = ProvisioningContext(is_unattended=not host.is_local, copy_project_config_from=copy_project_config_from)
+        ctx = ProvisioningContext(
+            is_unattended=not host.is_local,
+            is_auto_approve=mngr_ctx.is_auto_approve,
+            copy_project_config_from=copy_project_config_from,
+        )
 
         # Create the config directory (0700: contains credentials and session data)
         host.execute_idempotent_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
