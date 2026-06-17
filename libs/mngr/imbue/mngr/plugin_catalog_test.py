@@ -27,6 +27,39 @@ def test_catalog_contains_expected_basic_entry_points() -> None:
     assert "tutor" in basic_names
 
 
+def test_cloud_provider_plugins_detect_their_cli() -> None:
+    """aws/gcp/azure are recommended and pre-selected when their CLI is present.
+
+    Each carries a signal that runs the provider's CLI version check, so the
+    install wizard pre-selects it when that CLI is on PATH -- the same
+    signal-driven recommendation other plugins (claude, modal) use.
+    """
+    expected_commands = {
+        "aws": ("aws", "--version"),
+        "gcp": ("gcloud", "--version"),
+        "azure": ("az", "--version"),
+    }
+    for entry_point_name, command in expected_commands.items():
+        entry = get_catalog_entry(entry_point_name)
+        assert entry is not None
+        assert entry.is_recommended is True
+        assert isinstance(entry.gate, SignalGate)
+        assert entry.gate.signal.command == command
+
+
+def test_lima_plugin_detects_its_cli() -> None:
+    """lima is recommended and pre-selected when limactl is present.
+
+    Its signal only drives wizard preselection because the entry is
+    recommended (phase-1); a signal on a non-recommended entry is inert.
+    """
+    entry = get_catalog_entry("lima")
+    assert entry is not None
+    assert entry.is_recommended is True
+    assert isinstance(entry.gate, SignalGate)
+    assert entry.gate.signal.command == ("limactl", "--version")
+
+
 def test_catalog_entries_sharing_signal_use_same_instance() -> None:
     """Entries that share a signal should reference the exact same SignalCheck object."""
     claude_entry = get_catalog_entry("claude")

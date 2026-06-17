@@ -297,6 +297,12 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # specific type. (allowed_ssh_cidrs is fail-open, so an empty list no longer
     # raises here -- it creates a no-ingress NSG with a warning.)
     result = client.ensure_network()
+    # Best-effort: create the least-privilege custom role that lets each VM's
+    # managed identity deallocate itself on idle (true cost parity). Returns None
+    # (after a clear warning) when the operator lacks roleDefinitions/write -- idle
+    # self-deallocate is then disabled but `mngr stop`/`start` still work, so this
+    # never fails prepare.
+    client.ensure_self_deallocate_role()
     _output_prepare_result(result, output_opts.output_format)
 
 
