@@ -5,7 +5,8 @@
 # with the session id (verified live: it also carries last_assistant_message,
 # stop_hook_active, etc.). It clears the `codex_root_active` flag and recomputes
 # the `active` marker -- but only for the root session recorded by
-# set_active_marker.sh in `codex_root_session`.
+# set_active_marker.sh in `codex_root_session`. On the root's Stop it also clears
+# any stranded `permissions_waiting` marker as a safety net (see below).
 #
 # Async-subagent model: codex subagents run ASYNCHRONOUSLY, so the root's Stop
 # fires (root model loop done) WHILE its subagents may still be running; their
@@ -67,4 +68,27 @@ fi
 rm -f "$CODEX_ROOT_ACTIVE_FILE"
 codex_marker_recompute
 
+# Safety net: clear any stranded permission-waiting marker at turn end. Normally
+# PostToolUse clears it once the approved tool runs, but a dialog that was
+# cancelled/denied (or never resolved) before the turn ended would otherwise leave
+# the agent reporting PERMISSIONS-WAITING forever. Independent of the active-marker
+# recompute, so a simple remove is enough.
+rm -f "$CODEX_PERMISSIONS_WAITING_FILE"
+
 codex_marker_unlock
+
+# Turn-end flush: if this recompute left the agent WAITING (the `active` marker
+# is gone, so the root turn is done and no subagents are in flight), force one
+# synchronous common-transcript pass. A consumer harvesting the final message on
+# the WAITING signal would otherwise race the 5s converter daemon. Mirrors
+# claude's wait_for_stop_hook.sh and agy's statusline.sh. Done after releasing
+# the marker lock and gated defensively: the lib is provisioned by
+# Host._ensure_shared_shell_libs, but a missing lib or flush failure must never
+# disrupt codex's loop. mngr_common_transcript_flush writes nothing to stdout.
+if [ ! -e "$CODEX_MARKER_FILE" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh" ]; then
+    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_common_transcript_lib.sh
+    . "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+    if command -v mngr_common_transcript_flush >/dev/null 2>&1; then
+        mngr_common_transcript_flush
+    fi
+fi

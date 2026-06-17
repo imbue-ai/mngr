@@ -6,6 +6,23 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.9] - 2026-06-16
+
+### Fixed
+
+- Fixed: `start_host` (the `mngr stop --stop-host` resume path) now restarts the container's sshd after `docker start`. sshd is launched via `docker exec`, not the container entrypoint, so it does not survive a container stop/start (or a host VM reboot that takes the container down, e.g. an AWS instance stop/start) — without restarting it, the resume timed out waiting for container SSH. Latent gap for every VPS-Docker provider; AWS's native instance stop/start surfaced it.
+- Fixed: `start_host` now also relaunches the in-container activity watcher on resume and records a fresh `BOOT` activity timestamp. The watcher is a backgrounded process that does not survive a container stop/start, so without relaunching it a resumed host would silently stop auto-stopping on idle (a latent gap for every VPS-Docker provider). Refreshing `BOOT` activity is required alongside the relaunch: otherwise a resumed-but-idle host keeps its pre-stop activity-file mtimes and the watcher re-stops it within one poll — so resuming an idle host would race a near-immediate auto-stop.
+
+## [v0.1.8] - 2026-06-16
+
+### Changed
+
+- Changed: `prepare_btrfs_on_outer` now skips the loopback allocation/format/mount/fstab steps when the btrfs filesystem is already mounted at the configured mount path (e.g. on an OVH-slice's lima data disk), so a host whose btrfs is provided by an already-mounted real disk can reuse the shared vps_docker bake and slow-path rebuild unchanged.
+
+### Fixed
+
+- Fixed: `host_backup` btrfs snapshot helper (`snapshot_helper.sh`, the `OUTER_TRIGGER` mechanism) no longer re-processes a request it has already serviced; the spurious "snapshot path already exists" failure that masked a successful backup is gone. The helper now skips any request whose `request_id` already appears in `result.json`.
+
 ## [v0.1.7] - 2026-06-15
 
 ### Fixed

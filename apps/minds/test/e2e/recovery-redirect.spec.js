@@ -44,7 +44,7 @@ const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http:
   <button id="user-btn"></button><button id="requests-toggle"></button>
   <span id="page-title"></span><span id="requests-badge"></span>
   <iframe id="content-frame"></iframe>
-  <div id="sidebar-panel"></div><div id="sidebar-workspaces"></div>
+  <div id="sidebar-backdrop"></div><div id="sidebar-workspaces"></div>
   <script>
     window.__nav = [];
     window.__cb = {};
@@ -54,9 +54,8 @@ const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http:
       onCurrentWorkspaceChanged: function (cb) { window.__cb.currentWorkspace = cb; },
       onContentTitleChange: function (cb) { window.__cb.contentTitle = cb; },
       onContentURLChange: function (cb) { window.__cb.contentUrl = cb; },
-      onLastWorkspaceAgentIdChanged: function (cb) { window.__cb.lastWs = cb; },
+      onAccentChanged: function (cb) { window.__cb.accent = cb; },
       onModalStateChanged: function (cb) { window.__cb.modal = cb; },
-      getLastWorkspaceAgentId: function () { return Promise.resolve(null); },
       navigateContent: function (url) { window.__nav.push(url); },
       toggleSidebar: function () {}, toggleInbox: function () {},
       minimize: function () {}, maximize: function () {}, close: function () {},

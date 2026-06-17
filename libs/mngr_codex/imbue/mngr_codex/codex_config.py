@@ -70,6 +70,11 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 # the codex process).
 CODEX_HOME_RELATIVE_PATH: tuple[str, ...] = ("plugin", "codex", "home")
 
+# Codex's native resumable rollout store (the dir ``codex resume`` reads), as a
+# POSIX rel-path under the agent state dir. Preserved on destroy; it is a sibling
+# of the auth symlink and config, so targeting it specifically excludes those.
+SESSIONS_RELATIVE_PATH: str = Path(*CODEX_HOME_RELATIVE_PATH, "sessions").as_posix()
+
 _CONFIG_FILENAME: str = "config.toml"
 _AUTH_FILENAME: str = "auth.json"
 _HOOKS_FILENAME: str = "hooks.json"
@@ -131,6 +136,16 @@ def get_codex_version_cache_path(codex_home: Path) -> Path:
 # scripts touch/remove.
 ACTIVE_MARKER_FILENAME: str = "active"
 
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while codex is blocked on a
+# tool-approval dialog. The ``PermissionRequest`` hook touches it; ``PostToolUse``
+# (the tool ran after approval) and the root ``Stop`` (a stranded dialog at turn
+# end) remove it. ``CodexAgent.get_lifecycle_state`` promotes RUNNING -> WAITING
+# while it is present, and ``_waiting_reason`` reports ``PERMISSIONS``. Unlike the
+# ``active`` marker it is a plain touch/remove flag, not part of the lock-guarded
+# recompute: it tracks a single blocking dialog, not concurrent activity. This name
+# is also hardcoded as a literal in ``codex_marker_state.sh``; keep the two in sync.
+PERMISSIONS_WAITING_FILENAME: str = "permissions_waiting"
+
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the *root* codex
 # session id for the current conversation -- the session that opened a turn while
 # the marker was absent. ``clear_active_marker.sh`` acts on a ``Stop`` only when
@@ -187,6 +202,10 @@ MARKER_STATE_LIB_SCRIPT_NAME: str = "codex_marker_state.sh"
 BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
 RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
 COMMON_TRANSCRIPT_SCRIPT_NAME: str = "common_transcript.sh"
+# The python converter that common_transcript.sh invokes (python3
+# <dir>/common_transcript_convert.py). Provisioned alongside the .sh so the shell
+# resolves it relative to itself; gated by the same emit_common_transcript.
+COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: str = "common_transcript_convert.py"
 
 # Output locations (under ``$MNGR_AGENT_STATE_DIR``) for the transcript layers:
 # raw bytes under ``logs/`` and the agent-agnostic common transcript under
@@ -480,6 +499,16 @@ _CLEAR_ACTIVE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIV
 _SUBAGENT_STARTED_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SUBAGENT_STARTED_SCRIPT_NAME}"'
 _SUBAGENT_STOPPED_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{SUBAGENT_STOPPED_SCRIPT_NAME}"'
 
+# The permission-waiting marker is a plain touch/remove flag (no shared lock /
+# recompute), so its two hooks are inline one-liners rather than provisioned
+# scripts. ``PermissionRequest`` fires (and blocks the agent) while an approval
+# dialog is open; ``PostToolUse`` fires once the approved tool has run. (Codex has
+# no ``PostToolUseFailure`` event -- verified against codex 0.139.0 -- so unlike
+# claude there is no third clear hook; the root ``Stop`` clears any stranded
+# marker as a safety net, in ``clear_active_marker.sh``.)
+_SET_PERMISSIONS_WAITING_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{PERMISSIONS_WAITING_FILENAME}"'
+_CLEAR_PERMISSIONS_WAITING_COMMAND: str = f'rm -f "$MNGR_AGENT_STATE_DIR/{PERMISSIONS_WAITING_FILENAME}"'
+
 
 @pure
 def build_codex_hooks_config() -> dict[str, Any]:
@@ -496,19 +525,30 @@ def build_codex_hooks_config() -> dict[str, Any]:
 
     * ``UserPromptSubmit`` -> ``set_active_marker.sh``: set the root-turn flag (so
       ``BaseAgent.get_lifecycle_state`` reports RUNNING) and, at a fresh root
-      turn, record the root ``session_id`` and ``transcript_path``. After the
-      marker is set it signals the ``mngr-submit-<session>`` tmux wait-for channel
-      (``SUBMIT_WAIT_CHANNEL_PREFIX``), so ``send_message`` returns only once the
-      agent reads RUNNING.
+      turn, record the root ``session_id`` and ``transcript_path`` and clear any
+      stranded ``permissions_waiting`` marker (a second safety net alongside the
+      root ``Stop``, so a new turn never inherits a prior dialog's state). After
+      the marker is set it signals the ``mngr-submit-<session>`` tmux wait-for
+      channel (``SUBMIT_WAIT_CHANNEL_PREFIX``), so ``send_message`` returns only
+      once the agent reads RUNNING.
     * ``Stop`` -> ``clear_active_marker.sh``: clear the root-turn flag when the
       *root* agent's loop ends, then recompute (in-flight subagents keep the
       marker). The clear is guarded on the recorded root ``session_id`` so a
       nested/recursive ``codex`` process sharing this ``CODEX_HOME`` cannot flip
-      the agent to WAITING.
+      the agent to WAITING. It also clears any stranded ``permissions_waiting``
+      marker as a safety net.
     * ``SubagentStart`` -> ``subagent_started.sh``: register the subagent's
       ``agent_id`` so the marker stays present while it runs.
     * ``SubagentStop`` -> ``subagent_stopped.sh``: deregister the ``agent_id`` and
       recompute; the marker clears once the root turn is also done.
+
+    Two further handlers maintain the ``permissions_waiting`` marker (a plain
+    touch/remove flag, independent of the ``active`` recompute) so listings can
+    report *why* a codex agent is waiting (verified live against codex 0.139.0):
+
+    * ``PermissionRequest`` -> touch ``permissions_waiting``: codex fires this and
+      blocks while a tool-approval dialog is open.
+    * ``PostToolUse`` -> remove ``permissions_waiting``: the approved tool has run.
 
     The file is mngr-owned and rewritten from scratch each provision, so no
     merge-with-existing logic is needed. Codex requires command hooks to be
@@ -521,6 +561,8 @@ def build_codex_hooks_config() -> dict[str, Any]:
             "Stop": [{"hooks": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}]}],
             "SubagentStart": [{"hooks": [{"type": "command", "command": _SUBAGENT_STARTED_COMMAND}]}],
             "SubagentStop": [{"hooks": [{"type": "command", "command": _SUBAGENT_STOPPED_COMMAND}]}],
+            "PermissionRequest": [{"hooks": [{"type": "command", "command": _SET_PERMISSIONS_WAITING_COMMAND}]}],
+            "PostToolUse": [{"hooks": [{"type": "command", "command": _CLEAR_PERMISSIONS_WAITING_COMMAND}]}],
         }
     }
 

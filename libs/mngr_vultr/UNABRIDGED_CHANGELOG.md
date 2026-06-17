@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+## Vultr provider
+
+- The Vultr release-test settings now also disable the `azure` provider (`[providers.azure] is_enabled = false`), mirroring the existing modal/gcp/aws/ovh disables. Without it, `mngr list` inside the Vultr lifecycle tests would enumerate the newly-added azure provider and exit non-zero when Azure credentials weren't resolvable in that subprocess, failing the Vultr tests for a non-Vultr reason.
+
+Removed the dead VPS client methods `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` from `VultrVpsClient`. These had no production callers and are being dropped from the shared `VpsClientInterface`. The corresponding unit and release tests were removed as well.
+
+## 2026-06-15
+
+## Internal: disable the new `gcp` provider in Vultr release-test settings
+
+- The Vultr release tests write a `settings.toml` that disables every other remote provider so the create-host preflight does not trip resolving their credentials. With the new `gcp` provider now registered as a remote backend, it is added to that disable-set (matching the existing modal/aws/ovh/imbue_cloud entries). No behavioral change for Vultr.
+
 ## 2026-06-12
 
 ## AWS provider support: shared VPS-Docker base refactor

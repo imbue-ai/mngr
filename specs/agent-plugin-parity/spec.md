@@ -157,7 +157,7 @@ don't have, learned the hard way on pi:
 
 ## Current state matrix
 
-Y = implemented, partial = present but incomplete, - = absent.
+Y = implemented, partial = present but incomplete, - = absent (a gap), n/a = not applicable.
 
 | Dimension | claude | antigravity | pi-coding | opencode | codex |
 |---|---|---|---|---|---|
@@ -176,11 +176,12 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Onboarding NUX seed | Y | Y | n/a (no NUX) | n/a (no NUX) | Y (`.personality_migration` + `[notice]` suppressors) |
 | Raw transcript | Y | Y | Y | Y (in-process, raw-seeded) | Y (tail rollout JSONL) |
 | Common transcript | Y | Y | Y | Y (in-process, rebuilt on idle) | Y (converter, derived from raw) |
+| Usage tracking plugin | Y (`mngr_claude_usage`) | - (deferred; no cost/token source) | Y (`mngr_pi_coding_usage`) | Y (`mngr_opencode_usage`) | Y (`mngr_codex_usage`) |
 | Conversation resume (stop/start) | Y | Y | Y (`--session`) | Y (`attach --session`) | Y (`codex resume <id>`) |
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
-| Field generators (waiting_reason) | Y (online) | - | - | - | - |
+| Field generators (waiting_reason) | Y (online) | - (blocked: no event) | n/a (no prompt) | Y (online) | Y (online) |
 | Installation management | Y | - | Y | - (no version pinning) | partial (mngr-side update notify + opt-in auto-update; no pinning) |
 | Extra agent subtypes | Y (guardian/fairy/headless) | - | - | - | - (app-server variant deferred) |
 
@@ -226,6 +227,12 @@ Notable observations:
 - **`antigravity` is missing session-preservation-on-destroy, the streaming snapshot,
   deploy contributions, and field generators** relative to claude. These are the claude
   features no port has yet matched.
+- **`antigravity` is the one port with no usage-tracking plugin** -- claude, codex,
+  opencode, and pi each ship a `mngr_<harness>_usage` provider, but `agy`'s statusline
+  payload exposes no cost / token / rate-limit data, so there is nothing to write (deferred;
+  see the [agent-usage-plugins spec](../agent-usage-plugins/spec.md)). Consequently the
+  `mngr plugin install-wizard` offers a per-agent usage provider for every agent type except
+  antigravity.
 
 ---
 
@@ -969,14 +976,68 @@ files and env vars must be present in the remote image?
 
 Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
 
-- **claude** (`plugin.py:2759`): `agent_field_generators` -> `waiting_reason`, reading the
-  `permissions_waiting`/`active` markers without SSH/tmux to report `PERMISSIONS` vs
-  `END_OF_TURN`. Claude does **not** implement `offline_agent_field_generators`.
-- **antigravity**: implements neither, and explicitly **cannot surface a permission-WAITING
-  reason** -- agy fires no hook while blocked at a permission dialog, so there's no signal.
+- **claude** (`plugin.py:2759`) -- **status: implemented (online).** `agent_field_generators` ->
+  `waiting_reason`, reading the `permissions_waiting`/`active` markers without SSH/tmux to report
+  `PERMISSIONS` vs `END_OF_TURN`. Claude does **not** implement `offline_agent_field_generators`.
+- **antigravity** -- **status: should be done, but blocked on upstream.** agy *does* prompt
+  interactively (its `ask` policy surfaces a `run_command` confirmation dialog that blocks the
+  agent), so a `PERMISSIONS` reason would be meaningful in supervised mode. But agy fires no hook
+  and emits no permission-dialog event while blocked (live-verified against agy 1.0.3), so mngr
+  has no signal to read; implementing it needs an upstream event. (`END_OF_TURN` alone is
+  derivable from the `active` marker but adds nothing over RUNNING/WAITING.)
+- **pi-coding** -- **status: inapplicable (no need).** pi has no tool-approval gate at all: it
+  runs tools, including shell commands, without a confirmation prompt by design
+  (`mngr_pi_coding/README.md`). There is no blocked-on-permission state, so `PERMISSIONS` can
+  never apply, and `END_OF_TURN` alone adds nothing over RUNNING/WAITING.
+- **opencode** -- **status: implemented (online)** (both `PERMISSIONS` and `END_OF_TURN`), via
+  `agent_field_generators`. opencode prompts interactively (its per-tool `ask` policy, e.g.
+  `"edit": "ask"`) and -- unlike agy -- exposes the signal on the event bus: `permission.asked`
+  fires when a tool blocks on approval (carrying the request `id`) and `permission.replied` when it
+  is answered (carrying `requestID`). The in-process extension already subscribes to that bus (the
+  `event` hook in `mngr_opencode_plugin.ts`), so it tracks the set of pending request ids and keeps
+  a `permissions_waiting` marker present while any prompt is open -- the multi-session analog of
+  codex's single touch/remove flag (opencode is a server with concurrent subagent sessions).
+  Root-session idle clears any stranded marker as a safety net (codex uses the root `Stop`), and a
+  fresh server clears a marker left by a prior killed/crashed server at startup (codex clears at a
+  fresh root turn; claude has a startup reset). The gating rule lives in one shared
+  `_classify_waiting_reason` routed through both the lifecycle promotion and the field generator, so
+  the two cannot drift (mirrors codex). Notably opencode does **not** inherit codex's cancelled-dialog
+  limitation: codex's hook model fires no terminal hook on Esc/No, stranding both markers until the
+  next turn, but opencode's event bus emits `permission.replied` (on deny) and/or `session.idle` (on
+  deny *and* abort), each of which clears the marker promptly -- verified live against 1.17.7.
+  `OpenCodeAgent.get_lifecycle_state` promotes RUNNING -> WAITING while the marker is present,
+  mirroring claude/codex; `END_OF_TURN` follows from the `active` marker being absent. Covered live
+  by a release test (`test_opencode_waiting_reason_reports_permissions`): a real `bash: ask` agent
+  blocks on an approval prompt and the marker appears -- the one check that exercises the real event
+  wiring against the binary. (Caveat / **revisit**: the `@opencode-ai/sdk` type stubs are out of sync
+  with the shipped binary -- they name the events `permission.updated`/`permissionID`, but the
+  running server emits `permission.asked`/`requestID`, verified by inspecting the binary at **both**
+  1.16.2 and 1.17.7. This is a known class of opencode bug -- the SDK permission types drifted from
+  the binary in the permissions rework, e.g. opencode issue #7006 (a `permission.ask` plugin hook
+  defined in the SDK but never triggered at runtime) -- and community plugins consume
+  `permission.asked`/`permission.replied`, matching the binary, not the SDK's `permission.updated`.
+  The plugin accepts **both** names since opencode self-upgrades; once the SDK and binary reconverge
+  -- or opencode documents which is canonical -- the dead `permission.updated` branch can be dropped.)
+  No upstream change was required.
+- **codex** -- **status: implemented** (both `PERMISSIONS` and `END_OF_TURN`), via
+  `agent_field_generators`. `PermissionRequest` touches a `permissions_waiting` marker (inline
+  hook command) and `PostToolUse` clears it; the root `Stop` clears any stranded marker as a
+  safety net. `CodexAgent.get_lifecycle_state` also promotes RUNNING -> WAITING while the
+  marker is present, mirroring claude. Note codex has **no** `PostToolUseFailure` event (claude
+  does), so cleanup is `PostToolUse` + `Stop` only. `END_OF_TURN` follows from the `active`
+  marker (OR of `codex_root_active` and a non-empty `codex_subagents/`, recomputed under lock).
+  Verified live against codex 0.139.0 with the exact production inline hook commands. Codex
+  does **not** implement `offline_agent_field_generators`.
 
 Note: core has no first-class "WAITING reason" -- WAITING is binary (marker absent); the
-`waiting_reason` field is a plugin-specific embellishment.
+`waiting_reason` field is a plugin-specific embellishment that surfaces *why* a WAITING agent is
+blocked (PERMISSIONS vs END_OF_TURN). Implementing `PERMISSIONS` needs two things: (a) the CLI
+actually prompts interactively for tool approval, and (b) it exposes a signal mngr can read while
+the agent is blocked. claude, codex, and opencode have both (implemented): opencode's `ask` policy
+prompts and the event bus emits `permission.asked`/`permission.replied`. agy has (a) but not (b):
+it prompts but fires no event while blocked, so it is blocked on an upstream signal. pi has neither
+-- no tool-approval gate at all -- so `PERMISSIONS` is inapplicable. In the remaining unimplemented
+cases `END_OF_TURN` alone is derivable but adds nothing over the existing RUNNING/WAITING state.
 
 ### Q. Installation management & version pinning
 
@@ -1098,8 +1159,9 @@ so on.
    host paths over the host shell so it works remotely.
 
 Then the claude features no port has matched yet, in roughly descending value: **session
-preservation on destroy**, **deploy/scheduling contributions**, **field generators
-(waiting_reason)**, and the **streaming snapshot**.
+preservation on destroy**, **deploy/scheduling contributions**, and the **streaming
+snapshot**. (`waiting_reason` is matched by codex and opencode; still worth doing for agy once
+it exposes a permission signal; inapplicable to pi, which has no approval prompt. See dimension P.)
 
 Correctness hardening (shell-quoting of args, onboarding edge cases, etc.) is continuous,
 not a milestone -- expect it throughout. For a concrete worked example of this whole

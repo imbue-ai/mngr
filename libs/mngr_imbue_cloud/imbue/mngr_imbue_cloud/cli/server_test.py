@@ -1,9 +1,11 @@
+import subprocess
 from datetime import datetime
 from datetime import timezone
 
 from click.testing import CliRunner
 
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
+from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
 from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
 from imbue.mngr_imbue_cloud.cli.server import server
@@ -59,7 +61,8 @@ def test_build_registered_server_derives_slot_count_from_memory_per_slice() -> N
         ovh_order_id="8144904",
         status=SERVER_STATUS_READY,
     )
-    assert built.slot_count == 8
+    # 64GB box, 8GB slices: (64-8)*1024 // (8*1024 + 512) = 6 slots after host reserve.
+    assert built.slot_count == 6
     assert built.disk_gb == 477
     assert built.ovh_service_name == "ns1.ovh.us"
     assert str(built.status) == "ready"
@@ -70,9 +73,10 @@ def test_compute_server_slice_sizing_uses_server_inputs_and_specs() -> None:
     # 16 threads * 1.5 / 8 slots = 3 vCPU per slice.
     assert sizing["vcpus"] == 3
     assert sizing["advertised_memory_gb"] == 8
-    assert sizing["memory_mib"] == 8 * 1024 - 512
-    # Per-slice disk budget (477 - 20 reserve) // 8 slots, minus the fixed boot disk.
-    assert sizing["disk_gib"] == (477 - 20) // 8 - SLICE_BOOT_DISK_GIB
+    # Guest gets the full advertised RAM (per-VM overhead is accounted in slot_count).
+    assert sizing["memory_mib"] == 8 * 1024
+    # Per-slice disk budget = (477 - max(20, ceil(477*0.10))=48 reserve) // 8, minus boot.
+    assert sizing["disk_gib"] == (477 - 48) // 8 - SLICE_BOOT_DISK_GIB
     assert slice_advertised_attributes(sizing) == {"memory_gb": 8, "cpus": 3}
 
 
@@ -96,3 +100,18 @@ def test_server_group_help_lists_commands() -> None:
     for command in ("prep", "list", "register", "set-status"):
         assert command in result.output
     assert "allocate-slice" not in result.output
+
+
+def test_kill_bake_worker_processes_terminates_a_child() -> None:
+    # On a top-level kill the bake's in-flight `mngr create` workers must be reaped
+    # so they don't keep carving VMs; this is the helper that does it. Spawn a child
+    # and confirm it is killed (the helper kills all children of this process).
+    child = subprocess.Popen(["sleep", "39517"])
+    try:
+        assert child.poll() is None
+        _kill_bake_worker_processes(grace_seconds=5.0)
+        assert child.wait(timeout=5) is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)

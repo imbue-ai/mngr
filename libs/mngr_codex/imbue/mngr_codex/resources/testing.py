@@ -34,6 +34,19 @@ def provision_commands_dir(state_dir: Path, script_names: Sequence[str]) -> Path
     return commands_dir
 
 
+def install_common_transcript_flush_stub(state_dir: Path, sentinel: Path) -> None:
+    """Provision a stub ``mngr_common_transcript_lib.sh`` whose
+    ``mngr_common_transcript_flush`` just touches ``sentinel``.
+
+    Lets a turn-end hook test observe whether the flush ran without standing up
+    the real stream/convert pipeline. Write it after ``provision_commands_dir``
+    (which does not copy the shared lib) so it is the only definition.
+    """
+    (state_dir / "commands" / "mngr_common_transcript_lib.sh").write_text(
+        f'mngr_common_transcript_flush() {{ touch "{sentinel}"; }}\n'
+    )
+
+
 def run_codex_hook(
     state_dir: Path,
     script_name: str,

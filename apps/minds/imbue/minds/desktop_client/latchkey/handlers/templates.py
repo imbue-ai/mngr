@@ -26,6 +26,13 @@ from collections.abc import Sequence
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
+
+# The catch-all ``any`` permission is stored and submitted verbatim (it is
+# Detent's wildcard schema), but users find ``all`` clearer, so the dialog
+# shows this label in its place while the underlying checkbox value stays
+# ``any``.
+_WILDCARD_PERMISSION_LABEL = "all"
 
 
 @pure
@@ -61,6 +68,8 @@ def render_predefined_permission_dialog(
         permission_schemas=service.permission_schemas,
         description_by_permission_name=service.description_by_permission_name,
         checked_permissions=set(checked_permissions),
+        wildcard_permission=WILDCARD_PERMISSION_NAME,
+        wildcard_label=_WILDCARD_PERMISSION_LABEL,
         will_open_browser=will_open_browser,
         mngr_forward_origin=mngr_forward_origin,
     )

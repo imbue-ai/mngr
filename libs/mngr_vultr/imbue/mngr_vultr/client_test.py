@@ -160,24 +160,3 @@ class TestVultrVpsClientSshKeys:
         with patch("requests.request", return_value=response):
             with pytest.raises(VpsApiError):
                 client.upload_ssh_key("test", "ssh-ed25519 AAAA test")
-
-    def test_list_ssh_keys(self, client: VultrVpsClient) -> None:
-        response = _mock_response(json_data={"ssh_keys": [{"id": "k1", "name": "key1"}, {"id": "k2", "name": "key2"}]})
-        with patch("requests.request", return_value=response):
-            keys = client.list_ssh_keys()
-            assert len(keys) == 2
-            assert keys[0].id == "k1"
-
-
-class TestVultrVpsClientSnapshots:
-    def test_create_snapshot(self, client: VultrVpsClient) -> None:
-        response = _mock_response(json_data={"snapshot": {"id": "snap-123"}})
-        with patch("requests.request", return_value=response):
-            snap_id = client.create_snapshot(VpsInstanceId("inst-123"), "test snapshot")
-            assert str(snap_id) == "snap-123"
-
-    def test_list_snapshots_empty(self, client: VultrVpsClient) -> None:
-        response = _mock_response(json_data={"snapshots": []})
-        with patch("requests.request", return_value=response):
-            snapshots = client.list_snapshots()
-            assert snapshots == []

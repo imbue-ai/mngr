@@ -4,6 +4,39 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Fixed a stale keyword argument in the antigravity submission path: the call to `send_enter_via_tmux_wait_for_hook` still passed `queue_log_path_template=None`, a parameter that was removed upstream when the queue-log fallback was dropped (the function now waits on the TUI hook signal, optionally alongside an acceptance marker). agy supplies no acceptance marker, so behavior is unchanged -- it still waits on its statusLine busy-signal alone. This reconciles the antigravity plugin with the current `tui_utils` signature so it type-checks.
+
+The common-transcript converter's event-conversion logic lives in a standalone `common_transcript_convert.py` (provisioned alongside `common_transcript.sh` and invoked by it), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, non-string USER_INPUT content, and CODE_ACTION records with non-string content (e.g. JSON null) are dropped silently rather than emitting an empty event or crashing the converter.
+
+The common-transcript watcher no longer echoes converter errors to the agent's pane: a genuine conversion error is recorded in the structured log only, instead of also being written to the watcher's stderr.
+
+agy (antigravity) agents now preserve their transcripts on destroy, matching the claude plugin.
+
+- New `preserve_on_destroy` config option (default `true`): before an agy agent's state directory is deleted on destroy, its raw and common transcripts and the conversation-id history (root conversation plus the full conversation-ids list) are copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`, mirroring the agent's state-directory layout. For remote agents the files are pulled to the local machine so they survive host destruction. Set to `false` to discard transcript data on destroy.
+
+- Works for both online destroys and offline host destruction (where the agent state is read off the host's persisted volume).
+
+- The agy release lifecycle test now asserts the transcripts are actually preserved on destroy (previously destroy was bare cleanup), so the feature is covered end-to-end against the real `agy` binary.
+
+- agy's native resumable conversation store (the per-conversation SQLite files under `plugin/antigravity/home/.gemini/antigravity-cli/conversations/` that `agy --conversation` resumes from) is now also preserved on destroy, so the agent can be resumed or adopted. Only the `conversations/` subdir is preserved -- the agy oauth token, `settings.json`, and the macOS keychain symlink are excluded. Known limitation: on macOS the store is encrypted by the login-keychain "Antigravity Safe Storage" key, so a macOS-created store is readable on the same machine but not portable to a different machine or user (Linux uses a portable file-based store).
+
+## 2026-06-15
+
+Hardened the turn-end signal so consumers that read the common transcript on the WAITING
+transition (e.g. an orchestrator harvesting the agent's final message) can no longer
+outrun the converter. `statusline.sh` now, on the busy->idle edge, flushes the transcript
+pipeline (a synchronous `--single-pass` of the raw streamer and common-transcript
+converter, in pipeline order) before clearing the `active` marker -- so by the time the
+agent reports WAITING the common transcript already reflects the final assistant message.
+The flush is gated to the busy->idle edge so it costs at most one conversion pass per turn.
+
+The flush and the converter's convert lock now come from the shared
+`mngr_common_transcript_lib.sh` (see the `mngr` changelog) rather than being duplicated
+per agent. The convert lock keeps the on-demand flush from racing the background 5s
+daemon into duplicate events; its timeout is tunable via `MNGR_CONVERT_LOCK_TIMEOUT`.
+
 ## 2026-06-14
 
 Fixed a macOS keychain barrier that blocked antigravity (`agy`) agents. agy embeds

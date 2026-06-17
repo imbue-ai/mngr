@@ -72,9 +72,11 @@ import importlib.resources
 import json
 import shlex
 from collections.abc import Mapping
+from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import ClassVar
 from typing import Final
 
@@ -90,26 +92,42 @@ from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.common import classify_waiting_reason
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_codex import resources as _codex_resources
 from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import BACKGROUND_TASKS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import MARKER_LOCK_DIRNAME
 from imbue.mngr_codex.codex_config import MARKER_STATE_LIB_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_ACTIVE_FILENAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
+from imbue.mngr_codex.codex_config import SESSIONS_RELATIVE_PATH
 from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENTS_DIRNAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
@@ -260,6 +278,11 @@ class CodexAgentConfig(AgentTypeConfig):
         default=True,
         description="When True, emit a common-schema transcript that `mngr transcript` reads.",
     )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
+    )
 
 
 class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin):
@@ -277,6 +300,23 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
     def get_expected_process_name(self) -> str:
         # The codex CLI is a single Rust binary; ps/tmux show the literal name.
         return "codex"
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        """Get lifecycle state, accounting for the codex ``permissions_waiting`` marker.
+
+        The ``PermissionRequest`` hook touches a ``permissions_waiting`` file while
+        codex is blocked on a tool-approval dialog (verified live against codex
+        0.139.0: the marker is present for the whole time the dialog is open and is
+        cleared on ``PostToolUse``). The base state reads only the ``active`` marker,
+        which stays present during a dialog (the root turn has not stopped), so on
+        its own it would report RUNNING. Promote RUNNING -> WAITING while the agent
+        is blocked, since it cannot progress without user intervention. The promotion
+        rule itself lives in ``_resolve_lifecycle_state_for_permission`` so it can be
+        unit-tested without a live tmux pane.
+        """
+        base_state = super().get_lifecycle_state()
+        is_blocked_on_permission = self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
+        return _resolve_lifecycle_state_for_permission(base_state, is_blocked_on_permission)
 
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # codex's UserPromptSubmit hook (set_active_marker.sh) fires
@@ -304,8 +344,11 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         return {RAW_TRANSCRIPT_SCRIPT_NAME: _load_codex_resource_script(RAW_TRANSCRIPT_SCRIPT_NAME)}
 
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the codex common-transcript converter."""
-        return {COMMON_TRANSCRIPT_SCRIPT_NAME: _load_codex_resource_script(COMMON_TRANSCRIPT_SCRIPT_NAME)}
+        """Return the codex common-transcript converter shell script and its python module."""
+        return {
+            name: _load_codex_resource_script(name)
+            for name in (COMMON_TRANSCRIPT_SCRIPT_NAME, COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME)
+        }
 
     def _get_codex_home(self) -> Path:
         """Per-agent ``CODEX_HOME`` (under the agent state dir)."""
@@ -321,6 +364,11 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         the same file.
         """
         return self._get_agent_dir() / ROOT_SESSION_FILENAME
+
+    def on_destroy(self, host: OnlineHostInterface) -> None:
+        """Preserve transcripts and session-id history before the state dir is deleted."""
+        if self.agent_config.preserve_on_destroy:
+            preserve_agent_state(_codex_preserved_items(), self, host)
 
     def _resolve_user_codex_home(self, host: OnlineHostInterface) -> Path:
         """Resolve the user's real ``CODEX_HOME`` over the host shell.
@@ -785,7 +833,93 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         )
 
 
+def _codex_preserved_items() -> list[PreservedItem]:
+    """Return the files to preserve from a codex agent's state directory.
+
+    The raw and common transcripts, the root session-id history (used to resume
+    the conversation), and codex's native resumable rollout store. The native
+    JSONLs are preserved by targeting ``CODEX_HOME/sessions`` specifically, which
+    excludes the auth-token symlink and config that sit as siblings in CODEX_HOME.
+    """
+    return [
+        *build_transcript_preserved_items("codex"),
+        PreservedItem(rel_path=ROOT_SESSION_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=SESSIONS_RELATIVE_PATH, kind=FileType.DIRECTORY),
+    ]
+
+
+def _codex_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) codex agent, or None to skip it."""
+    return flag_gated_items(ref, "preserve_on_destroy", _codex_preserved_items())
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve codex transcripts from the host's volume before it is destroyed.
+
+    Mirrors ``CodexAgent.on_destroy`` for the offline path, where a host is
+    destroyed without per-agent ``on_destroy`` calls but agent state still lives
+    on the host's persisted volume.
+    """
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName("codex"), _codex_items_to_preserve_for_discovered_agent
+    )
+
+
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the codex agent type."""
     return ("codex", CodexAgent, CodexAgentConfig)
+
+
+def _resolve_lifecycle_state_for_permission(
+    base_state: AgentLifecycleState, is_blocked_on_permission: bool
+) -> AgentLifecycleState:
+    """Layer the ``permissions_waiting`` signal onto the base lifecycle state.
+
+    Promotes RUNNING -> WAITING while codex is blocked on a tool-approval dialog
+    (the base state, which reads only the ``active`` marker, would otherwise report
+    RUNNING since the root turn has not stopped). Every non-RUNNING base state
+    passes through unchanged. Kept pure (no agent/host) so ``get_lifecycle_state``'s
+    promotion rule is unit-testable without standing up a tmux pane.
+
+    Defers the gating decision to the shared ``classify_waiting_reason``: a RUNNING
+    base state means the ``active`` marker is present and the process is alive, so
+    the classifier's ``is_active`` gate is satisfied and a PERMISSIONS verdict is
+    what promotes RUNNING to WAITING. Sharing that one function keeps this promotion
+    and the ``waiting_reason`` field generator from drifting apart.
+    """
+    if base_state != AgentLifecycleState.RUNNING:
+        return base_state
+    reason = classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked_on_permission)
+    return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else base_state
+
+
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting based on marker files, or None.
+
+    Reads the agent state directory's marker files directly rather than calling
+    get_lifecycle_state() (which runs tmux/ps SSH commands), then delegates the
+    decision to the shared ``classify_waiting_reason`` so this and the lifecycle
+    promotion stay in lockstep. The markers are maintained by the codex lifecycle
+    hooks (see build_codex_hooks_config). ``permissions_waiting`` is only read when
+    ``active`` is present, both to short-circuit the idle case and because the
+    classifier ignores the permission signal when the agent is not in a turn.
+
+    Known limitation: when a dialog is cancelled (Esc / "No"), codex 0.139.0 fires
+    no terminal hook for the turn (verified live), so both the ``active`` and
+    ``permissions_waiting`` markers persist until the next turn's Stop. During that
+    window this returns PERMISSIONS even though the dialog is closed; the lifecycle
+    state stays WAITING (correct), only this reason sub-field is briefly off, and it
+    self-heals at the next Stop. See the README "Known limitation" note.
+    """
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    is_active = host.path_exists(agent_dir / ACTIVE_MARKER_FILENAME)
+    is_blocked_on_permission = is_active and host.path_exists(agent_dir / PERMISSIONS_WAITING_FILENAME)
+    return classify_waiting_reason(is_active, is_blocked_on_permission)
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose codex-specific agent fields for listing."""
+    return ("codex", {"waiting_reason": _waiting_reason})

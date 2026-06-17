@@ -50,6 +50,8 @@ _DATA_HOME_RELATIVE_PATH: tuple[str, ...] = ("plugin", "opencode", "data")
 # OpenCode namespaces everything it writes under ``$XDG_DATA_HOME/opencode``.
 _OPENCODE_APP_DIR_NAME: str = "opencode"
 _AUTH_FILENAME: str = "auth.json"
+_DB_FILENAME: str = "opencode.db"
+_STORAGE_DIR_NAME: str = "storage"
 _CONFIG_FILENAME: str = "opencode.json"
 _PLUGIN_DIR_NAME: str = "plugin"
 
@@ -62,6 +64,14 @@ PLUGIN_FILENAME: str = "mngr_opencode_plugin.ts"
 # ``BaseAgent.get_lifecycle_state`` reads as RUNNING; absence means WAITING. The
 # plugin touches/removes it. Kept in sync with the literal ``"active"`` core checks.
 ACTIVE_MARKER_FILENAME: str = "active"
+
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while opencode is blocked on a
+# tool-approval prompt (its ``ask`` permission policy). The lifecycle plugin touches
+# it while one or more permissions are pending and removes it once they are all
+# answered; ``OpenCodeAgent.get_lifecycle_state`` promotes RUNNING -> WAITING while
+# it is present, and ``_waiting_reason`` reports ``PERMISSIONS``. The plugin
+# hardcodes this same literal; keep the two in sync.
+PERMISSIONS_WAITING_FILENAME: str = "permissions_waiting"
 
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the *root* OpenCode
 # session id. ``opencode_launch.sh`` creates the session (via the server API)
@@ -119,6 +129,23 @@ COMMON_TRANSCRIPT_RELATIVE_PATH: str = "events/opencode/common_transcript/events
 
 # ``source`` stamped on every common-transcript event (mirrors agy's scheme).
 COMMON_TRANSCRIPT_SOURCE: str = "opencode/common_transcript"
+
+# OpenCode's native resumable session store (relative to ``$MNGR_AGENT_STATE_DIR``,
+# POSIX strings), preserved on destroy so the session can be resumed/adopted. These
+# target the db file + storage dir specifically; the sibling ``auth.json`` (a symlink
+# to shared creds) and ``log/`` under the same ``opencode/`` dir are deliberately excluded.
+# The db is SQLite in WAL mode: the ``-wal`` (and ``-shm``) sidecars hold writes not yet
+# checkpointed into the main file, so they must be preserved alongside it or the most
+# recent turns are lost. Both are absent once checkpointed (e.g. a clean shutdown), so
+# preservation skips them when missing.
+NATIVE_DB_RELATIVE_PATH: str = "/".join((*_DATA_HOME_RELATIVE_PATH, _OPENCODE_APP_DIR_NAME, _DB_FILENAME))
+NATIVE_DB_WAL_RELATIVE_PATH: str = f"{NATIVE_DB_RELATIVE_PATH}-wal"
+NATIVE_DB_SHM_RELATIVE_PATH: str = f"{NATIVE_DB_RELATIVE_PATH}-shm"
+# ``storage/`` is a pre-SQLite-migration layout: on current opencode (verified 1.17.7) all
+# conversation content lives in the db, and ``storage/`` is empty -- so preserving it is a
+# no-op there. Kept (and skipped when absent) for back-compat with older opencode versions
+# that did file the message parts under it.
+NATIVE_STORAGE_RELATIVE_PATH: str = "/".join((*_DATA_HOME_RELATIVE_PATH, _OPENCODE_APP_DIR_NAME, _STORAGE_DIR_NAME))
 
 
 def get_opencode_root_session_file_path(agent_state_dir: Path) -> Path:
