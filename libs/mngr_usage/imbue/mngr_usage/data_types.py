@@ -7,6 +7,7 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import PluginConfig
 
 # Discovery convention shared by the reader (``api``) and the destroy-time
@@ -43,13 +44,31 @@ class CostMode(UpperCaseStrEnum):
     API_KEY = auto()
 
 
+class CostProvenance(UpperCaseStrEnum):
+    """How a session's ``total_cost_usd`` was obtained.
+
+    - ``REPORTED``: the harness supplied the dollar figure directly (Claude
+      Code's statusline, OpenCode's per-message cost, pi's client-side cost).
+    - ``ESTIMATED``: the reader derived it from token counts via the pricing
+      table (a token-only source like Codex, or a provider where the harness
+      reports no cost).
+
+    Orthogonal to [[cost-mode]] (who pays / whether it's billable). The reader
+    prefers a ``REPORTED`` figure and only falls back to ``ESTIMATED``.
+    """
+
+    REPORTED = auto()
+    ESTIMATED = auto()
+
+
 class UsagePluginConfig(PluginConfig):
     """Configuration for the usage plugin."""
 
-    max_age_seconds: int = Field(
+    stale_after_seconds: int = Field(
         default=300,
         description="Snapshot freshness threshold in seconds. When the snapshot's "
         "updated_at is older than this, `mngr usage` prints a stale-snapshot warning. "
+        "Display warning only -- it does not change which events are aggregated. "
         "Reader-only -- this plugin doesn't capture data, it walks events files "
         "produced by writer plugins (one event per provisioned agent's render) and "
         "aggregates them per-source (rate-limit windows reduce freshest-wins; "
@@ -79,7 +98,9 @@ class UsagePluginConfig(PluginConfig):
             return self
         return UsagePluginConfig(
             enabled=override.enabled if override.enabled is not None else self.enabled,
-            max_age_seconds=override.max_age_seconds if override.max_age_seconds is not None else self.max_age_seconds,
+            stale_after_seconds=(
+                override.stale_after_seconds if override.stale_after_seconds is not None else self.stale_after_seconds
+            ),
             since_seconds=override.since_seconds if override.since_seconds is not None else self.since_seconds,
             preserve_on_destroy=(
                 override.preserve_on_destroy if override.preserve_on_destroy is not None else self.preserve_on_destroy
@@ -118,6 +139,33 @@ class CostSnapshot(FrozenModel):
     )
     total_lines_added: int | None = Field(default=None, description="Lines of code added during the session.")
     total_lines_removed: int | None = Field(default=None, description="Lines of code removed during the session.")
+
+
+class TokenSnapshot(FrozenModel):
+    """Session-level token counts supplied by a writer that reports usage in tokens.
+
+    All fields optional and writer-driven, mirroring ``CostSnapshot``'s
+    passive-but-typed stance. The buckets are **non-overlapping**: ``input`` is
+    the non-cached input count, and ``cache_read`` / ``cache_creation`` are
+    separate, so the dollar cost is exactly
+    ``input*p_in + cache_read*p_cr + cache_creation*p_cw + output*p_out`` with no
+    double-counting (see :func:`imbue.mngr_usage.pricing.compute_cost`). Writers
+    whose source reports ``input`` inclusive of cache normalize it to the
+    non-cached count before emitting. ``output`` includes any reasoning tokens
+    (billed at the output rate).
+
+    Like ``CostSnapshot``, a ``TokenSnapshot`` plays two roles: one session's own
+    contribution at ``SessionCostRecord.tokens``, and the per-mode sum at
+    ``UsageSnapshot``'s token aggregates. Each field sums cleanly, so the same
+    type serves both.
+    """
+
+    input: int | None = Field(default=None, description="Non-cached input tokens (cache buckets are separate).")
+    output: int | None = Field(default=None, description="Output tokens, inclusive of reasoning tokens.")
+    cache_read: int | None = Field(default=None, description="Input tokens served from the prompt cache (read).")
+    cache_creation: int | None = Field(
+        default=None, description="Input tokens written to the prompt cache (creation/write)."
+    )
 
 
 class WindowSnapshot(FrozenModel):
@@ -194,8 +242,50 @@ class SessionCostRecord(FrozenModel):
         "(direct ANTHROPIC_API_KEY; cost is real). Determines which aggregate this session feeds "
         "into on UsageSnapshot."
     )
+    tokens: TokenSnapshot | None = Field(
+        default=None,
+        description="This session's own token contribution, when the source reports tokens; "
+        "None for cost-only sources (e.g. Claude).",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Canonical '<provider>/<model>' the tokens were billed against; drives "
+        "token->cost derivation. None when the source reports cost directly or omits the model.",
+    )
+    cost_provenance: CostProvenance = Field(
+        default=CostProvenance.REPORTED,
+        description="Whether ``cost`` was reported by the harness (default) or estimated by the "
+        "reader from ``tokens`` via the pricing table.",
+    )
     first_event_at: int = Field(description="Unix timestamp of the earliest event seen for this session.")
     last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
+
+
+class UsageEvent(FrozenModel):
+    """One raw event dict parsed and validated into the shape the walkers consume.
+
+    Produced by ``_parse_usage_event`` (in ``api``); a parsed event always has a
+    usable ``timestamp_unix`` and non-empty ``session_id`` (both are drop
+    conditions in the parser). The walkers read every other field off this typed
+    surface instead of re-doing ``event.get(...)`` + ``isinstance`` guards, which
+    keeps the cross-strategy invariant intact: windows can only be read off a
+    parsed event, so the session_id requirement filters windows exactly as it
+    filters sessions.
+    """
+
+    timestamp_unix: int = Field(description="Event timestamp as a Unix timestamp.")
+    session_id: str = Field(description="Writer-supplied session id (always non-empty on a parsed event).")
+    event_id: str | None = Field(default=None, description="Per-event id, when the writer emitted one.")
+    message_id: str | None = Field(default=None, description="Per-message id for session-incremental sources.")
+    cost: CostSnapshot | None = Field(default=None, description="Parsed cost block, or None when absent/malformed.")
+    tokens: TokenSnapshot | None = Field(
+        default=None, description="Parsed tokens block, or None when absent/malformed."
+    )
+    windows: dict[str, WindowSnapshot] = Field(
+        default_factory=dict, description="Parsed rate_limits payload (empty when absent)."
+    )
+    model: str | None = Field(default=None, description="Canonical '<provider>/<model>', or None.")
+    cost_mode_hint: CostMode | None = Field(default=None, description="Writer-declared cost_mode hint, or None.")
 
 
 @overload
@@ -223,6 +313,54 @@ def _sum_optional(values: list[int | None] | list[float | None]) -> int | float 
     return sum(present) if present else None
 
 
+@overload
+def add_optional(left: int | None, right: int | None) -> int | None: ...
+
+
+@overload
+def add_optional(left: float | None, right: float | None) -> float | None: ...
+
+
+@pure
+def add_optional(left: int | float | None, right: int | float | None) -> int | float | None:
+    """Add two optional numbers, treating None as 'missing' (None + None stays None).
+
+    A present value on either side wins (a None on the other side counts as
+    zero), matching ``_sum_optional``'s 'how much have I spent' stance where a
+    single missing sub-field doesn't black-hole the whole sum.
+    """
+    if left is None and right is None:
+        return None
+    return (left or 0) + (right or 0)
+
+
+@overload
+def sub_optional(current: int | None, baseline: int | None) -> int | None: ...
+
+
+@overload
+def sub_optional(current: float | None, baseline: float | None) -> float | None: ...
+
+
+@pure
+def sub_optional(current: int | float | None, baseline: int | float | None) -> int | float | None:
+    """Single-field clamped subtraction for cost-delta computation.
+
+    Treats a missing baseline as zero so the first reading in a series just
+    gets its own value. A missing current field stays None (no delta to
+    report). Negative deltas are clamped to zero defensively -- they shouldn't
+    occur within a cumulative series but if a writer ever emits an out-of-order
+    pair we'd rather show 0 than a misleading negative spend.
+
+    Distinct from ``add_optional`` because subtraction clamps at zero and treats
+    a None ``current`` as 'no delta', not as a zero operand.
+    """
+    if current is None:
+        return None
+    delta = current - (baseline if baseline is not None else 0)
+    return delta if delta >= 0 else type(current)(0)
+
+
 def _aggregate_cost(records: tuple[SessionCostRecord, ...]) -> CostSnapshot:
     """Sum each numeric field across ``records``'s ``cost`` snapshots.
 
@@ -238,6 +376,20 @@ def _aggregate_cost(records: tuple[SessionCostRecord, ...]) -> CostSnapshot:
         total_api_duration_ms=_sum_optional([s.cost.total_api_duration_ms for s in records]),
         total_lines_added=_sum_optional([s.cost.total_lines_added for s in records]),
         total_lines_removed=_sum_optional([s.cost.total_lines_removed for s in records]),
+    )
+
+
+def _aggregate_tokens(records: tuple[SessionCostRecord, ...]) -> TokenSnapshot:
+    """Sum each token field across ``records``'s ``tokens`` (a None record contributes nothing).
+
+    All-None ``TokenSnapshot`` when no record carries tokens -- e.g. a cost-only
+    source like Claude -- so the JSON / CEL surface stays shape-stable.
+    """
+    return TokenSnapshot(
+        input=_sum_optional([s.tokens.input if s.tokens is not None else None for s in records]),
+        output=_sum_optional([s.tokens.output if s.tokens is not None else None for s in records]),
+        cache_read=_sum_optional([s.tokens.cache_read if s.tokens is not None else None for s in records]),
+        cache_creation=_sum_optional([s.tokens.cache_creation if s.tokens is not None else None for s in records]),
     )
 
 
@@ -328,6 +480,26 @@ class UsageSnapshot(FrozenModel):
         and real costs. All-None when there are no api_key sessions.
         """
         return _aggregate_cost(self.api_sessions)
+
+    @property
+    def subscription_tokens(self) -> TokenSnapshot:
+        """Aggregate token counts across subscription-mode sessions (all-None for cost-only sources)."""
+        return _aggregate_tokens(self.subscription_sessions)
+
+    @property
+    def api_tokens(self) -> TokenSnapshot:
+        """Aggregate token counts across api_key-mode sessions (all-None for cost-only sources)."""
+        return _aggregate_tokens(self.api_sessions)
+
+    @property
+    def is_subscription_cost_estimated(self) -> bool:
+        """True if any subscription session's cost was reader-estimated from tokens (vs harness-reported)."""
+        return any(s.cost_provenance == CostProvenance.ESTIMATED for s in self.subscription_sessions)
+
+    @property
+    def is_api_cost_estimated(self) -> bool:
+        """True if any api_key session's cost was reader-estimated from tokens (vs harness-reported)."""
+        return any(s.cost_provenance == CostProvenance.ESTIMATED for s in self.api_sessions)
 
     @property
     def session_count(self) -> int:

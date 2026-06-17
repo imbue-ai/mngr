@@ -27,22 +27,19 @@ from pydantic import SkipValidation
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr_claude.stream_json import content_block_start_event
+from imbue.mngr_claude.stream_json import content_block_stop_event
+from imbue.mngr_claude.stream_json import message_delta_event
+from imbue.mngr_claude.stream_json import message_start_event
+from imbue.mngr_claude.stream_json import message_stop_event
+from imbue.mngr_claude.stream_json import text_delta_event
 from imbue.mngr_robinhood.stream_buffer import buffer_body
 from imbue.mngr_robinhood.stream_buffer import compute_stream_delta
-
-# We reconstruct a single text content block per streamed message; tool-call and reasoning blocks
-# never reach the stream_buffer, so index 0 always refers to the assistant-text block.
-_BLOCK_INDEX: Final[int] = 0
 
 # stop_reason stamped on the synthesized message_delta at clean turn completion. mngr cannot observe
 # claude's real stop_reason at stream time; end_turn is the overwhelmingly common terminal value and
 # the authoritative ResultMessage carries the real terminal signal.
 _SYNTHETIC_STOP_REASON: Final[str] = "end_turn"
-
-
-def _zeroed_usage() -> dict[str, Any]:
-    """A zeroed usage stub: stream-time token counts are unknown on the mngr transport."""
-    return {"input_tokens": 0, "output_tokens": 0}
 
 
 class StreamEventSynthesizer(MutableModel):
@@ -96,15 +93,15 @@ class StreamEventSynthesizer(MutableModel):
         events: list[StreamEvent] = []
         if not self.is_message_open:
             events.extend(self._open_framing(session_id, model))
-        events.append(self._event(session_id, _content_block_delta_payload(delta)))
+        events.append(self._event(session_id, text_delta_event(delta)))
         return events
 
     def _open_framing(self, session_id: str, model: str) -> list[StreamEvent]:
         self.is_message_open = True
         self.message_id = str(uuid4())
         return [
-            self._event(session_id, _message_start_payload(self.message_id, model)),
-            self._event(session_id, _content_block_start_payload()),
+            self._event(session_id, message_start_event(self.message_id, model)),
+            self._event(session_id, content_block_start_event()),
         ]
 
     def _close_framing(self, session_id: str) -> list[StreamEvent]:
@@ -113,50 +110,10 @@ class StreamEventSynthesizer(MutableModel):
         self.is_message_open = False
         self.message_id = ""
         return [
-            self._event(session_id, _content_block_stop_payload()),
-            self._event(session_id, _message_delta_payload()),
-            self._event(session_id, _message_stop_payload()),
+            self._event(session_id, content_block_stop_event()),
+            self._event(session_id, message_delta_event(_SYNTHETIC_STOP_REASON)),
+            self._event(session_id, message_stop_event()),
         ]
 
     def _event(self, session_id: str, payload: dict[str, Any]) -> StreamEvent:
         return StreamEvent(uuid=str(uuid4()), session_id=session_id, event=payload)
-
-
-def _message_start_payload(message_id: str, model: str) -> dict[str, Any]:
-    return {
-        "type": "message_start",
-        "message": {
-            "id": message_id,
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": [],
-            "stop_reason": None,
-            "stop_sequence": None,
-            "usage": _zeroed_usage(),
-        },
-    }
-
-
-def _content_block_start_payload() -> dict[str, Any]:
-    return {"type": "content_block_start", "index": _BLOCK_INDEX, "content_block": {"type": "text", "text": ""}}
-
-
-def _content_block_delta_payload(text: str) -> dict[str, Any]:
-    return {"type": "content_block_delta", "index": _BLOCK_INDEX, "delta": {"type": "text_delta", "text": text}}
-
-
-def _content_block_stop_payload() -> dict[str, Any]:
-    return {"type": "content_block_stop", "index": _BLOCK_INDEX}
-
-
-def _message_delta_payload() -> dict[str, Any]:
-    return {
-        "type": "message_delta",
-        "delta": {"stop_reason": _SYNTHETIC_STOP_REASON, "stop_sequence": None},
-        "usage": _zeroed_usage(),
-    }
-
-
-def _message_stop_payload() -> dict[str, Any]:
-    return {"type": "message_stop"}

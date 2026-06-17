@@ -35,8 +35,13 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('modal-state-changed', (_event, data) => callback(data));
   },
 
-  // Sidebar
-  toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
+  // Sidebar. The optional ``anchor`` arg is
+  //   { trigger: {x, y, width, height}, offset: {x, y} }
+  // (all numbers; viewport-relative). Main packs it into the sidebar's URL
+  // so Sidebar.jinja can position the menu via server-rendered inline
+  // style. If omitted, the server falls back to sensible defaults
+  // (anchor a 38px-tall element at the top-left, nudged 2px left and 2px below it).
+  toggleSidebar: (anchor) => ipcRenderer.send('toggle-sidebar', anchor),
 
   // Inbox modal (formerly the right-side requests panel)
   toggleInbox: () => ipcRenderer.send('toggle-inbox'),
@@ -62,15 +67,15 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('current-workspace-changed', (_event, agentId) => callback(agentId));
   },
 
-  // Persisted "last opened workspace" agent id. The chrome page reads this
-  // on bootstrap to paint the titlebar accent before the first
-  // ``current-workspace-changed`` event arrives. Main owns writes
-  // (driven by ``current-workspace-changed`` + SSE-driven cleanup) and
-  // broadcasts updates via ``onLastWorkspaceAgentIdChanged`` (workspace
-  // deleted, user signed out, a different bundle opened a workspace).
-  getLastWorkspaceAgentId: () => ipcRenderer.invoke('get-last-workspace-agent-id'),
-  onLastWorkspaceAgentIdChanged: (callback) => {
-    ipcRenderer.on('last-workspace-agent-id-changed', (_event, agentId) => callback(agentId));
+  // The accent source for THIS window's current screen: the workspace id on
+  // a workspace-scoped screen (the workspace itself plus its settings /
+  // sharing / destroying / recovery screens) and null on a general screen.
+  // Main pushes it on every navigation (and on workspace-delete / sign-out),
+  // and re-pushes the current value when the chrome view (re)loads, so the
+  // titlebar paints the right accent -- or the neutral chrome -- without the
+  // renderer remembering anything.
+  onAccentChanged: (callback) => {
+    ipcRenderer.on('accent-changed', (_event, agentId) => callback(agentId));
   },
 
   // Actions

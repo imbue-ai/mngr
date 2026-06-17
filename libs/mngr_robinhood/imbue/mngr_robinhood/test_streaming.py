@@ -46,6 +46,18 @@ def _have_claude_credentials() -> bool:
 
 pytestmark = [
     pytest.mark.release,
+    # robinhood drives a real claude agent in tmux, so these tests exercise the
+    # tmux resource. The PATH wrapper installed by the resource guard blocks
+    # (exit 127) any tmux invocation from a test lacking this mark, which would
+    # make the robinhood subprocess fail (exit 2). Declaring it lets the real
+    # tmux through; the subprocess inherits the resulting allow flag via its env.
+    pytest.mark.tmux,
+    # Driving a real agent over a long prompt far exceeds the project's default
+    # 30s per-test timeout. Sibling live SDK tests use timeout(600); set this just
+    # above the 600s subprocess run timeout so a hung agent surfaces robinhood's
+    # own captured stdout/stderr (via _run_robinhood) rather than a bare
+    # pytest-timeout traceback.
+    pytest.mark.timeout(660),
     pytest.mark.skipif(
         not _have_claude_credentials(),
         reason="Release test requires ANTHROPIC_API_KEY in the environment and `claude` on PATH.",

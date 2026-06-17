@@ -23,6 +23,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
+from imbue.concurrency_group.errors import SingleExceptionExpectedError
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
@@ -696,5 +697,5 @@ class ConcurrencyExceptionGroup(ExceptionGroup):
         self,
     ) -> Exception:
         if len(self.exceptions) != 1:
-            raise ValueError("The exception group does not contain exactly one exception.")
+            raise SingleExceptionExpectedError("The exception group does not contain exactly one exception.")
         return self.exceptions[0]

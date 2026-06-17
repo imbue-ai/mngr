@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr kanpan [OPTIONS]
+mngr kanpan [--include CEL] [--exclude CEL] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT]
 ```
 
 TUI board showing agents grouped by lifecycle state with PR status.

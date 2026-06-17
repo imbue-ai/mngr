@@ -35,6 +35,7 @@ from imbue.mngr_vps_docker.container_setup import commit_container
 from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
 from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps_docker.container_setup import docker_inspect_running
+from imbue.mngr_vps_docker.container_setup import ensure_depot_token_available
 from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import get_outer_free_disk_gb
 from imbue.mngr_vps_docker.container_setup import install_btrfs_progs_on_outer
@@ -380,6 +381,29 @@ def test_build_image_on_outer_raises_on_build_failure() -> None:
         )
 
 
+def test_ensure_depot_token_available_raises_for_depot_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEPOT_TOKEN", raising=False)
+    with pytest.raises(MngrError, match="DEPOT_TOKEN"):
+        ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_raises_for_depot_with_empty_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEPOT_TOKEN", "")
+    with pytest.raises(MngrError, match="DEPOT_TOKEN"):
+        ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_passes_for_depot_with_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEPOT_TOKEN", "tok-123")
+    ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_is_noop_for_docker_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The DOCKER builder never needs a token, even when DEPOT_TOKEN is absent.
+    monkeypatch.delenv("DEPOT_TOKEN", raising=False)
+    ensure_depot_token_available(DockerBuilder.DOCKER)
+
+
 def test_build_image_on_outer_with_depot_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DEPOT_TOKEN", raising=False)
     outer = _outer()
@@ -410,8 +434,14 @@ def test_build_image_on_outer_with_depot_uses_depot_build(monkeypatch: pytest.Mo
     )
     assert tag == "depot-image"
     cmd = _stub(outer).recorded[0].command
-    # Depot install + depot build, with --load (so the image lands on the daemon)
-    assert "depot build --load -t depot-image" in cmd
+    # depot build runs with --load so the image lands on the daemon, invoked via
+    # the resolved $DEPOT_BIN rather than a bare `depot`.
+    assert '"$DEPOT_BIN" build --load -t depot-image' in cmd
+    # Resolution prefers a depot already on PATH, falling back to the installer's
+    # off-PATH default ($HOME/.depot/bin/depot); the install check is idempotent
+    # against whichever path was resolved.
+    assert 'command -v depot || echo "$HOME/.depot/bin/depot"' in cmd
+    assert 'test -x "$DEPOT_BIN"' in cmd
     # Secret must NOT be inlined into the command string -- it goes via env.
     assert "my-secret-token" not in cmd
 
@@ -781,10 +811,13 @@ def test_prepare_btrfs_on_outer_is_idempotent_when_everything_in_place() -> None
 
 def test_prepare_btrfs_on_outer_raises_when_free_space_below_reserve() -> None:
     # Loop file missing forces the free-space check, which sees only 15 GiB < 20 GiB reserved.
+    # mountpoint -q fails: a fresh VPS is not yet mounted (so the pre-mounted-btrfs
+    # short-circuit does not apply and the loop-file path runs).
     outer = _scripted(
         [
             ("command -v mkfs.btrfs", _ok()),
             ("test -f /var/lib/mngr-btrfs.img", _fail()),
+            ("mountpoint -q", _fail()),
             ("df --output=avail", _ok(f"{15 * (1024**3)}\n")),
         ]
     )
@@ -800,10 +833,13 @@ def test_prepare_btrfs_on_outer_raises_when_free_space_below_reserve() -> None:
 
 def test_prepare_btrfs_on_outer_raises_when_free_space_equal_to_reserve() -> None:
     # Boundary: free == reserved means loop_file_size would be 0; reject.
+    # mountpoint -q fails: a fresh VPS is not yet mounted (so the pre-mounted-btrfs
+    # short-circuit does not apply and the loop-file path runs).
     outer = _scripted(
         [
             ("command -v mkfs.btrfs", _ok()),
             ("test -f /var/lib/mngr-btrfs.img", _fail()),
+            ("mountpoint -q", _fail()),
             ("df --output=avail", _ok(f"{20 * (1024**3)}\n")),
         ]
     )
@@ -840,6 +876,38 @@ def test_prepare_btrfs_on_outer_skips_free_space_check_when_loop_file_present() 
     )
     joined = "\n".join(cast(_ScriptedOuter, outer).recorded)
     assert "df --output=avail" not in joined
+
+
+def test_prepare_btrfs_on_outer_skips_loop_when_btrfs_already_mounted() -> None:
+    """Slice case: btrfs is already mounted (lima data disk) and no loop file exists.
+
+    The loop-file allocation/mkfs/mount/fstab must be skipped entirely; only the
+    per-host subvolume is ensured.
+    """
+    outer = _scripted(
+        [
+            ("mountpoint -q", _ok()),
+            ("test -f /var/lib/mngr-btrfs.img", _fail()),
+            ("command -v mkfs.btrfs", _ok()),
+            (f"test -d /mngr-btrfs/{_TEST_HOST_HEX}", _fail()),
+        ]
+    )
+    result = prepare_btrfs_on_outer(
+        outer,
+        host_id=_TEST_HOST_ID,
+        btrfs_mount_path=_TEST_MOUNT_PATH,
+        loop_file_path=_TEST_LOOP_FILE,
+        outer_disk_reserved_gb=_TEST_RESERVED_GB,
+    )
+    assert result == _TEST_MOUNT_PATH / _TEST_HOST_HEX
+    joined = "\n".join(cast(_ScriptedOuter, outer).recorded)
+    # No loop-file machinery ran...
+    assert "df --output=avail" not in joined
+    assert "fallocate" not in joined
+    assert "mount -o loop" not in joined
+    assert "/etc/fstab" not in joined
+    # ...but the per-host subvolume was created.
+    assert f"btrfs subvolume create /mngr-btrfs/{_TEST_HOST_HEX}" in joined
 
 
 # =========================================================================

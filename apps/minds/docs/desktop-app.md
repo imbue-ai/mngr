@@ -30,7 +30,7 @@ When accessing an agent URL in a regular browser (not the Electron app), the Pyt
 
 1. Electron creates a frameless window showing a loading screen (`shell.html`)
 2. `uv sync` runs using the bundled `uv` binary and the packaged `pyproject.toml` + lockfile
-3. Electron finds an available port and spawns: `uv run minds --format jsonl --log-file <path> forward --host 127.0.0.1 --port <port> --no-browser`
+3. Electron finds an available port and spawns: `uv run minds -v --format jsonl --log-file <path> run --host 127.0.0.1 --port <port> --no-browser --config-file <path>` (the packaged build always passes `--config-file` from the bundled `client.toml`)
 4. The backend emits a JSONL event `{"event": "login_url", "login_url": "..."}` on stdout
 5. Electron waits for the port to accept TCP connections, then navigates directly to the login URL
 6. Auth completes (one-time code consumed, session cookie set), the custom title bar is injected, user sees the web UI
@@ -74,7 +74,13 @@ Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Unique
 - **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
 - **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
-- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId, lastWorkspaceAgentId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped. Each window's per-window `lastWorkspaceAgentId` carries the most-recently-opened workspace for that window so its accent paints the titlebar across navigation away from the workspace; it's cleared for matching windows on workspace deletion and for all windows on account sign-out.
+- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL, and each window's titlebar accent is re-derived from that restored URL (see below) -- the accent is not separately persisted. URLs pointing at workspaces that no longer exist are silently dropped. (Older files that still carry a per-window `lastWorkspaceAgentId` field are accepted and the field ignored.)
+
+### Titlebar accent and the neutral chrome
+
+The full-width titlebar (and the thin shell around the content view) adopt the active workspace's accent color while you're on a workspace-scoped screen, and fall back to a **neutral** chrome on every other minds screen. The neutral chrome is pure white in light mode (the `--titlebar-bg` fallback in `Chrome.jinja` plus the dark `--titlebar-fg` fallback in `tokens.css`); a pure-black dark-mode variant is a deferred follow-up. The same neutral white is used by the startup/quitting/error loading screen (`shell.html`). Workspace accent swatches deliberately exclude pure black and white so a workspace's color can never collide with this neutral chrome (users can still type either into the settings hex input).
+
+The accent is a **pure function of the window's current screen**, not a remembered value. The titlebar is its own `WebContentsView` and can't read the content URL, so the main process derives the accent source from each content navigation (`parseAccentSourceAgentId`: the workspace id on the workspace itself plus its settings / sharing / destroying / recovery screens, `null` on a general screen) and pushes it to the titlebar over a single `accent-changed` IPC; the chrome renderer applies it unconditionally. Main also re-pushes the current value whenever a chrome view (re)loads (via `primeViewWithCachedChromeState`), which covers cold start, new windows, and crash-recovery rebuilds. The narrower "which workspace is actually being *displayed*" signal (`current-workspace-changed`) is separate and drives only the OS window title and the recovery-page auto-redirect. Browser mode derives the same accent directly from the iframe URL in its poll loop.
 
 ### Environment variables
 
@@ -118,7 +124,7 @@ same shape:
   config.toml             # Optional minds user preferences (default account, etc.)
   client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
   secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
-  window-state.json       # Per-window content URLs + last-opened workspace, restored on next launch
+  window-state.json       # Per-window content URLs + bounds, restored on next launch
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories

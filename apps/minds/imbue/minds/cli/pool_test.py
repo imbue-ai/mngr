@@ -15,13 +15,16 @@ from click.testing import CliRunner
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from imbue.minds.cli.pool import _BACKEND_OVH_VPS
+from imbue.minds.cli.pool import _BACKEND_SLICE
 from imbue.minds.cli.pool import _SECRET_BEARING_FLAGS
 from imbue.minds.cli.pool import build_create_admin_args
 from imbue.minds.cli.pool import build_destroy_admin_args
 from imbue.minds.cli.pool import build_list_admin_args
 from imbue.minds.cli.pool import derive_public_key_from_private
-from imbue.minds.cli.pool import merge_ovh_env_into_subprocess_env
+from imbue.minds.cli.pool import merge_extra_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
+from imbue.minds.cli.pool import resolve_host_pool_dsn
 from imbue.minds.cli.pool import resolved_management_public_key_path
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
@@ -52,31 +55,64 @@ def test_database_url_is_redacted_from_the_loggable_admin_command() -> None:
 def test_build_create_admin_args_injects_minds_env_tag() -> None:
     args = build_create_admin_args(
         env_name="alice",
+        backend=_BACKEND_OVH_VPS,
         count=3,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json='{"cpus": 2}',
         workspace_dir="/path/to/workspace",
         management_public_key_file="/path/to/key.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
     )
     # The --tag injection is the whole reason for this layer's existence.
     tag_index = args.index("--tag")
     assert args[tag_index + 1] == "minds_env=alice"
 
 
+def test_build_create_admin_args_emits_backend() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_OVH_VPS,
+        count=1,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert args[args.index("--backend") + 1] == "ovh_vps"
+
+
 def test_build_create_admin_args_forwards_all_other_flags_verbatim() -> None:
     args = build_create_admin_args(
         env_name="alice",
+        backend=_BACKEND_OVH_VPS,
         count=5,
         region="US-WEST-OR",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json='{"cpus": 4, "memory_gb": 16}',
         workspace_dir="/some/workspace",
         management_public_key_file="/path/to/key.pub",
         database_url="postgres://example",
         mngr_source="/path/to/mngr",
         is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
     )
     assert args[0] == "create"
     assert args[args.index("--count") + 1] == "5"
@@ -91,14 +127,20 @@ def test_build_create_admin_args_forwards_all_other_flags_verbatim() -> None:
 def test_build_create_admin_args_omits_mngr_source_when_none() -> None:
     args = build_create_admin_args(
         env_name="alice",
+        backend=_BACKEND_OVH_VPS,
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--mngr-source" not in args
 
@@ -106,14 +148,20 @@ def test_build_create_admin_args_omits_mngr_source_when_none() -> None:
 def test_build_create_admin_args_omits_no_recycle_by_default() -> None:
     args = build_create_admin_args(
         env_name="alice",
+        backend=_BACKEND_OVH_VPS,
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--no-recycle" not in args
 
@@ -121,16 +169,236 @@ def test_build_create_admin_args_omits_no_recycle_by_default() -> None:
 def test_build_create_admin_args_forwards_no_recycle_when_disabled() -> None:
     args = build_create_admin_args(
         env_name="alice",
+        backend=_BACKEND_OVH_VPS,
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir="/w",
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=False,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
     )
     assert "--no-recycle" in args
+
+
+def test_build_create_admin_args_forwards_skip_deferred_install_wait_when_set() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_OVH_VPS,
+        count=1,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=True,
+    )
+    assert "--skip-deferred-install-wait" in args
+
+
+def test_build_create_admin_args_omits_skip_deferred_install_wait_by_default() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_OVH_VPS,
+        count=1,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert "--skip-deferred-install-wait" not in args
+
+
+def test_build_create_admin_args_slice_omits_ovh_only_flags() -> None:
+    """Slice bakes are not OVH-IAM-tagged and need no --management-public-key-file."""
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_SLICE,
+        count=2,
+        region="US-EAST-VA",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert args[args.index("--backend") + 1] == "slice"
+    assert "--tag" not in args
+    assert "--management-public-key-file" not in args
+    assert args[args.index("--from-tag") + 1] == "minds-v0.3.1"
+
+
+def test_build_create_admin_args_slice_forwards_dry_run() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_SLICE,
+        count=1,
+        region="US-EAST-VA",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=True,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert "--dry-run" in args
+
+
+def test_build_create_admin_args_omits_dry_run_for_ovh_backend() -> None:
+    """--dry-run is slice-only; the ovh_vps path must never forward it."""
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_OVH_VPS,
+        count=1,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=True,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert "--dry-run" not in args
+
+
+def test_build_create_admin_args_omits_no_recycle_for_slice_backend() -> None:
+    """--no-recycle is ovh_vps-only; the slice path must never forward it."""
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_SLICE,
+        count=1,
+        region="US-EAST-VA",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=False,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert "--no-recycle" not in args
+
+
+def test_build_create_admin_args_slice_forwards_max_concurrency() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_SLICE,
+        count=8,
+        region="US-EAST-VA",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+        max_concurrency=4,
+    )
+    assert args[args.index("--max-concurrency") + 1] == "4"
+
+
+def test_build_create_admin_args_omits_max_concurrency_when_none() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_SLICE,
+        count=8,
+        region="US-EAST-VA",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+        max_concurrency=None,
+    )
+    assert "--max-concurrency" not in args
+
+
+def test_build_create_admin_args_omits_max_concurrency_for_ovh_backend() -> None:
+    # --max-concurrency is slice-only; the ovh_vps path must never forward it.
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_OVH_VPS,
+        count=2,
+        region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir="/w",
+        management_public_key_file="/k.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+        max_concurrency=4,
+    )
+    assert "--max-concurrency" not in args
+
+
+def test_pool_create_ovh_rejects_max_concurrency(
+    _isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--max-concurrency is slice-only; the ovh_vps backend must reject it up front."""
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
+    runner = CliRunner()
+    result = runner.invoke(
+        pool,
+        ["create", "--count", "1", "--region", "US-EAST-VA", "--max-concurrency", "4"],
+    )
+    assert result.exit_code != 0
+    assert "--max-concurrency is only supported for --backend slice" in result.output
 
 
 def test_build_list_admin_args() -> None:
@@ -209,17 +477,94 @@ def test_pool_create_derives_production_from_default_root_name(
     # command uses, so verifying it here covers the end-to-end behaviour.
     args = build_create_admin_args(
         env_name="production",
+        backend=_BACKEND_OVH_VPS,
         count=1,
         region="US-EAST-VA",
+        from_tag=None,
+        repo_url=None,
+        repo_branch_or_tag_override=None,
         attributes_json="{}",
         workspace_dir=str(_isolated_env),
         management_public_key_file="/k.pub",
         database_url="postgres://example",
         mngr_source=None,
         is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
     )
     tag_index = args.index("--tag")
     assert args[tag_index + 1] == "minds_env=production"
+
+
+def test_pool_create_slice_rejects_management_public_key_file(
+    _isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--management-public-key-file is ovh_vps-only; slice must reject it before any Vault read."""
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
+    key_file = _isolated_env / "mgmt.pub"
+    key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
+    runner = CliRunner()
+    result = runner.invoke(
+        pool,
+        [
+            "create",
+            "--backend",
+            "slice",
+            "--count",
+            "1",
+            "--region",
+            "US-EAST-VA",
+            # explicit DSN short-circuits resolve_host_pool_dsn so no Vault read happens
+            "--database-url",
+            "postgres://example",
+            "--management-public-key-file",
+            str(key_file),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--management-public-key-file is not applicable to --backend slice" in result.output
+
+
+def test_pool_create_slice_rejects_no_recycle(
+    _isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--no-recycle is ovh_vps-only; slice must reject it before any Vault read."""
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
+    runner = CliRunner()
+    result = runner.invoke(
+        pool,
+        [
+            "create",
+            "--backend",
+            "slice",
+            "--count",
+            "1",
+            "--region",
+            "US-EAST-VA",
+            "--database-url",
+            "postgres://example",
+            "--no-recycle",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--no-recycle is not applicable to --backend slice" in result.output
+
+
+def test_pool_create_ovh_rejects_dry_run(
+    _isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--dry-run is slice-only; the ovh_vps backend must reject it up front."""
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
+    runner = CliRunner()
+    result = runner.invoke(
+        pool,
+        ["create", "--count", "1", "--region", "US-EAST-VA", "--dry-run"],
+    )
+    assert result.exit_code != 0
+    assert "--dry-run is only supported for --backend slice" in result.output
 
 
 def test_pool_list_requires_activated_env(_isolated_env: Path) -> None:
@@ -236,33 +581,33 @@ def test_pool_destroy_requires_activated_env(_isolated_env: Path) -> None:
     assert "No minds env is activated" in result.output
 
 
-def test_merge_ovh_env_overrides_shell_values() -> None:
-    """Vault-sourced OVH creds win over whatever the operator's shell has set.
+def test_merge_extra_env_overrides_shell_values() -> None:
+    """Vault-sourced secrets win over whatever the operator's shell has set.
 
     Operator running ``minds pool create`` after activating a specific tier
-    intends to bake against THAT tier's OVH account. A stale
-    ``OVH_APPLICATION_KEY`` from a different tier's session would otherwise
+    intends to bake against THAT tier's account. A stale ``OVH_APPLICATION_KEY``
+    (or POOL_SSH_PRIVATE_KEY) from a different tier's session would otherwise
     silently misroute the bake.
     """
-    merged = merge_ovh_env_into_subprocess_env(
+    merged = merge_extra_env_into_subprocess_env(
         shell_env={"OVH_APPLICATION_KEY": "stale", "HOME": "/home/me"},
-        ovh_env={"OVH_APPLICATION_KEY": "from-vault", "OVH_CONSUMER_KEY": "ck-from-vault"},
+        extra_env={"OVH_APPLICATION_KEY": "from-vault", "OVH_CONSUMER_KEY": "ck-from-vault"},
     )
     assert merged["OVH_APPLICATION_KEY"] == "from-vault"
     assert merged["OVH_CONSUMER_KEY"] == "ck-from-vault"
-    # Non-OVH shell vars are preserved untouched.
+    # Non-overlaid shell vars are preserved untouched.
     assert merged["HOME"] == "/home/me"
 
 
-def test_merge_ovh_env_preserves_unrelated_shell_vars() -> None:
-    """OVH overlay does not perturb unrelated env vars."""
-    merged = merge_ovh_env_into_subprocess_env(
+def test_merge_extra_env_preserves_unrelated_shell_vars() -> None:
+    """The overlay does not perturb unrelated env vars."""
+    merged = merge_extra_env_into_subprocess_env(
         shell_env={"PATH": "/usr/bin", "FOO": "bar"},
-        ovh_env={"OVH_APPLICATION_KEY": "k"},
+        extra_env={"POOL_SSH_PRIVATE_KEY": "-----BEGIN-----"},
     )
     assert merged["PATH"] == "/usr/bin"
     assert merged["FOO"] == "bar"
-    assert merged["OVH_APPLICATION_KEY"] == "k"
+    assert merged["POOL_SSH_PRIVATE_KEY"] == "-----BEGIN-----"
 
 
 def test_derive_public_key_from_private_round_trips() -> None:
@@ -313,10 +658,26 @@ def test_resolved_management_public_key_path_explicit_override_yields_path_uncha
         assert Path(yielded).is_file()
 
 
-def test_merge_ovh_env_with_empty_ovh_returns_shell_copy() -> None:
-    """An empty Vault overlay (e.g. when OVH creds aren't injected) is a no-op."""
-    merged = merge_ovh_env_into_subprocess_env(
+def test_resolve_host_pool_dsn_returns_explicit_when_given() -> None:
+    """An explicit --database-url wins and never touches Vault (even on staging)."""
+    # If this consulted Vault for the staging tier it would shell out / fail in
+    # the test env; returning the explicit value proves the precedence short-circuit.
+    assert resolve_host_pool_dsn("staging", "postgres://explicit") == "postgres://explicit"
+
+
+def test_resolve_host_pool_dsn_returns_none_for_dev_tier() -> None:
+    """Per-env tiers return None (no Vault read) so the admin CLI auto-resolves the DSN."""
+    assert resolve_host_pool_dsn("dev-josh-1", None) is None
+
+
+def test_resolve_host_pool_dsn_returns_none_for_ci_tier() -> None:
+    assert resolve_host_pool_dsn("ci-abc123", None) is None
+
+
+def test_merge_extra_env_with_empty_overlay_returns_shell_copy() -> None:
+    """An empty Vault overlay (e.g. when no secrets are injected) is a no-op."""
+    merged = merge_extra_env_into_subprocess_env(
         shell_env={"PATH": "/usr/bin"},
-        ovh_env={},
+        extra_env={},
     )
     assert merged == {"PATH": "/usr/bin"}

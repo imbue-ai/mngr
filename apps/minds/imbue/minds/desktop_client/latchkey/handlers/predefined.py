@@ -44,8 +44,6 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -60,6 +58,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -106,12 +106,12 @@ def _format_granted_message(service_display_name: str, granted: Sequence[str]) -
     permissions = ", ".join(granted)
     return (
         f"Your permission request for {service_display_name} was granted with the following "
-        f"permissions: {permissions}. Please retry the call that was blocked."
+        f"permissions: {permissions}."
     )
 
 
 def _format_denied_message(service_display_name: str) -> str:
-    return f"Your permission request for {service_display_name} was denied. Do not retry the blocked call."
+    return f"Your permission request for {service_display_name} was denied."
 
 
 def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
@@ -220,7 +220,7 @@ def _render_unknown_scope_fragment(request_id: str, scope: str) -> str:
         '<h1 class="text-xl font-semibold text-zinc-900 leading-tight">Unknown scope</h1>'
         '<p class="mt-2 text-zinc-600">'
         f"The agent requested permissions under scope <code>{escaped_scope}</code>, "
-        "but this scope is not in the latchkey gateway's permission catalog. "
+        "but this scope is not in the latchkey service catalog. "
         "The request can only be denied from here."
         "</p>"
         '<form id="permissions-form" method="POST" '
@@ -276,8 +276,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     latchkey: Latchkey = Field(description="Latchkey wrapper used to probe credentials and run sign-in flows.")
     services_catalog: ServicesCatalog = Field(
         description=(
-            "Lazy in-memory snapshot of the latchkey services catalog fetched from the "
-            "gateway's ``/permissions/available`` endpoint. Empty when the fetch failed."
+            "Lazy in-memory snapshot of the latchkey services catalog, read from the bundled "
+            "``services.json`` data file that ships with mngr_latchkey."
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(description="Sends mngr message to the waiting agent.")

@@ -1,6 +1,9 @@
 import json
 import os
 import queue
+import subprocess
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import httpx
@@ -23,6 +26,7 @@ from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
+from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -57,6 +61,7 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -1383,7 +1388,7 @@ def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
     response = client.get("/_chrome")
     assert response.status_code == 200
     assert "sidebar-toggle" in response.text
-    assert "sidebar-panel" in response.text
+    assert "sidebar-menu" in response.text
 
 
 def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
@@ -1439,20 +1444,99 @@ def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> N
     (destroying_dir / "pid").write_text(str(os.getpid()))
     (destroying_dir / "output.log").write_text("destroy in flight...\n")
 
-    ids = _destroying_agent_ids(paths, (agent_id,))
+    # The pid is alive, so the record is RUNNING regardless of host state; an
+    # empty resolver is enough to drive the helper.
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    ids = _destroying_agent_ids(paths, backend_resolver)
     assert ids == [str(agent_id)]
 
 
 def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
     """The test-server helper builds a minimal app without WorkspacePaths;
     the helper must tolerate that without raising."""
-    assert _destroying_agent_ids(None, ()) == []
+    assert _destroying_agent_ids(None, StaticBackendResolver(url_by_agent_and_service={})) == []
+
+
+def _write_dead_destroy_dir(paths: WorkspacePaths, agent_id: AgentId, host_id: HostId) -> None:
+    """Create a destroying/<agent_id>/ dir whose wrapper pid is already dead.
+
+    Spawns and reaps a trivial child so its pid is reliably not alive, then
+    writes the same three files ``start_destroy`` would (pid, host_id, log).
+    """
+    dir_path = paths.data_dir / "destroying" / str(agent_id)
+    dir_path.mkdir(parents=True)
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    (dir_path / "pid").write_text(f"{proc.pid}\n")
+    (dir_path / "host_id").write_text(f"{host_id}\n")
+    (dir_path / "output.log").write_text("done\n")
+
+
+def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path) -> None:
+    """A finished destroy whose host is gone is DONE: disassociated + record deleted.
+
+    This is the Fix for the silent-orphan bug -- finalization (disassociation)
+    happens only once the host is actually gone, not synchronously on click.
+    """
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    _write_dead_destroy_dir(paths, agent_id, HostId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_workspace("user-1", str(agent_id))
+    # Resolver knows no active agents and reports no host state -> the host is
+    # gone -> the destroy is DONE.
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+
+    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store)
+
+    assert marker == {}
+    assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
+    assert session_store.get_account_for_workspace(str(agent_id)) is None
+
+
+def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path: Path) -> None:
+    """A finished destroy whose host is still up is FAILED: kept + stays associated.
+
+    The workspace must remain visible and owned so the user can retry, instead
+    of vanishing while its host keeps running (and billing).
+    """
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    _write_dead_destroy_dir(paths, agent_id, HostId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_workspace("user-1", str(agent_id))
+    # Resolver still lists the workspace agent as active -> host still up -> FAILED.
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
+
+    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store)
+
+    assert marker == {str(agent_id): "failed"}
+    assert (paths.data_dir / "destroying" / str(agent_id)).exists()
+    assert session_store.get_account_for_workspace(str(agent_id)) is not None
+
+
+class _AllAgentsKnownStaticResolver(StaticBackendResolver):
+    """Reports every queried agent as a known, host-resolvable agent.
+
+    The inbox display filters out requests whose agent can't be resolved
+    to a host (see ``_displayable_pending_requests``). These tests cover
+    the running-workspace case where every agent resolves, so the resolver
+    claims to know any agent it's asked about.
+    """
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
 
 
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
-    assert _build_requests_payload(None) == {"count": 0, "request_ids": []}
-    assert _build_requests_payload(RequestInbox()) == {"count": 0, "request_ids": []}
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    assert _build_requests_payload(None, resolver) == {"count": 0, "request_ids": []}
+    assert _build_requests_payload(RequestInbox(), resolver) == {"count": 0, "request_ids": []}
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1461,7 +1545,8 @@ def test_build_requests_payload_carries_pending_ids() -> None:
     event = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="post updates"
     )
-    payload = _build_requests_payload(RequestInbox().add_request(event))
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    payload = _build_requests_payload(RequestInbox().add_request(event), resolver)
     assert payload == {"count": 1, "request_ids": [str(event.event_id)]}
 
 
@@ -1491,8 +1576,9 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
         )
     ).add_request(request_b)
 
-    payload_a = _build_requests_payload(inbox_with_a)
-    payload_b = _build_requests_payload(inbox_with_b)
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    payload_a = _build_requests_payload(inbox_with_a, resolver)
+    payload_b = _build_requests_payload(inbox_with_b, resolver)
     assert payload_a["count"] == payload_b["count"] == 1
     assert payload_a != payload_b
     assert payload_b["request_ids"] == [str(request_b.event_id)]
@@ -1655,7 +1741,10 @@ def _build_inbox_test_app(
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     session_store = make_session_store_for_test(tmp_path)
     minds_config = MindsConfig(data_dir=tmp_path)
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    # The inbox display hides requests whose agent can't be resolved to a
+    # host; these tests exercise the running-workspace case, so use a
+    # resolver that treats every agent as known.
+    backend_resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
@@ -2629,3 +2718,225 @@ def test_host_health_api_requires_authentication(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
     response = client.get(f"/api/agents/{agent_id}/host-health")
     assert response.status_code == 403
+
+
+# -- Workspace color route ---------------------------------------------
+#
+# POST /api/workspaces/<agent_id>/color writes the per-workspace color
+# label via ``mngr label`` (CLI merge semantics). Tests cover the
+# error responses (403 unauthenticated / 400 invalid_hex / 404 not_primary /
+# 409 stale_provider / 502 host_unreachable) and the success path through
+# a fake mngr stub. The optimistic-resolver-update path is unit-tested
+# in backend_resolver_test.py; here we cover the route's plumbing.
+
+
+def _make_workspace_color_resolver(
+    agent_id: AgentId, provider_name: str = "docker", extra_labels: dict[str, str] | None = None
+) -> MngrCliBackendResolver:
+    """Build a resolver carrying a single primary-workspace agent.
+
+    Primary workspaces are filtered by the ``workspace`` + ``is_primary``
+    label pair (matches MngrCliBackendResolver.list_known_workspace_ids).
+    """
+    labels = {"workspace": "true", "is_primary": "true", **(extra_labels or {})}
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent_id,),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=HostId.generate(),
+                    agent_id=agent_id,
+                    agent_name=AgentName(str(agent_id)),
+                    provider_name=ProviderInstanceName(provider_name),
+                    certified_data={"labels": labels},
+                ),
+            ),
+        )
+    )
+    return resolver
+
+
+def _create_test_desktop_client_with_color_runtime(
+    tmp_path: Path,
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    concurrency_group: ConcurrencyGroup | None,
+) -> tuple[TestClient, FileAuthStore]:
+    """Like ``_create_test_desktop_client`` but wires mngr_binary + concurrency
+    group so the workspace-color route can shell out to a fake ``mngr label``."""
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        mngr_binary=mngr_binary,
+        root_concurrency_group=concurrency_group,
+        mngr_host_dir=tmp_path / "mngr",
+    )
+    return TestClient(app, base_url="http://localhost"), auth_store
+
+
+def test_set_workspace_color_requires_authentication(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    resolver = _make_workspace_color_resolver(agent_id)
+    client, _ = _create_test_desktop_client_with_color_runtime(
+        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
+    )
+    response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
+    assert response.status_code == 403
+
+
+def test_set_workspace_color_rejects_invalid_hex(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    resolver = _make_workspace_color_resolver(agent_id)
+    client, auth_store = _create_test_desktop_client_with_color_runtime(
+        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "not-a-hex"})
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_hex"
+
+
+def test_set_workspace_color_rejects_non_primary_agent(tmp_path: Path) -> None:
+    """An agent without the ``workspace`` + ``is_primary`` label pair (e.g.
+    the sibling system-services agent) is not a valid color-write target.
+    The resolver returns 404 ``not_primary``."""
+    primary_id = AgentId.generate()
+    services_id = AgentId.generate()
+    host = HostId.generate()
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(primary_id, services_id),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host,
+                    agent_id=primary_id,
+                    agent_name=AgentName("user-agent"),
+                    provider_name=ProviderInstanceName("docker"),
+                    certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+                ),
+                DiscoveredAgent(
+                    host_id=host,
+                    agent_id=services_id,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName("docker"),
+                    certified_data={"labels": {}},
+                ),
+            ),
+        )
+    )
+    client, auth_store = _create_test_desktop_client_with_color_runtime(
+        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.post(f"/api/workspaces/{services_id}/color", json={"hex": "#0b292b"})
+    assert response.status_code == 404
+    assert response.json()["error"] == "not_primary"
+
+
+def test_set_workspace_color_rejects_stale_provider(tmp_path: Path) -> None:
+    """A workspace whose provider's latest discovery poll errored is
+    flagged is_stale and is not a safe color-write target -- writes
+    against an unreachable host would not be observable. Returns 409."""
+    agent_id = AgentId.generate()
+    provider_name = "imbue_cloud_acct"
+    resolver = _make_workspace_color_resolver(agent_id, provider_name=provider_name)
+    errored = ProviderInstanceName(provider_name)
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={
+            errored: DiscoveryError(type_name="RuntimeError", message="boom", provider_name=errored)
+        },
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    client, auth_store = _create_test_desktop_client_with_color_runtime(
+        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
+    assert response.status_code == 409
+    assert response.json()["error"] == "stale_provider"
+
+
+def test_set_workspace_color_returns_502_when_mngr_label_fails(tmp_path: Path) -> None:
+    """A non-zero ``mngr label`` exit (host unreachable, label-mode bug,
+    etc.) surfaces as 502 with the detail in the response so the
+    settings UI can show an inline error."""
+    agent_id = AgentId.generate()
+    resolver = _make_workspace_color_resolver(agent_id)
+    # Fake mngr that fails on the ``label`` subcommand.
+    fake = tmp_path / "fake_mngr_failing"
+    fake.write_text('#!/bin/sh\ncase "$1" in\n  label) echo "label failed" >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n')
+    fake.chmod(0o755)
+
+    with ConcurrencyGroup(name="test-color-failure") as cg:
+        client, auth_store = _create_test_desktop_client_with_color_runtime(
+            tmp_path=tmp_path,
+            backend_resolver=resolver,
+            mngr_binary=str(fake),
+            concurrency_group=cg,
+        )
+        _authenticate_client(client=client, auth_store=auth_store)
+        response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "host_unreachable"
+
+
+def test_set_workspace_color_writes_label_and_updates_resolver(tmp_path: Path) -> None:
+    """End-to-end: a valid POST (a) shells out to ``mngr label`` with the
+    normalized hex, (b) optimistically updates the resolver's snapshot,
+    (c) returns 200 with the normalized hex."""
+    agent_id = AgentId.generate()
+    resolver = _make_workspace_color_resolver(agent_id)
+    # Fake mngr that logs every invocation but always exits clean.
+    mngr_binary = _write_fake_mngr(tmp_path)
+
+    with ConcurrencyGroup(name="test-color-success") as cg:
+        client, auth_store = _create_test_desktop_client_with_color_runtime(
+            tmp_path=tmp_path,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            concurrency_group=cg,
+        )
+        _authenticate_client(client=client, auth_store=auth_store)
+
+        # Lenient input ``"FFF"`` should normalize to ``"#ffffff"`` server-side.
+        response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "FFF"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent_id"] == str(agent_id)
+    assert body["color"] == "#ffffff"
+
+    # Fake mngr captured the label argv with the normalized hex.
+    invocations = _read_fake_mngr_invocations(mngr_binary)
+    label_lines = [line for line in invocations if line.startswith("label ")]
+    assert len(label_lines) == 1, invocations
+    assert f"label {agent_id} -l color=#ffffff" in label_lines[0]
+
+    # The resolver's cached snapshot reflects the new color, so the
+    # next SSE workspaces emit will carry it.
+    assert resolver.get_workspace_color(agent_id) == "#ffffff"
+
+
+def test_set_workspace_color_returns_502_when_concurrency_group_missing(tmp_path: Path) -> None:
+    """If the desktop client was created without a concurrency group
+    (a test-only path), the color route cannot shell out and returns
+    502 with the missing-runtime detail."""
+    agent_id = AgentId.generate()
+    resolver = _make_workspace_color_resolver(agent_id)
+    client, auth_store = _create_test_desktop_client_with_color_runtime(
+        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
+    assert response.status_code == 502
+    assert response.json()["error"] == "host_unreachable"

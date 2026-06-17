@@ -840,7 +840,7 @@ def test_unset_vars_applied_during_agent_start(
 
 def _collect_pane_pids(host: Host, session_name: str) -> list[str]:
     """Collect all pane PIDs and their descendant PIDs for a tmux session (across all windows)."""
-    return host._collect_session_pids(session_name)
+    return host._collect_session_pids(session_name, [], None)
 
 
 @pytest.mark.flaky
@@ -1178,7 +1178,7 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
             # Sanity-check: orphan is NOT a descendant of any pane PID. This is what makes
             # it invisible to the old pane-descendant walk and is precisely the case the
             # env-scan fix addresses.
-            pane_descendant_pids = host._collect_session_pids(session_name)
+            pane_descendant_pids = host._collect_session_pids(session_name, [], None)
             assert orphan_pid not in pane_descendant_pids, (
                 f"Test setup invalid: orphan {orphan_pid} is in pane descendants "
                 f"{pane_descendant_pids}; reparenting did not occur"
@@ -2328,6 +2328,72 @@ def test_create_work_dir_works_without_origin_remote(
     assert result.returncode != 0
 
 
+@pytest.mark.acceptance
+@pytest.mark.rsync
+@pytest.mark.timeout(60)
+def test_create_work_dir_git_mirror_from_remote_source_to_local_target(
+    host_with_temp_dir: tuple[Host, Path],
+    ssh_host_factory: Callable[[str], Host],
+    setup_git_config: None,
+    tmp_path: Path,
+) -> None:
+    """Git mirror transfer from a remote source to a local target.
+
+    Regression test for the `mngr clone <remote-agent> ... --provider local`
+    failure: the target .git bare repo is created by `git init --bare` in
+    _transfer_git_repo, but _git_push_to_target then took a `git clone --mirror`
+    path that refuses a non-empty destination, so the transfer always failed
+    with "destination path ... already exists and is not an empty directory".
+    A mirror-style fetch into the existing bare repo fixes this.
+    """
+    local_host, _temp_dir = host_with_temp_dir
+
+    # Create the source git repo on the local filesystem; the remote host reaches
+    # it over a local sshd, so the path is shared but the source host is remote.
+    source_path = tmp_path / "source_repo"
+    source_path.mkdir()
+    (source_path / "file.txt").write_text("tracked content")
+    _init_git_repo(source_path)
+
+    ssh_host = ssh_host_factory("source")
+    assert not ssh_host.is_local
+
+    target_path = tmp_path / "target_repo"
+
+    options = CreateAgentOptions(
+        name=AgentName("remote-to-local-clone"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(new_branch_name="test/remote-to-local"),
+    )
+
+    work_dir = local_host.create_agent_work_dir(ssh_host, source_path, options).path
+
+    assert work_dir == target_path
+    assert (work_dir / "file.txt").read_text() == "tracked content"
+    assert (work_dir / ".git").exists()
+
+    # The new branch from the transfer must be checked out and the source's
+    # history must be present, proving the fetch actually mirrored the repo.
+    branch_result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_result.stdout.strip() == "test/remote-to-local"
+    log_result = subprocess.run(
+        ["git", "log", "--oneline"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert log_result.returncode == 0
+    assert log_result.stdout.strip() != ""
+
+
 # =============================================================================
 # Agent Environment Variable Tests
 # =============================================================================
@@ -2917,6 +2983,62 @@ def test_rsync_files_remote_to_remote_with_files_from(
 
     assert (target_path / "include_me.txt").read_text() == "included"
     assert not (target_path / "exclude_me.txt").exists()
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(60)
+def test_git_transfer_remote_to_remote(
+    ssh_host_factory: Callable[[str], Host],
+    tmp_path: Path,
+    setup_git_config: None,
+) -> None:
+    """Git transfer between two distinct remote hosts must relay through a local mirror.
+
+    Regression test: a direct ``git push`` from the remote source host would point
+    ``GIT_SSH_COMMAND`` at the target's ssh key and known_hosts, which live on the
+    orchestrator machine -- not on the source host where the push runs. That produced
+    "Identity file ... not accessible" and "Host key verification failed". The transfer
+    must instead pull a bare mirror locally using the source's credentials, then push to
+    the target using the target's, both run on the orchestrator where those files exist.
+
+    A single local sshd backs both hosts, but they are created under different provider
+    instances so they have distinct host ids and are not treated as the same machine --
+    which is exactly the condition that routes through the relay path under test.
+    """
+    source_path = tmp_path / "source_git_r2r"
+    source_path.mkdir()
+    (source_path / "tracked.txt").write_text("tracked content")
+    _init_git_repo(source_path)
+
+    target_path = tmp_path / "target_git_r2r"
+
+    source_host = ssh_host_factory("git-r2r-source")
+    target_host = ssh_host_factory("git-r2r-target")
+
+    assert not source_host.is_local
+    assert not target_host.is_local
+    # The relay path is only exercised when the hosts are distinct machines.
+    assert source_host.id != target_host.id
+
+    options = CreateAgentOptions(
+        name=AgentName("git-r2r"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
+    )
+
+    target_host._transfer_git_repo(source_host, source_path, target_path, options)
+
+    # The relay must have materialized the source commit and working tree on the target.
+    content_result = target_host.execute_idempotent_command("cat tracked.txt", cwd=target_path)
+    assert content_result.success
+    assert content_result.stdout.strip() == "tracked content"
+
+    log_result = target_host.execute_idempotent_command("git log --oneline", cwd=target_path)
+    assert log_result.success
+    assert "Initial commit" in log_result.stdout
 
 
 @pytest.mark.rsync

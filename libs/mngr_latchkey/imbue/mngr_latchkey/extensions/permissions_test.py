@@ -1,4 +1,4 @@
-"""End-to-end tests for the ``permissions`` extension's ``available`` endpoints.
+"""End-to-end tests for the ``permissions`` extension's ``available`` endpoint.
 
 The extension is a Node ESM module that cannot be imported from Python,
 so this follows the same pattern as ``permission_requests_test.py`` and
@@ -6,16 +6,18 @@ so this follows the same pattern as ``permission_requests_test.py`` and
 extension's default export, mount it on an HTTP server, and hit it with
 ``urllib``.
 
-These tests focus on ``GET /permissions/available`` and ``GET
-/permissions/available/<service_name>``, asserting that the catalog they
-serve (backed by the bundled ``services.json``) carries detent's
-per-schema descriptions -- the scope-level ``description`` and each
-permission's ``{name, description}`` -- end to end.
+These tests focus on ``GET /permissions/available/<service_name>``
+(the per-service catalog endpoint -- the bare collection endpoint is not
+served), asserting that the catalog it serves (backed by the bundled
+``services.json``) carries detent's per-schema descriptions -- the
+scope-level ``description`` and each permission's ``{name, description}``
+-- end to end.
 
 Tests skip cleanly when Node is unavailable, mirroring the sibling
 extension test modules.
 """
 
+import contextlib
 import json
 import shutil
 import socket
@@ -27,6 +29,7 @@ import urllib.request
 from collections.abc import Generator
 from pathlib import Path
 from typing import Final
+from urllib.parse import quote
 
 import pytest
 
@@ -110,9 +113,9 @@ def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
     return False
 
 
-@pytest.fixture
-def node_extension() -> Generator[str, None, None]:
-    """Spawn the Node driver and yield the extension's base URL."""
+@contextlib.contextmanager
+def _spawn_node_extension(env: dict[str, str]) -> Generator[str, None, None]:
+    """Spawn the Node driver with ``env`` and yield the extension's base URL."""
     assert _NODE_BINARY is not None
     script = _build_node_driver_script()
     process = subprocess.Popen(
@@ -120,7 +123,7 @@ def node_extension() -> Generator[str, None, None]:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={"PATH": "/usr/bin:/bin"},
+        env=env,
         text=True,
     )
     try:
@@ -135,6 +138,13 @@ def node_extension() -> Generator[str, None, None]:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5.0)
+
+
+@pytest.fixture
+def node_extension() -> Generator[str, None, None]:
+    """Spawn the Node driver and yield the extension's base URL."""
+    with _spawn_node_extension({"PATH": "/usr/bin:/bin"}) as base_url:
+        yield base_url
 
 
 def _get_json(url: str) -> tuple[int, object]:
@@ -174,31 +184,8 @@ def _assert_entry_well_formed(entry: object) -> None:
         assert isinstance(permission_dict.get("description", ""), str)
 
 
-def test_available_collection_exposes_descriptions(node_extension: str) -> None:
-    """``GET /permissions/available`` returns scope and per-permission descriptions."""
-    status, payload = _get_json(f"{node_extension}/permissions/available")
-
-    assert status == 200
-    catalog = _as_dict(payload)
-    assert len(catalog) > 0
-    for entries in catalog.values():
-        entry_list = _as_list(entries)
-        assert len(entry_list) > 0
-        for entry in entry_list:
-            _assert_entry_well_formed(entry)
-
-    # Pin a concrete service so the test fails loudly if descriptions ever
-    # stop flowing through: Slack's scope and its read-all permission both
-    # carry a non-empty summary.
-    slack_entry = _as_dict(_as_list(catalog["slack"])[0])
-    _as_nonempty_str(slack_entry["description"])
-    slack_permissions = [_as_dict(p) for p in _as_list(slack_entry["permissions"])]
-    slack_read_all = next(p for p in slack_permissions if p["name"] == "slack-read-all")
-    _as_nonempty_str(slack_read_all["description"])
-
-
 def test_available_for_service_exposes_descriptions(node_extension: str) -> None:
-    """``GET /permissions/available/<service>`` returns the same description-bearing entries."""
+    """``GET /permissions/available/<service>`` returns description-bearing entries."""
     status, payload = _get_json(f"{node_extension}/permissions/available/slack")
 
     assert status == 200
@@ -206,10 +193,71 @@ def test_available_for_service_exposes_descriptions(node_extension: str) -> None
     assert len(entries) > 0
     for entry in entries:
         _assert_entry_well_formed(entry)
-    _as_nonempty_str(_as_dict(entries[0])["description"])
+
+    # Pin Slack concretely so the test fails loudly if descriptions ever
+    # stop flowing through: its scope and its read-all permission both
+    # carry a non-empty summary.
+    slack_entry = _as_dict(entries[0])
+    _as_nonempty_str(slack_entry["description"])
+    slack_permissions = [_as_dict(p) for p in _as_list(slack_entry["permissions"])]
+    slack_read_all = next(p for p in slack_permissions if p["name"] == "slack-read-all")
+    _as_nonempty_str(slack_read_all["description"])
+
+
+def test_available_injects_any_permission_for_every_scope(node_extension: str) -> None:
+    """The catch-all ``any`` permission is injected at index 0 of every scope.
+
+    A service whose catalog lists at least one permission (Slack) and a
+    service whose catalog lists none (Linear) must both surface ``any``
+    as the first available permission, so a caller can always request
+    unrestricted access under a known scope.
+    """
+    for service in ("slack", "linear"):
+        status, payload = _get_json(f"{node_extension}/permissions/available/{service}")
+        assert status == 200, service
+        entries = _as_list(payload)
+        assert len(entries) > 0, service
+        for entry in entries:
+            permissions = [_as_dict(p) for p in _as_list(_as_dict(entry)["permissions"])]
+            assert permissions[0]["name"] == "any", service
+            # ``any`` appears exactly once even if the catalog ever lists it.
+            assert [p["name"] for p in permissions].count("any") == 1, service
+            _as_nonempty_str(permissions[0]["description"])
 
 
 def test_available_for_unknown_service_returns_404(node_extension: str) -> None:
     status, _ = _get_json(f"{node_extension}/permissions/available/not-a-real-service")
 
     assert status == 404
+
+
+def _post_json(url: str, body: object) -> tuple[int, object]:
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            return int(response.status), json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        return int(e.code), None
+
+
+def test_post_rule_creates_missing_host_directory(tmp_path: Path) -> None:
+    """``POST /permissions/rules`` materializes the parent host directory if absent.
+
+    Regression test: the minds desktop grant flow targets
+    ``<root>/hosts/<host_id>/latchkey_permissions.json``, whose ``hosts/<id>/``
+    directory may not have been created yet (e.g. agent creation's
+    finalize/link step was skipped or failed). The atomic write must create the
+    directory and succeed rather than failing with ENOENT (a confusing 500).
+    """
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    assert not target.parent.exists()
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key=slack-api"
+        status, payload = _post_json(url, ["any"])
+
+    assert status == 201, payload
+    assert target.is_file()
+    on_disk = json.loads(target.read_text())
+    assert on_disk["rules"] == [{"slack-api": ["any"]}]

@@ -1,0 +1,81 @@
+# Unabridged Changelog - mngr_codex
+
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_codex/changelog/`.
+
+For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-06-16
+
+The codex background-tasks supervisor now also launches an optional usage writer (`codex_usage.sh`) when it's present in the agent's `commands/` dir -- installed by the new `imbue-mngr-codex-usage` package -- and restarts it if it dies, alongside the existing raw/common transcript watchers. No change for agents without the usage plugin installed.
+
+The common-transcript converter's rollout-to-common conversion logic now lives in a standalone `common_transcript_convert.py` (provisioned alongside `common_transcript.sh` and invoked by it) rather than an inline `python3` heredoc, so it is type-checked, linted, and unit-tested directly. Malformed rollout lines and unreadable existing-output lines are dropped silently.
+
+codex now flushes the common transcript at turn end. When the root turn finishes and no subagents are in flight (the agent goes WAITING), the Stop / SubagentStop hooks run one synchronous `--single-pass` conversion, so a consumer harvesting the final message on the WAITING signal no longer races the 5s converter daemon -- matching claude and antigravity. The converter takes the shared convert lock around its read-modify-write so this flush and the background daemon cannot produce duplicate events.
+
+The common-transcript watcher no longer echoes converter errors to the agent's pane: a genuine conversion error is recorded in the structured log only, instead of also being written to the watcher's stderr.
+
+Codex agents now preserve their transcripts on destroy (closing the carried-forward session-preservation gap), matching the claude plugin.
+
+- New `preserve_on_destroy` config option (default `true`): before a codex agent's state directory is deleted on destroy, its raw and common transcripts and the root session-id history are copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`, mirroring the agent's state-directory layout. For remote agents the files are pulled to the local machine so they survive host destruction. Set to `false` to discard transcript data on destroy.
+
+- The native resumable rollout session store under `CODEX_HOME/sessions` is now preserved on destroy too, so a preserved agent can be resumed/adopted from codex's own session files. Only the `sessions/` directory is targeted, so the auth-token symlink and config that sit as siblings in `CODEX_HOME` are still excluded.
+
+- Works for both online destroys and offline host destruction (where the agent state is read off the host's persisted volume).
+
+- The codex release lifecycle test now asserts the transcripts are actually preserved on destroy (previously destroy was bare cleanup), so the feature is covered end-to-end against the real `codex` binary.
+
+## 2026-06-15
+
+Codex agents now report *why* they are waiting, via a `waiting_reason` field in `mngr list` (matching `mngr_claude`):
+
+- `PERMISSIONS` -- the agent is blocked on a tool-approval dialog. A `PermissionRequest` hook touches a `permissions_waiting` marker, and the agent's lifecycle state now reports WAITING (not RUNNING) while the dialog is open. `PostToolUse` clears the marker once the approved tool runs, and both the root `Stop` and the start of the next turn (`UserPromptSubmit`) clear any stranded marker.
+
+- `END_OF_TURN` -- the agent is idle with its turn complete.
+
+The `PERMISSIONS` reason is now gated on the agent's `active` (in-turn) marker, so a stranded `permissions_waiting` marker that outlived its turn reports `END_OF_TURN` rather than wrongly showing `PERMISSIONS` -- the verdict no longer depends on a cleanup hook having deleted the file.
+
+This applies only in supervised mode; with `auto_allow_permissions = true` codex never prompts, so a permission reason never appears.
+
+Known limitation: cancelling a dialog (Esc / "No") interrupts the turn and codex 0.139.0 fires no terminal hook for it (no PostToolUse, Stop, or Notification), so the markers persist until the next turn's Stop. The agent's state stays `WAITING` (correct), but `waiting_reason` may read `PERMISSIONS` instead of `END_OF_TURN` during that window; it self-heals at the next Stop.
+
+Verified live against codex 0.139.0: approve fires `PermissionRequest` -> `PostToolUse` -> `Stop` (marker cleared); cancel fires `PermissionRequest` and then no terminal hook.
+
+## 2026-06-13
+
+Stabilized the codex marker-lock concurrency smoke test (`test_concurrent_root_stop_and_last_subagent_stop_clears_marker`), which could time out under heavy CI load. The test forks roughly 32 short-lived bash subprocesses, so the suite-wide 10s timeout was too tight when a runner was busy; it now gets a generous per-test timeout (a real deadlock would still hang far longer) and is marked flaky so offload retries it. No production behavior changed.
+
+## 2026-06-12
+
+Added real `codex` agent-type support as its own plugin (`imbue-mngr-codex`), wiring OpenAI's Codex CLI into mngr and replacing the previous in-core `BaseAgent` stub.
+
+- Per-agent `CODEX_HOME` isolation gives each agent its own config, sessions, and transcripts without relocating the user's real `$HOME`.
+- Shared auth via a write-through `auth.json` symlink to a shared `~/.codex/auth.json` (with `cli_auth_credentials_store = "file"` pinned), so logging in once authenticates every agent and token refreshes propagate.
+- RUNNING/WAITING lifecycle with subagent-aware gating across four hooks (`UserPromptSubmit`, `Stop`, `SubagentStart`, `SubagentStop`). Because codex subagents run asynchronously (the root's `Stop` fires while subagents are still working, with no ordering guarantee on the later `SubagentStop` hooks and no `fullyIdle` signal), the `active` marker is recomputed under a lock from a root-turn flag plus one file per in-flight subagent, so it stays RUNNING until the root turn AND every subagent are done. The `Stop` clear is still guarded against a nested/recursive codex via the recorded root `session_id`.
+- Conversation resume across stop/start: the root `session_id` is captured into a tracking file and `mngr start` shell-evaluates `codex resume <id>` (falling back to a fresh start). The rollout JSONL is flushed per line, so it survives `mngr stop`'s hard kill.
+- Common transcripts readable by `mngr transcript`, plus seeded trust and onboarding for a silent first launch.
+- `send_message` waits for submission to register: the `UserPromptSubmit` hook signals a `mngr-submit-<session>` tmux wait-for channel after it sets the `active` marker, and the sender blocks on that channel, so `mngr message` returns only once the agent reads RUNNING (closes a race where a follow-up lifecycle check could see the pre-turn idle state).
+- Update handling: codex's blocking startup "Update available!" prompt is disabled (it would intercept the first message), and mngr surfaces updates itself at provision instead. It compares `codex --version` to the latest version codex recorded in `~/.codex/version.json` (no network call); this check always runs and is best-effort (failures never block provisioning). When codex is outdated, the action is governed by a single `update_policy` setting (default `ASK`): `AUTO` runs `codex update` with no prompt, `ASK` prompts on an attended local run (interactive tty + local host, not `--yes`) and otherwise logs a non-blocking notice, and `NEVER` only logs the notice. Because `ASK` is gated on the host being local as well as interactive (mirroring the claude plugin's `is_unattended = not host.is_local`), an unattended remote/deploy agent provisioned from a local terminal defaults to neither prompting nor upgrading the remote's global install.
+
+Not yet implemented (carried-forward gaps): session-preservation-on-destroy, deploy/scheduling contributions, field generators (`waiting_reason`), the streaming snapshot, and install/version management. A future app-server-backed agent variant (drive `codex app-server` over JSON-RPC for programmatic messaging + a `codex --remote` TUI viewer + clean `initialize`-based readiness) is the recommended follow-up; its design and the OpenAI-ToS caveat (identify honestly, no `codex-tui` spoofing) are documented in the plugin README.
+
+Added a conformance test asserting that codex's real emitted common-transcript records
+validate against the new canonical envelope schema
+(`imbue.mngr.agents.common_transcript_records`). The release test now runs on the
+shared agent release-lifecycle harness (`imbue.mngr.agents.agent_release_testing`). The
+full lifecycle (including stop/start resume) passes end-to-end against the real codex
+binary. Simplified the release test's plumbing to reuse the shared `init_git_repo` helper
+and the autouse fixture's tmux-server isolation instead of hand-rolling its own git repo
+setup and private tmux server. Now that codex's `send_message` blocks until the agent
+reads RUNNING (the submit/lifecycle race fix), the release test also observes the RUNNING
+marker like the pi and opencode tests do.
+
+## 2026-06-09
+
+Added real `codex` agent-type support as its own plugin (`imbue-mngr-codex`), wiring OpenAI's Codex CLI into mngr and replacing the previous in-core `BaseAgent` stub.
+
+- Per-agent `CODEX_HOME` isolation: each agent runs `codex` under its own `CODEX_HOME` so its config, sessions, and transcripts stay isolated, without relocating the user's real `$HOME`.
+- Shared auth: each agent's `auth.json` is a write-through symlink to a shared `~/.codex/auth.json`, so the first agent's login authenticates every other agent and token refreshes propagate ("log in once, anywhere"). `cli_auth_credentials_store = "file"` is pinned so the shared file backend is used.
+- RUNNING/WAITING lifecycle with subagent-aware gating: a `UserPromptSubmit`/`Stop` hook pair maintains an `active` marker driving `BaseAgent`'s RUNNING/WAITING detection. Subagents fire a distinct `SubagentStop` and run in separate rollout files, so they never touch the marker by construction; the root session id is recorded so `Stop` clears the marker only at root-agent scope.
+- Conversation resume: the root `session_id` is captured from a hook into a tracking file, and `mngr start` shell-evaluates `codex resume <id>` (falling back to a fresh start), so the agent keeps its context across a stop/start. The rollout JSONL is flushed per line, so it survives the hard process kill `mngr stop` performs.
+- Transcripts: codex agents emit a common transcript readable by `mngr transcript`, mapping codex's rollout `message`/`function_call`/`function_call_output` lines into the agent-agnostic format.
+- Trust and onboarding: the agent's canonical work-dir path is seeded as `trusted` and the onboarding NUX is seeded for a silent first launch, so codex starts without interactive trust/login prompts.

@@ -26,10 +26,6 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
-from imbue.mngr_claude.headless_claude_agent import extract_assistant_message_id
-from imbue.mngr_claude.headless_claude_agent import extract_assistant_text
-from imbue.mngr_claude.headless_claude_agent import extract_message_start_id
-from imbue.mngr_claude.headless_claude_agent import extract_text_delta
 from imbue.mngr_claude.plugin import ClaudeAgent
 
 # =============================================================================
@@ -425,8 +421,13 @@ def _make_assistant_message_line(text: str, message_id: str | None = None) -> st
     (without `--include-partial-messages`) on v2.1.114 and similar versions.
     """
     message: dict[str, object] = {
+        "type": "message",
         "role": "assistant",
+        "model": "claude-sonnet-4-5",
         "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
     }
     if message_id is not None:
         message["id"] = message_id
@@ -445,7 +446,16 @@ def _make_message_start_line(message_id: str) -> str:
             "type": "stream_event",
             "event": {
                 "type": "message_start",
-                "message": {"id": message_id, "role": "assistant"},
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
             },
         }
     )
@@ -838,178 +848,6 @@ def test_headless_claude_registered(
     assert "headless_claude" in types
 
 
-# =============================================================================
-# Tests for extract_text_delta
-# =============================================================================
-
-
-def test_extract_text_delta_valid_event() -> None:
-    """A valid content_block_delta event should return the text."""
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "text_delta", "text": "hello"},
-            },
-        }
-    )
-    assert extract_text_delta(event) == "hello"
-
-
-def test_extract_text_delta_non_delta_event() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {"type": "content_block_start", "index": 0},
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_malformed_json() -> None:
-    assert extract_text_delta("not valid json {{{") is None
-
-
-def test_extract_text_delta_non_stream_event() -> None:
-    event = json.dumps({"type": "result", "subtype": "success"})
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_missing_delta() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {"type": "content_block_delta", "index": 0},
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_event_not_dict() -> None:
-    event = json.dumps({"type": "stream_event", "event": "not_a_dict"})
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_non_text_delta_type() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "delta": {"type": "input_json_delta", "partial_json": "{}"},
-            },
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_delta_not_dict() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "delta": "not_a_dict",
-            },
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-def test_extract_text_delta_text_not_string() -> None:
-    event = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": 42},
-            },
-        }
-    )
-    assert extract_text_delta(event) is None
-
-
-# =============================================================================
-# Tests for extract_assistant_text and dual-envelope stream_output
-# =============================================================================
-
-
-def test_extract_assistant_text_single_text_block() -> None:
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
-        }
-    )
-    assert extract_assistant_text(event) == "hello"
-
-
-def test_extract_assistant_text_concatenates_multiple_text_blocks() -> None:
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "Hello "},
-                    {"type": "text", "text": "world!"},
-                ],
-            },
-        }
-    )
-    assert extract_assistant_text(event) == "Hello world!"
-
-
-def test_extract_assistant_text_skips_non_text_blocks() -> None:
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}},
-                    {"type": "text", "text": "after tool"},
-                ],
-            },
-        }
-    )
-    assert extract_assistant_text(event) == "after tool"
-
-
-def test_extract_assistant_text_returns_none_when_no_text_blocks() -> None:
-    event = json.dumps(
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": "tu_1", "name": "bash", "input": {}}],
-            },
-        }
-    )
-    assert extract_assistant_text(event) is None
-
-
-def test_extract_assistant_text_returns_none_for_non_assistant_event() -> None:
-    event = json.dumps({"type": "system", "subtype": "init"})
-    assert extract_assistant_text(event) is None
-
-
-def test_extract_assistant_text_returns_none_for_malformed_json() -> None:
-    assert extract_assistant_text("not valid json {{{") is None
-
-
-def test_extract_assistant_text_returns_none_when_message_not_dict() -> None:
-    event = json.dumps({"type": "assistant", "message": "not_a_dict"})
-    assert extract_assistant_text(event) is None
-
-
-def test_extract_assistant_text_returns_none_when_content_not_list() -> None:
-    event = json.dumps({"type": "assistant", "message": {"content": "not_a_list"}})
-    assert extract_assistant_text(event) is None
-
-
 # A tool_use-only assistant event for the "tool_use_only_assistant_event_ends_turn"
 # scenario. `is_definitely_different_message` is False (same id), so without a
 # state reset the next assistant text would be diffed against the stale buffer
@@ -1174,90 +1012,3 @@ def test_stream_output_dual_envelope_dispatch(
     chunks = list(agent.stream_output())
 
     assert chunks == expected_chunks
-
-
-def test_extract_assistant_message_id_returns_id_when_present() -> None:
-    line = json.dumps(
-        {
-            "type": "assistant",
-            "message": {"id": "msg_xyz", "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
-        }
-    )
-    assert extract_assistant_message_id(line) == "msg_xyz"
-
-
-def test_extract_assistant_message_id_returns_none_when_id_missing() -> None:
-    line = json.dumps(
-        {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
-        }
-    )
-    assert extract_assistant_message_id(line) is None
-
-
-def test_extract_assistant_message_id_returns_none_for_non_assistant_event() -> None:
-    line = json.dumps({"type": "system", "subtype": "init"})
-    assert extract_assistant_message_id(line) is None
-
-
-def test_extract_assistant_message_id_returns_none_for_malformed_json() -> None:
-    assert extract_assistant_message_id("not valid json {{{") is None
-
-
-def test_extract_assistant_message_id_returns_none_when_message_not_dict() -> None:
-    line = json.dumps({"type": "assistant", "message": "not_a_dict"})
-    assert extract_assistant_message_id(line) is None
-
-
-def test_extract_assistant_message_id_returns_none_when_id_not_string() -> None:
-    line = json.dumps(
-        {
-            "type": "assistant",
-            "message": {"id": 42, "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
-        }
-    )
-    assert extract_assistant_message_id(line) is None
-
-
-def test_extract_message_start_id_returns_id_for_message_start_event() -> None:
-    line = _make_message_start_line("msg_abc")
-    assert extract_message_start_id(line) == "msg_abc"
-
-
-def test_extract_message_start_id_returns_none_for_text_delta_event() -> None:
-    assert extract_message_start_id(_make_stream_json_line("hello")) is None
-
-
-def test_extract_message_start_id_returns_none_for_top_level_assistant_event() -> None:
-    line = _make_assistant_message_line("hi", message_id="msg_abc")
-    assert extract_message_start_id(line) is None
-
-
-def test_extract_message_start_id_returns_none_for_malformed_json() -> None:
-    assert extract_message_start_id("not valid json {{{") is None
-
-
-def test_extract_message_start_id_returns_none_when_event_not_dict() -> None:
-    line = json.dumps({"type": "stream_event", "event": "not_a_dict"})
-    assert extract_message_start_id(line) is None
-
-
-def test_extract_message_start_id_returns_none_when_message_not_dict() -> None:
-    line = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {"type": "message_start", "message": "not_a_dict"},
-        }
-    )
-    assert extract_message_start_id(line) is None
-
-
-def test_extract_message_start_id_returns_none_when_id_not_string() -> None:
-    line = json.dumps(
-        {
-            "type": "stream_event",
-            "event": {"type": "message_start", "message": {"id": 42, "role": "assistant"}},
-        }
-    )
-    assert extract_message_start_id(line) is None

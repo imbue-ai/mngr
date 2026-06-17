@@ -19,6 +19,7 @@ from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
 from imbue.mngr.cli.create import _apply_host_labels
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
+from imbue.mngr.cli.create import _compute_loader_provider_filter
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
@@ -2239,3 +2240,176 @@ def test_resolve_source_location_raises_outside_git_repo(
             mngr_ctx=temp_mngr_ctx,
             is_start_desired=True,
         )
+
+
+# =============================================================================
+# Tests for _compute_loader_provider_filter
+# =============================================================================
+
+
+def test_compute_loader_provider_filter_no_source_no_target_returns_none(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """A purely local create (no source, no target host, no --reuse) needs no discovery."""
+    address = NewAgentLocation()
+
+    result = _compute_loader_provider_filter(default_create_cli_opts, address)
+
+    assert result is None
+
+
+def test_compute_loader_provider_filter_local_source_returns_none(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """A bare local path source skips the loader and so does not force discovery."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().source, ":/tmp/some-path"),
+    )
+    address = NewAgentLocation()
+
+    result = _compute_loader_provider_filter(opts, address)
+
+    assert result is None
+
+
+def test_compute_loader_provider_filter_source_with_provider_narrows(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """A source pinned to a provider narrows discovery to just that provider."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().source, "some-agent@host.modal"),
+    )
+    address = NewAgentLocation()
+
+    result = _compute_loader_provider_filter(opts, address)
+
+    assert result == ("modal",)
+
+
+def test_compute_loader_provider_filter_source_without_provider_falls_back_to_full_scan(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """A source referring to an agent on any provider forces a full scan."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().source, "some-agent"),
+    )
+    address = NewAgentLocation()
+
+    result = _compute_loader_provider_filter(opts, address)
+
+    assert result is None
+
+
+def test_compute_loader_provider_filter_target_with_provider_narrows(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """An existing-host target pinned to a provider narrows discovery to that provider."""
+    address = NewAgentLocation(
+        host_name=HostName("existing-host"),
+        provider_name=ProviderInstanceName("modal"),
+    )
+
+    result = _compute_loader_provider_filter(default_create_cli_opts, address)
+
+    assert result == ("modal",)
+
+
+def test_compute_loader_provider_filter_target_without_provider_falls_back_to_full_scan(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """An existing-host target with no provider forces a full scan."""
+    address = NewAgentLocation(host_name=HostName("existing-host"))
+
+    result = _compute_loader_provider_filter(default_create_cli_opts, address)
+
+    assert result is None
+
+
+def test_compute_loader_provider_filter_new_host_target_returns_none(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """A new-host target (via .PROVIDER form) skips the existing-host loader call."""
+    address = NewAgentLocation(provider_name=ProviderInstanceName("modal"))
+
+    result = _compute_loader_provider_filter(default_create_cli_opts, address)
+
+    assert result is None
+
+
+def test_compute_loader_provider_filter_new_host_flag_skips_loader(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """--new-host with a fresh host name skips the existing-host loader call."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().new_host, True),
+    )
+    address = NewAgentLocation(
+        host_name=HostName("new-host"),
+        provider_name=ProviderInstanceName("modal"),
+    )
+
+    result = _compute_loader_provider_filter(opts, address)
+
+    assert result is None
+
+
+def test_compute_loader_provider_filter_reuse_with_target_provider_narrows(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """--reuse with a provider-pinned target narrows discovery to that provider."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().reuse, True),
+    )
+    address = NewAgentLocation(
+        name=AgentName("reuse-me"),
+        provider_name=ProviderInstanceName("modal"),
+    )
+
+    result = _compute_loader_provider_filter(opts, address)
+
+    assert result == ("modal",)
+
+
+def test_compute_loader_provider_filter_reuse_without_provider_falls_back_to_full_scan(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """--reuse without a provider needs a full scan to find the agent anywhere."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().reuse, True),
+    )
+    address = NewAgentLocation(name=AgentName("reuse-me"))
+
+    result = _compute_loader_provider_filter(opts, address)
+
+    assert result is None
+
+
+def test_compute_loader_provider_filter_unions_source_and_target_providers(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """Source on one provider and target on another are unioned and sorted."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().source, "src-agent@src-host.modal"),
+    )
+    address = NewAgentLocation(
+        host_name=HostName("target-host"),
+        provider_name=ProviderInstanceName("docker"),
+    )
+
+    result = _compute_loader_provider_filter(opts, address)
+
+    assert result == ("docker", "modal")
+
+
+def test_compute_loader_provider_filter_git_url_source_skips_loader(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """A git URL source clones locally and does not need provider discovery."""
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().source, "https://github.com/example/repo.git"),
+    )
+    address = NewAgentLocation()
+
+    result = _compute_loader_provider_filter(opts, address)
+
+    assert result is None

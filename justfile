@@ -184,7 +184,7 @@ test-quick args="":
 
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "no release"
+  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "not release"
 
 test-release:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
@@ -251,16 +251,28 @@ minds-tailwind:
   bash apps/minds/scripts/fetch_tailwind.sh
 
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
-# in FCT. Default FCT path is $HOME/project/forever-claude-template; override
-# by passing a positional arg. Run from this repo on the branch you want to
-# vendor (typically main); the recipe archives HEAD, replaces vendor/mngr/
-# contents with that snapshot, and commits in FCT. Does not push. Aborts if
-# FCT has any uncommitted changes -- resolve them first. The full release
-# flow (release branches, push, merge to main) is the release-minds skill.
-sync-vendor-mngr fct="$HOME/project/forever-claude-template":
+# in FCT. The FCT checkout path comes from the positional arg, else FCT_DIR read
+# from a gitignored apps/minds/.env (minds-scoped per-user config -- see
+# apps/minds/.env.example), else $FCT_DIR in your shell. No personal path is
+# baked in, and nothing outside this recipe loads that .env. Position the mngr
+# checkout at the exact commit you want to vendor first -- your release PR branch
+# HEAD / the verified release SHA, NOT blindly `main`, which can drift past it
+# between verification and merge. The recipe archives HEAD, replaces vendor/mngr/
+# with that snapshot, and commits in FCT. Does not push. Aborts if FCT is dirty.
+# Full release flow: apps/minds/docs/release.md.
+sync-vendor-mngr fct="":
     #!/bin/bash
     set -ueo pipefail
     fct="{{fct}}"
+    # Fall back to FCT_DIR -- from a gitignored apps/minds/.env (minds-scoped), or your shell.
+    if [ -z "$fct" ] && [ -f apps/minds/.env ]; then set -a; . ./apps/minds/.env; set +a; fi
+    if [ -z "$fct" ]; then fct="${FCT_DIR:-}"; fi
+    if [ -z "$fct" ]; then
+        echo "error: no forever-claude-template path. Set FCT_DIR in apps/minds/.env, or pass it:" >&2
+        echo "  echo 'FCT_DIR=/path/to/forever-claude-template' >> apps/minds/.env   # gitignored" >&2
+        echo "  just sync-vendor-mngr /path/to/forever-claude-template" >&2
+        exit 2
+    fi
     if [ ! -d "$fct/vendor/mngr" ]; then
         echo "Error: $fct/vendor/mngr not found"
         exit 1
@@ -335,6 +347,18 @@ deploy *args:
 # dev case. Refuses without activation so the recipe never silently
 # writes to the wrong env's data root.
 #
+# Install the minds desktop client's node deps (electron, etc.) using the Node
+# version apps/minds pins in apps/minds/.nvmrc -- selected via
+# select_node_version.sh so pnpm's engine-strict check passes regardless of the
+# shell's default node. Run this once before `just minds-start`; `minds-start`
+# points here when node_modules is missing. Never installs Node (errors with a
+# hint if the pinned version isn't available via nvm).
+minds-install:
+    #!/bin/bash
+    set -ueo pipefail
+    . apps/minds/scripts/select_node_version.sh || exit 2
+    cd apps/minds && pnpm install
+
 # Override agent_name / branch via positional args:
 #   just minds-start agent_name=foo branch=some-branch
 # Refuses to start if another minds-start is already running in this
@@ -391,13 +415,6 @@ minds-start agent_name="mindtest" branch="":
         fi
         rm -f "$pid_file"
     fi
-    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
-    if [ ! -e "$fct_wt/.git" ]; then
-        echo "error: no FCT worktree at $fct_wt" >&2
-        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
-        exit 2
-    fi
     if [ -f .env ]; then
         set -a
         . .env
@@ -435,8 +452,7 @@ minds-start agent_name="mindtest" branch="":
         echo "" >&2
         echo "error: minds desktop client isn't installed/built yet in this worktree." >&2
         echo "       Run:" >&2
-        echo "         cd apps/minds && pnpm install && cd -" >&2
-        echo "         just minds-build" >&2
+        echo "         just minds-install" >&2
         echo "       (~2 min on first run; subsequent rebuilds are seconds)." >&2
         echo "       Then re-run \`just minds-start\`." >&2
         exit 2
@@ -786,13 +802,155 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     [ -n "$base_url" ] && printf 'export ANTHROPIC_BASE_URL=%s\n' "$base_url" >> "$env_file"
     echo "Wrote $env_file (mode 600)"
 
-# Destroy and remove every host in the pool with status='released'.
-# Sources .minds/<env>/neon.sh for DATABASE_URL.
-cleanup-pool-hosts env="production":
+# === minds pool hosts (OVH-backed, leased mode) ===
+#
+# Thin wrappers around the env-aware `minds pool {create,list,destroy}` CLI,
+# which resolves the management SSH key, OVH AK/AS/CK, AND (for staging /
+# production) the host_pool DSN from the activated tier's Vault entries
+# automatically -- so you never export creds or pass --database-url by hand.
+# dev / ci envs auto-resolve the DSN from their per-env secrets.toml. Activate a
+# minds env first:  eval "$(uv run minds env activate <name>)"
+
+# Bake pre-provisioned OVH-VPS pool host(s) for the activated minds env.
+#
+# The bake DERIVES the stamped identity (repo_url + repo_branch_or_tag) from its
+# source -- you no longer hand-type them, so the advertised identity always matches
+# what was baked. Two modes:
+#
+#   DEV (best-effort label): bake from a working tree; identity = its origin remote
+#     + current branch (uncommitted changes included). Use this for iteration.
+#       eval "$(uv run minds env activate staging)"
+#       just bake-pool-host-dev US-WEST-OR ~/project/forever-claude-template
+#
+#   PROD (strict, tag): clone the FCT remote at an exact tag into a fresh temp dir
+#     and bake from that; identity = remote + tag (content provably equals the tag).
+#       just bake-pool-host-prod US-WEST-OR v0.3.0
+#
+# IMPORTANT for the fast path: a desktop-client create adopts a baked host only when
+# its canonical repo + branch + region match. For a DEV fast-path test, set the create
+# form's repository to the ACTUAL git remote (not a local clone path) and the branch to
+# the same branch you baked. Extra flags forward to `minds pool create` (e.g.
+# --no-recycle, --mngr-source <monorepo-root>, --attributes '{"cpus":2}').
+bake-pool-host-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+    uv run minds pool create \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --workspace-dir "{{workspace_dir}}" \
+        --skip-deferred-install-wait \
+        {{extra_args}}
+
+# Production OVH-VPS pool bake from an exact FCT tag (strict; see bake-pool-host-dev).
+bake-pool-host-prod region tag count="1" *extra_args:
+    uv run minds pool create \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --from-tag "{{tag}}" \
+        {{extra_args}}
+
+# === minds bare-metal SLICES (carved on a pre-registered OVH bare-metal box) ===
+#
+# Unlike `bake-pool-host-{dev,prod}` (which order a fresh OVH VPS per host), these
+# bake "slices": lima/QEMU VMs carved on a bare-metal box you already ordered,
+# `mngr imbue_cloud admin server register`ed, and `... prep`ped (status `ready`).
+# Slices land in the SAME pool_hosts table as OVH VPSes (backend_kind=slice) and
+# lease identically. They are thin wrappers over `minds pool create --backend
+# slice`, which resolves the tier's pool key (+ host_pool DSN for shared tiers)
+# from Vault just like the OVH path -- so the only manual difference from
+# bake-pool-host-* is the backend.
+#
+# Prereqs: activate a minds env first (`eval "$(uv run minds env activate <name>)"`)
+# AND `vault login -method=oidc` (the wrapper's Vault reads need a live token).
+#
+# `region` is the lease-region LABEL stamped on each row (what the connector
+# region-matches at lease time, e.g. US-EAST-VA) -- NOT the box's raw OVH
+# datacenter code. Server selection picks the `ready` box with the most free
+# slots and is not region-filtered today, so the box must have a free slot.
+
+# Dev slice bake from a working tree (identity = its origin remote + current branch).
+bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+    uv run minds pool create \
+        --backend slice \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --workspace-dir "{{workspace_dir}}" \
+        --skip-deferred-install-wait \
+        {{extra_args}}
+
+# Production slice bake from an exact FCT tag (strict; content provably equals the
+# tag). Pass `--dry-run` through extra args first to confirm server selection +
+# per-slice sizing without baking.
+bake-slice-prod region tag count="1" *extra_args:
+    uv run minds pool create \
+        --backend slice \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --from-tag "{{tag}}" \
+        {{extra_args}}
+
+# Add a paid user to the activated minds env. Resolves the connector URL (from the
+# env's client.toml) and the paid-list admin key (from the tier's Vault) automatically,
+# so this is a one-shot. Activate first: eval "$(uv run minds env activate <name>)" and
+# `vault login`. Use `minds paid remove`/`list` for the other operations.
+#   just add-paid-email someone@example.com
+add-paid-email email:
+    uv run minds paid add "{{email}}"
+
+# List pool_hosts rows for the activated minds env (read-only).
+list-pool-hosts:
+    uv run minds pool list
+
+# Destroy a single pool host: cancel its OVH VPS, then drop its pool_hosts row.
+# Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
+# destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
+# VPS is already gone).
+#
+#   just destroy-pool-host <pool-host-id>
+#
+# Note: the steady-state teardown is automatic -- the connector releases a host
+# when its lease ends and an hourly Modal cron (`cleanup_removing_pool_hosts`)
+# sweeps any stragglers; `minds env destroy` removes every VPS for a whole tier.
+# This recipe is the manual single-host escape hatch.
+destroy-pool-host pool_host_id *extra_args:
+    uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
+
+# Args forward as-is, e.g. `just release patch`, `just release patch --dry-run
+# --minor mngr`, or `just release --watch`. See scripts/release.py's header for
+# the full interface.
+# Selectively bump and publish changed packages to PyPI.
+release *args:
+    uv run scripts/release.py {{args}}
+
+# Reads GH_TOKEN + ANTHROPIC_API_KEY from Vault (run `vault login -method=oidc` first); set
+# CHANGELOG_VERIFY=quick|full to run the agent once during deploy. Idempotent:
+# removes any existing schedule before recreating, so this is also how you
+# redeploy after editing scripts/changelog_consolidation_prompt.md or
+# scripts/changelog_deploy.sh.
+# (Re)deploy the nightly changelog-consolidation schedule from current source.
+changelog-deploy:
+    bash scripts/changelog_deploy.sh
+
+# Diffs against the real base branch, so it must run on a real checkout
+# (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
+# sandbox has no base ref and the check would pass vacuously. Bare `python`
+# (no `uv run`) because the gate is deliberately stdlib-only: no `uv sync`,
+# matching how the `check-changelog` CI job invokes it.
+# Check that this branch has a changelog entry per project it touches.
+check-changelog:
+    python -m scripts.check_changelog_entries
+
+# Opens a PR (which you can merge before re-running a blocked release) by
+# running the same agent the schedule runs nightly. Reads the provider +
+# plugin-disable args from scripts/changelog_schedule_utils.py; the trigger
+# name and mngr namespace are kept in sync with that module by hand, as in
+# changelog_deploy.sh.
+# Trigger an on-demand changelog-consolidation run to consolidate pending entries.
+changelog-trigger:
     #!/bin/bash
     set -ueo pipefail
-    set -a
-    . .minds/{{env}}/neon.sh
-    set +a
-    uv run python apps/remote_service_connector/scripts/cleanup_released_hosts.py \
-        --database-url "$DATABASE_URL"
+    # Isolated mngr config namespace (mirrors changelog_deploy.sh) so we don't
+    # load the repo's .mngr/settings.toml, whose plugins won't import here.
+    export MNGR_ROOT_NAME="mngr-changelog-schedule"
+    unset MNGR_HOST_DIR MNGR_PREFIX
+    provider="$(uv run python scripts/changelog_schedule_utils.py --print-provider)"
+    disable_args="$(uv run python scripts/changelog_schedule_utils.py --print-disable-plugin-args)"
+    uv run mngr schedule run changelog-consolidation --provider "$provider" $disable_args

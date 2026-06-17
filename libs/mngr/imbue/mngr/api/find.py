@@ -12,9 +12,11 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import AgentStateInconsistencyError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -139,7 +141,7 @@ def _filter_all_agents(
 
 
 @pure
-def _filter_one_agent(
+def filter_one_agent(
     agent: AgentNameOrId,
     resolved_host: DiscoveredHost | None,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
@@ -213,7 +215,7 @@ def resolve_host_location_address(
     resolved_agent: DiscoveredAgent | None = None
     if parsed.agent is not None:
         with log_span("Resolving agent reference"):
-            resolved_host, resolved_agent = _filter_one_agent(parsed.agent, resolved_host, agents_by_host)
+            resolved_host, resolved_agent = filter_one_agent(parsed.agent, resolved_host, agents_by_host)
 
     with log_span("Getting host interface from provider"):
         if resolved_host is None:
@@ -246,6 +248,57 @@ def resolve_host_location_address(
     return ResolvedHostLocationAddress(
         location=HostLocation(host=online_host, path=resolved_path),
         agent=resolved_agent,
+    )
+
+
+def resolve_host_location(
+    parsed: HostLocationAddress,
+    mngr_ctx: MngrContext,
+    *,
+    is_start_desired: bool = True,
+) -> ResolvedHostLocationAddress:
+    """Resolve a :class:`HostLocationAddress` to a host, path, and optional agent.
+
+    Convenience wrapper that drives discovery on the caller's behalf:
+
+    - If ``parsed`` has no agent and no host, the path is returned with the
+      local host (no discovery is performed, so unrelated providers like
+      Docker or Modal are not touched).
+    - Otherwise, performs discovery narrowed to the address's provider (when
+      pinned) and delegates to :func:`resolve_host_location_address`.
+
+    Callers that need to drive discovery themselves (e.g. ``mngr create``,
+    which caches a single discovery result across multiple address
+    resolutions) should call :func:`resolve_host_location_address` directly.
+
+    Raises :class:`UserInputError` if ``parsed`` has no path, no agent, and
+    no host.
+    """
+    if parsed.agent is None and parsed.host is None:
+        if parsed.path is None:
+            raise UserInputError("Location must include an agent, a host, or a path")
+        return ResolvedHostLocationAddress(location=HostLocation(host=get_local_host(mngr_ctx), path=parsed.path))
+
+    # Narrow discovery to the address's provider (when pinned) and feed the
+    # event-stream optimization with the agent name/ID (when present).
+    provider_names: tuple[str, ...] | None = None
+    if parsed.host is not None and parsed.host.provider is not None:
+        provider_names = (str(parsed.host.provider),)
+    agent_identifiers: tuple[str, ...] | None = None
+    if parsed.agent is not None:
+        agent_identifiers = (str(parsed.agent),)
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=provider_names,
+        agent_identifiers=agent_identifiers,
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    return resolve_host_location_address(
+        parsed,
+        agents_by_host,
+        mngr_ctx,
+        is_start_desired=is_start_desired,
     )
 
 
@@ -565,13 +618,13 @@ def find_one_agent_and_agents_by_host(
 
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
-    agent cannot be resolved (see :func:`_filter_one_agent`).
+    agent cannot be resolved (see :func:`filter_one_agent`).
     """
     agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
     if not agents_by_host and address.host is not None:
         raise UserInputError(f"No hosts found matching {address.host}")
 
-    host_ref, agent_ref = _filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
+    host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     return host_ref, agent_ref, agents_by_host
 
 
@@ -606,8 +659,8 @@ def resolve_to_started_host_and_agent(
     instead.
 
     Raises :class:`UserInputError` when the host is offline and
-    ``allow_auto_start`` is False. Raises :class:`RuntimeError` if the
-    agent was found during discovery but is missing on the live host (a
+    ``allow_auto_start`` is False. Raises :class:`AgentStateInconsistencyError`
+    if the agent was found during discovery but is missing on the live host (a
     stale-cache / host state inconsistency case).
     """
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
@@ -616,7 +669,7 @@ def resolve_to_started_host_and_agent(
     for live_agent in online_host.get_agents():
         if live_agent.id == agent_ref.agent_id:
             return live_agent, online_host
-    raise RuntimeError(
+    raise AgentStateInconsistencyError(
         f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
         f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
         "This indicates a stale discovery cache or host state inconsistency."

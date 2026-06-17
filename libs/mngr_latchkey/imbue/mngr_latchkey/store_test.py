@@ -13,12 +13,14 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
-from imbue.mngr_latchkey.store import gateway_log_path
+from imbue.mngr_latchkey.store import forward_events_log_path
+from imbue.mngr_latchkey.store import forward_log_path
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import point_opaque_handle_at_host
 from imbue.mngr_latchkey.store import save_forward_info
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.store import update_forward_info_gateway_port
@@ -32,9 +34,14 @@ from imbue.mngr_latchkey.store import update_forward_info_gateway_port
 # ``forward_supervisor_test.py`` and below.
 
 
-def test_gateway_log_path_is_top_level(tmp_path: Path) -> None:
-    path = gateway_log_path(tmp_path)
-    assert path == tmp_path / "latchkey_gateway.log"
+def test_forward_log_paths_are_distinct(tmp_path: Path) -> None:
+    raw = forward_log_path(tmp_path)
+    structured = forward_events_log_path(tmp_path)
+    assert raw == tmp_path / "latchkey_forward.log"
+    # Named ``events.jsonl`` (directly in the plugin dir, no nested subdir) so
+    # the standard mngr JSONL sink prunes its rotated copies.
+    assert structured == tmp_path / "events.jsonl"
+    assert raw != structured
 
 
 def test_default_permissions_path_is_top_level(tmp_path: Path) -> None:
@@ -154,6 +161,41 @@ def test_link_opaque_permissions_target_is_absolute(tmp_path: Path) -> None:
 
     target = os.readlink(opaque_path)
     assert os.path.isabs(target)
+
+
+def test_point_opaque_handle_creates_symlink_when_absent(tmp_path: Path) -> None:
+    """``point_opaque_handle_at_host`` creates the handle symlink without moving anything."""
+    host_id = HostId()
+    host_path = permissions_path_for_host(tmp_path, host_id)
+    save_permissions(host_path, LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
+    # A handle path under the opaque dir that was never materialized.
+    opaque_path = opaque_permissions_dir(tmp_path) / "deadbeefdeadbeefdeadbeefdeadbeef.json"
+    assert not opaque_path.exists()
+
+    point_opaque_handle_at_host(tmp_path, opaque_path, host_id)
+
+    assert opaque_path.is_symlink()
+    assert opaque_path.resolve() == host_path.resolve()
+    assert os.path.isabs(os.readlink(opaque_path))
+    # The canonical file is untouched (nothing was moved into it).
+    assert json.loads(opaque_path.read_text()) == {"rules": [{"slack-api": ["slack-read-all"]}]}
+
+
+def test_point_opaque_handle_repoints_existing_symlink(tmp_path: Path) -> None:
+    """An existing handle pointing elsewhere is atomically repointed at the host file."""
+    host_id = HostId()
+    host_path = permissions_path_for_host(tmp_path, host_id)
+    save_permissions(host_path, LatchkeyPermissionsConfig())
+    opaque_path = new_opaque_permissions_path(tmp_path)
+    # Make the handle a (stale) symlink to an unrelated target.
+    stale_target = tmp_path / "somewhere-else.json"
+    stale_target.write_text("{}")
+    opaque_path.symlink_to(stale_target)
+
+    point_opaque_handle_at_host(tmp_path, opaque_path, host_id)
+
+    assert opaque_path.is_symlink()
+    assert opaque_path.resolve() == host_path.resolve()
 
 
 # -- Permissions config tests --
