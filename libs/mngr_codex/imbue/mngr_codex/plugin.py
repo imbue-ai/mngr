@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import os
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -99,6 +100,8 @@ from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -118,7 +121,9 @@ from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -898,36 +903,97 @@ class CodexAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt the session named by ``--adopt-session`` into this newly provisioned agent.
+        """Adopt an existing codex conversation into this newly provisioned agent.
 
-        ``plugin_data["adopt_session"]`` is the tuple of values passed to the
-        (command-global, ``multiple=True``) ``--adopt-session`` flag; empty when the flag
-        was not given. When present, adopt the last entry (a codex session id or an
-        absolute rollout ``.jsonl`` path): resolve it to a ``(session_id,
-        source_sessions_dir)`` (see ``_resolve_adopt_session``), copy the source
-        ``sessions/`` tree into this agent's ``CODEX_HOME/sessions``, rebind the adopted
-        rollout's recorded cwd to this agent's work dir (so ``codex resume`` does not pop
-        the working-directory modal), and write the session id as the resume pointer
-        (``codex_root_session``) that ``assemble_command``'s prelude reads.
+        Two mutually exclusive sources, dispatched here:
+
+        - ``--adopt-session`` (``plugin_data["adopt_session"]``, the tuple of values passed
+          to the command-global ``multiple=True`` flag): adopt the last entry (a codex
+          session id or an absolute rollout ``.jsonl`` path). Resolve it to a
+          ``(session_id, source_sessions_dir)`` (see ``_resolve_adopt_session``), copy that
+          source ``sessions/`` tree into this agent's ``CODEX_HOME/sessions``, then rebind.
+
+        - ``--from <agent>`` (``options.source_agent_state_location``): a generic clone that
+          copies the source workspace but *not* the source agent's state dir. Transfer just
+          the source's native session store, then resume its most-recent conversation.
+
+        "Rebind" in both cases means: rewrite the adopted rollout's recorded cwd to this
+        agent's work dir (so ``codex resume`` does not pop the working-directory modal) and
+        write the session id as the resume pointer (``codex_root_session``) that
+        ``assemble_command``'s prelude reads.
         """
         adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
-        if not adopt_args:
+        if adopt_args:
+            user_codex_home = self._resolve_user_codex_home(host)
+            session_id, source_sessions_dir = _resolve_adopt_session(adopt_args[-1], mngr_ctx, user_codex_home)
+            dest_sessions_dir = self._get_codex_home() / "sessions"
+            with log_span("Adopting codex session {}", session_id):
+                host.copy_directory(host, source_sessions_dir, dest_sessions_dir)
+                self._rebind_codex_session(host, dest_sessions_dir, session_id)
+            logger.info("Adopted codex session {} into agent {}", session_id, self.id)
             return
-        user_codex_home = self._resolve_user_codex_home(host)
-        session_id, source_sessions_dir = _resolve_adopt_session(adopt_args[-1], mngr_ctx, user_codex_home)
-        with log_span("Adopting codex session {}", session_id):
-            self._adopt_codex_session(host, session_id, source_sessions_dir)
-        logger.info("Adopted codex session {} into agent {}", session_id, self.id)
+        if options.source_agent_state_location is not None:
+            self._adopt_cloned_codex_session(host, options.source_agent_state_location)
 
-    def _adopt_codex_session(self, host: OnlineHostInterface, session_id: str, source_sessions_dir: Path) -> None:
-        """Copy the resolved session store in, rebind its cwd, and write the resume pointer.
+    def _adopt_cloned_codex_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+        """Resume the cloned source agent's conversation after a ``--from`` clone.
 
-        Copies the source ``sessions/`` tree into this agent's ``CODEX_HOME/sessions``,
-        rewrites the adopted rollout's recorded cwd to this agent's work dir, then writes
-        ``session_id`` to ``codex_root_session`` so the launch prelude resumes it.
+        Transfers the source's native session store (the same relpath the agent preserves
+        and scans) into this agent's state dir, discovers the source's most-recent rollout
+        in the transferred store, and rebinds it (cwd rewrite + resume pointer). When the
+        source had no session store, warns and returns so the clone starts fresh.
         """
+        transferred = transfer_cloned_agent_session_store(
+            host, self._get_agent_dir(), source_location, _AGENT_SESSIONS_RELPATH
+        )
+        if not transferred:
+            logger.warning(
+                "Clone adopt: source agent {} has no codex session store; cloned agent will start a fresh session",
+                source_location.path,
+            )
+            return
         dest_sessions_dir = self._get_codex_home() / "sessions"
-        host.copy_directory(host, source_sessions_dir, dest_sessions_dir)
+        session_id = self._find_latest_session_id(host, dest_sessions_dir)
+        if session_id is None:
+            logger.warning(
+                "Clone adopt: no rollout found in transferred codex session store at {}; "
+                "cloned agent will start a fresh session",
+                dest_sessions_dir,
+            )
+            return
+        with log_span("Adopting cloned codex session {}", session_id):
+            self._rebind_codex_session(host, dest_sessions_dir, session_id)
+        logger.info("Adopted cloned codex session {} into agent {}", session_id, self.id)
+
+    def _find_latest_session_id(self, host: OnlineHostInterface, sessions_dir: Path) -> str | None:
+        """Return the session id of the most-recent rollout under ``sessions_dir``, or None.
+
+        Codex files rollouts under ``sessions/YYYY/MM/DD/`` as
+        ``rollout-<timestamp>-<id>.jsonl``; ``find ... | xargs ls -t`` walks the date
+        nesting and picks the newest by mtime, and its trailing UUID is the id codex
+        resumes by. Resolved over the host shell (a recursive ``find``, not a globstar
+        glob) so it works remotely and under any shell. ``|| true`` keeps an empty store
+        non-fatal.
+        """
+        quoted_dir = shlex.quote(str(sessions_dir))
+        result = host.execute_idempotent_command(
+            f"find {quoted_dir} -type f -name 'rollout-*.jsonl' -print0 2>/dev/null "
+            "| xargs -0 ls -t 2>/dev/null | head -n1 || true",
+            timeout_seconds=10.0,
+        )
+        latest = result.stdout.strip()
+        if not latest:
+            return None
+        return _session_id_from_rollout_path(Path(latest))
+
+    def _rebind_codex_session(self, host: OnlineHostInterface, dest_sessions_dir: Path, session_id: str) -> None:
+        """Rebind a session already present in ``dest_sessions_dir`` to this agent.
+
+        Rewrites the adopted rollout's recorded cwd to this agent's work dir, then writes
+        ``session_id`` to ``codex_root_session`` so the launch prelude resumes it. Shared by
+        the ``--adopt-session`` and ``--from`` paths, which differ only in how the store
+        arrives in ``dest_sessions_dir``.
+        """
         self._rebind_adopted_rollout_cwd(host, dest_sessions_dir, session_id)
         host.write_text_file(self._get_root_session_file_path(), session_id)
 
@@ -1148,6 +1214,42 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     preserve_host_agents_on_destroy(
         host, mngr_ctx, AgentTypeName("codex"), _codex_items_to_preserve_for_discovered_agent
     )
+
+
+def _user_native_codex_home() -> Path:
+    """Resolve the user's real ``CODEX_HOME`` on the local machine.
+
+    Honors a ``CODEX_HOME`` override, else ``$HOME/.codex`` -- the same precedence the
+    plugin uses over the host shell and the release test seeds. Used by
+    ``on_before_create``, which runs before any host exists and whose source is always
+    local, so a local-process resolution matches the later host-shell resolution.
+    """
+    override = os.environ.get("CODEX_HOME")
+    return Path(override) if override else Path.home() / ".codex"
+
+
+@hookimpl
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+    """Codex-specific fail-fast pre-resolution of ``--adopt-session`` session ids.
+
+    The agent-agnostic gate (the type must support session adoption; mutual exclusion with
+    ``--from``) and the ``--adopt-session`` option declaration live in the core
+    ``builtin_adopt_session`` hookimpl. This runs only for codex agents and resolves every
+    named session *now* -- before any host or worktree is created -- so a bad or ambiguous
+    id is a clean ``UserInputError`` rather than a ConcurrencyExceptionGroup traceback out
+    of ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
+    source is always local, so the result matches the resolution done later.
+    """
+    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
+    if not adopt_session:
+        return None
+    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
+    if not issubclass(resolved.agent_class, CodexAgent):
+        return None
+    user_codex_home = _user_native_codex_home()
+    for session_arg in adopt_session:
+        _resolve_adopt_session(session_arg, mngr_ctx, user_codex_home)
+    return None
 
 
 @hookimpl
