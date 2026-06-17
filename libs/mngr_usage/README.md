@@ -78,4 +78,4 @@ specific source, use the top-level `source` field in CEL (e.g.
 
 For recurring automation, let `cron` own the cadence: poll the plain
 `mngr usage --format json` snapshot on a schedule and branch in the shell. See
-[cron automation recipes](docs/cron_recipes.md) for worked examples.
+[cron automation recipes](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_usage/imbue/mngr_usage/docs/cron_recipes.md) for worked examples.

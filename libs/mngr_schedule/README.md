@@ -75,6 +75,7 @@ There are two modes for how the target repo is packaged:
 
 1. **incremental** (default): the current HEAD commit hash is resolved and reused across deploys from the same repo, so the project doesn't need to be repackaged and uploaded each time.
 2. **full**: the entire current HEAD state of the repo (or the whole folder, if not a git repo) is packaged and uploaded on each deploy. Pass `--full-copy` to enable.
+
 #### Auto-merge at runtime
 
 For a git repo, the scheduled function fetches and merges the latest code from the deployed branch before each run, so the agent always works with up-to-date code.

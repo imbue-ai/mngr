@@ -1,6 +1,6 @@
 # imbue-mngr-claude
 
-Claude agent type plugin for [mngr](../../README.md).
+Claude agent type plugin for [mngr](https://github.com/imbue-ai/mngr).
 
 Provides the `claude`, `code-guardian`, and `fixme-fairy` agent types.
 
