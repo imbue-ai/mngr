@@ -6,7 +6,9 @@ from imbue.mngr_azure.backend import _build_host_dir_sync_command
 from imbue.mngr_azure.backend import _build_host_dir_sync_service_unit
 from imbue.mngr_azure.state_bucket import host_dir_sync_target_for
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_SCRIPT_PATH
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
+from imbue.mngr_vps.instance_offline import build_host_dir_sync_script
 from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
 
 _HOST_DIR = "/mnt/mngr-btrfs/abc123/host_dir"
@@ -25,12 +27,20 @@ def test_sync_command_uses_delete_destination_and_excludes() -> None:
 
 
 def test_service_unit_is_oneshot_and_authenticates_as_the_managed_identity() -> None:
-    unit = _build_host_dir_sync_service_unit(_HOST_DIR, _BLOB_URL, _CLIENT_ID)
+    unit = _build_host_dir_sync_service_unit(_CLIENT_ID)
     assert "Type=oneshot" in unit
-    assert "ExecStart=/bin/sh -c 'azcopy sync" in unit
+    # ExecStart points at the installed script (no inline /bin/sh -c, so no nested quoting).
+    assert f"ExecStart={HOST_DIR_SYNC_SCRIPT_PATH}" in unit
+    assert "/bin/sh -c" not in unit
     # azcopy authenticates as the VM's user-assigned identity via MSI.
     assert "Environment=AZCOPY_AUTO_LOGIN_TYPE=MSI" in unit
     assert f"Environment=AZCOPY_MSI_CLIENT_ID={_CLIENT_ID}" in unit
+
+
+def test_sync_script_runs_the_sync_command() -> None:
+    script = build_host_dir_sync_script(_build_host_dir_sync_command(_HOST_DIR, _BLOB_URL))
+    assert script.startswith("#!/bin/sh\n")
+    assert f'exec azcopy sync "{_HOST_DIR}" "{_BLOB_URL}"' in script
 
 
 def test_timer_unit_fires_at_the_interval() -> None:

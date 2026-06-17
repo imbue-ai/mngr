@@ -6,7 +6,9 @@ from imbue.mngr_aws.backend import _build_host_dir_sync_command
 from imbue.mngr_aws.backend import _build_host_dir_sync_service_unit
 from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_SCRIPT_PATH
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
+from imbue.mngr_vps.instance_offline import build_host_dir_sync_script
 from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
 
 _HOST_DIR = "/mnt/mngr-btrfs/abc123/host_dir"
@@ -21,11 +23,18 @@ def test_sync_command_uses_delete_and_excludes() -> None:
     assert '--exclude "*/node_modules/*"' in command
 
 
-def test_service_unit_is_oneshot_and_runs_the_sync() -> None:
-    unit = _build_host_dir_sync_service_unit(_HOST_DIR, _TARGET)
+def test_service_unit_is_oneshot_and_runs_the_installed_script() -> None:
+    unit = _build_host_dir_sync_service_unit()
     assert "Type=oneshot" in unit
-    assert "ExecStart=/bin/sh -c 'aws s3 sync" in unit
-    assert _TARGET in unit
+    # ExecStart points at the installed script (no inline /bin/sh -c, so no nested quoting).
+    assert f"ExecStart={HOST_DIR_SYNC_SCRIPT_PATH}" in unit
+    assert "/bin/sh -c" not in unit
+
+
+def test_sync_script_runs_the_sync_command() -> None:
+    script = build_host_dir_sync_script(_build_host_dir_sync_command(_HOST_DIR, _TARGET))
+    assert script.startswith("#!/bin/sh\n")
+    assert f'exec aws s3 sync "{_HOST_DIR}/" "{_TARGET}"' in script
 
 
 def test_timer_unit_fires_at_the_interval() -> None:

@@ -51,11 +51,14 @@ from imbue.mngr_vps.instance_offline import AGENT_TAG_FIELDS
 from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
 from imbue.mngr_vps.instance_offline import BucketHostDirBackend
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_SCRIPT_PATH
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
 from imbue.mngr_vps.instance_offline import TagMirrorVpsProvider
+from imbue.mngr_vps.instance_offline import build_host_dir_sync_script
 from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.systemd import render_systemd_unit
 
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 
@@ -117,23 +120,29 @@ def _build_host_dir_sync_command(host_dir_on_outer: str, blob_prefix_url: str) -
     )
 
 
-def _build_host_dir_sync_service_unit(host_dir_on_outer: str, blob_prefix_url: str, identity_client_id: str) -> str:
+def _build_host_dir_sync_service_unit(identity_client_id: str) -> str:
     """Build the oneshot systemd ``.service`` that pushes host_dir to the bucket once.
 
     Triggered periodically by the paired ``.timer`` and once on graceful stop.
     ``Type=oneshot`` so a stop-time ``systemctl start`` blocks until the sync
     completes (the offline copy is current before the VM deallocates). The MSI
-    login env pins azcopy to the bucket-write user-assigned identity.
+    login env pins azcopy to the bucket-write user-assigned identity. ``ExecStart``
+    runs the installed ``HOST_DIR_SYNC_SCRIPT_PATH`` script rather than an inline
+    ``/bin/sh -c``, so the embedded host_dir path and blob URL avoid systemd's + the
+    shell's nested quoting.
     """
-    command = _build_host_dir_sync_command(host_dir_on_outer, blob_prefix_url)
-    return (
-        "[Unit]\n"
-        "Description=Sync this host's host_dir to the mngr Azure Blob state bucket for offline reads\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        "Environment=AZCOPY_AUTO_LOGIN_TYPE=MSI\n"
-        f"Environment=AZCOPY_MSI_CLIENT_ID={identity_client_id}\n"
-        f"ExecStart=/bin/sh -c '{command}'\n"
+    return render_systemd_unit(
+        {
+            "Unit": [
+                ("Description", "Sync this host's host_dir to the mngr Azure Blob state bucket for offline reads")
+            ],
+            "Service": [
+                ("Type", "oneshot"),
+                ("Environment", "AZCOPY_AUTO_LOGIN_TYPE=MSI"),
+                ("Environment", f"AZCOPY_MSI_CLIENT_ID={identity_client_id}"),
+                ("ExecStart", HOST_DIR_SYNC_SCRIPT_PATH),
+            ],
+        }
     )
 
 
@@ -158,12 +167,11 @@ def _build_azcopy_install_command() -> str:
 
 def _build_idle_watcher_service_unit() -> str:
     """Build the oneshot systemd ``.service`` that runs the self-deallocate script when idle."""
-    return (
-        "[Unit]\n"
-        "Description=Deallocate this Azure VM when mngr signals the host is idle\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart={_DEALLOCATE_SCRIPT_PATH}\n"
+    return render_systemd_unit(
+        {
+            "Unit": [("Description", "Deallocate this Azure VM when mngr signals the host is idle")],
+            "Service": [("Type", "oneshot"), ("ExecStart", _DEALLOCATE_SCRIPT_PATH)],
+        }
     )
 
 
@@ -749,11 +757,14 @@ class _BlobHostDirBackend(BucketHostDirBackend):
             return
         host_dir_on_outer = str(self.provider._realizer.host_dir_path_on_outer(host_id))
         blob_prefix_url = host_dir_sync_target_for(self.bucket.account_name, self.bucket.container_name, host_id)
-        service_unit = _build_host_dir_sync_service_unit(host_dir_on_outer, blob_prefix_url, identity_client_id)
+        sync_script = build_host_dir_sync_script(_build_host_dir_sync_command(host_dir_on_outer, blob_prefix_url))
+        service_unit = _build_host_dir_sync_service_unit(identity_client_id)
         timer_unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
         with log_span("Installing Azure host_dir sync daemon"):
             with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
                 outer.execute_idempotent_command(_build_azcopy_install_command(), timeout_seconds=300.0)
+                outer.write_text_file(Path(HOST_DIR_SYNC_SCRIPT_PATH), sync_script)
+                outer.execute_idempotent_command(f"chmod +x {HOST_DIR_SYNC_SCRIPT_PATH}")
                 outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
                 outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
                 outer.execute_idempotent_command("systemctl daemon-reload")

@@ -1,4 +1,5 @@
 import json
+import shlex
 from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -40,6 +41,7 @@ from imbue.mngr_vps.host_state_store import StateBucket
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.systemd import render_systemd_unit
 
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 
@@ -63,6 +65,14 @@ IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-idle-watcher"
 HOST_DIR_SYNC_UNIT_NAME: Final[str] = "mngr-host-dir-sync"
 HOST_DIR_SYNC_INTERVAL_SECONDS: Final[int] = 60
 
+# Host-side scripts the oneshot ``.service`` units run via ``ExecStart``. Installing
+# the command as a script (rather than an inline ``ExecStart=/bin/sh -c '...'``) keeps
+# the embedded paths/URIs out of systemd's + the shell's nested quoting.
+HOST_DIR_SYNC_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-host-dir-sync.sh"
+# Default (AWS/GCP) idle action: the idle-watcher ``.service`` runs this poweroff
+# script. Azure overrides the action with its own ARM self-deallocate script.
+IDLE_WATCHER_POWEROFF_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-idle-watcher.sh"
+
 
 def build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
     """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
@@ -85,24 +95,23 @@ def build_idle_watcher_path_unit(sentinel_on_outer: str, instance_kind: str) -> 
     provider's wording for the machine (``EC2 instance`` / ``GCE instance`` /
     ``Azure VM``), used only in the human-readable ``Description=``.
     """
-    return (
-        "[Unit]\n"
-        f"Description=Watch for the mngr idle sentinel and stop this {instance_kind} when idle\n"
-        "[Path]\n"
-        f"PathExists={sentinel_on_outer}\n"
-        f"Unit={IDLE_WATCHER_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
+    return render_systemd_unit(
+        {
+            "Unit": [("Description", f"Watch for the mngr idle sentinel and stop this {instance_kind} when idle")],
+            "Path": [("PathExists", sentinel_on_outer), ("Unit", f"{IDLE_WATCHER_UNIT_NAME}.service")],
+            "Install": [("WantedBy", "multi-user.target")],
+        }
     )
 
 
-def build_poweroff_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
-    """Build the oneshot systemd ``.service`` that powers the host off when idle.
+def build_poweroff_idle_watcher_script(sentinel_on_outer: str) -> str:
+    """Build the host-side script that powers the instance off when mngr signals idle.
 
-    Powers the instance off with ``shutdown -P now``; on AWS EC2 then applies the
-    instance's ``InstanceInitiatedShutdownBehavior`` (stop or terminate), and on GCE
-    a guest poweroff lands the instance in ``TERMINATED`` (stopped, disk preserved,
-    no compute billing) -- both with no IAM/API call.
+    Installed at ``IDLE_WATCHER_POWEROFF_SCRIPT_PATH`` and run by the idle-watcher
+    ``.service``. Powers off with ``shutdown -P now``; on AWS EC2 that then applies
+    the instance's ``InstanceInitiatedShutdownBehavior`` (stop or terminate), and on
+    GCE a guest poweroff lands the instance in ``TERMINATED`` (stopped, disk
+    preserved, no compute billing) -- both with no IAM/API call.
 
     It removes the sentinel file BEFORE powering off. This is what makes resume
     work: when ``mngr start`` boots the instance again, systemd re-arms the ``.path``
@@ -111,11 +120,26 @@ def build_poweroff_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
     boot (the in-container watcher only re-creates it if the host is idle again).
     """
     return (
-        "[Unit]\n"
-        "Description=Power off this instance when mngr signals the host is idle\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && shutdown -P now'\n"
+        "#!/bin/sh\n"
+        "# Installed by mngr -- power this instance off when it signals idle.\n"
+        "set -u\n"
+        f"rm -f {shlex.quote(sentinel_on_outer)}\n"
+        "shutdown -P now\n"
+    )
+
+
+def build_poweroff_idle_watcher_service_unit() -> str:
+    """Build the oneshot systemd ``.service`` that runs the installed poweroff script.
+
+    ``ExecStart`` points at ``IDLE_WATCHER_POWEROFF_SCRIPT_PATH`` (see
+    ``build_poweroff_idle_watcher_script``) rather than an inline ``/bin/sh -c``, so
+    the sentinel path it removes never has to survive systemd + shell quoting.
+    """
+    return render_systemd_unit(
+        {
+            "Unit": [("Description", "Power off this instance when mngr signals the host is idle")],
+            "Service": [("Type", "oneshot"), ("ExecStart", IDLE_WATCHER_POWEROFF_SCRIPT_PATH)],
+        }
     )
 
 
@@ -125,16 +149,28 @@ def build_host_dir_sync_timer_unit(interval_seconds: int) -> str:
     ``OnBootSec`` gives the host a moment to finish bootstrapping before the first
     sync; ``OnUnitActiveSec`` then repeats at the interval. Shared by AWS and Azure.
     """
-    return (
-        "[Unit]\n"
-        "Description=Periodically sync this host's host_dir to the mngr state bucket\n"
-        "[Timer]\n"
-        f"OnBootSec={interval_seconds}\n"
-        f"OnUnitActiveSec={interval_seconds}\n"
-        f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=timers.target\n"
+    return render_systemd_unit(
+        {
+            "Unit": [("Description", "Periodically sync this host's host_dir to the mngr state bucket")],
+            "Timer": [
+                ("OnBootSec", str(interval_seconds)),
+                ("OnUnitActiveSec", str(interval_seconds)),
+                ("Unit", f"{HOST_DIR_SYNC_UNIT_NAME}.service"),
+            ],
+            "Install": [("WantedBy", "timers.target")],
+        }
     )
+
+
+def build_host_dir_sync_script(sync_command: str) -> str:
+    """Build the host-side script the host_dir-sync ``.service`` runs via ``ExecStart``.
+
+    Installed at ``HOST_DIR_SYNC_SCRIPT_PATH``. Wrapping the provider's sync command
+    (``aws s3 sync ...`` / ``azcopy sync ...``) in a script -- rather than an inline
+    ``ExecStart=/bin/sh -c '...'`` -- keeps the embedded host_dir path and bucket URI
+    out of systemd's + the shell's nested quoting.
+    """
+    return f"#!/bin/sh\nexec {sync_command}\n"
 
 
 class OfflineCapableVpsProvider(VpsProvider):
@@ -440,20 +476,27 @@ class OfflineCapableVpsProvider(VpsProvider):
     def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
         """Hook: the oneshot ``.service`` body the host-side idle watcher runs.
 
-        Default (AWS/GCP) powers the host off with ``shutdown -P now`` (removing the
-        sentinel first so a resumed instance is not immediately re-stopped). Azure
-        overrides this to run its installed ARM self-deallocate script.
+        Default (AWS/GCP) powers the host off with ``shutdown -P now`` (the poweroff
+        script removes the sentinel first so a resumed instance is not immediately
+        re-stopped). Azure overrides this to run its installed ARM self-deallocate
+        script.
         """
-        return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
+        del sentinel_on_outer
+        return build_poweroff_idle_watcher_service_unit()
 
     def _prepare_idle_watcher_outer(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
         """Hook: provider setup on the outer before the idle-watcher units are written.
 
-        ``sentinel_on_outer`` is the outer-filesystem path of the idle sentinel
-        (the same value the units reference). Default no-op (AWS/GCP need nothing).
-        Azure overrides this to install curl and write its self-deallocate script
-        (which removes that sentinel and then deallocates), run by its ``.service``.
+        ``sentinel_on_outer`` is the outer-filesystem path of the idle sentinel (the
+        same value the units reference). Default (AWS/GCP) installs the poweroff script
+        the ``.service`` runs (it removes the sentinel, then ``shutdown -P now``). Azure
+        overrides this to install curl and write its ARM self-deallocate script instead
+        (an Azure OS shutdown does not halt compute billing).
         """
+        outer.write_text_file(
+            Path(IDLE_WATCHER_POWEROFF_SCRIPT_PATH), build_poweroff_idle_watcher_script(sentinel_on_outer)
+        )
+        outer.execute_idempotent_command(f"chmod +x {IDLE_WATCHER_POWEROFF_SCRIPT_PATH}")
 
     def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
         """Install the systemd path/service idle watcher on the outer host.

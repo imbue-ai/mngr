@@ -48,10 +48,13 @@ from imbue.mngr_vps.instance_offline import AGENT_TAG_FIELDS
 from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
 from imbue.mngr_vps.instance_offline import BucketHostDirBackend
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_SCRIPT_PATH
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
 from imbue.mngr_vps.instance_offline import TagMirrorVpsProvider
+from imbue.mngr_vps.instance_offline import build_host_dir_sync_script
 from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.systemd import render_systemd_unit
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
@@ -104,19 +107,21 @@ def _build_host_dir_sync_command(host_dir_on_outer: str, sync_target_uri: str) -
     return f'aws s3 sync "{host_dir_on_outer}/" "{sync_target_uri}" --delete {excludes}'.rstrip()
 
 
-def _build_host_dir_sync_service_unit(host_dir_on_outer: str, sync_target_uri: str) -> str:
+def _build_host_dir_sync_service_unit() -> str:
     """Build the oneshot systemd ``.service`` that pushes host_dir to the bucket once.
 
     Triggered periodically by the paired ``.timer`` and once on graceful stop.
     ``Type=oneshot`` so a stop-time ``systemctl start`` blocks until the sync
     completes (the offline copy is current before the instance powers off).
+    ``ExecStart`` runs the installed ``HOST_DIR_SYNC_SCRIPT_PATH`` script rather than an
+    inline ``/bin/sh -c``, so the embedded host_dir path and S3 URI avoid systemd's +
+    the shell's nested quoting.
     """
-    return (
-        "[Unit]\n"
-        "Description=Sync this host's host_dir to the mngr S3 state bucket for offline reads\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart=/bin/sh -c '{_build_host_dir_sync_command(host_dir_on_outer, sync_target_uri)}'\n"
+    return render_systemd_unit(
+        {
+            "Unit": [("Description", "Sync this host's host_dir to the mngr S3 state bucket for offline reads")],
+            "Service": [("Type", "oneshot"), ("ExecStart", HOST_DIR_SYNC_SCRIPT_PATH)],
+        }
     )
 
 
@@ -565,11 +570,14 @@ class _S3HostDirBackend(BucketHostDirBackend):
     def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
         host_dir_on_outer = self.provider._realizer.host_dir_path_on_outer(host_id)
         sync_target_uri = host_dir_sync_target_for(self.bucket.bucket_name, host_id)
-        service_unit = _build_host_dir_sync_service_unit(str(host_dir_on_outer), sync_target_uri)
+        sync_script = build_host_dir_sync_script(_build_host_dir_sync_command(str(host_dir_on_outer), sync_target_uri))
+        service_unit = _build_host_dir_sync_service_unit()
         timer_unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
         with log_span("Installing AWS host_dir sync daemon"):
             with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
                 outer.execute_idempotent_command(_build_awscli_install_command(), timeout_seconds=300.0)
+                outer.write_text_file(Path(HOST_DIR_SYNC_SCRIPT_PATH), sync_script)
+                outer.execute_idempotent_command(f"chmod +x {HOST_DIR_SYNC_SCRIPT_PATH}")
                 outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
                 outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
                 outer.execute_idempotent_command("systemctl daemon-reload")
