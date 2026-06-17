@@ -90,6 +90,7 @@ from __future__ import annotations
 import importlib.resources
 import shlex
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
@@ -107,6 +108,11 @@ from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -115,12 +121,17 @@ from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CONVERSATIONS_DIR_RELATIVE_TO_HOME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
@@ -149,6 +160,9 @@ from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_sett
 _DANGEROUSLY_SKIP_PERMISSIONS_FLAG: Final[str] = "--dangerously-skip-permissions"
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
+# The python converter common_transcript.sh invokes (python3
+# <dir>/common_transcript_convert.py); provisioned alongside the .sh.
+_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: Final[str] = "common_transcript_convert.py"
 _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 # The python3 decoder stream_transcript.sh invokes to read agy's SQLite conversation
 # store (agy >= 1.0.4); provisioned alongside the streamer into the commands/ dir.
@@ -335,6 +349,11 @@ class AntigravityAgentConfig(AgentTypeConfig):
         default=True,
         description="When True, emit a common-schema transcript that `mngr transcript` reads.",
     )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
+    )
 
 
 class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTranscriptMixin):
@@ -365,9 +384,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # per-session channel whenever the agent enters a busy state -- i.e. once
         # it starts processing the just-submitted message (see statusline.sh).
         # Wait for that, exactly as Claude waits for its UserPromptSubmit hook.
-        # Known edge: a model that *refuses* the prompt -- e.g. quota exhausted
-        # -- never enters a busy state, so this times out even though the prompt
-        # was enqueued.
+        # agy waits on the statusLine busy-signal alone -- no acceptance marker is
+        # supplied (agy records none), so the hook signal is the sole confirmation,
+        # which covers the normal and queue-while-busy cases. (Known edge: a model
+        # that *refuses* the prompt -- e.g. quota exhausted -- never enters a busy
+        # state, so this times out even though the prompt was enqueued.)
         send_enter_via_tmux_wait_for_hook(
             self,
             tmux_target,
@@ -397,8 +418,12 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         }
 
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the antigravity common-transcript converter."""
-        return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
+        """Return the antigravity common-transcript converter shell script plus the
+        python module it invokes."""
+        return {
+            name: _load_antigravity_resource_script(name)
+            for name in (_COMMON_TRANSCRIPT_SCRIPT_NAME, _COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME)
+        }
 
     def _get_agy_log_file_path(self) -> Path:
         """Path agy is told to write its --log-file to.
@@ -493,6 +518,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         and this path resolve to the same file.
         """
         return self._get_agent_dir() / ROOT_CONVERSATION_FILENAME
+
+    def on_destroy(self, host: OnlineHostInterface) -> None:
+        """Preserve transcripts and conversation-id history before the state dir is deleted."""
+        if self.agent_config.preserve_on_destroy:
+            preserve_agent_state(_antigravity_preserved_items(), self, host)
 
     def provision(
         self,
@@ -1023,6 +1053,52 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {cd_cmd} "
             f'&& {{ {resume_prelude}; {home_prefix} {agy_invocation} "$@" ; }}'
         )
+
+
+def _antigravity_preserved_items() -> list[PreservedItem]:
+    """Return the files to preserve from an antigravity agent's state directory.
+
+    The raw and common transcripts plus the conversation-id history: the root
+    conversation (for resume) and the full conversation-ids list (root plus
+    subagents).
+
+    Also agy's native resumable conversation store -- the per-conversation
+    SQLite ``<conv_id>.db`` files that ``agy --conversation`` resumes from. We
+    preserve the ``conversations/`` subdir specifically, which excludes the agy
+    oauth token, ``settings.json``, and the macOS keychain symlink (all siblings
+    elsewhere in the per-agent ``home`` tree, which is otherwise not preserved).
+
+    Known limitation: on macOS the ``.db`` is encrypted by Chromium os_crypt
+    with the "Antigravity Safe Storage" key in the login keychain, so a
+    macOS-created store is not portable to a different machine/user (it is
+    readable when preserved on the same machine, and Linux uses a portable
+    file-based store).
+    """
+    conversations_relpath = (Path(*_AGY_HOME_RELATIVE_PATH) / CONVERSATIONS_DIR_RELATIVE_TO_HOME).as_posix()
+    return [
+        *build_transcript_preserved_items("antigravity"),
+        PreservedItem(rel_path=ROOT_CONVERSATION_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=CONVERSATION_IDS_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=conversations_relpath, kind=FileType.DIRECTORY),
+    ]
+
+
+def _antigravity_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) antigravity agent, or None to skip it."""
+    return flag_gated_items(ref, "preserve_on_destroy", _antigravity_preserved_items())
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve antigravity transcripts from the host's volume before it is destroyed.
+
+    Mirrors ``AntigravityAgent.on_destroy`` for the offline path, where a host is
+    destroyed without per-agent ``on_destroy`` calls but agent state still lives
+    on the host's persisted volume.
+    """
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName("antigravity"), _antigravity_items_to_preserve_for_discovered_agent
+    )
 
 
 @hookimpl

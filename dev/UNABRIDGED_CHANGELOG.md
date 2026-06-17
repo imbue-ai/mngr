@@ -4,6 +4,90 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Regenerated `uv.lock` to match the version revert of `imbue-mngr-opencode-usage` and `imbue-mngr-pi-coding-usage` back to 0.1.0.
+
+## 2026-06-16
+
+Added `specs/agent-usage-plugins/spec.md`: a design spec for extending `mngr usage` cost/usage tracking beyond Claude to the OpenCode, pi, and Codex harnesses. The spec generalizes the usage event schema to report raw token counts (with the reader deriving and provenance-flagging cost via a canonical pricing table), keeps dollars as the cross-harness comparable unit, and lays out three thin per-harness writer plugins. Antigravity and the Claude-subagent-proxy are documented as out of scope. The
+per-harness data exposure was verified against the locally installed harnesses
+(OpenCode 1.16.2, Codex 0.138.0, pi 0.79.1): OpenCode reports cost+tokens
+directly; Codex's `token_count` events expose cumulative tokens plus rate-limit
+windows (so Codex subscription agents get Claude-style windows as a bonus). A
+live two-turn `pi-coding` agent confirmed pi reports cost natively
+(`usage.cost.total`, matching the canonical Anthropic prices exactly) with
+non-overlapping cache-exclusive token buckets, so pi is reported-cost (estimate
+only as a fallback), leaving Codex as the only purely token-derived harness.
+
+Documented the install-wizard surfacing of the usage plugins: added an "Install-wizard recommendation" section to `specs/agent-usage-plugins/spec.md`, and recorded the antigravity gap (the one agent type with no usage provider, so the wizard offers none for it) in the `specs/agent-plugin-parity/spec.md` current-state matrix (new "Usage tracking plugin" row) and its observations.
+
+Extended the local-scratch gitignore convention to Python and text files: `**/*.local.py` and `**/*.local.txt` are now ignored, mirroring the existing `**/*.local.md` and `**/*.local.sh` patterns. Lets one-off validation harnesses and probe scripts (named `whatever.local.py` / `whatever.local.txt`) stay untracked and survive the stop hook's working-tree cleanup.
+
+Add a design spec (`specs/aws-ec2-stop-start-lifecycle/`) for giving AWS agents a Modal-like idle-paused-but-resumable lifecycle via native EC2 stop/start (instead of EBS snapshots). Phases 1 (native EC2 instance stop/start), 2 (the self-stopping idle watcher), and 4 (offline EC2-tag discovery so stopped hosts stay resumable by name) are marked implemented.
+
+The idle watcher is a host-side systemd path unit that powers the host off (`shutdown -P now`) when an in-container sentinel goes stale; EC2's `InstanceInitiatedShutdownBehavior` (new `terminate_on_shutdown` config flag, default `stop`) decides whether that shutdown stops the instance (resumable via `mngr start`, EBS-only cost) or terminates it. The spec documents the single-flag tradeoff (resumable-on-idle OR self-terminating, not both) in Decision #3, plus the `prepare`/`cleanup` permission notes.
+
+## Azure provider wiring
+
+- Added `--cov=imbue.mngr_azure` to the root pytest coverage config so the new `mngr_azure` package is covered alongside the other provider plugins. The package is picked up automatically by the `libs/*` uv workspace glob.
+
+- Registered the `azure` command group in `scripts/make_cli_docs.py` (`SECONDARY_COMMANDS`) so `mngr azure` gets a generated doc page, alongside `aws` / `gcp`.
+
+- The `azure` create template now builds the project Dockerfile on the VM (so azure agents get `gh` and the full mngr toolchain) instead of coming up on a bare `debian:bookworm-slim` base. It mirrors the `gcp` template: `build_arg = ["--azure-vm-size=...", "--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]` -- the context is the worktree, which the shared `mngr_vps_docker` build flow clones (overlaying uncommitted changes) and uploads, resolving `--file` inside it. Also forwards `GH_TOKEN` + runs `gh auth setup-git` (via the `github_setup` window), sets `agent_args=--dangerously-skip-permissions` and `target_path=/code/mngr`.
+
+- `[providers.azure] builder = "DEPOT"` builds on depot's cached remote builders (like `gcp`) so azure creates after the first reuse cached layers instead of building cold. Requires `DEPOT_TOKEN` exported at `mngr create -t azure` time (read from the create shell, not `pass_env`); `depot.json` in the repo supplies the project id. Drop the block to fall back to a native `docker build` on the VM.
+
+Synced the root design specs to the removed VPS-client snapshot surface: `specs/vps-docker-provider/spec.md` and `concise.md` no longer declare `create_snapshot` / `delete_snapshot` / `list_snapshots` on `VpsClientInterface`; `specs/ovh-vps-provider/spec.md` drops the OVH snapshot-wrapper bullet and its snapshot test scenarios; `specs/azure-provider/concise.md` drops the managed-disk-snapshot client bullet; and `specs/aws-ec2-stop-start-lifecycle/spec.md` no longer says the `AwsVpsClient` snapshot methods exist-but-unwired.
+
+Also synced the matching `list_ssh_keys` references (removed alongside the snapshot methods): `specs/ovh-vps-provider/spec.md` no longer lists `list_ssh_keys` as a client method, and `specs/azure-provider/concise.md`'s method count drops from ~11 to ~7.
+
+Added `specs/cleanup-error-aggregation.md`, a design spec for making `mngr stop`/`destroy`/`cleanup` aggregate and classify failures (benign "already gone" vs. real "resource left behind"), with cause-specific exit codes, across both the stop and destroy paths.
+
+`minds-launch-to-msg.yml`: show the ref name **and** the resolved commit, not the tag object.
+
+The Slack notification and step summaries resolved `commit_sha` / `template_ref` with `git ls-remote refs/tags/<tag>` (no peel), so a run against an **annotated** tag (e.g. `minds-v0.3.1`) displayed the tag-*object* SHA — a SHA you can't `git checkout` and that doesn't match the commit the run actually built. The `check_should_run` compute step now peels annotated tags (`^{}`) to the commit they point at (also making the pair-key / marker cache consistent between tag and SHA reruns), carries the input ref through as new `mngr_ref` / `fct_ref` outputs, and the Slack line + should-run summary now render `` `<ref>` (`<commit>`) `` — e.g. `` `minds-v0.3.1` (`d05797429`) ``. Raw-SHA inputs still render just the commit. The `launch_to_msg` job's own `resolve FCT template ref` step (its per-job summary) is peeled the same way, so no step surfaces a tag-object SHA anymore.
+
+`justfile`: realign the `sync-vendor-mngr` recipe with the current release flow — its comment now tells you to position the mngr checkout at the **verified release SHA** (not blindly `main`, which can drift past it), points at `apps/minds/docs/release.md` instead of the stale `release-minds` skill, and **no longer hardcodes a personal FCT path** — the FCT checkout path comes from the positional arg, else `FCT_DIR` read from a gitignored, **minds-scoped** `apps/minds/.env` (template: committed `apps/minds/.env.example`), else `$FCT_DIR` in your shell. No shell-rc edit, it reaches non-interactive agent shells, nothing personal is committed, and **only this recipe** loads that `.env` (no repo-wide `set dotenv-load`). Errors with usage if none is set. `release.md` documents this up front for release agents.
+
+## 2026-06-15
+
+`just bake-pool-host-dev` now passes `--skip-deferred-install-wait` so dev pool bakes don't wait the extra few minutes for the deferred Playwright/apt install before stopping the services agent.
+
+Replaced the `just bake-pool-host` recipe with `just bake-pool-host-dev` (bake from a working tree -- best-effort branch label) and `just bake-pool-host-prod` (clone an exact FCT tag -- strict), reflecting that the imbue_cloud pool bake now derives the stamped repo identity from its source rather than from hand-typed `--attributes`. The `minds-justfile` skill documents the dev-vs-production distinction and how to set the create form's repository for a fast-path match.
+
+Added a `just minds-install` recipe that installs the minds desktop client's node deps (electron, etc.) using the Node version pinned in `apps/minds/.nvmrc` (selected via `select_node_version.sh`), so the install no longer fails with `ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's default node has drifted off the pin. `just minds-start`'s "not installed yet" hint now points at `just minds-install` (instead of a raw `cd apps/minds && pnpm install`, which skipped the node selection and hit the engine check).
+
+Added a design doc (`blueprint/ovh-baremetal-slices/`) for extending the imbue_cloud pool to allocate "slices" (lima/QEMU VMs) on rented OVH bare-metal servers as an alternative to ordering OVH VPSes, including the data model, admin lifecycle, connector release fork, and a recorded pricing gotcha (catalog base price excludes RAM/storage upgrades).
+
+Added a refactor design doc (`blueprint/mngr-imbue-cloud-module-layers/`) proposing a layered sub-package structure for the `mngr_imbue_cloud` plugin (with an `import-linter` ordering contract), isolating the slice/bare-metal subsystem and the pool-bake code into their own layers and decomposing the oversized `instance.py`.
+
+Added an `import-linter` "mngr_imbue_cloud layers contract" (root `pyproject.toml`) and a `test_meta_ratchets.py` test that enforces it, as part of restructuring the `mngr_imbue_cloud` plugin into layered sub-packages.
+
+Bumped the per-test timeout on the `test_cli_docs_are_up_to_date` meta-ratchet test: the enlarged imbue_cloud CLI surface (the new `admin server` + slice commands) made full CLI-doc regeneration exceed the default 10s pytest-timeout in the slower offload sandbox.
+
+Fixed the per-PR changelog enforcement check, which was passing vacuously in CI.
+
+The check previously ran as an acceptance test (`test_pr_has_changelog_entry`) inside the offload Modal sandbox, but the sandbox does a fresh `git init` (so `main == HEAD`) and never fetches `origin`, so its base-branch diff always came back empty and the check passed no matter what. Any PR could merge without changelog entries.
+
+The enforcement now lives in a dedicated CI gate, `scripts/check_changelog_entries.py` (run via the `check-changelog` GitHub Actions job and the `just check-changelog` recipe), which computes the changed-file set against the real base branch on the orchestrator where a base ref actually exists. It refuses to run with a loud non-zero exit if it cannot resolve a diff base distinct from HEAD, so it can never again pass vacuously. The old sandbox-bound acceptance test has been removed.
+
+Expanded CLAUDE.md flaky-test guidance: first investigate why a test is flaky and make it more robust if possible; if it is correct but fundamentally needs more time, bump that test's timeout (but avoid unreasonably long timeouts -- prefer leaving it marked flaky for infrastructure-level flukes).
+
+## GCP provider support: root-level changes
+
+- Top-level coverage configuration adds `--cov=imbue.mngr_gcp` so the new package contributes coverage data.
+- `scripts/make_cli_docs.py` adds `gcp` to `SECONDARY_COMMANDS` so the `mngr gcp` operator command group gets generated docs (required by `help_formatter_test`).
+- `uv.lock` updated to add the new `imbue-mngr-gcp` workspace package and its dependencies (`google-cloud-compute`, `google-auth`, and their transitive deps).
+
+- `.mngr/settings.toml` gains a `gcp` create-template (`mngr create -t gcp`) and a shared `[providers.gcp]` block, the analogue of the existing `modal` template. Like the `aws` template it builds via the `mngr_vps_docker` backend (`--file=` + `.` context) on depot's remote builders (`builder = "DEPOT"`), so it needs `DEPOT_TOKEN` and `GH_TOKEN` at create time. The provider defaults to `us-west1`/`us-west1-a` on an `e2-standard-2` VM; per-developer `allowed_ssh_cidrs` stays in the gitignored `.mngr/settings.local.toml` and the SSH firewall is created once via `mngr gcp prepare`.
+
+Updated the agent-plugin-parity spec to record that `opencode` now implements the `waiting_reason` field generator (online), and documented that the `@opencode-ai/sdk` type stubs are out of sync with the shipped opencode binary on the permission events (the stubs say `permission.updated`/`permissionID`; the running 1.16.2 server emits `permission.asked`/`requestID`).
+
+Documented the cross-plugin `waiting_reason` parity picture and implemented it for codex: the agent-plugin-parity spec now classifies each agent type -- implemented (claude, codex), doable-but-unimplemented (opencode, whose event bus exposes `permission.asked`/`permission.replied`), blocked-on-upstream (antigravity, which prompts but emits no event while blocked), and inapplicable (pi, which has no tool-approval prompt at all) -- while codex now implements both `PERMISSIONS` and `END_OF_TURN`.
+
+Verified live against codex 0.139.0 that the `PermissionRequest` hook fires and blocks while the approval dialog is open (and clears on `PostToolUse`), and recorded two corrections: codex has no `PostToolUseFailure` event (cleanup is `PostToolUse` + `Stop` only) and `PermissionRequest` payloads carry no `tool_use_id`.
+
 ## 2026-06-14
 
 Added `scripts/extract_antigravity_proto_schema.py`, a developer tool that recovers

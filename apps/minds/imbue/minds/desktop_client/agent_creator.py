@@ -1673,10 +1673,13 @@ class AgentCreator(MutableModel):
                 # We downgrade ``LatchkeyStoreError`` here to a warning
                 # rather than failing agent creation: the gateway still
                 # has the deny-all baseline at the opaque path (the JWT
-                # already points there), so the agent comes up working
-                # but any later UI-driven permission grants will not
-                # take effect. The user can recover by re-creating the
-                # agent.
+                # already points there), so the agent comes up working.
+                # If the link is never established, the first permission
+                # request the agent files is repaired on the fly by
+                # ``recover_missing_host_permissions`` (see
+                # ``_StreamedPermissionRequestHandler`` in ``cli/run.py``),
+                # which swings the opaque handle to the canonical path so
+                # later UI-driven grants take effect without a re-create.
                 if self.latchkey is not None:
                     try:
                         finalize_host_permissions(
@@ -1692,8 +1695,8 @@ class AgentCreator(MutableModel):
                         )
                         log_queue.put(
                             "[minds] Warning: could not link latchkey permissions handle to "
-                            f"canonical path for host {canonical_host_id}; permission grants will not "
-                            f"take effect until the agent is re-created. Reason: {link_error}"
+                            f"canonical path for host {canonical_host_id}; this will be repaired "
+                            f"automatically the first time the agent requests a permission. Reason: {link_error}"
                         )
 
                 log_queue.put("[minds] Agent created successfully.")

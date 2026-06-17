@@ -50,6 +50,7 @@ import shlex
 import urllib.parse
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
@@ -62,28 +63,48 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import copy_on_host
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
+from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENABLED_VALUE
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
+from imbue.mngr_opencode.opencode_config import NATIVE_DB_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import NATIVE_DB_SHM_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import NATIVE_DB_WAL_RELATIVE_PATH
+from imbue.mngr_opencode.opencode_config import NATIVE_STORAGE_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import OPENCODE_BIN_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_WORKDIR_ENV_VAR
+from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
+from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import build_opencode_config
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
@@ -193,6 +214,11 @@ class OpenCodeAgentConfig(AgentTypeConfig):
         default=True,
         description="When True, emit a common-schema transcript that `mngr transcript` reads.",
     )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
+    )
 
 
 class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
@@ -210,6 +236,22 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         # attach client is the pane's foreground process (lifecycle detection
         # also matches it among pane descendants).
         return "opencode"
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        """Get lifecycle state, accounting for the ``permissions_waiting`` marker.
+
+        The lifecycle plugin touches ``permissions_waiting`` while opencode is
+        blocked on a tool-approval prompt (its ``ask`` permission policy) and clears
+        it once the prompt is answered. The base state reads only the ``active``
+        marker, which stays present during a prompt (the session is still busy), so
+        on its own it would report RUNNING. Promote RUNNING -> WAITING while the
+        agent is blocked, since it cannot progress without user intervention. The
+        promotion rule lives in ``_resolve_lifecycle_state_for_permission`` so it can
+        be unit-tested without a live server.
+        """
+        base_state = super().get_lifecycle_state()
+        is_blocked_on_permission = self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
+        return _resolve_lifecycle_state_for_permission(base_state, is_blocked_on_permission)
 
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
@@ -486,8 +528,103 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
             launch_command = f"{launch_command} {forwarded_args}"
         return CommandString(launch_command)
 
+    def on_destroy(self, host: OnlineHostInterface) -> None:
+        """Preserve transcripts and session-id history before the state dir is deleted."""
+        if self.agent_config.preserve_on_destroy:
+            preserve_agent_state(_opencode_preserved_items(), self, host)
+
+
+def _opencode_preserved_items() -> list[PreservedItem]:
+    """Return the files to preserve from an opencode agent's state directory.
+
+    The raw and common transcripts, the root session-id history, and opencode's
+    native resumable session store (the SQLite ``opencode.db`` plus its ``-wal``/``-shm``
+    WAL sidecars, and ``storage/``) so the session can be resumed/adopted. The native
+    store is targeted by those specific paths so the sibling ``auth.json`` (a symlink to
+    shared creds) and ``log/`` are excluded. The ``-wal``/``-shm`` sidecars carry writes
+    not yet checkpointed into the main db; preservation skips them when absent (e.g. once
+    checkpointed by a clean shutdown), as it does any missing item.
+    """
+    return [
+        *build_transcript_preserved_items("opencode"),
+        PreservedItem(rel_path=ROOT_SESSION_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=NATIVE_DB_RELATIVE_PATH, kind=FileType.FILE),
+        PreservedItem(rel_path=NATIVE_DB_WAL_RELATIVE_PATH, kind=FileType.FILE),
+        PreservedItem(rel_path=NATIVE_DB_SHM_RELATIVE_PATH, kind=FileType.FILE),
+        PreservedItem(rel_path=NATIVE_STORAGE_RELATIVE_PATH, kind=FileType.DIRECTORY),
+    ]
+
+
+def _opencode_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) opencode agent, or None to skip it."""
+    return flag_gated_items(ref, "preserve_on_destroy", _opencode_preserved_items())
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve opencode transcripts from the host's volume before it is destroyed.
+
+    Mirrors ``OpenCodeAgent.on_destroy`` for the offline path, where a host is
+    destroyed without per-agent ``on_destroy`` calls but agent state still lives
+    on the host's persisted volume.
+    """
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName("opencode"), _opencode_items_to_preserve_for_discovered_agent
+    )
+
 
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the opencode agent type."""
     return ("opencode", OpenCodeAgent, OpenCodeAgentConfig)
+
+
+def _resolve_lifecycle_state_for_permission(
+    base_state: AgentLifecycleState, is_blocked_on_permission: bool
+) -> AgentLifecycleState:
+    """Layer the ``permissions_waiting`` signal onto the base lifecycle state.
+
+    Promotes RUNNING -> WAITING while opencode is blocked on a tool-approval prompt
+    (the base state, which reads only the ``active`` marker, would otherwise report
+    RUNNING since the session stays busy). Every non-RUNNING base state passes
+    through unchanged. Kept pure (no agent/host) so ``get_lifecycle_state``'s
+    promotion rule is unit-testable without standing up a live server.
+
+    Defers the gating decision to the shared ``classify_waiting_reason``: a RUNNING
+    base state means the ``active`` marker is present and the process is alive, so
+    the classifier's ``is_active`` gate is satisfied and a PERMISSIONS verdict is
+    what promotes RUNNING to WAITING. Sharing that one function keeps this promotion
+    and the ``waiting_reason`` field generator from drifting apart.
+    """
+    if base_state != AgentLifecycleState.RUNNING:
+        return base_state
+    reason = classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked_on_permission)
+    return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else base_state
+
+
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting based on marker files, or None.
+
+    Reads the agent state directory's marker files directly rather than calling
+    get_lifecycle_state() (which runs tmux/ps SSH commands), then delegates the
+    decision to the shared ``classify_waiting_reason`` so this and the lifecycle
+    promotion stay in lockstep. The markers are maintained by the in-process
+    lifecycle plugin (mngr_opencode_plugin.ts). ``permissions_waiting`` is only read
+    when ``active`` is present, both to short-circuit the idle case and because the
+    classifier ignores the permission signal when the agent is not in a turn.
+
+    Unlike codex, opencode has no cancelled-dialog ambiguity here: a denied prompt
+    emits ``permission.replied`` and a cancelled turn emits ``session.idle``, both of
+    which clear the marker promptly (verified live), so ``permissions_waiting`` does
+    not strand alongside ``active``.
+    """
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    is_active = host.path_exists(agent_dir / ACTIVE_MARKER_FILENAME)
+    is_blocked_on_permission = is_active and host.path_exists(agent_dir / PERMISSIONS_WAITING_FILENAME)
+    return classify_waiting_reason(is_active, is_blocked_on_permission)
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose opencode-specific agent fields for listing."""
+    return ("opencode", {"waiting_reason": _waiting_reason})

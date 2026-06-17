@@ -542,8 +542,7 @@ def test_schedule_run_local_nonexistent_trigger(
 
 # Executing the deployed trigger's run.sh shells out (it tries `mngr create`), whose
 # subprocess startup is slow and variable under CI load and intermittently exceeds the
-# default 10s pytest-timeout. Bump the timeout and let offload retry the rare slow run.
-@pytest.mark.flaky
+# default 10s pytest-timeout. Bump the timeout to absorb the rare slow run.
 @pytest.mark.timeout(30)
 def test_schedule_run_local_deployed_trigger(
     cli_runner: CliRunner,

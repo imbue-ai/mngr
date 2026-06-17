@@ -369,9 +369,17 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         start_action()
 
-    def capture_pane_content(self, include_scrollback: bool = False) -> str | None:
-        """Capture the current tmux pane content for this agent."""
-        return self._capture_pane_content(self.tmux_target, include_scrollback=include_scrollback)
+    def capture_pane_content(self, include_scrollback: bool = False, window: int | str | None = None) -> str | None:
+        """Capture the current tmux pane content for this agent.
+
+        When window is None, captures the agent's primary window (window 0).
+        Otherwise, captures the given tmux window (by index or name) in the
+        agent's session.
+        """
+        target = (
+            self.tmux_target if window is None else TmuxWindowTarget(session_name=self.session_name, window=window)
+        )
+        return self._capture_pane_content(target, include_scrollback=include_scrollback)
 
     def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
         """Send literal text to a tmux pane, choosing the best method by length.

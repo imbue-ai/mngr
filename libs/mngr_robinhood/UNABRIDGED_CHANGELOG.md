@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Best-effort agent teardown (`stop_agent` / `destroy_agent`) and the SDK
+restart-with-resume flow now also swallow the `CleanupFailedGroup` that `Host.stop_agents` /
+`Host.destroy_agent` raise when cleanup leaves a resource behind, matching the existing
+intent of logging and continuing rather than letting a teardown failure abort the run (or,
+for restart, abort the relaunch).
+
+## 2026-06-15
+
+Fixed the robinhood streaming release tests (`test_streaming.py`), which drive a real
+claude agent in tmux. They were missing `@pytest.mark.tmux`, so the resource-guard PATH
+wrapper blocked their tmux usage and the robinhood subprocess exited 2. Added the mark
+(plus a longer per-test timeout, since a real agent run far exceeds the default 30s).
+Test-only change; robinhood's streaming behavior is unchanged.
+
 ## 2026-06-14
 
 # Stream-json producers use the shared typed envelope

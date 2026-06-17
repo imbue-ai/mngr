@@ -62,6 +62,17 @@ if [ -x "$COMMON_TRANSCRIPT_SCRIPT" ]; then
     log_info "Started common transcript converter (PID: $_COMMON_TRANSCRIPT_PID)"
 fi
 
+# Usage writer (optional): emits cost_snapshot events from token_count rollout
+# items. Only launched if present in commands/ -- mngr_codex_usage installs it,
+# so usage events are written only when their reader is installed.
+USAGE_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/codex_usage.sh"
+_USAGE_PID=""
+if [ -x "$USAGE_SCRIPT" ]; then
+    bash "$USAGE_SCRIPT" &
+    _USAGE_PID=$!
+    log_info "Started usage writer (PID: $_USAGE_PID)"
+fi
+
 _cleanup() {
     if [ -n "$_STREAM_PID" ] && kill -0 "$_STREAM_PID" 2>/dev/null; then
         kill "$_STREAM_PID" 2>/dev/null
@@ -70,6 +81,10 @@ _cleanup() {
     if [ -n "$_COMMON_TRANSCRIPT_PID" ] && kill -0 "$_COMMON_TRANSCRIPT_PID" 2>/dev/null; then
         kill "$_COMMON_TRANSCRIPT_PID" 2>/dev/null
         wait "$_COMMON_TRANSCRIPT_PID" 2>/dev/null || true
+    fi
+    if [ -n "$_USAGE_PID" ] && kill -0 "$_USAGE_PID" 2>/dev/null; then
+        kill "$_USAGE_PID" 2>/dev/null
+        wait "$_USAGE_PID" 2>/dev/null || true
     fi
     rm -f "$_MNGR_CODEX_LOCK"
 }
@@ -95,6 +110,15 @@ while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
             bash "$COMMON_TRANSCRIPT_SCRIPT" &
             _COMMON_TRANSCRIPT_PID=$!
             log_info "Restarted common transcript converter (PID: $_COMMON_TRANSCRIPT_PID)"
+        fi
+    fi
+
+    if [ -n "$_USAGE_PID" ] && ! kill -0 "$_USAGE_PID" 2>/dev/null; then
+        log_warn "Usage writer died, restarting"
+        if [ -x "$USAGE_SCRIPT" ]; then
+            bash "$USAGE_SCRIPT" &
+            _USAGE_PID=$!
+            log_info "Restarted usage writer (PID: $_USAGE_PID)"
         fi
     fi
 
