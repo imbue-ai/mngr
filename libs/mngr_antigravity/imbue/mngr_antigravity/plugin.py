@@ -111,12 +111,13 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
-from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -338,15 +339,7 @@ def _resolve_adopt_session(adopt_arg: str, mngr_ctx: MngrContext) -> tuple[str, 
     # local mngr agent and preserved agent. A match in multiple dirs is ambiguous.
     candidate_dirs = [get_antigravity_conversations_dir(Path.home())]
     candidate_dirs.extend(_mngr_agent_conversations_dirs(mngr_ctx))
-
-    # Deduplicate by resolved path while preserving candidate ordering.
-    search_dirs: list[Path] = []
-    seen_resolved_dirs: set[Path] = set()
-    for entry in candidate_dirs:
-        resolved_entry = entry.resolve()
-        if resolved_entry not in seen_resolved_dirs:
-            seen_resolved_dirs.add(resolved_entry)
-            search_dirs.append(entry)
+    search_dirs = dedupe_by_resolved_path(candidate_dirs)
 
     matches: list[Path] = []
     for conversations_dir in search_dirs:
@@ -801,9 +794,8 @@ class AntigravityAgent(
         is seeded with the same id so the streamer tails the adopted conversation
         from the first turn (subagent ids are appended later by the capture hook).
         """
-        # Match statusline.sh / capture_conversation_id.sh write formats exactly: the
-        # root file holds the bare id (no newline), the ids file is newline-terminated
-        # lines (the capture hook's `grep -qxF` whole-line match depends on the newline).
+        # The ids file must be newline-terminated: the capture hook's `grep -qxF` whole-line
+        # match (capture_conversation_id.sh) depends on it. The root file holds the bare id.
         host.write_text_file(self._get_root_conversation_file_path(), conversation_id)
         host.write_text_file(self._get_conversation_ids_file_path(), f"{conversation_id}\n")
 
@@ -1388,24 +1380,15 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Antigravity-specific fail-fast pre-resolution of ``--adopt`` conversation ids.
-
-    The agent-agnostic gate (the type must support session adoption; mutual exclusion with
-    cloning via ``--from``) and the ``--adopt`` option declaration both live in core. This
-    runs only for antigravity agents and resolves every named conversation *now* -- before any
-    host or worktree is created -- so a bad or ambiguous id is a clean ``UserInputError``
-    rather than a ConcurrencyExceptionGroup traceback out of ``on_after_provisioning`` (which
-    runs inside provision_agent's ConcurrencyGroup). The source is always local, so the result
-    matches the resolution done later.
-    """
-    adopt_session = args.agent_options.adopt_session
-    if not adopt_session:
-        return None
-    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, AntigravityAgent):
-        return None
-    for adopt_arg in adopt_session:
-        _resolve_adopt_session(adopt_arg, mngr_ctx)
+    """Antigravity-specific fail-fast pre-resolution of ``--adopt`` conversation ids
+    (resolves each named conversation before any host/worktree is built; see the shared helper)."""
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        AntigravityAgent,
+        lambda adopt_arg: _resolve_adopt_session(adopt_arg, mngr_ctx),
+    )
     return None
 
 

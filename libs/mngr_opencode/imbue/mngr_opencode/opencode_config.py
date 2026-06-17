@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -280,16 +281,11 @@ def serialize_opencode_config(config: Mapping[str, Any]) -> str:
     return json.dumps(dict(config), indent=2)
 
 
-# Per-agent OpenCode data root relative to the agent state dir (the ``XDG_DATA_HOME``
-# value), as POSIX path parts -- used to locate an agent's native ``opencode.db`` when
-# scanning live/preserved mngr agents for a session to adopt.
-_AGENT_DATA_HOME_PARTS: Final[tuple[str, ...]] = _DATA_HOME_RELATIVE_PATH
-
-# The agent's native ``opencode.db`` relative to its state dir. The plugin passes this to
-# the shared live/preserved agent scanner (``iter_agent_session_paths``) to find every
-# local agent's db; kept here so the path layout stays defined alongside the other
-# opencode-data constants.
-AGENT_OPENCODE_DB_RELPATH: Final[Path] = Path(*_AGENT_DATA_HOME_PARTS, _OPENCODE_APP_DIR_NAME, _DB_FILENAME)
+# The agent's native ``opencode.db`` relative to its state dir (under the per-agent
+# ``XDG_DATA_HOME``). The plugin passes this to the shared live/preserved agent scanner
+# (``iter_agent_session_paths``) to find every local agent's db; kept here so the path layout
+# stays defined alongside the other opencode-data constants.
+AGENT_OPENCODE_DB_RELPATH: Final[Path] = Path(*_DATA_HOME_RELATIVE_PATH, _OPENCODE_APP_DIR_NAME, _DB_FILENAME)
 
 # Where a user-native (plain-CLI) OpenCode install keeps its data, relative to the data
 # home root resolved from ``$XDG_DATA_HOME`` (or ``~/.local/share``).
@@ -327,8 +323,7 @@ def _db_has_session(db_path: Path, session_id: str) -> bool:
     elsewhere.
     """
     try:
-        # A connect failure here is dominated by the benign "db file does not exist" case
-        # (the user-native path is always probed even when absent), so it is not logged.
+        # Connect failures are dominated by the benign "file does not exist" case, so not logged.
         connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     except sqlite3.Error:
         return False
@@ -336,8 +331,7 @@ def _db_has_session(db_path: Path, session_id: str) -> bool:
         cursor = connection.execute("SELECT 1 FROM session WHERE id = ? LIMIT 1", (session_id,))
         return cursor.fetchone() is not None
     except sqlite3.Error as exc:
-        # A query failure means the file exists but is malformed/corrupt: surface it (at
-        # trace level) rather than swallowing it as a silent "no match".
+        # File exists but is malformed/corrupt: surface at trace level rather than silently swallow.
         logger.trace("Could not query sessions in OpenCode db {} (treated as no match): {}", db_path, exc)
         return False
     finally:
@@ -395,26 +389,25 @@ def read_only_root_session_id(db_path: Path) -> str:
     return str(rows[0][0])
 
 
-def build_opencode_rebind_commands(db_path: Path, session_id: str, new_directory: Path) -> tuple[str, ...]:
-    """Build the host shell commands that rebind an adopted session's stored cwd.
+# Fold the ``-wal``/``-shm`` sidecars into the main db so the rebind sees and rewrites the
+# committed rows. Run before the rebind script.
+_WAL_CHECKPOINT_SQL: Final[str] = "PRAGMA wal_checkpoint(TRUNCATE);"
 
-    OpenCode stores the absolute source worktree on the ``session`` row, the owning
-    ``project`` row, and a ``project_directory`` row; after copying the db into the new
-    agent these all still point at the destroyed source worktree, so the session must be
-    rebound to the new agent's work dir or recall silently no-ops against it. Returns, in
-    order: a WAL checkpoint (fold the ``-wal``/``-shm`` sidecars into the main db so the
-    rebind sees and rewrites the committed rows), then the rebind ``UPDATE``s plus the
-    ``project_directory`` upsert (its PK is ``(project_id, directory)``). Verified live
-    against opencode 1.17.7.
+
+def build_opencode_rebind_sql(session_id: str, new_directory: Path) -> str:
+    """Build the SQL script that rebinds an adopted session's stored source-worktree paths.
+
+    OpenCode stores the absolute source worktree on the ``session`` row, the owning ``project``
+    row, and a ``project_directory`` row; after copying the db into the new agent these all
+    still point at the destroyed source worktree, so the session must be rebound to the new
+    agent's work dir or recall silently no-ops against it. The ``project_directory`` upsert
+    leaves any pre-existing row in place (its PK is ``(project_id, directory)``, so the new row
+    is additive) -- harmless, and it matches how OpenCode records additional directories.
+    Verified live against opencode 1.17.7.
     """
-    quoted_db = _sqlite_quote(str(db_path))
     quoted_session = _sqlite_quote(session_id)
     quoted_dir = _sqlite_quote(str(new_directory))
-    # One transactional script: look the session's project up, then rewrite every stored
-    # directory. The upsert leaves any pre-existing project_directory row in place (its PK
-    # includes the directory, so the new row is additive) -- harmless, and it matches how
-    # OpenCode itself records additional directories for a project.
-    rebind_sql = (
+    return (
         f"UPDATE session SET directory = {quoted_dir} WHERE id = {quoted_session};"
         f"UPDATE project SET worktree = {quoted_dir} "
         f"WHERE id = (SELECT project_id FROM session WHERE id = {quoted_session});"
@@ -423,19 +416,18 @@ def build_opencode_rebind_commands(db_path: Path, session_id: str, new_directory
         f"FROM session WHERE id = {quoted_session} "
         f"ON CONFLICT (project_id, directory) DO NOTHING;"
     )
+
+
+def build_opencode_rebind_commands(db_path: Path, session_id: str, new_directory: Path) -> tuple[str, ...]:
+    """Wrap the rebind SQL as host ``sqlite3`` shell commands: WAL checkpoint, then the rebind."""
+    quoted_db = shlex.quote(str(db_path))
     return (
-        f"sqlite3 {quoted_db} 'PRAGMA wal_checkpoint(TRUNCATE);'",
-        f"sqlite3 {quoted_db} {_shell_quote_sql(rebind_sql)}",
+        f"sqlite3 {quoted_db} {shlex.quote(_WAL_CHECKPOINT_SQL)}",
+        f"sqlite3 {quoted_db} {shlex.quote(build_opencode_rebind_sql(session_id, new_directory))}",
     )
 
 
 def _sqlite_quote(value: str) -> str:
     """Quote a value as a SQLite string literal (single quotes doubled)."""
     escaped = value.replace("'", "''")
-    return f"'{escaped}'"
-
-
-def _shell_quote_sql(sql: str) -> str:
-    """Shell-quote a SQL script for ``sqlite3 <db> <sql>`` (the SQL already uses '' literals)."""
-    escaped = sql.replace("'", "'\\''")
     return f"'{escaped}'"

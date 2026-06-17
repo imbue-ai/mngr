@@ -33,6 +33,7 @@ from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
+from imbue.mngr.utils.testing import run_mngr_subprocess
 
 # A fast, cheap, tool-capable model keeps the real turns short.
 _MODEL = "claude-haiku-4-5"
@@ -122,10 +123,7 @@ class _PiReleaseProfile(AgentReleaseProfile):
         run_git_command(work_dir, "commit", "-m", "add gitignore and .agents/skills")
 
     def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
-        # uv run mngr from the checkout, matching how the rest of this lib's e2e runs.
-        return subprocess.run(
-            ["uv", "run", "mngr", *args], env=dict(ctx.env), capture_output=True, text=True, timeout=timeout
-        )
+        return run_mngr_subprocess(*args, env=dict(ctx.env), timeout=timeout)
 
 
 @pytest.mark.release

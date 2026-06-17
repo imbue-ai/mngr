@@ -49,6 +49,7 @@ from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 
 # claude's native resumable session store, relative to the agent state dir: the
@@ -134,10 +135,7 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
         ]
 
     def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
-        # uv run mngr from the checkout, matching how the rest of this lib's e2e runs.
-        return subprocess.run(
-            ["uv", "run", "mngr", *args], env=dict(ctx.env), capture_output=True, text=True, timeout=timeout
-        )
+        return run_mngr_subprocess(*args, env=dict(ctx.env), timeout=timeout)
 
 
 @pytest.mark.release

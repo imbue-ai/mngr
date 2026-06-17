@@ -19,12 +19,13 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
-from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -244,15 +245,7 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, home_d
         return session_file
 
     candidate_dirs = [_get_pi_home_dir(home_dir) / "sessions", *_pi_session_store_dirs(mngr_ctx)]
-
-    # Deduplicate by resolved path while preserving candidate ordering.
-    search_dirs: list[Path] = []
-    seen_resolved_dirs: set[Path] = set()
-    for candidate in candidate_dirs:
-        resolved = candidate.resolve()
-        if resolved not in seen_resolved_dirs:
-            seen_resolved_dirs.add(resolved)
-            search_dirs.append(candidate)
+    search_dirs = dedupe_by_resolved_path(candidate_dirs)
 
     matches: list[Path] = []
     for sessions_dir in search_dirs:
@@ -913,9 +906,7 @@ class PiCodingAgent(
             self._adopt_session(host, adopt_args[-1])
         elif options.source_agent_state_location is not None:
             self._adopt_cloned_session(host, options.source_agent_state_location)
-        else:
-            # Neither --adopt nor --from: the agent starts a fresh session.
-            return
+        # Neither --adopt nor --from: the agent starts a fresh session (nothing to do).
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
         """Copy the resolved session into this agent's store, rebind it, and point resume at it.
@@ -1063,24 +1054,14 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """pi-specific fail-fast pre-resolution of ``--adopt`` session ids.
-
-    The agent-agnostic validation (the type must support session adoption; mutual
-    exclusion with ``--from`` cloning) lives in core session-adoption validation. This
-    runs only for pi-coding agents and resolves every named session *now* -- before any
-    host or worktree is created -- so a bad/ambiguous id is a clean ``UserInputError``
-    rather than a traceback out of ``on_after_provisioning`` (which runs inside
-    provision_agent's ConcurrencyGroup). The source is always local, so the result
-    matches the resolution done later.
-    """
-    adopt_session = args.agent_options.adopt_session
-    if not adopt_session:
-        return None
-    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, PiCodingAgent):
-        return None
-    for session_arg in adopt_session:
-        _resolve_adopt_session(session_arg, mngr_ctx)
+    """Fail-fast pre-resolution of pi ``--adopt`` session ids (see ``run_adopt_session_preflight``)."""
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        PiCodingAgent,
+        lambda session_arg: _resolve_adopt_session(session_arg, mngr_ctx),
+    )
     return None
 
 

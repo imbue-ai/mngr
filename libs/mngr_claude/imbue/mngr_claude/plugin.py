@@ -41,10 +41,11 @@ from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
-from imbue.mngr.config.agent_config_registry import resolve_agent_type
+from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentInstallationError
@@ -198,15 +199,7 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
 
     candidate_dirs = [current_config_dir / "projects", user_config_dir / "projects"]
     candidate_dirs.extend(_mngr_session_projects_dirs(mngr_ctx))
-
-    # Deduplicate by resolved path while preserving the candidate ordering.
-    search_dirs: list[Path] = []
-    seen_resolved_dirs: set[Path] = set()
-    for candidate in candidate_dirs:
-        resolved = candidate.resolve()
-        if resolved not in seen_resolved_dirs:
-            seen_resolved_dirs.add(resolved)
-            search_dirs.append(candidate)
+    search_dirs = dedupe_by_resolved_path(candidate_dirs)
 
     matches: list[Path] = []
     for projects_dir in search_dirs:
@@ -2626,23 +2619,14 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Claude-specific fail-fast pre-resolution of ``--adopt`` session ids.
-
-    The agent-agnostic gate (the type must support session adoption; mutual exclusion with
-    cloning via ``--from``) lives in core. This runs only for claude agents and resolves
-    every named session *now* -- before any host or worktree is created -- so a bad id is a
-    clean user error rather than a ConcurrencyExceptionGroup traceback out of
-    ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
-    source is always local, so the result matches the resolution done later.
-    """
-    adopt_session = args.agent_options.adopt_session
-    if not adopt_session:
-        return None
-    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, ClaudeAgent):
-        return None
-    for session_arg in adopt_session:
-        _resolve_adopt_session(session_arg, mngr_ctx)
+    """Fail-fast pre-resolution of claude ``--adopt`` session ids (see ``run_adopt_session_preflight``)."""
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        ClaudeAgent,
+        lambda session_arg: _resolve_adopt_session(session_arg, mngr_ctx),
+    )
     return None
 
 

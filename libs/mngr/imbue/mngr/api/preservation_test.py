@@ -8,11 +8,14 @@ import pytest
 
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import run_adopt_session_preflight
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import get_agent_state_dir_path
@@ -330,3 +333,38 @@ def test_preserve_host_agents_on_destroy_skips_non_readable_host(
 
     # Must return without raising even though the host exposes no readable volume.
     preserve_host_agents_on_destroy(offline, temp_mngr_ctx, AgentTypeName("codex"), _items_when_opted_in)
+
+
+def test_dedupe_by_resolved_path_preserves_first_seen_order(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    other = tmp_path / "other"
+    other.mkdir()
+
+    # ``link`` resolves to ``real`` (already seen) and the trailing ``real`` is a literal
+    # repeat -- both collapse, and the first-seen unresolved paths keep their order.
+    assert dedupe_by_resolved_path([real, link, other, real]) == [real, other]
+
+
+def test_run_adopt_session_preflight_noop_without_sessions(temp_mngr_ctx: MngrContext) -> None:
+    calls: list[str] = []
+    run_adopt_session_preflight(AgentTypeName("claude"), (), temp_mngr_ctx, object, calls.append)
+    assert calls == []
+
+
+def test_run_adopt_session_preflight_resolves_each_session_for_matching_type(temp_mngr_ctx: MngrContext) -> None:
+    claude_class = resolve_agent_type(AgentTypeName("claude"), temp_mngr_ctx.config).agent_class
+    calls: list[str] = []
+    run_adopt_session_preflight(AgentTypeName("claude"), ("a", "b"), temp_mngr_ctx, claude_class, calls.append)
+    assert calls == ["a", "b"]
+
+
+def test_run_adopt_session_preflight_skips_for_nonmatching_type(temp_mngr_ctx: MngrContext) -> None:
+    class _Unrelated:
+        pass
+
+    calls: list[str] = []
+    run_adopt_session_preflight(AgentTypeName("claude"), ("a",), temp_mngr_ctx, _Unrelated, calls.append)
+    assert calls == []

@@ -7,3 +7,5 @@ On adoption, the resolved rollout store is copied into the new agent's `CODEX_HO
 This is driven by the central `mngr create --adopt <id>` flag (repeatable; the last value wins for codex). `--adopt-session` is still accepted as an alias. The codex plugin now reads the values from the first-class `CreateAgentOptions.adopt_session` field rather than from `plugin_data["adopt_session"]`. A bad or ambiguous id is still caught up front (before any host or worktree is created) as a clean error rather than a traceback.
 
 Cloning a codex agent with `mngr create <new> codex --from <agent>` now resumes the source agent's conversation too: the clone transfers the source's native session store, resumes its most-recent rollout, and rebinds the recorded working directory to the clone's work dir (so no resume modal appears).
+
+A failure to resolve the user's `CODEX_HOME` during provisioning now surfaces as a clean, user-facing error instead of an abrupt process exit.

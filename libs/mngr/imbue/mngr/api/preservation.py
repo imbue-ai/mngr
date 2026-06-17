@@ -22,6 +22,7 @@ mirror the agent-state-dir layout verbatim under the destination root.
 """
 
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import get_agents_root_dir
@@ -89,6 +91,53 @@ def iter_agent_session_paths(local_host_dir: Path, relpath: Path) -> list[Path]:
             if candidate.exists():
                 paths.append(candidate)
     return paths
+
+
+def dedupe_by_resolved_path(candidates: Iterable[Path]) -> list[Path]:
+    """Return ``candidates`` with duplicate paths removed, preserving first-seen order.
+
+    Two candidates are duplicates when they ``resolve()`` to the same real path (so a
+    symlinked and a direct route to one dir collapse to one). The original (unresolved)
+    path is kept. Session-adoption resolvers use this to dedupe their search dirs -- the
+    current/user config dir can coincide with a scanned agent dir -- so a session that
+    lives in one physical dir is never reported as ambiguously matching "two" dirs.
+    """
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            deduped.append(candidate)
+    return deduped
+
+
+def run_adopt_session_preflight(
+    agent_type: AgentTypeName,
+    adopt_session: tuple[str, ...],
+    mngr_ctx: MngrContext,
+    agent_class: type,
+    resolve_one: Callable[[str], object],
+) -> None:
+    """Fail-fast on bad ``--adopt`` session ids before any host or worktree is created.
+
+    The agent-agnostic gate (the type must support adoption; mutual exclusion with ``--from``)
+    runs in :func:`~imbue.mngr.api.create.create`; this is the per-plugin ``on_before_create``
+    body. It resolves every named session *now* -- the source is always local, so the result
+    matches the resolution done later in ``on_after_provisioning`` -- so a bad id is a clean
+    user error rather than a ConcurrencyExceptionGroup traceback out of the provisioning group.
+
+    No-op unless ``adopt_session`` is set and the agent type is (a subtype of) ``agent_class``.
+    ``resolve_one`` is the plugin's own resolver, called once per named session for its side
+    effect of raising :class:`UserInputError` on an unknown/ambiguous id.
+    """
+    if not adopt_session:
+        return
+    resolved = resolve_agent_type(agent_type, mngr_ctx.config)
+    if not issubclass(resolved.agent_class, agent_class):
+        return
+    for session_arg in adopt_session:
+        resolve_one(session_arg)
 
 
 def transfer_cloned_agent_session_store(

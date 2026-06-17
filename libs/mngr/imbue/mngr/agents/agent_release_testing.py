@@ -17,9 +17,9 @@ agent is held to the same lifecycle and the same canonical-transcript contract.
 
 The shared assertions are deliberately keyed on the **common transcript** (which every
 agent emits, and which `imbue.mngr.agents.common_transcript_records` makes canonical)
-rather than on the RUNNING marker: codex sets its marker only on ``UserPromptSubmit``
-and clears it on ``Stop``, so polling the marker mid-turn is racy. Observing the
-RUNNING marker is therefore an opt-in capability (``observes_running_marker``); the
+rather than on the RUNNING marker: not every agent surfaces a RUNNING marker that is
+reliably observable mid-turn (some only flip it on prompt-submit and clear it on stop),
+so observing it is an opt-in capability (``observes_running_marker``); the
 WAITING-after-create check and transcript-conformance check are uniform.
 
 These tests are not run in CI (release-marked); run a profile's test manually with the

@@ -70,8 +70,8 @@ from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
-from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -182,6 +182,18 @@ def _load_opencode_resource(filename: str) -> str:
     """Load a resource file from the mngr_opencode resources package."""
     resource_files = importlib.resources.files(_opencode_resources)
     return resource_files.joinpath(filename).read_text()
+
+
+def _adopt_search_db_paths(mngr_ctx: MngrContext) -> list[Path]:
+    """The ``opencode.db`` paths an ``--adopt`` session id is searched across (local only).
+
+    The user-native db plus every live and preserved local mngr agent's db. Used by both the
+    ``on_before_create`` fail-fast and the ``adopt_session`` resolution so they search the
+    same set.
+    """
+    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
+    agent_db_paths = iter_agent_session_paths(local_host_dir, AGENT_OPENCODE_DB_RELPATH)
+    return collect_adopt_search_db_paths(agent_db_paths)
 
 
 class OpenCodeAgentConfig(AgentTypeConfig):
@@ -507,10 +519,7 @@ class OpenCodeAgent(
         if adopt_args:
             adopt_arg = adopt_args[-1]
             with log_span("Adopting OpenCode session from {}", adopt_arg):
-                local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-                agent_db_paths = iter_agent_session_paths(local_host_dir, AGENT_OPENCODE_DB_RELPATH)
-                search_db_paths = collect_adopt_search_db_paths(agent_db_paths)
-                session_id, source_db = resolve_adopt_session_db(adopt_arg, search_db_paths)
+                session_id, source_db = resolve_adopt_session_db(adopt_arg, _adopt_search_db_paths(mngr_ctx))
                 self._copy_session_db_into_agent(host, source_db)
                 self._rebind_and_point_resume(host, session_id)
             return
@@ -756,27 +765,14 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """OpenCode-specific fail-fast pre-resolution of ``--adopt`` session ids.
-
-    The agent-agnostic gate (the type must support session adoption; mutual exclusion with
-    cloning via ``--from``) lives in the core ``_validate_session_adoption``. This runs only for
-    opencode agents and resolves the named session id(s) *now* -- before any host or worktree is
-    created -- so a bad or ambiguous id is a clean ``UserInputError`` rather than a
-    ConcurrencyExceptionGroup traceback out of ``on_after_provisioning`` (which runs inside
-    provision_agent's ConcurrencyGroup). The source is always local, so the result matches the
-    resolution done later.
-    """
-    adopt_session: tuple[str, ...] = args.agent_options.adopt_session
-    if not adopt_session:
-        return None
-    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, OpenCodeAgent):
-        return None
-    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-    agent_db_paths = iter_agent_session_paths(local_host_dir, AGENT_OPENCODE_DB_RELPATH)
-    search_db_paths = collect_adopt_search_db_paths(agent_db_paths)
-    for session_arg in adopt_session:
-        resolve_adopt_session_db(session_arg, search_db_paths)
+    """Fail-fast pre-resolution of opencode ``--adopt`` session ids (see ``run_adopt_session_preflight``)."""
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        OpenCodeAgent,
+        lambda session_arg: resolve_adopt_session_db(session_arg, _adopt_search_db_paths(mngr_ctx)),
+    )
     return None
 
 

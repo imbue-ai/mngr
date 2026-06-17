@@ -96,14 +96,16 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
-from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
@@ -437,13 +439,10 @@ class CodexAgent(
         result = host.execute_idempotent_command('printf %s "${CODEX_HOME:-$HOME/.codex}"', timeout_seconds=10.0)
         resolved = result.stdout.strip()
         if not result.success or not resolved:
-            logger.error(
+            raise PluginMngrError(
                 "Could not resolve the user's CODEX_HOME for codex provisioning "
-                "(exit_success={}, stdout={!r}); cannot locate the shared auth.json.",
-                result.success,
-                result.stdout,
+                f"(exit_success={result.success}, stdout={result.stdout!r}); cannot locate the shared auth.json."
             )
-            raise SystemExit(1)
         return Path(resolved)
 
     def _resolve_canonical_path(self, host: OnlineHostInterface, path: Path) -> str:
@@ -1122,18 +1121,10 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, user_c
 
     # Search the user-native store plus every live and preserved local mngr agent (all
     # of them -- an id matching in multiple stores is treated as ambiguous below, not
-    # resolved by search order).
-    search_dirs: list[Path] = [user_codex_home / "sessions"]
-    search_dirs.extend(_mngr_session_dirs(mngr_ctx))
-
-    # Deduplicate by resolved path while preserving candidate ordering.
-    deduped_dirs: list[Path] = []
-    seen_resolved: set[Path] = set()
-    for candidate in search_dirs:
-        resolved = candidate.resolve()
-        if resolved not in seen_resolved:
-            seen_resolved.add(resolved)
-            deduped_dirs.append(candidate)
+    # resolved by search order). Dedupe by resolved path (the user store can coincide
+    # with a scanned agent dir) while preserving candidate ordering.
+    candidate_dirs: list[Path] = [user_codex_home / "sessions", *_mngr_session_dirs(mngr_ctx)]
+    deduped_dirs = dedupe_by_resolved_path(candidate_dirs)
 
     matched_dirs: list[Path] = []
     for sessions_dir in deduped_dirs:
@@ -1232,26 +1223,15 @@ def _user_native_codex_home() -> Path:
 
 @hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Codex-specific fail-fast pre-resolution of ``--adopt`` session ids.
-
-    The agent-agnostic gate (the type must support session adoption; mutual exclusion with
-    ``--from``) and the ``--adopt`` option declaration live in core (the
-    ``adopt_session`` field on ``CreateAgentOptions`` and ``_validate_session_adoption``).
-    This runs only for codex agents and resolves every named session *now* -- before any
-    host or worktree is created -- so a bad or ambiguous id is a clean ``UserInputError``
-    rather than a ConcurrencyExceptionGroup traceback out of ``on_after_provisioning``
-    (which runs inside provision_agent's ConcurrencyGroup). The source is always local, so
-    the result matches the resolution done later.
-    """
-    adopt_session = args.agent_options.adopt_session
-    if not adopt_session:
-        return None
-    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, CodexAgent):
-        return None
+    """Codex-specific fail-fast pre-resolution of ``--adopt`` session ids (see ``run_adopt_session_preflight``)."""
     user_codex_home = _user_native_codex_home()
-    for session_arg in adopt_session:
-        _resolve_adopt_session(session_arg, mngr_ctx, user_codex_home)
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        CodexAgent,
+        resolve_one=lambda session_arg: _resolve_adopt_session(session_arg, mngr_ctx, user_codex_home),
+    )
     return None
 
 

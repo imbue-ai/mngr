@@ -17,9 +17,12 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -31,12 +34,16 @@ from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
+from imbue.mngr_antigravity.plugin import _AGENT_CONVERSATIONS_RELPATH
+from imbue.mngr_antigravity.plugin import _resolve_adopt_session
+from imbue.mngr_antigravity.plugin import on_before_create
 from imbue.mngr_antigravity.plugin import register_agent_aliases
 from imbue.mngr_antigravity.plugin import register_agent_type
 
@@ -1365,3 +1372,285 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
 
     dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
     assert not dest_dir.exists()
+
+
+# =============================================================================
+# Session adoption (--adopt / --from)
+# =============================================================================
+
+
+def _seed_conversation_store(conversations_dir: Path, conversation_id: str, suffix: str = ".db") -> Path:
+    """Write a fake ``<id><suffix>`` store file into ``conversations_dir`` and return it."""
+    conversations_dir.mkdir(parents=True, exist_ok=True)
+    store = conversations_dir / f"{conversation_id}{suffix}"
+    store.write_text("fake-store-bytes")
+    return store
+
+
+def test_resolve_adopt_session_accepts_store_file_path(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """An absolute path to a ``<id>.db`` store resolves to (stem, parent dir)."""
+
+    store = _seed_conversation_store(tmp_path / "store", "conv-abc")
+    conversation_id, source_dir = _resolve_adopt_session(str(store), local_provider.mngr_ctx)
+    assert conversation_id == "conv-abc"
+    assert source_dir == store.parent
+
+
+def test_resolve_adopt_session_accepts_single_conversation_directory(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An absolute path to a directory holding exactly one store resolves unambiguously."""
+
+    conversations_dir = tmp_path / "conversations"
+    _seed_conversation_store(conversations_dir, "only-conv")
+    conversation_id, source_dir = _resolve_adopt_session(str(conversations_dir), local_provider.mngr_ctx)
+    assert conversation_id == "only-conv"
+    assert source_dir == conversations_dir
+
+
+def test_resolve_adopt_session_rejects_empty_conversation_directory(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A directory with no store files is a clear user error."""
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    with pytest.raises(UserInputError, match="No conversation store"):
+        _resolve_adopt_session(str(empty_dir), local_provider.mngr_ctx)
+
+
+def test_resolve_adopt_session_rejects_multi_conversation_directory(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A directory with multiple conversations is ambiguous; require the full file path."""
+
+    conversations_dir = tmp_path / "conversations"
+    _seed_conversation_store(conversations_dir, "conv-one")
+    _seed_conversation_store(conversations_dir, "conv-two")
+    with pytest.raises(UserInputError, match="multiple conversations"):
+        _resolve_adopt_session(str(conversations_dir), local_provider.mngr_ctx)
+
+
+def test_resolve_adopt_session_rejects_missing_absolute_path(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An absolute path that is neither a store file nor a directory is rejected."""
+
+    missing = tmp_path / "does-not-exist"
+    with pytest.raises(UserInputError, match="not found"):
+        _resolve_adopt_session(str(missing), local_provider.mngr_ctx)
+
+
+def test_resolve_adopt_session_finds_id_in_user_native_store(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A bare id is found in the user-native ``~/.gemini`` conversations store.
+
+    HOME is redirected to ``tmp_path`` for tests, so the user-native store lives under it.
+    """
+
+    user_store_dir = get_antigravity_conversations_dir(Path.home())
+    _seed_conversation_store(user_store_dir, "user-conv")
+    conversation_id, source_dir = _resolve_adopt_session("user-conv", local_provider.mngr_ctx)
+    assert conversation_id == "user-conv"
+    assert source_dir.resolve() == user_store_dir.resolve()
+
+
+def test_resolve_adopt_session_finds_id_in_live_agent_store(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A bare id is found in a live local mngr agent's per-agent conversations dir."""
+
+    agent_conversations = get_agents_root_dir(tmp_path / ".mngr") / "some-agent-id" / _AGENT_CONVERSATIONS_RELPATH
+    _seed_conversation_store(agent_conversations, "agent-conv")
+    conversation_id, source_dir = _resolve_adopt_session("agent-conv", local_provider.mngr_ctx)
+    assert conversation_id == "agent-conv"
+    assert source_dir.resolve() == agent_conversations.resolve()
+
+
+def test_resolve_adopt_session_rejects_unknown_id(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A bare id present in no searched store is a clean user error."""
+
+    with pytest.raises(UserInputError, match="not found"):
+        _resolve_adopt_session("nonexistent-conv", local_provider.mngr_ctx)
+
+
+def test_resolve_adopt_session_rejects_ambiguous_id(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A bare id present in two distinct stores is rejected as ambiguous."""
+
+    _seed_conversation_store(get_antigravity_conversations_dir(Path.home()), "dup-conv")
+    agent_conversations = get_agents_root_dir(tmp_path / ".mngr") / "agent-x" / _AGENT_CONVERSATIONS_RELPATH
+    _seed_conversation_store(agent_conversations, "dup-conv")
+    with pytest.raises(UserInputError, match="multiple conversation directories"):
+        _resolve_adopt_session("dup-conv", local_provider.mngr_ctx)
+
+
+def test_finalize_adopted_session_writes_resume_pointers(antigravity_agent: AntigravityAgent) -> None:
+    """The root-conversation file holds the bare id; the ids file is newline-terminated."""
+    antigravity_agent._finalize_adopted_session(antigravity_agent.host, "conv-final")
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-final"
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_conversation_ids_file_path()) == "conv-final\n"
+
+
+@pytest.mark.rsync
+def test_adopt_session_copies_store_and_writes_pointers(antigravity_agent: AntigravityAgent, tmp_path: Path) -> None:
+    """``_adopt_session`` copies the source store into the per-agent home and records the resume id."""
+    source_store_dir = tmp_path / "source_conversations"
+    _seed_conversation_store(source_store_dir, "conv-adopt")
+    antigravity_agent._adopt_session(antigravity_agent.host, str(source_store_dir / "conv-adopt.db"))
+
+    dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
+    assert (dest_dir / "conv-adopt.db").read_text() == "fake-store-bytes"
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-adopt"
+
+
+@pytest.mark.rsync
+def test_adopt_session_dispatches_to_adopt_session_for_adopt_arg(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """``adopt_session`` uses the LAST ``--adopt`` entry (agy resumes a single conversation)."""
+    first_dir = tmp_path / "first"
+    _seed_conversation_store(first_dir, "conv-first")
+    last_dir = tmp_path / "last"
+    _seed_conversation_store(last_dir, "conv-last")
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("antigravity"),
+        adopt_session=(str(first_dir / "conv-first.db"), str(last_dir / "conv-last.db")),
+    )
+    antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-last"
+
+
+def test_adopt_session_noop_without_adopt_or_clone(antigravity_agent: AntigravityAgent) -> None:
+    """With neither ``--adopt`` nor ``--from``, adoption writes no resume pointer."""
+    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"))
+    antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+    assert not antigravity_agent._get_root_conversation_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_via_adopt_session(antigravity_agent: AntigravityAgent, tmp_path: Path) -> None:
+    """``on_after_provisioning`` resumes a ``--adopt`` conversation into the new agent."""
+    source_dir = tmp_path / "src"
+    _seed_conversation_store(source_dir, "conv-prov")
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("antigravity"), adopt_session=(str(source_dir / "conv-prov.db"),)
+    )
+    antigravity_agent.on_after_provisioning(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-prov"
+
+
+def _seed_source_agent_state(state_dir: Path, conversation_id: str, *, with_root_pointer: bool) -> None:
+    """Seed a fake source agent state dir with a conversations store and optional root pointer."""
+    _seed_conversation_store(state_dir / _AGENT_CONVERSATIONS_RELPATH, conversation_id)
+    if with_root_pointer:
+        (state_dir / ROOT_CONVERSATION_FILENAME).write_text(conversation_id)
+
+
+@pytest.mark.rsync
+def test_adopt_cloned_session_resumes_source_root_conversation(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """``--from`` transfers the source store and resumes the source's recorded root conversation."""
+    source_state = tmp_path / "source_agent_state"
+    _seed_source_agent_state(source_state, "conv-clone-root", with_root_pointer=True)
+    source_location = HostLocation(host=antigravity_agent.host, path=source_state)
+
+    antigravity_agent._adopt_cloned_session(antigravity_agent.host, source_location)
+
+    dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
+    assert (dest_dir / "conv-clone-root.db").read_text() == "fake-store-bytes"
+    assert (
+        antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path())
+        == "conv-clone-root"
+    )
+
+
+@pytest.mark.rsync
+def test_adopt_cloned_session_falls_back_to_latest_store_without_root_pointer(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """Without a root pointer, the most-recent transferred store id is resumed."""
+    source_state = tmp_path / "source_agent_state"
+    _seed_source_agent_state(source_state, "conv-clone-latest", with_root_pointer=False)
+    source_location = HostLocation(host=antigravity_agent.host, path=source_state)
+
+    antigravity_agent._adopt_cloned_session(antigravity_agent.host, source_location)
+
+    assert (
+        antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path())
+        == "conv-clone-latest"
+    )
+
+
+def test_adopt_cloned_session_noop_when_source_has_no_store(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """A source agent with no conversations store leaves the clone with a fresh session."""
+    source_state = tmp_path / "empty_source_state"
+    source_state.mkdir()
+    source_location = HostLocation(host=antigravity_agent.host, path=source_state)
+
+    antigravity_agent._adopt_cloned_session(antigravity_agent.host, source_location)
+
+    assert not antigravity_agent._get_root_conversation_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_adopt_session_dispatches_to_clone_for_source_location(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """``adopt_session`` routes ``--from`` (source_agent_state_location) to the clone path."""
+    source_state = tmp_path / "source_agent_state"
+    _seed_source_agent_state(source_state, "conv-from-clone", with_root_pointer=True)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("antigravity"),
+        source_agent_state_location=HostLocation(host=antigravity_agent.host, path=source_state),
+    )
+    antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+    assert (
+        antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path())
+        == "conv-from-clone"
+    )
+
+
+def test_on_before_create_resolves_adopt_ids_for_antigravity(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """``on_before_create`` fails fast on an unknown ``--adopt`` id for an antigravity agent."""
+    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"), adopt_session=("no-such-conv",))
+    args = OnBeforeCreateArgs(
+        target_host=local_provider.create_host(HostName(LOCAL_HOST_NAME)),
+        agent_options=options,
+        create_work_dir=True,
+    )
+    with pytest.raises(UserInputError, match="not found"):
+        on_before_create(args, local_provider.mngr_ctx)
+
+
+def test_on_before_create_noop_without_adopt_session(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """``on_before_create`` is a no-op when no ``--adopt`` was requested."""
+    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"))
+    args = OnBeforeCreateArgs(
+        target_host=local_provider.create_host(HostName(LOCAL_HOST_NAME)),
+        agent_options=options,
+        create_work_dir=True,
+    )
+    assert on_before_create(args, local_provider.mngr_ctx) is None
+
+
+def test_on_before_create_noop_for_non_antigravity_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """``on_before_create`` skips resolution (and would-be errors) for a non-antigravity type.
+
+    The id is unresolvable, but the agent type is not antigravity, so the preflight no-ops
+    rather than raising -- another plugin owns that type.
+    """
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"), adopt_session=("no-such-conv",))
+    args = OnBeforeCreateArgs(
+        target_host=local_provider.create_host(HostName(LOCAL_HOST_NAME)),
+        agent_options=options,
+        create_work_dir=True,
+    )
+    assert on_before_create(args, local_provider.mngr_ctx) is None
