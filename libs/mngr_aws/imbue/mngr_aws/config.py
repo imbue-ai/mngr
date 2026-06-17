@@ -10,13 +10,11 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.config.data_types import ScalarStrTuple
-from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
-from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.config import PublicIpVpsProviderConfig
 
 
 class AwsConfigError(MngrError, ValueError):
@@ -79,7 +77,7 @@ DEFAULT_AMI_BY_REGION: Final[dict[str, str]] = {
 }
 
 
-class AwsProviderConfig(VpsProviderConfig):
+class AwsProviderConfig(PublicIpVpsProviderConfig):
     """Configuration for the AWS EC2 VPS Docker provider.
 
     Credentials are deliberately not stored in this config. boto3's default
@@ -134,23 +132,6 @@ class AwsProviderConfig(VpsProviderConfig):
     vpc_id: str | None = Field(
         default=None,
         description="VPC ID. Only used to scope auto-created security group lookups.",
-    )
-    allowed_ssh_cidrs: ScalarStrTuple = Field(
-        default=ScalarTuple(("0.0.0.0/0",)),
-        description=(
-            "Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the "
-            "auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. "
-            "('203.0.113.4/32',) to restrict, or () for no ingress. A warning is logged "
-            "when the effective range is 0.0.0.0/0 or empty."
-        ),
-    )
-    associate_public_ip: bool = Field(
-        default=True,
-        description=(
-            "Assign a public IPv4 address to the instance. Required for the current "
-            "mngr-from-developer-laptop SSH access model. For a more secure deployment, "
-            "set to False and run mngr from a bastion or via Session Manager."
-        ),
     )
     root_volume_size_gb: int = Field(
         default=30,

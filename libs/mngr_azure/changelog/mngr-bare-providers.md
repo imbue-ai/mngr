@@ -49,3 +49,5 @@ listing / existence / read / write / delete logic it duplicated with the AWS
 leaving the bucket with just its raw Blob primitives and the seam. The
 one-at-a-time blob delete (Blob storage has no batch delete) stays Azure-specific.
 No user-visible behavior change.
+
+`mngr azure prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-VMs via the shared `mngr_vps.cli_helpers`, and `AzureProviderConfig` lifts `allowed_ssh_cidrs` / `associate_public_ip` into shared config bases instead of carrying Azure-local copies. The cleanup refusal when VMs still exist now raises the unified `ManagedResourcesExistError` (previously `AzureProviderError`) so the message matches the other clouds. `allowed_ssh_cidrs` is now typed `ScalarStrTuple` (matching AWS) rather than a plain tuple, so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing; the config key and default are unchanged.

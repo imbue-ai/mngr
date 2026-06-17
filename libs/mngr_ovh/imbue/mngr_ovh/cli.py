@@ -23,7 +23,6 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
@@ -31,6 +30,7 @@ from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.iam_tags import list_vps_resources
+from imbue.mngr_vps.cli_helpers import resolve_provider_config
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.primitives import VpsInstanceId
 
@@ -51,28 +51,19 @@ def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> OvhPr
     runtime ``mngr create --provider <provider_name>`` path uses, so it reads the
     user's resolved config rather than ``OvhProviderConfig()`` class defaults
     (which would talk to the default endpoint / subsidiary regardless of what the
-    user pinned). Class defaults remain the fallback for the first-run case where
-    no block is pinned; credentials still fall back to env / ``~/.ovh.conf`` via
-    ``build_ovh_client`` when the block leaves them unset.
-
-    When the looked-up config is not an ``OvhProviderConfig`` (e.g. the user
-    pointed ``[providers.ovh]`` at a non-OVH backend), fall back to class
-    defaults and warn so the user notices their ``--provider`` selection did not
-    have the intended effect. The missing-block case is silent because that is
-    the expected first-run shape. Mirrors ``mngr_aws.cli._resolve_provider_config``.
+    user pinned). Credentials still fall back to env / ``~/.ovh.conf`` via
+    ``build_ovh_client`` when the block leaves them unset. Thin wrapper over the
+    shared ``resolve_provider_config`` (see it for the {configured / wrong-backend
+    / missing} contract).
     """
-    config = mngr_ctx.config.providers.get(ProviderInstanceName(provider_name))
-    if isinstance(config, OvhProviderConfig):
-        return config
-    if config is not None:
-        logger.warning(
-            "Provider {!r} is configured but is not an OVH backend (got {}); "
-            "falling back to OvhProviderConfig class defaults (and env / ~/.ovh.conf "
-            "credentials). Point --provider at an OVH-backed block to inspect it.",
-            provider_name,
-            type(config).__name__,
-        )
-    return OvhProviderConfig()
+    return resolve_provider_config(
+        mngr_ctx,
+        provider_name,
+        config_cls=OvhProviderConfig,
+        default_factory=OvhProviderConfig,
+        cloud_label="an OVH backend",
+        override_hint="Point --provider at an OVH-backed block to inspect it.",
+    )
 
 
 @click.group(name="ovh")

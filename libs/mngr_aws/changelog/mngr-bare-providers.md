@@ -43,3 +43,5 @@ listing / existence / read / write / delete logic it duplicated with the Azure
 `_delete_object` / `_prefix_has_objects` likewise moved to `BaseStateBucket`,
 leaving the bucket with just its raw S3 primitives and the seam. The 1000-key
 `DeleteObjects` batching stays S3-specific. No user-visible behavior change.
+
+`mngr aws prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-instances via the shared `mngr_vps.cli_helpers`, and `AwsProviderConfig` lifts `allowed_ssh_cidrs` / `associate_public_ip` into shared config bases instead of carrying AWS-local copies. The cleanup refusal when instances still exist now raises the unified `ManagedResourcesExistError` (a `MngrError`) so the message matches the other clouds. The `allowed_ssh_cidrs` type is unchanged for AWS (already `ScalarStrTuple`, now unified across all three clouds); no config key changed.
