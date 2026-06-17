@@ -790,16 +790,18 @@ def test_build_start_agent_shell_command_sources_config_after_new_session(
     """mngr's config is sourced at agent creation, after new-session.
 
     The user's own config is pulled in at tmux server start; mngr's is not, so it
-    is sourced explicitly. The step is non-fatal (|| true) so a cosmetic-config
-    error does not abort the agent-start chain.
+    is sourced explicitly. The step is non-fatal: it is wrapped in a subshell that
+    scopes '|| true' to this step alone, so a cosmetic-config error does not abort
+    the agent-start chain (and a failure of an earlier step is not masked).
     """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
     assert "source-file" in result
     assert result.index("new-session") < result.index("source-file")
-    source_file_step = result[result.index("source-file") :].split("&&")[0]
-    assert source_file_step.rstrip().endswith("|| true")
+    source_file_start = result.index("(tmux source-file")
+    source_file_step = result[source_file_start : result.index(")", source_file_start) + 1]
+    assert source_file_step.endswith("|| true)")
 
 
 def test_build_start_agent_shell_command_includes_additional_windows(

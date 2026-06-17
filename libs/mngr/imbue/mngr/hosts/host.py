@@ -3347,8 +3347,10 @@ def _build_start_agent_shell_command(
 
     # Source mngr's own tmux config (options and key bindings) at agent creation.
     # The user's own config is pulled in at tmux server start.
-    # || true keeps a cosmetic-config error from blocking agent startup.
-    steps.append(f"tmux source-file {shlex.quote(str(tmux_config_path))} || true")
+    # The subshell scopes '|| true' to this step alone (&& and || share precedence
+    # and left-associate, so an unparenthesized '|| true' would rescue the whole
+    # preceding && chain); it keeps a cosmetic-config error from blocking agent startup.
+    steps.append(f"(tmux source-file {shlex.quote(str(tmux_config_path))} || true)")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
 
