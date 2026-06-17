@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
+from loguru import logger
+
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -325,13 +327,18 @@ def _db_has_session(db_path: Path, session_id: str) -> bool:
     elsewhere.
     """
     try:
+        # A connect failure here is dominated by the benign "db file does not exist" case
+        # (the user-native path is always probed even when absent), so it is not logged.
         connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     except sqlite3.Error:
         return False
     try:
         cursor = connection.execute("SELECT 1 FROM session WHERE id = ? LIMIT 1", (session_id,))
         return cursor.fetchone() is not None
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        # A query failure means the file exists but is malformed/corrupt: surface it (at
+        # trace level) rather than swallowing it as a silent "no match".
+        logger.trace("Could not query sessions in OpenCode db {} (treated as no match): {}", db_path, exc)
         return False
     finally:
         connection.close()
