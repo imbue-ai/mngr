@@ -60,7 +60,9 @@ from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.overlay.markers import ScalarTuple
 from imbue.overlay.operators import EXTEND_SUFFIX
+from imbue.overlay.operators import assign_bare_key
 from imbue.overlay.operators import bare_key
+from imbue.overlay.operators import is_assign_key
 from imbue.overlay.operators import is_extend_key
 from imbue.overlay.operators import parse_scalar_value
 
@@ -382,18 +384,36 @@ def _assigned_paths(parsed_layer: MngrConfig) -> list[str]:
     return list(_walk_dotted_paths(dumped, ()))
 
 
+def _strip_operator_suffix(key: str) -> str:
+    """Strip an outermost ``__extend`` / ``__assign`` operator suffix from a single key.
+
+    A *deferred* settings-patch field (``settings_overrides`` / ``create_templates``)
+    carries its operator markers verbatim into the parsed layer's dump, so a path like
+    ``...permissions.allow__assign`` would not match the bare ``...permissions.allow`` the
+    overlay narrowing reports. Normalizing the suffix (the same single-strip ``lift`` does)
+    lets provenance attribute the dropped value to the layer that set it via an operator.
+    """
+    if is_extend_key(key):
+        return bare_key(key)
+    if is_assign_key(key):
+        return assign_bare_key(key)
+    return key
+
+
 def _walk_dotted_paths(value: Any, prefix: tuple[str, ...]) -> "Iterator[str]":
     """Yield the dotted path of every node and leaf reachable in ``value``.
 
     Recurses into dict values (the only mapping shape config dumps produce), yielding a
     path for each nested dict node as well as its leaves; non-dict values are leaves.
-    The empty root path is not yielded.
+    Each key segment has its operator suffix normalized (``_strip_operator_suffix``) so the
+    paths match the bare paths the overlay narrowing reports. The empty root path is not
+    yielded.
     """
     if prefix:
         yield ".".join(prefix)
     if isinstance(value, dict):
         for key, sub_value in value.items():
-            yield from _walk_dotted_paths(sub_value, prefix + (str(key),))
+            yield from _walk_dotted_paths(sub_value, prefix + (_strip_operator_suffix(str(key)),))
 
 
 def _record_provenance(

@@ -2381,6 +2381,37 @@ def test_load_config_settings_overrides_narrowing_error_attributes_both_sides(
     assert "mngr config set --scope project" in message
 
 
+def test_load_config_narrowing_attributes_dropped_from_for_suffixed_lower_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """When the dropped value was set via an operator suffix (here ``__assign``) in a
+    *deferred* settings-patch field, the narrowing's ``dropped_from`` still names that
+    layer. The lower layer's parsed dump carries the suffixed key (``allow__assign``)
+    while the narrowing path is bare (``...allow``), so provenance attribution must
+    normalize the operator suffix to match.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow__assign = ["A"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow = ["B"]\n'
+    )
+    with pytest.raises(ConfigParseError) as exc_info:
+        load_config(pm=pm, concurrency_group=cg)
+    message = str(exc_info.value)
+    assert "settings_overrides.permissions.allow" in message
+    # The dropped value belongs to the project layer, which set it via ``allow__assign``.
+    assert "would drop a value from" in message
+    assert "mngr config set --scope project" in message
+
+
 # =============================================================================
 # Tests for narrowing diagnostics: both-sides attribution (which layer assigns
 # over which layer's dropped value).
