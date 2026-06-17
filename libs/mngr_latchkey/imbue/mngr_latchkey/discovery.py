@@ -162,6 +162,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
         try:
             host_side_port = self.latchkey.start_gateway(self.concurrency_group)
         except LatchkeyError as e:
+            # Log-and-return rather than raise: this runs on the discovery
+            # dispatch thread, and ``start_gateway`` is idempotently re-ensured
+            # on every subsequent discovery fire, so a transient failure
+            # self-heals on the next event without us killing the stream. A
+            # truly broken gateway is caught loudly by the eager
+            # ``start_gateway`` call in ``_forward_command`` at startup; here we
+            # only need to not wedge the dispatch loop.
             logger.warning("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
             return
 

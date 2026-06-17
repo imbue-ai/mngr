@@ -276,6 +276,11 @@ def _parse_auth_options(payload: Mapping[str, object], service_name: str) -> fro
             raw_options,
         )
         return frozenset()
+    # The guard above already proves every element is a ``str`` at runtime, but
+    # ty cannot propagate the ``all(isinstance(...))`` check into the element
+    # type (``raw_options`` stays ``list[object]``). The per-element
+    # ``isinstance`` filter is what narrows it back to ``str`` for the type
+    # checker; it is a no-op at runtime, not dead defensive code.
     return frozenset(option for option in raw_options if isinstance(option, str))
 
 
@@ -894,6 +899,13 @@ class Latchkey(MutableModel):
         )
         if is_success:
             return True, ""
+        # The prepare-and-retry path is gated on latchkey's stderr wording: the
+        # upstream CLI exposes no structured "preparation required" signal, so
+        # we sniff for its suggested ``latchkey auth browser-prepare`` command in
+        # the error text. This is a soft contract -- if upstream rewords the
+        # message we degrade to "surface the original error, no auto-retry"
+        # (never to incorrect behaviour). Prefer a machine-readable marker here
+        # if latchkey ever grows one.
         if "latchkey auth browser-prepare" not in detail.lower():
             return False, detail
         logger.info(
@@ -1038,6 +1050,12 @@ class Latchkey(MutableModel):
         then spawns. Does not mutate ``_info`` or persist the info -- the
         caller is responsible for committing both under the lock.
         """
+        # ``initialize()`` already validated the binary's presence, so this
+        # re-check only covers the narrow race where the binary is removed
+        # between ``initialize()`` and this spawn. Without it the failure still
+        # surfaces -- ``run_process_in_background`` below would raise an
+        # ``OSError`` that we wrap into ``LatchkeyError`` -- but this gives the
+        # cleaner, more specific ``LatchkeyBinaryNotFoundError`` instead.
         if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
