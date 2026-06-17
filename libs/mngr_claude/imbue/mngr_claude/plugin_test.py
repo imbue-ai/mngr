@@ -1051,12 +1051,12 @@ def test_get_expected_process_name_returns_claude(
     assert agent.get_expected_process_name() == "claude"
 
 
-def test_tui_ready_indicator_is_claude_code(
+def test_tui_ready_indicator_is_input_prompt_glyph(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """ClaudeAgent inherits InteractiveTuiAgent's TUI_READY_INDICATOR class var."""
+    """ClaudeAgent uses the input-prompt glyph, which renders on both fresh start and resume."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    assert agent.get_tui_ready_indicator() == "Claude Code"
+    assert agent.get_tui_ready_indicator() == "❯"
 
 
 @pytest.mark.skipif(
