@@ -20,7 +20,7 @@ from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import SettingsPatchField
+from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName

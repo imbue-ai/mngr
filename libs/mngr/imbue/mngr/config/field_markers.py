@@ -3,8 +3,7 @@ that read them off pydantic field metadata.
 
 A leaf module: it imports nothing from ``data_types`` or ``overlay_merge`` (both of
 which import *from* it), so the marker types and their collectors can be shared by the
-merge pipeline without a cycle. ``data_types`` re-exports these names, so existing
-``from ...data_types import SettingsPatchField / get_*`` imports keep working.
+merge pipeline without a cycle.
 """
 
 from pydantic import BaseModel

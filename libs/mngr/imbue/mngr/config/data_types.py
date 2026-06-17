@@ -23,16 +23,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-
-# Re-exported from ``field_markers`` (the leaf module that owns them) so existing
-# ``from ...config.data_types import SettingsPatchField / get_*`` imports keep working.
-# The redundant ``as`` aliases mark these as intentional re-exports.
-from imbue.mngr.config.field_markers import RegistryField as RegistryField
-from imbue.mngr.config.field_markers import SettingsPatchField as SettingsPatchField
-from imbue.mngr.config.field_markers import get_registry_field_names as get_registry_field_names
-from imbue.mngr.config.field_markers import get_settings_patch_field_names as get_settings_patch_field_names
+from imbue.mngr.config.field_markers import RegistryField
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
-from imbue.mngr.config.overlay_merge import merge_models_via_overlay_with_narrowings
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -231,8 +223,11 @@ class AgentTypeConfig(FrozenModel):
 
         # Computed via the overlay pipeline (behavior-identical to the old
         # field-by-field merge); see ``overlay_merge.merge_models_via_overlay``
-        # and ``config/README.md``.
-        return merge_models_via_overlay(self, override)
+        # and ``config/README.md``. ``merge_with`` only needs the merged value, so
+        # the cross-scope narrowings are dropped here (see ``merge_with_narrowings``
+        # on ``MngrConfig`` for the path that surfaces them).
+        merged, _narrowings = merge_models_via_overlay(self, override)
+        return merged
 
 
 class ProviderInstanceConfig(FrozenModel):
@@ -502,7 +497,7 @@ class MngrConfig(FrozenModel):
         whole list into its flag-gated narrowing aggregation. ``merge_with`` delegates
         here and discards the paths for callers that only need the merged value.
         """
-        return merge_models_via_overlay_with_narrowings(
+        return merge_models_via_overlay(
             self,
             override,
             serialize_as_any=True,

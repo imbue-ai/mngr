@@ -20,14 +20,14 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
-from imbue.mngr.config.data_types import SettingsPatchField
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import get_or_create_user_id
-from imbue.mngr.config.data_types import get_registry_field_names
-from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.field_markers import SettingsPatchField
+from imbue.mngr.config.field_markers import get_registry_field_names
+from imbue.mngr.config.field_markers import get_settings_patch_field_names
 from imbue.mngr.config.loader import parse_config
-from imbue.mngr.config.overlay_merge import merge_models_via_overlay_with_narrowings
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -84,7 +84,7 @@ def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
         narrowings = base.merge_with_narrowings(override)[1]
     else:
         container_field_names = frozenset()
-        narrowings = merge_models_via_overlay_with_narrowings(base, override)[1]
+        narrowings = merge_models_via_overlay(base, override)[1]
     base_fields = dict(base)
     override_fields = dict(override)
     container_entry_classes: dict[str, dict[Any, type[Any]]] = {

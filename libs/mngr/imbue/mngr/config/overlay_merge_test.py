@@ -26,7 +26,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
-from imbue.mngr.config.data_types import SettingsPatchField
+from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.config.provider_config_registry import reset_provider_config_registry

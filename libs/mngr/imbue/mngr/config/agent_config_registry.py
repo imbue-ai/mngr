@@ -13,9 +13,17 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 
-# Fields on AgentTypeConfig that are routing metadata (not runtime config values).
-# These are skipped when applying custom overrides to a parent config.
+# Fields on AgentTypeConfig that are inheritance-routing metadata, not runtime config
+# values. They are cleared before a parent/child merge so they never flow into the result.
 _METADATA_FIELDS: frozenset[str] = frozenset({"parent_type", "plugin"})
+
+
+def _without_routing_metadata(config: AgentTypeConfig) -> AgentTypeConfig:
+    """Return a copy of ``config`` with the inheritance-routing metadata
+    (``parent_type`` / ``plugin``) cleared, so a parent/child merge never carries it into
+    the merged runtime config."""
+    return config.model_copy(update={name: None for name in _METADATA_FIELDS})
+
 
 # =============================================================================
 # Agent Config Registry
@@ -100,19 +108,20 @@ def _apply_custom_overrides_to_parent_config(
     delegates to ``overlay_merge.merge_models_via_overlay`` with ``parent_config`` as the
     base, so the result reparses into ``type(parent_config)`` -- the class-switching crux,
     where a base-class ``custom_config`` folded onto a ``ClaudeAgentConfig`` parent yields
-    a ``ClaudeAgentConfig`` with the parent's subclass-only fields. ``_METADATA_FIELDS``
-    (``parent_type`` / ``plugin``) are dropped from the child's dump (inheritance routing,
-    never runtime config) and ``serialize_as_any`` keeps subclass-only fields. Assign-by-
-    default, except ``SettingsPatchField`` fields accumulate across the boundary; cross-scope
+    a ``ClaudeAgentConfig`` with the parent's subclass-only fields. Both layers have their
+    inheritance-routing metadata (``parent_type`` / ``plugin``) cleared first
+    (``_without_routing_metadata``) so it never flows into the merged runtime config, and
+    ``serialize_as_any`` keeps subclass-only fields. Assign-by-default, except
+    ``SettingsPatchField`` fields accumulate across the boundary; cross-scope
     ``settings_overrides`` narrowing here is intentionally not surfaced (deferred with the
     broader narrowing-philosophy decision).
     """
-    return merge_models_via_overlay(
-        parent_config,
-        custom_config,
-        drop_field_names=frozenset(_METADATA_FIELDS),
+    merged, _narrowings = merge_models_via_overlay(
+        _without_routing_metadata(parent_config),
+        _without_routing_metadata(custom_config),
         serialize_as_any=True,
     )
+    return merged
 
 
 def _check_agent_type_not_disabled(

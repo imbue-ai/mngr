@@ -13,10 +13,10 @@ The pipeline is **serialize -> pre-process -> overlay merge -> reparse**:
    value at each key selects the rule: a value that is a ``BaseModel`` -> ``<field>__extend``
    recursed into (field-by-field sub-model merge); a ``RegistryField`` dict -> a two-level
    ``__extend`` (the dict + each entry key) recursed per entry; a ``SettingsPatchField`` ->
-   ``<field>__extend`` (accumulate, value as-is); ``drop_field_names`` -> drop the key;
+   ``<field>__extend`` (accumulate, value as-is);
    ``drop_none_values`` -> drop keys that are ``None``; every other key stays bare (assign).
 3. ``lift`` both and ``merge_narrowing_allowed`` override over base (the value, plus
-   every narrowing path for the with-narrowings variant).
+   every narrowing path).
 4. ``lower`` (not ``finalize``, so inner ``__extend`` markers survive), strip the
    synthetic suffixes via the symmetric ``_from_operator_dict``, reparse container
    entries into their concrete classes, and reparse the whole dict into ``type(base)``.
@@ -91,7 +91,6 @@ def _container_entry_models(
 def _to_operator_dict(
     values: dict[str, Any],
     live_model: BaseModel,
-    drop_field_names: frozenset[str],
     *,
     drop_none_values: bool,
 ) -> dict[str, Any]:
@@ -103,9 +102,8 @@ def _to_operator_dict(
     ``RegistryField`` field -> a two-level ``__extend`` (per-key deep merge, each entry
     recursed); a ``SettingsPatchField`` field -> ``<field>__extend`` (value as-is, so
     inner ``__extend`` / ``__assign`` markers survive and re-combine); every other key
-    bare (assign-by-default). ``drop_field_names`` keys are dropped (routing metadata);
-    under ``drop_none_values`` a ``None``-valued key is dropped (the "treat ``None`` as
-    unset" rule, since the model's "unset" sentinel is ``None``).
+    bare (assign-by-default). Under ``drop_none_values`` a ``None``-valued key is dropped
+    (the "treat ``None`` as unset" rule, since the model's "unset" sentinel is ``None``).
 
     The same rule set applies at every depth: a sub-model may itself carry a registry /
     settings-patch field, and it is handled identically. (For the current config models a
@@ -118,18 +116,16 @@ def _to_operator_dict(
     entry_models_by_field = _container_entry_models(live_model, registry_field_names)
     result: dict[str, Any] = {}
     for key, value in values.items():
-        if key in drop_field_names:
-            continue
         if drop_none_values and value is None:
             continue
         if key in submodel_values and isinstance(value, dict):
             result[f"{key}{EXTEND_SUFFIX}"] = _to_operator_dict(
-                value, submodel_values[key], drop_field_names, drop_none_values=drop_none_values
+                value, submodel_values[key], drop_none_values=drop_none_values
             )
         elif key in registry_field_names and isinstance(value, dict):
             entry_models = entry_models_by_field.get(key, {})
             result[f"{key}{EXTEND_SUFFIX}"] = _container_to_operator_dict(
-                value, entry_models, drop_field_names, drop_none_values=drop_none_values
+                value, entry_models, drop_none_values=drop_none_values
             )
         elif key in settings_patch_field_names:
             result[f"{key}{EXTEND_SUFFIX}"] = value
@@ -141,7 +137,6 @@ def _to_operator_dict(
 def _container_to_operator_dict(
     container: dict[Any, Any],
     entry_models: dict[Any, BaseModel],
-    drop_field_names: frozenset[str],
     *,
     drop_none_values: bool,
 ) -> dict[Any, Any]:
@@ -162,7 +157,7 @@ def _container_to_operator_dict(
     for key, entry in container.items():
         entry_model = entry_models.get(key)
         if entry_model is not None and isinstance(entry, dict):
-            marked = _to_operator_dict(entry, entry_model, drop_field_names, drop_none_values=drop_none_values)
+            marked = _to_operator_dict(entry, entry_model, drop_none_values=drop_none_values)
         else:
             marked = entry
         result[f"{key}{EXTEND_SUFFIX}"] = marked
@@ -348,35 +343,14 @@ def merge_models_via_overlay(
     base: ModelT,
     override: BaseModel,
     *,
-    drop_field_names: frozenset[str] = frozenset(),
-    serialize_as_any: bool = False,
-    drop_none_values: bool = False,
-) -> ModelT:
-    """Merge ``override`` onto ``base`` via the overlay node algebra (see module docstring).
-
-    The value-only entry point: delegates to
-    ``merge_models_via_overlay_with_narrowings`` and discards the narrowing paths.
-    Used by callers that only need the merged value (e.g. ``AgentTypeConfig.merge_with``)."""
-    merged, _narrowings = merge_models_via_overlay_with_narrowings(
-        base,
-        override,
-        drop_field_names=drop_field_names,
-        serialize_as_any=serialize_as_any,
-        drop_none_values=drop_none_values,
-    )
-    return merged
-
-
-def merge_models_via_overlay_with_narrowings(
-    base: ModelT,
-    override: BaseModel,
-    *,
-    drop_field_names: frozenset[str] = frozenset(),
     serialize_as_any: bool = False,
     drop_none_values: bool = False,
 ) -> tuple[ModelT, list[str]]:
-    """Merge ``override`` onto ``base`` and also return *every* narrowing path the
-    overlay merge surfaced (see module docstring for the merge mechanics).
+    """Merge ``override`` onto ``base``, returning the merged model and *every* narrowing
+    path the overlay merge surfaced (see module docstring for the merge mechanics).
+
+    Callers that only need the merged value drop the second element explicitly
+    (e.g. ``AgentTypeConfig.merge_with``, ``apply_parent_overrides``).
 
     ``SettingsPatchField`` / ``RegistryField`` marks are read directly off each live
     model's class (``field_markers``): a settings-patch field accumulates via ``__extend``;
@@ -386,10 +360,11 @@ def merge_models_via_overlay_with_narrowings(
     ``security_group``) are detected at runtime and merged field-by-field (carrying a base's
     unset sub-fields through).
 
-    ``drop_field_names`` are dropped from the sparse override dump before merging (e.g.
-    routing metadata). ``serialize_as_any`` is threaded to ``model_dump`` so subclass
-    entries serialize through their concrete type. ``drop_none_values`` drops ``None``-valued
-    keys from both layers (the top-level None-padding case).
+    ``serialize_as_any`` is threaded to ``model_dump`` so subclass entries serialize through
+    their concrete type. ``drop_none_values`` drops ``None``-valued keys from both layers
+    (the top-level None-padding case). A caller that needs to exclude a field entirely (e.g.
+    inheritance-routing metadata) strips it from the inputs first, rather than this function
+    knowing field names.
 
     Returns ``(merged, narrowings)``: ``merged`` is a ``type(base)`` instance (so a
     subclass like ``ClaudeAgentConfig`` keeps its concrete class and subclass-only
@@ -408,7 +383,6 @@ def merge_models_via_overlay_with_narrowings(
     pipeline = _run_overlay_pipeline(
         base,
         override,
-        drop_field_names=drop_field_names,
         serialize_as_any=serialize_as_any,
         drop_none_values=drop_none_values,
     )
@@ -434,7 +408,6 @@ def _run_overlay_pipeline(
     base: BaseModel,
     override: BaseModel,
     *,
-    drop_field_names: frozenset[str],
     serialize_as_any: bool,
     drop_none_values: bool,
 ) -> _OverlayPipelineResult:
@@ -470,7 +443,6 @@ def _run_overlay_pipeline(
         _to_operator_dict(
             base_full,
             base,
-            drop_field_names,
             # When ``drop_none_values`` is set, ``None`` is the model's "unset" sentinel on
             # *both* sides (TOML has no null), so a ``None`` in the base dump is dropped too.
             # This treats a ``None``-valued base field (e.g. a ``model_construct``'d
@@ -487,7 +459,6 @@ def _run_overlay_pipeline(
         _to_operator_dict(
             override_sparse,
             override,
-            drop_field_names,
             drop_none_values=drop_none_values,
         )
     )

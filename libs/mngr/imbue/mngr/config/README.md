@@ -133,7 +133,7 @@ base" for why this is sound (associativity).
 
 A narrowing is a higher layer's bare assign silently dropping a non-empty aggregate
 that a lower layer set. **All** narrowing detection flows through the one overlay
-merge: `merge_models_via_overlay_with_narrowings` returns every narrowing path it
+merge: `merge_models_via_overlay` returns every narrowing path it
 finds, and the loader (`_collect_narrowing`) attributes each to the layer that set
 the dropped value. There is no separate model-walker.
 

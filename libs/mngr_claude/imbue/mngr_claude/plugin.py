@@ -45,7 +45,7 @@ from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.data_types import SettingsPatchField
+from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
