@@ -5,9 +5,9 @@ from imbue.mngr_azure.backend import _build_azcopy_install_command
 from imbue.mngr_azure.backend import _build_host_dir_blob_url
 from imbue.mngr_azure.backend import _build_host_dir_sync_command
 from imbue.mngr_azure.backend import _build_host_dir_sync_service_unit
-from imbue.mngr_vps.instance import HOST_DIR_SYNC_INTERVAL_SECONDS
-from imbue.mngr_vps.instance import HOST_DIR_SYNC_UNIT_NAME
-from imbue.mngr_vps.instance import build_host_dir_sync_timer_unit
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
+from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
 
 _HOST_DIR = "/mnt/mngr-btrfs/abc123/host_dir"
 _BLOB_URL = "https://mngrstabc.blob.core.windows.net/mngr-state/hosts/abc123/host_dir"

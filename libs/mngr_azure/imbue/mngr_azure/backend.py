@@ -49,10 +49,10 @@ from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
-from imbue.mngr_vps.instance import AGENT_TAG_FIELDS
-from imbue.mngr_vps.instance import AGENT_TAG_PREFIX
-from imbue.mngr_vps.instance import TagMirrorVpsProvider
 from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.instance_offline import AGENT_TAG_FIELDS
+from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
+from imbue.mngr_vps.instance_offline import TagMirrorVpsProvider
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 

@@ -21,3 +21,5 @@ Moved mngr host identity (host id and created-at) out of GCE *labels* and into i
 The idle-watcher install (in-container sentinel `shutdown.sh` plus the host-side systemd `.path`/`.service`) and the best-effort `_on_host_finalized` step runner moved to the shared `OfflineCapableVpsProvider`. GCP now supplies only the `GCE instance` display name; its `.service` body is the shared default `shutdown -P now` (a GCE guest poweroff stops the instance) and it does not sync host_dir to an object store, so it inherits the no-op sync gate and installs no sync daemon. The host-side idle-watcher systemd unit name changed from `mngr-gcp-idle-watcher` to the shared `mngr-idle-watcher`. Behavior-preserving otherwise.
 
 Updated the VPS build-arg parsing imports to point at the new `imbue.mngr_vps.build_args` module (moved out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
+
+Updated the `OfflineCapableVpsProvider` import to the new `imbue.mngr_vps.instance_offline` module (split out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
