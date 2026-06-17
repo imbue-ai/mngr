@@ -15,12 +15,15 @@ plumbing. A single ``run_agent_release_lifecycle(profile, tmp_path)`` call is th
 whole release test, so the parity the spec describes is enforced executably: every
 agent is held to the same lifecycle and the same canonical-transcript contract.
 
-The shared assertions are deliberately keyed on the **common transcript** (which every
-agent emits, and which `imbue.mngr.agents.common_transcript_records` makes canonical)
-rather than on the RUNNING marker: not every agent surfaces a RUNNING marker that is
-reliably observable mid-turn (some only flip it on prompt-submit and clear it on stop),
-so observing it is an opt-in capability (``observes_running_marker``); the
-WAITING-after-create check and transcript-conformance check are uniform.
+The shared assertions are keyed on the **common transcript** (which every agent emits,
+and which `imbue.mngr.agents.common_transcript_records` makes canonical). Every agent is
+held to the same core arc -- it surfaces the RUNNING marker and resumes on stop/start and
+adoption. Two capabilities still vary by agent: forcing a bash tool call (so the transcript
+carries a tool_call nested on the assistant turn plus its tool_result) is gated by
+``forces_tool_call`` because antigravity cannot satisfy it (it runs the command async and
+ends the turn before the result settles, so a single forced-tool turn carries no
+tool_result -- see its profile), and reporting per-message token usage is gated by
+``asserts_usage`` since not every CLI exposes it.
 
 These tests are not run in CI (release-marked); run a profile's test manually with the
 real binary present, e.g.::
@@ -91,9 +94,11 @@ class AgentReleaseProfile(abc.ABC):
     agent_type: str
     common_transcript_subdir: str
 
-    # Capability flags -- which agent-specific assertions apply (mirrors the parity
-    # matrix). Defaults suit a minimal port; richer agents opt in.
-    observes_running_marker: bool = True
+    # Capability flags. Observing the RUNNING marker is required of every agent, so it is
+    # not a flag. ``forces_tool_call`` is gated because antigravity cannot satisfy it (its
+    # tool result is captured only at the next turn boundary, so a single forced-tool turn
+    # never carries a tool_result -- see its profile). ``asserts_usage`` is gated because
+    # not every CLI reports per-message token usage (codex, opencode, antigravity do not).
     forces_tool_call: bool = False
     asserts_usage: bool = False
     # Paths (relative to the agent state dir, mirrored under the preserved dir) of the
@@ -121,11 +126,11 @@ class AgentReleaseProfile(abc.ABC):
         """Invoke ``mngr`` with ``args`` for this agent (each agent launches mngr its own way)."""
 
     def seed_prompt(self, secret: str) -> str:
-        """The first message: plant ``secret`` and (if forcing a tool) run a bash echo.
+        """The first message: plant ``secret`` and (when ``forces_tool_call``) run a bash echo.
 
-        Overridable; the default plants the secret verbatim so the recall turn can
-        prove resume, and -- when ``forces_tool_call`` -- forces a tool call so the
-        transcript contains a tool_result.
+        Overridable; the default plants the secret verbatim so the recall turn can prove
+        resume, and -- when ``forces_tool_call`` -- forces a tool call so the transcript
+        carries a tool_result.
         """
         if self.forces_tool_call:
             return (
@@ -365,18 +370,17 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
         assert not _marker_path(host_dir).exists(), "expected WAITING (no active marker) right after create"
 
-        # 2. Seed the secret. Optionally observe the RUNNING marker (skipped where racy).
+        # 2. Seed the secret and observe the RUNNING marker (every agent surfaces it).
         seed = profile.run_mngr(
             ctx, "message", agent_name, "--message", profile.seed_prompt(secret), timeout=_MESSAGE_TIMEOUT_SECONDS
         )
         assert seed.returncode == 0, f"seed message failed:\n{seed.stdout}\n{seed.stderr}"
-        if profile.observes_running_marker:
-            assert poll_until(
-                condition=_marker_path(host_dir).exists, timeout=_RUNNING_TIMEOUT_SECONDS, poll_interval=0.2
-            ), "active marker never appeared -> agent never reported RUNNING"
+        assert poll_until(
+            condition=_marker_path(host_dir).exists, timeout=_RUNNING_TIMEOUT_SECONDS, poll_interval=0.2
+        ), "active marker never appeared -> agent never reported RUNNING"
 
         # 3. The seed turn must be captured: user_message carries the secret, plus a reply
-        #    (and a tool_result when the agent was asked to use a tool).
+        #    (and a tool_result when the agent forces a tool call).
         records = _wait_for_records(
             host_dir,
             subdir,
@@ -385,7 +389,8 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
             description="seed turn was not captured",
         )
 
-        # 4. The captured records must all match the canonical envelope, plus capability checks.
+        # 4. The captured records must all match the canonical envelope, plus the forced-tool
+        #    assertions (the call nested on the assistant turn, and its result) when applicable.
         _assert_records_conform(records)
         assert all(r["source"] == f"{subdir}/common_transcript" for r in records), records
         assert len({r["event_id"] for r in records}) == len(records), "event_ids must be unique"

@@ -82,11 +82,8 @@ def _init_claude_workspace(path: Path) -> None:
 class _ClaudeReleaseProfile(AgentReleaseProfile):
     agent_type = "claude"
     common_transcript_subdir = "claude"
-    # claude touches the ``active`` marker on UserPromptSubmit (so RUNNING is reliably
-    # observable once a message returns), its forced seed turn runs a bash tool call,
-    # and its common-transcript converter emits per-message token usage -- so all three
-    # of the richer shared assertions apply.
-    observes_running_marker = True
+    # claude's forced seed turn runs a bash tool call and its converter emits per-message
+    # token usage, so both gated assertions apply (observing the RUNNING marker is universal).
     forces_tool_call = True
     asserts_usage = True
     # This is the store the adopt-from-preserved arc adopts: after destroy, a fresh agent

@@ -67,13 +67,9 @@ _PROVIDER_SETTINGS: tuple[str, ...] = (
 class _CodexReleaseProfile(AgentReleaseProfile):
     agent_type = "codex"
     common_transcript_subdir = "codex"
-    # codex's send_message blocks until the agent reads RUNNING (its UserPromptSubmit hook
-    # fires a tmux wait-for signal *after* setting the marker), so the marker is reliably
-    # present once a message returns -- observe it. The seed turn forces a bash tool call
-    # (create passes approval_policy=never, below, so it runs unattended), and codex's
-    # converter surfaces that call as a nested assistant tool_call. codex does not report
-    # token usage in the common envelope.
-    observes_running_marker = True
+    # codex forces the bash tool call (run unattended via approval_policy=never, set in
+    # create_extra_args; its converter surfaces it as a nested assistant tool_call). It does
+    # not report token usage, so that assertion is off (observing the RUNNING marker is universal).
     forces_tool_call = True
     asserts_usage = False
     # This is the store the adopt-from-preserved arc adopts: after destroy, a fresh agent
