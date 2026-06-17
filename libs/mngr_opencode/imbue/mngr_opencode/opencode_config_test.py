@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import HostName
@@ -15,6 +16,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_DB_RELPATH
 from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_SOURCE
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
@@ -243,14 +245,14 @@ def test_resolve_adopt_session_db_by_id_ambiguous_raises(tmp_path: Path) -> None
 def test_collect_adopt_search_db_paths_includes_agent_and_preserved_dbs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agents_root = tmp_path / "agents"
-    preserved_root = tmp_path / "preserved"
-    live_db = agents_root / "agent-1" / "plugin" / "opencode" / "data" / "opencode" / "opencode.db"
-    preserved_db = preserved_root / "name--id" / "plugin" / "opencode" / "data" / "opencode" / "opencode.db"
+    host_dir = tmp_path / "host"
+    live_db = host_dir / "agents" / "agent-1" / AGENT_OPENCODE_DB_RELPATH
+    preserved_db = host_dir / "preserved" / "name--id" / AGENT_OPENCODE_DB_RELPATH
     _write_opencode_db(live_db, "ses_live", "/live/work")
     _write_opencode_db(preserved_db, "ses_preserved", "/preserved/work")
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "user-data"))
-    paths = collect_adopt_search_db_paths(agents_root, preserved_root)
+    agent_db_paths = iter_agent_session_paths(host_dir, AGENT_OPENCODE_DB_RELPATH)
+    paths = collect_adopt_search_db_paths(agent_db_paths)
     assert live_db in paths
     assert preserved_db in paths
     # The user-native db path is always included (even when it does not exist on disk).

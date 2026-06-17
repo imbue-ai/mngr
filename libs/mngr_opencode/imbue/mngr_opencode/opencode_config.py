@@ -350,7 +350,7 @@ def resolve_adopt_session_db(adopt_session_arg: str, search_db_paths: Sequence[P
         source_db = Path(adopt_session_arg).resolve()
         if not source_db.is_file():
             raise UserInputError(f"OpenCode session db not found: {source_db}")
-        return _read_only_root_session_id(source_db), source_db
+        return read_only_root_session_id(source_db), source_db
 
     matches = [db_path for db_path in search_db_paths if _db_has_session(db_path, adopt_session_arg)]
     if not matches:
@@ -367,7 +367,7 @@ def resolve_adopt_session_db(adopt_session_arg: str, search_db_paths: Sequence[P
     return adopt_session_arg, matches[0]
 
 
-def _read_only_root_session_id(db_path: Path) -> str:
+def read_only_root_session_id(db_path: Path) -> str:
     """Return the lone root (parent-less) session id in ``db_path``, opened read-only.
 
     Adoption resumes one root conversation; a db with zero or several roots is ambiguous
