@@ -9,6 +9,7 @@ from typing import Never
 from loguru import logger
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.live_output_tail import tail_live_output
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentConfigT
@@ -207,7 +208,9 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin, Ha
 
         reader = self.make_live_output_reader()
         is_any_output_yielded = False
-        for chunk in self.stream_live_output(self.host, reader, self._make_live_output_finished_predicate()):
+        for chunk in tail_live_output(
+            self.host, self.get_live_output_path(), reader, self._make_live_output_finished_predicate()
+        ):
             is_any_output_yielded = True
             yield chunk
 

@@ -21,8 +21,6 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
-from imbue.mngr.interfaces.live_output import LIVE_OUTPUT_POLL_INTERVAL
-from imbue.mngr.interfaces.live_output import LIVE_OUTPUT_POLL_TIMEOUT
 from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -31,7 +29,6 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
-from imbue.mngr.utils.polling import poll_until
 
 # this is the only place where it is acceptable to use the TYPE_CHECKING flag
 if TYPE_CHECKING:
@@ -535,57 +532,6 @@ class HasCommonTranscriptMixin(HasTranscriptMixin):
         ...
 
 
-def _read_text_or_none(host: OnlineHostInterface, path: Path) -> str | None:
-    """Read ``path`` via ``host``, returning None if it does not exist yet."""
-    try:
-        return host.read_text_file(path)
-    except FileNotFoundError:
-        return None
-
-
-class _LiveOutputTailer(MutableModel):
-    """Polls a live-output file and yields the text deltas a reader extracts from it.
-
-    The ``host`` is passed per call rather than stored as a field so this module
-    need not import ``OnlineHostInterface`` at runtime (it is only available
-    under ``TYPE_CHECKING`` here, since importing it would close an
-    ``agent -> live_output -> host -> agent`` cycle). The new-data check is a
-    bound method reading ``self.last_mtime`` (mutated on the model, not a
-    captured local), so the polling lambda binds only stable values.
-    """
-
-    path: Path
-    is_finished: Callable[[], bool]
-    last_mtime: datetime | None = None
-
-    def has_new_data_or_finished(self, host: OnlineHostInterface) -> bool:
-        current_mtime = host.get_file_mtime(self.path)
-        if current_mtime is not None and current_mtime != self.last_mtime:
-            return True
-        return self.is_finished()
-
-    def tail(self, host: OnlineHostInterface, reader: LiveOutputReader) -> Iterator[str]:
-        while not reader.is_complete and not self.is_finished():
-            poll_until(
-                lambda: self.has_new_data_or_finished(host),
-                timeout=LIVE_OUTPUT_POLL_TIMEOUT,
-                poll_interval=LIVE_OUTPUT_POLL_INTERVAL,
-            )
-            self.last_mtime = host.get_file_mtime(self.path)
-            content = _read_text_or_none(host, self.path)
-            if content is not None:
-                yield from reader.feed(content)
-
-        # Final drain after the agent exits, unless a terminal marker already
-        # ended the stream (in which case trailing bytes are not ours to emit).
-        if not reader.is_complete:
-            content = _read_text_or_none(host, self.path)
-            if content is not None:
-                yield from reader.feed(content)
-            if not reader.is_complete:
-                yield from reader.finalize()
-
-
 class SupportsLiveOutputMixin(ABC):
     """Mixin for agents that publish a live, in-progress view of their output before a turn completes.
 
@@ -597,10 +543,11 @@ class SupportsLiveOutputMixin(ABC):
     Capability detection treats "can stream live output" as one capability
     regardless of which surface an agent uses.
 
-    The shared :meth:`stream_live_output` drives the poll-read-extract loop over
-    that file; pull consumers (a headless ``stream_output``) call it directly,
-    while push consumers (the robinhood multi-turn drivers) instead poll the
-    reader themselves, interleaved with their own transcript/lifecycle reads.
+    The poll-read-extract loop over that file lives in
+    :func:`imbue.mngr.agents.live_output_tail.tail_live_output`; pull consumers
+    (a headless ``stream_output``) call it directly, while push consumers (the
+    robinhood multi-turn drivers) instead poll the reader themselves,
+    interleaved with their own transcript/lifecycle reads.
     """
 
     @abstractmethod
@@ -612,21 +559,6 @@ class SupportsLiveOutputMixin(ABC):
     def make_live_output_reader(self) -> LiveOutputReader:
         """Create a fresh reader that extracts text deltas from this agent's live-output file."""
         ...
-
-    def stream_live_output(
-        self,
-        host: OnlineHostInterface,
-        reader: LiveOutputReader,
-        is_finished: Callable[[], bool],
-    ) -> Iterator[str]:
-        """Tail :meth:`get_live_output_path`, yielding text deltas until ``is_finished()``.
-
-        The caller supplies the ``reader`` (rather than this building it) so it
-        can inspect the reader's terminal state -- :attr:`LiveOutputReader.is_complete`
-        / :attr:`LiveOutputReader.stream_error` -- once streaming finishes.
-        """
-        tailer = _LiveOutputTailer(path=self.get_live_output_path(), is_finished=is_finished)
-        yield from tailer.tail(host, reader)
 
 
 class HeadlessAgentMixin(ABC):

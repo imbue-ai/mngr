@@ -27,7 +27,7 @@ class LiveOutputReader(MutableModel, ABC):
 
     Readers hold only extraction state -- file IO and polling belong to the
     caller -- so the same reader serves both pull consumers (the shared tail
-    loop in :meth:`SupportsLiveOutputMixin.stream_live_output`) and push
+    loop in :func:`imbue.mngr.agents.live_output_tail.tail_live_output`) and push
     consumers (drivers that poll the reader on their own multi-turn cadence).
     """
 

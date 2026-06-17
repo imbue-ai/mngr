@@ -11,7 +11,7 @@ pure ``compute_stream_delta`` / ``buffer_body`` helpers it wraps are also used d
 remain the single source of the reflow-tolerant diff logic. Consumers: the robinhood CLI
 orchestrator (renders deltas as plain text / ``text_delta`` partials), the mngr-backed Agent SDK
 driver (wraps deltas as synthesized ``StreamEvent`` payloads), and -- via the reader -- any pull
-consumer tailing the buffer through ``stream_live_output``.
+consumer tailing the buffer through ``tail_live_output``.
 """
 
 from imbue.imbue_common.pure import pure
