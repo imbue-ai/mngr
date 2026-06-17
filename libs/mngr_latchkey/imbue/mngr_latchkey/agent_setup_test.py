@@ -25,8 +25,8 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
+from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
-from imbue.mngr_latchkey.agent_setup import recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -248,7 +248,7 @@ def test_finalize_propagates_link_errors(tmp_path: Path) -> None:
         finalize_host_permissions(fake, missing_path, HostId())
 
 
-# -- recover_host_permissions_for_agent --------------------------------------
+# -- maybe_recover_host_permissions_for_agent --------------------------------
 
 
 def test_recover_links_standalone_opaque_when_host_file_missing(tmp_path: Path) -> None:
@@ -261,7 +261,7 @@ def test_recover_links_standalone_opaque_when_host_file_missing(tmp_path: Path) 
     canonical = permissions_path_for_host(fake.plugin_data_dir, host_id)
     assert not canonical.exists()
 
-    did_recover = recover_host_permissions_for_agent(fake, host_id, agent_id, setup.opaque_permissions_path)
+    did_recover = maybe_recover_host_permissions_for_agent(fake, host_id, agent_id, setup.opaque_permissions_path)
 
     assert did_recover is True
     # The canonical file now exists and the opaque handle is a symlink to it,
@@ -290,7 +290,7 @@ def test_recover_is_noop_for_file_but_still_registers_agent(tmp_path: Path) -> N
     canonical = permissions_path_for_host(fake.plugin_data_dir, host_id)
     assert str(agent_id) not in canonical.read_text()
 
-    did_recover = recover_host_permissions_for_agent(fake, host_id, agent_id, setup.opaque_permissions_path)
+    did_recover = maybe_recover_host_permissions_for_agent(fake, host_id, agent_id, setup.opaque_permissions_path)
 
     assert did_recover is False
     assert str(agent_id) in canonical.read_text()
@@ -303,7 +303,7 @@ def test_recover_rejects_opaque_path_outside_opaque_directory(tmp_path: Path) ->
     stray.parent.mkdir(parents=True)
     stray.write_text("{}")
     with pytest.raises(LatchkeyStoreError):
-        recover_host_permissions_for_agent(fake, HostId(), AgentId(), stray)
+        maybe_recover_host_permissions_for_agent(fake, HostId(), AgentId(), stray)
 
 
 def test_recover_materializes_baseline_when_opaque_handle_missing(tmp_path: Path) -> None:
@@ -316,7 +316,7 @@ def test_recover_materializes_baseline_when_opaque_handle_missing(tmp_path: Path
     canonical = permissions_path_for_host(fake.plugin_data_dir, host_id)
     assert not canonical.exists()
 
-    did_recover = recover_host_permissions_for_agent(fake, host_id, agent_id, phantom)
+    did_recover = maybe_recover_host_permissions_for_agent(fake, host_id, agent_id, phantom)
 
     assert did_recover is True
     assert canonical.is_file()
@@ -324,6 +324,10 @@ def test_recover_materializes_baseline_when_opaque_handle_missing(tmp_path: Path
     config = json.loads(canonical.read_text())
     assert len(config["rules"]) > 0
     assert str(agent_id) in canonical.read_text()
+    # The missing opaque handle was (re)created as a symlink to the canonical
+    # file, so the agent's JWT (which resolves to the handle) works again.
+    assert phantom.is_symlink()
+    assert phantom.resolve() == canonical.resolve()
 
 
 # -- AgentLatchkeySetup model -------------------------------------------------

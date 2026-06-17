@@ -79,7 +79,7 @@ from imbue.minds.utils.output import emit_event
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
-from imbue.mngr_latchkey.agent_setup import recover_host_permissions_for_agent
+from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -596,8 +596,8 @@ class _StreamedPermissionRequestHandler(FrozenModel):
 
         The streamed request carries ``permissions_target_path`` -- the
         agent's opaque permissions handle (what its gateway JWT resolves
-        to). :func:`recover_host_permissions_for_agent` swings that handle
-        into the canonical host path when the latter is missing (so grants
+        to). :func:`maybe_recover_host_permissions_for_agent` swings that
+        handle into the canonical host path when the latter is missing (so grants
         written by the approval flow are visible to the agent) and
         idempotently re-registers the agent in the host's allowlist. No-op
         when the target is absent (non-latchkey request) or the host is
@@ -611,7 +611,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         if host_id is None:
             return
         try:
-            did_recover = recover_host_permissions_for_agent(
+            did_recover = maybe_recover_host_permissions_for_agent(
                 latchkey=self.latchkey,
                 host_id=host_id,
                 agent_id=agent_id,

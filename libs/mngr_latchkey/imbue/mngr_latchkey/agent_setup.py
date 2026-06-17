@@ -55,6 +55,7 @@ from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import point_opaque_handle_at_host
 from imbue.mngr_latchkey.store import save_permissions
 
 # Env-var names baked into the upstream latchkey CLI's wire contract.
@@ -444,13 +445,18 @@ def finalize_host_permissions(
     link_opaque_permissions_to_host(latchkey.plugin_data_dir, opaque_permissions_path, host_id)
 
 
-def recover_host_permissions_for_agent(
+def maybe_recover_host_permissions_for_agent(
     latchkey: Latchkey,
     host_id: HostId,
     agent_id: AgentId,
     opaque_permissions_path: Path,
 ) -> bool:
     """Repair a host's permissions file (and re-register ``agent_id``) when needed.
+
+    Cheap in the common case: when the canonical file already exists this
+    only re-registers the agent (an idempotent read, usually a no-op),
+    which is why the name carries the ``maybe_`` hedge -- the expensive
+    link / write paths run only on the rare missing-file case.
 
     A best-effort safety net for the rare case where an agent is live and
     able to file permission requests (its gateway JWT resolves to the
@@ -514,12 +520,12 @@ def recover_host_permissions_for_agent(
             finalize_host_permissions(latchkey, opaque_permissions_path, host_id)
         else:
             # The opaque handle is missing or is a (dangling) symlink -- both are
-            # unexpected for a request the gateway just accepted, but in either
-            # case materializing the baseline at the canonical path is the safe
-            # repair: a dangling opaque symlink already points here (so it starts
-            # resolving once the file exists), and a missing handle at least lets
-            # future grants land somewhere real.
+            # unexpected for a request the gateway just accepted. Materialize
+            # the baseline at the canonical path and (re)point the opaque
+            # handle at it, so the agent's JWT (which resolves to the handle)
+            # starts working again and later grants are visible to it.
             save_permissions(host_path, _AGENT_BASELINE_PERMISSIONS)
+            point_opaque_handle_at_host(plugin_data_dir, opaque_permissions_path, host_id)
         did_repair = True
 
     # Always ensure the requesting agent is in the host's allowlist. This is a
