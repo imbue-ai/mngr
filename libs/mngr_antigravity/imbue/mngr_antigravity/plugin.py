@@ -112,10 +112,12 @@ from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
+from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import require_unique_match
 from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -350,22 +352,19 @@ def _resolve_adopt_session(adopt_arg: str, mngr_ctx: MngrContext) -> tuple[str, 
                     matches.append(conversations_dir)
                     break
 
-    if not matches:
-        # Don't enumerate the searched dirs: there is one per local mngr agent, so the
-        # list can run long. The searched scope is the user-native store, live agents,
-        # and preserved agents.
-        raise UserInputError(
+    # Don't enumerate the searched dirs in the not-found message: there is one per local mngr
+    # agent, so the list can run long. The searched scope is the user-native store, live
+    # agents, and preserved agents.
+    match = require_unique_match(
+        matches,
+        not_found_message=(
             f"Conversation {adopt_arg} not found. "
             "Check that the conversation id is correct, or pass an absolute path to the <id>.db file."
-        )
-    if len(matches) > 1:
-        match_list = "\n".join(f"  {m}" for m in matches)
-        raise UserInputError(
-            f"Conversation {adopt_arg} found in multiple conversation directories:\n{match_list}\n"
-            "Pass the full path to the <id>.db file to specify which one."
-        )
-
-    return adopt_arg, matches[0]
+        ),
+        ambiguous_header=f"Conversation {adopt_arg} found in multiple conversation directories:",
+        ambiguous_hint="Pass the full path to the <id>.db file to specify which one.",
+    )
+    return adopt_arg, match
 
 
 class AntigravityAgentConfig(AgentTypeConfig):
@@ -704,13 +703,14 @@ class AntigravityAgent(
           its root conversation.
 
         Either way ``assemble_command`` then resumes the recorded id via ``agy --conversation``.
+        The explicit-vs-clone dispatch lives in the shared ``dispatch_session_adoption``.
         """
-        adopt_args: tuple[str, ...] = options.adopt_session
-        if adopt_args:
-            self._adopt_session(host, adopt_args[-1])
-            return
-        if options.source_agent_state_location is not None:
-            self._adopt_cloned_session(host, options.source_agent_state_location)
+        dispatch_session_adoption(
+            options.adopt_session,
+            options.source_agent_state_location,
+            on_explicit=lambda args: self._adopt_session(host, args[-1]),
+            on_clone=lambda location: self._adopt_cloned_session(host, location),
+        )
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
         """Resolve, copy, and finalize an adopted agy conversation.

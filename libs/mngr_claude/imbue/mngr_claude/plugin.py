@@ -42,9 +42,11 @@ from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
+from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import require_unique_match
 from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -206,22 +208,19 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
         if projects_dir.exists():
             matches.extend(projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
 
-    if not matches:
-        # Don't enumerate the searched dirs: there is one per local mngr agent, so the
-        # list can run to hundreds of paths. The --adopt help documents the
-        # search scope (current/user Claude config dirs, live agents, preserved agents).
-        raise UserInputError(
+    # Don't enumerate the searched dirs in the not-found message: there is one per local mngr
+    # agent, so the list can run to hundreds of paths. The --adopt help documents the search
+    # scope (current/user Claude config dirs, live agents, preserved agents).
+    match = require_unique_match(
+        matches,
+        not_found_message=(
             f"Session {adopt_session_arg} not found. "
             "Check that the session ID is correct, or pass a path to the .jsonl file."
-        )
-    if len(matches) > 1:
-        match_list = "\n".join(f"  {m}" for m in matches)
-        raise UserInputError(
-            f"Session {adopt_session_arg} found in multiple project directories:\n{match_list}\n"
-            "Pass the full path to the .jsonl file to specify which one."
-        )
-
-    return adopt_session_arg, matches[0].parent
+        ),
+        ambiguous_header=f"Session {adopt_session_arg} found in multiple project directories:",
+        ambiguous_hint="Pass the full path to the .jsonl file to specify which one.",
+    )
+    return adopt_session_arg, match.parent
 
 
 class ClaudeAgentConfig(AgentTypeConfig):
@@ -2330,10 +2329,10 @@ class ClaudeAgent(
     ) -> None:
         """Adopt a session so the agent's claude resumes existing context.
 
-        Dispatches to ``_adopt_explicit_sessions`` (``--adopt``)
-        or ``_adopt_cloned_session`` (``--from <agent>``); both end in
-        ``_finalize_adopted_session``. The combination is rejected
-        upstream in ``on_before_create``.
+        Dispatches (via ``dispatch_session_adoption``) to ``_adopt_explicit_sessions``
+        (``--adopt``, which takes the *whole* tuple -- every named session is made
+        available, the last is resumed) or ``_adopt_cloned_session`` (``--from <agent>``);
+        both end in ``_finalize_adopted_session``.
 
         Destination resolution depends on ``use_env_config_dir``:
         - Default (``False``): copies into the per-agent config dir at
@@ -2344,14 +2343,12 @@ class ClaudeAgent(
           in shared mode, and it only adds new project subdirs -- it never
           modifies existing user files.
         """
-        adopt_session_args: tuple[str, ...] = options.adopt_session
-        assert not (adopt_session_args and options.source_agent_state_location is not None), (
-            "--adopt and --from <agent> are mutually exclusive (should have been rejected by on_before_create)"
+        dispatch_session_adoption(
+            options.adopt_session,
+            options.source_agent_state_location,
+            on_explicit=lambda args: self._adopt_explicit_sessions(host, args),
+            on_clone=lambda location: self._adopt_cloned_session(host, location),
         )
-        if adopt_session_args:
-            self._adopt_explicit_sessions(host, adopt_session_args)
-        if options.source_agent_state_location is not None:
-            self._adopt_cloned_session(host, options.source_agent_state_location)
 
     def _adopt_explicit_sessions(
         self,

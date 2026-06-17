@@ -66,6 +66,7 @@ from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_di
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
@@ -513,18 +514,22 @@ class OpenCodeAgent(
           just the source's native opencode store and resumes its root session.
 
         Resolving, copying, rebinding, and writing the resume pointer happen here -- the same
-        create-time seam where the launch script first records ``root_session_id``.
+        create-time seam where the launch script first records ``root_session_id``. The
+        explicit-vs-clone dispatch lives in the shared ``dispatch_session_adoption``.
         """
-        adopt_args: tuple[str, ...] = options.adopt_session
-        if adopt_args:
-            adopt_arg = adopt_args[-1]
-            with log_span("Adopting OpenCode session from {}", adopt_arg):
-                session_id, source_db = resolve_adopt_session_db(adopt_arg, _adopt_search_db_paths(mngr_ctx))
-                self._copy_session_db_into_agent(host, source_db)
-                self._rebind_and_point_resume(host, session_id)
-            return
-        if options.source_agent_state_location is not None:
-            self._adopt_cloned_session(host, options.source_agent_state_location)
+        dispatch_session_adoption(
+            options.adopt_session,
+            options.source_agent_state_location,
+            on_explicit=lambda args: self._adopt_explicit_session(host, args[-1], mngr_ctx),
+            on_clone=lambda location: self._adopt_cloned_session(host, location),
+        )
+
+    def _adopt_explicit_session(self, host: OnlineHostInterface, adopt_arg: str, mngr_ctx: MngrContext) -> None:
+        """Resolve an explicit ``--adopt`` value, copy its db into this agent, and rebind."""
+        with log_span("Adopting OpenCode session from {}", adopt_arg):
+            session_id, source_db = resolve_adopt_session_db(adopt_arg, _adopt_search_db_paths(mngr_ctx))
+            self._copy_session_db_into_agent(host, source_db)
+            self._rebind_and_point_resume(host, session_id)
 
     def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
         """Resume the source agent's conversation after a ``--from <agent>`` clone.

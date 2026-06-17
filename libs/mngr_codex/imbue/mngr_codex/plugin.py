@@ -97,10 +97,12 @@ from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
+from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import require_unique_match
 from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -921,20 +923,25 @@ class CodexAgent(
         "Rebind" in both cases means: rewrite the adopted rollout's recorded cwd to this
         agent's work dir (so ``codex resume`` does not pop the working-directory modal) and
         write the session id as the resume pointer (``codex_root_session``) that
-        ``assemble_command``'s prelude reads.
+        ``assemble_command``'s prelude reads. The explicit-vs-clone dispatch lives in the
+        shared ``dispatch_session_adoption``.
         """
-        adopt_args = options.adopt_session
-        if adopt_args:
-            user_codex_home = self._resolve_user_codex_home(host)
-            session_id, source_sessions_dir = _resolve_adopt_session(adopt_args[-1], mngr_ctx, user_codex_home)
-            dest_sessions_dir = self._get_codex_home() / "sessions"
-            with log_span("Adopting codex session {}", session_id):
-                host.copy_directory(host, source_sessions_dir, dest_sessions_dir)
-                self._rebind_codex_session(host, dest_sessions_dir, session_id)
-            logger.info("Adopted codex session {} into agent {}", session_id, self.id)
-            return
-        if options.source_agent_state_location is not None:
-            self._adopt_cloned_codex_session(host, options.source_agent_state_location)
+        dispatch_session_adoption(
+            options.adopt_session,
+            options.source_agent_state_location,
+            on_explicit=lambda args: self._adopt_explicit_codex_session(host, args[-1], mngr_ctx),
+            on_clone=lambda location: self._adopt_cloned_codex_session(host, location),
+        )
+
+    def _adopt_explicit_codex_session(self, host: OnlineHostInterface, adopt_arg: str, mngr_ctx: MngrContext) -> None:
+        """Resolve an explicit ``--adopt`` value, copy its ``sessions/`` tree in, and rebind."""
+        user_codex_home = self._resolve_user_codex_home(host)
+        session_id, source_sessions_dir = _resolve_adopt_session(adopt_arg, mngr_ctx, user_codex_home)
+        dest_sessions_dir = self._get_codex_home() / "sessions"
+        with log_span("Adopting codex session {}", session_id):
+            host.copy_directory(host, source_sessions_dir, dest_sessions_dir)
+            self._rebind_codex_session(host, dest_sessions_dir, session_id)
+        logger.info("Adopted codex session {} into agent {}", session_id, self.id)
 
     def _adopt_cloned_codex_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
         """Resume the cloned source agent's conversation after a ``--from`` clone.
@@ -1132,19 +1139,17 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, user_c
         if sessions_dir.is_dir() and any(sessions_dir.glob(f"**/rollout-*-{adopt_session_arg}.jsonl")):
             matched_dirs.append(sessions_dir)
 
-    if not matched_dirs:
-        raise UserInputError(
+    matched_dir = require_unique_match(
+        matched_dirs,
+        not_found_message=(
             f"Codex session {adopt_session_arg} not found. Check that the session id is correct, "
             "or pass an absolute path to the rollout .jsonl file. (Searched the user's "
             "~/.codex/sessions, every live mngr codex agent, and every preserved one.)"
-        )
-    if len(matched_dirs) > 1:
-        match_list = "\n".join(f"  {d}" for d in matched_dirs)
-        raise UserInputError(
-            f"Codex session {adopt_session_arg} found in multiple session stores:\n{match_list}\n"
-            "Pass the absolute path to the rollout .jsonl file to specify which one."
-        )
-    return adopt_session_arg, matched_dirs[0]
+        ),
+        ambiguous_header=f"Codex session {adopt_session_arg} found in multiple session stores:",
+        ambiguous_hint="Pass the absolute path to the rollout .jsonl file to specify which one.",
+    )
+    return adopt_session_arg, matched_dir
 
 
 def _session_id_from_rollout_path(rollout_file: Path) -> str:

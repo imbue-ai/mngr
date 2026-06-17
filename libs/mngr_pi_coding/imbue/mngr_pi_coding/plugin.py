@@ -20,10 +20,12 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
+from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import require_unique_match
 from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -254,22 +256,18 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, home_d
                 if session_file.stem == adopt_session_arg or session_file.stem.endswith(f"_{adopt_session_arg}"):
                     matches.append(session_file)
 
-    if not matches:
-        # Don't enumerate the searched dirs: there is one per local mngr agent, so the
-        # list can run long. The search scope is the user-native store, live agents,
-        # and preserved agents.
-        raise UserInputError(
+    # Don't enumerate the searched dirs in the not-found message: there is one per local mngr
+    # agent, so the list can run long. The search scope is the user-native store, live agents,
+    # and preserved agents.
+    return require_unique_match(
+        matches,
+        not_found_message=(
             f"pi session {adopt_session_arg} not found. "
             "Check that the session id is correct, or pass an absolute path to the .jsonl file."
-        )
-    if len(matches) > 1:
-        match_list = "\n".join(f"  {match}" for match in matches)
-        raise UserInputError(
-            f"pi session {adopt_session_arg} found in multiple session stores:\n{match_list}\n"
-            "Pass the absolute path to the .jsonl file to specify which one."
-        )
-
-    return matches[0]
+        ),
+        ambiguous_header=f"pi session {adopt_session_arg} found in multiple session stores:",
+        ambiguous_hint="Pass the absolute path to the .jsonl file to specify which one.",
+    )
 
 
 def _rewrite_pi_session_cwd(content: str, new_cwd: str) -> str:
@@ -901,14 +899,12 @@ class PiCodingAgent(
         store, rebound to this agent's work_dir, and recorded as the resume pointer.
         Empty (and no ``--from``) means no adoption (the agent starts fresh).
         """
-        adopt_args = options.adopt_session
-        if adopt_args:
-            self._adopt_session(host, adopt_args[-1])
-        elif options.source_agent_state_location is not None:
-            self._adopt_cloned_session(host, options.source_agent_state_location)
-        else:
-            # Neither --adopt nor --from: the agent starts a fresh session.
-            return
+        dispatch_session_adoption(
+            options.adopt_session,
+            options.source_agent_state_location,
+            on_explicit=lambda args: self._adopt_session(host, args[-1]),
+            on_clone=lambda location: self._adopt_cloned_session(host, location),
+        )
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
         """Copy the resolved session into this agent's store, rebind it, and point resume at it.

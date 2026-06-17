@@ -25,6 +25,7 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import Field
@@ -35,6 +36,7 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -138,6 +140,57 @@ def run_adopt_session_preflight(
         return
     for session_arg in adopt_session:
         resolve_one(session_arg)
+
+
+_MatchT = TypeVar("_MatchT")
+
+
+def require_unique_match(
+    matches: Sequence[_MatchT],
+    *,
+    not_found_message: str,
+    ambiguous_header: str,
+    ambiguous_hint: str,
+) -> _MatchT:
+    """Return the single element of ``matches``, raising :class:`UserInputError` for zero or many.
+
+    Every per-CLI adopt resolver scans its native store(s) for a session id and ends the same
+    way: zero hits is an unknown-id error, more than one is an ambiguity the user must
+    disambiguate (with the colliding stores listed), exactly one is the answer. Only the store
+    scanning differs per CLI; this shared tail keeps the not-found/ambiguous error shape uniform.
+    The ambiguous error is ``ambiguous_header``, then each match on its own indented line, then
+    ``ambiguous_hint`` (typically "pass the full path to <store> to specify which one").
+    """
+    if not matches:
+        raise UserInputError(not_found_message)
+    if len(matches) > 1:
+        listing = "\n".join(f"  {match}" for match in matches)
+        raise UserInputError(f"{ambiguous_header}\n{listing}\n{ambiguous_hint}")
+    return matches[0]
+
+
+def dispatch_session_adoption(
+    adopt_session: tuple[str, ...],
+    source_location: HostLocation | None,
+    *,
+    on_explicit: Callable[[tuple[str, ...]], None],
+    on_clone: Callable[[HostLocation], None],
+) -> None:
+    """Route an agent's ``adopt_session`` to the explicit-``--adopt`` or ``--from``-clone path.
+
+    The two adoption sources are mutually exclusive (the core gate rejects combining them) and
+    explicit ``--adopt`` takes precedence; with neither set the agent starts fresh. This encodes
+    that one contract so every plugin's ``adopt_session`` is just two callbacks: ``on_explicit``
+    receives the full ``--adopt`` tuple (the plugin decides whether to use all of it or only the
+    last entry), ``on_clone`` receives the source agent's state location.
+    """
+    if adopt_session:
+        on_explicit(adopt_session)
+    elif source_location is not None:
+        on_clone(source_location)
+    else:
+        # Neither --adopt nor --from: the agent starts a fresh session (nothing to do).
+        return
 
 
 def transfer_cloned_agent_session_store(
