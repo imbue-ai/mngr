@@ -132,21 +132,18 @@ def select_eco_option_codes(
         # A family counts as mandatory if any of its offers is flagged mandatory.
         is_family_mandatory[family] = is_family_mandatory.get(family, False) or bool(option.get("mandatory"))
 
-    def _codes_for(family: str) -> list[str]:
-        return [str(option["planCode"]) for option in options_by_family.get(family, [])]
-
-    memory_code = next((code for code in _codes_for("memory") if parse_memory_gb(code) == memory_gb), None)
+    memory_codes = [str(option["planCode"]) for option in options_by_family.get("memory", [])]
+    storage_codes = [str(option["planCode"]) for option in options_by_family.get("storage", [])]
+    memory_code = next((code for code in memory_codes if parse_memory_gb(code) == memory_gb), None)
     if memory_code is None:
-        raise BareMetalConfigError(
-            f"no {memory_gb}GB memory option for this plan; offered: {sorted(_codes_for('memory'))}"
-        )
+        raise BareMetalConfigError(f"no {memory_gb}GB memory option for this plan; offered: {sorted(memory_codes)}")
     storage_code = next(
-        (code for code in _codes_for("storage") if code == storage_short or code.startswith(storage_short + "-")),
+        (code for code in storage_codes if code == storage_short or code.startswith(storage_short + "-")),
         None,
     )
     if storage_code is None:
         raise BareMetalConfigError(
-            f"storage {storage_short!r} not offered for this plan; offered: {sorted(_codes_for('storage'))}"
+            f"storage {storage_short!r} not offered for this plan; offered: {sorted(storage_codes)}"
         )
 
     # Resolve every other mandatory family (e.g. bandwidth, and vrack on the plans that include it): the

@@ -117,7 +117,8 @@ def test_destroy_disk_unlocks_then_force_deletes() -> None:
 
 def test_destroy_disk_tolerates_already_absent_disk() -> None:
     client = _recording_client({"limactl disk delete": (1, "", "disk does not exist")})
-    client.destroy_disk("mngr-slice-abc-data")  # must not raise
+    # An already-absent disk must not raise.
+    client.destroy_disk("mngr-slice-abc-data")
 
 
 def test_destroy_disk_raises_on_genuine_delete_failure() -> None:
