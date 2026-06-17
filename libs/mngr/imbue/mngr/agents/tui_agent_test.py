@@ -187,14 +187,17 @@ def test_send_message_waits_for_ready_indicator_before_pasting() -> None:
 
 
 @pytest.mark.allow_warnings
-def test_send_message_raises_when_ready_indicator_never_appears() -> None:
-    """If the indicator is absent (e.g. transcript still replaying), nothing is pasted."""
+def test_wait_for_tui_ready_raises_when_indicator_never_appears() -> None:
+    """When the indicator never appears, the readiness wait raises instead of returning.
+
+    ``send_message`` calls ``wait_for_tui_ready`` before pasting, so if the pane
+    never shows the indicator (e.g. a transcript still replaying), this raise is
+    what stops keystrokes from being dropped into a not-yet-ready session. A
+    short timeout keeps the test off the production 30s default.
+    """
     agent = _make_recording_agent(pane_content="restored conversation, no prompt yet")
-    with pytest.raises(SendMessageError):
-        # Use a short readiness timeout so the test does not block on the
-        # production 30s default; the message is irrelevant since we never paste.
+    with pytest.raises(SendMessageError, match="Timeout waiting for TUI to be ready"):
         wait_for_tui_ready(agent, agent.tmux_target, agent.get_tui_ready_indicator(), timeout_seconds=0.2)
-    assert agent.steps == []
 
 
 def test_send_message_runs_preflight_before_readiness_wait() -> None:
