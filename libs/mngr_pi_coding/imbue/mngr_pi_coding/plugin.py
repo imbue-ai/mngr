@@ -37,6 +37,7 @@ from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -308,6 +309,7 @@ def _has_api_credentials_available(
 
 class PiCodingAgent(
     BaseAgent[PiCodingAgentConfig],
+    InteractiveAgentMixin,
     CliBackedAgentMixin,
     HasCommonTranscriptMixin,
     HasSessionPreservationMixin,

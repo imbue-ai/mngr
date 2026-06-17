@@ -7,3 +7,5 @@ The agent now declares the `HasSessionPreservationMixin` capability mixin: its `
 `PiCodingAgent` now declares `HasAutoInstallMixin` and routes its install-if-missing through the shared `ensure_cli_installed` helper (it now also prompts in interactive mode rather than only honoring `--yes`).
 
 `PiCodingAgent` now also declares `CliBackedAgentMixin`, marking it as wrapping a specific external CLI so the CLI-only capability-matrix rows scope to it positively (rather than by the absence of a command-runner marker). Behavior is unchanged.
+
+`PiCodingAgent` now also declares `InteractiveAgentMixin` -- the marker for agents that accept interactive messages, now that `send_message` is no longer a universal `AgentInterface` method. pi already implemented `send_message` (it appends to its extension inbox), so this only adds the marker. Behavior is unchanged.

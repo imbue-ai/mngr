@@ -15,7 +15,7 @@ from typing import ClassVar
 from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.tui_utils import DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import wait_for_paste_visible
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
@@ -23,7 +23,7 @@ from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
 
 
-class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
+class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
     """Base for interactive TUI agents that echo input back to the terminal.
 
     Subclasses declare:
