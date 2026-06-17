@@ -32,6 +32,7 @@ from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_PORT_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_ROLE
 from imbue.mngr_opencode.opencode_config import build_opencode_config
+from imbue.mngr_opencode.opencode_config import build_opencode_merge_sql
 from imbue.mngr_opencode.opencode_config import build_opencode_rebind_commands
 from imbue.mngr_opencode.opencode_config import build_opencode_rebind_sql
 from imbue.mngr_opencode.opencode_config import collect_adopt_search_db_paths
@@ -44,9 +45,11 @@ from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 from imbue.mngr_opencode.opencode_config import get_opencode_root_session_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_server_port_file_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
+from imbue.mngr_opencode.opencode_config import list_source_merge_tables
 from imbue.mngr_opencode.opencode_config import read_opencode_config
 from imbue.mngr_opencode.opencode_config import resolve_adopt_session_db
 from imbue.mngr_opencode.opencode_config import serialize_opencode_config
+from imbue.mngr_opencode.testing import write_opencode_session
 
 
 def test_build_opencode_config_always_sets_schema() -> None:
@@ -162,41 +165,9 @@ def test_launch_script_literals_stay_in_sync_with_constants() -> None:
         assert env_var in launch_source
 
 
-def _write_opencode_db(db_path: Path, session_id: str, directory: str, *, parent_id: str | None = None) -> str:
-    """Create a minimal OpenCode-shaped db with one project + one session; return the project id.
-
-    Mirrors only the columns the adopt resolver / rebind touch (verified against the real
-    opencode 1.17.7 schema): session.(id, project_id, parent_id, directory), project.(id,
-    worktree), project_directory.(project_id, directory).
-    """
-    project_id = f"proj_{session_id}"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
-    try:
-        connection.executescript(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, directory TEXT NOT NULL);"
-            "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL);"
-            "CREATE TABLE project_directory (project_id TEXT NOT NULL, directory TEXT NOT NULL, time_created INTEGER, "
-            "PRIMARY KEY (project_id, directory));"
-        )
-        connection.execute(
-            "INSERT INTO session (id, project_id, parent_id, directory) VALUES (?, ?, ?, ?)",
-            (session_id, project_id, parent_id, directory),
-        )
-        connection.execute("INSERT INTO project (id, worktree) VALUES (?, ?)", (project_id, directory))
-        connection.execute(
-            "INSERT INTO project_directory (project_id, directory, time_created) VALUES (?, ?, 0)",
-            (project_id, directory),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    return project_id
-
-
 def test_resolve_adopt_session_db_by_path_uses_lone_root_session(tmp_path: Path) -> None:
     db_path = tmp_path / "opencode.db"
-    _write_opencode_db(db_path, "ses_root", "/src/work")
+    write_opencode_session(db_path, "ses_root", "/src/work")
     session_id, source_db = resolve_adopt_session_db(str(db_path), [])
     assert session_id == "ses_root"
     assert source_db == db_path
@@ -204,7 +175,7 @@ def test_resolve_adopt_session_db_by_path_uses_lone_root_session(tmp_path: Path)
 
 def test_resolve_adopt_session_db_by_path_rejects_multiple_roots(tmp_path: Path) -> None:
     db_path = tmp_path / "opencode.db"
-    _write_opencode_db(db_path, "ses_root", "/src/work")
+    write_opencode_session(db_path, "ses_root", "/src/work")
     # A second parent-less session makes the db ambiguous when addressed by path.
     connection = sqlite3.connect(db_path)
     connection.execute(
@@ -220,8 +191,8 @@ def test_resolve_adopt_session_db_by_path_rejects_multiple_roots(tmp_path: Path)
 def test_resolve_adopt_session_db_by_id_searches_stores(tmp_path: Path) -> None:
     db_a = tmp_path / "a" / "opencode.db"
     db_b = tmp_path / "b" / "opencode.db"
-    _write_opencode_db(db_a, "ses_aaa", "/a/work")
-    _write_opencode_db(db_b, "ses_bbb", "/b/work")
+    write_opencode_session(db_a, "ses_aaa", "/a/work")
+    write_opencode_session(db_b, "ses_bbb", "/b/work")
     session_id, source_db = resolve_adopt_session_db("ses_bbb", [db_a, db_b])
     assert session_id == "ses_bbb"
     assert source_db == db_b
@@ -229,7 +200,7 @@ def test_resolve_adopt_session_db_by_id_searches_stores(tmp_path: Path) -> None:
 
 def test_resolve_adopt_session_db_by_id_missing_raises(tmp_path: Path) -> None:
     db_a = tmp_path / "a" / "opencode.db"
-    _write_opencode_db(db_a, "ses_aaa", "/a/work")
+    write_opencode_session(db_a, "ses_aaa", "/a/work")
     with pytest.raises(UserInputError, match="not found"):
         resolve_adopt_session_db("ses_zzz", [db_a])
 
@@ -237,8 +208,8 @@ def test_resolve_adopt_session_db_by_id_missing_raises(tmp_path: Path) -> None:
 def test_resolve_adopt_session_db_by_id_ambiguous_raises(tmp_path: Path) -> None:
     db_a = tmp_path / "a" / "opencode.db"
     db_b = tmp_path / "b" / "opencode.db"
-    _write_opencode_db(db_a, "ses_dup", "/a/work")
-    _write_opencode_db(db_b, "ses_dup", "/b/work")
+    write_opencode_session(db_a, "ses_dup", "/a/work")
+    write_opencode_session(db_b, "ses_dup", "/b/work")
     with pytest.raises(UserInputError, match="multiple stores"):
         resolve_adopt_session_db("ses_dup", [db_a, db_b])
 
@@ -249,8 +220,8 @@ def test_collect_adopt_search_db_paths_includes_agent_and_preserved_dbs(
     host_dir = tmp_path / "host"
     live_db = host_dir / "agents" / "agent-1" / AGENT_OPENCODE_DB_RELPATH
     preserved_db = host_dir / "preserved" / "name--id" / AGENT_OPENCODE_DB_RELPATH
-    _write_opencode_db(live_db, "ses_live", "/live/work")
-    _write_opencode_db(preserved_db, "ses_preserved", "/preserved/work")
+    write_opencode_session(live_db, "ses_live", "/live/work")
+    write_opencode_session(preserved_db, "ses_preserved", "/preserved/work")
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "user-data"))
     agent_db_paths = iter_agent_session_paths(host_dir, AGENT_OPENCODE_DB_RELPATH)
     paths = collect_adopt_search_db_paths(agent_db_paths)
@@ -267,7 +238,7 @@ def test_build_opencode_rebind_sql_rewrites_every_stored_source_worktree_path(tm
     so the test does not depend on the CLI being installed.
     """
     db_path = tmp_path / "opencode.db"
-    _write_opencode_db(db_path, "ses_root", "/old/src/work")
+    write_opencode_session(db_path, "ses_root", "/old/src/work")
     new_directory = tmp_path / "new" / "work"
     connection = sqlite3.connect(db_path)
     try:
@@ -291,3 +262,102 @@ def test_build_opencode_rebind_commands_wraps_sql_as_sqlite3_cli_invocations(tmp
     assert commands[1].startswith("sqlite3 ") and "UPDATE session" in commands[1]
     # The db path is shell-quoted (it is a literal arg, not a SQL string literal).
     assert shlex.quote(str(tmp_path / "opencode.db")) in commands[0]
+
+
+def _apply_merge_sql(dest_db: Path, source_db: Path, session_id: str) -> None:
+    """Apply the merge SQL via the stdlib sqlite3 module (the engine the host CLI runs)."""
+    connection = sqlite3.connect(dest_db)
+    try:
+        connection.executescript(build_opencode_merge_sql(source_db, session_id, list_source_merge_tables(source_db)))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_build_opencode_merge_sql_folds_session_and_dependents_keeping_existing(tmp_path: Path) -> None:
+    """Merging a source session adds its full row set without disturbing the dest's existing session."""
+    dest_db = tmp_path / "dest.db"
+    source_db = tmp_path / "src.db"
+    write_opencode_session(dest_db, "ses_a", "/dest/work", message_id="msg_a")
+    write_opencode_session(source_db, "ses_b", "/src/work", message_id="msg_b")
+    _apply_merge_sql(dest_db, source_db, "ses_b")
+    connection = sqlite3.connect(dest_db)
+    try:
+        sessions = {row[0] for row in connection.execute("SELECT id FROM session").fetchall()}
+        messages = {row[0] for row in connection.execute("SELECT id FROM message").fetchall()}
+        parts = {row[0] for row in connection.execute("SELECT id FROM part").fetchall()}
+        projects = {row[0] for row in connection.execute("SELECT id FROM project").fetchall()}
+    finally:
+        connection.close()
+    assert sessions == {"ses_a", "ses_b"}
+    assert messages == {"msg_a", "msg_b"}
+    assert parts == {"prt_msg_a", "prt_msg_b"}
+    assert projects == {"proj_ses_a", "proj_ses_b"}
+
+
+def test_build_opencode_merge_sql_carries_descendant_subagent_sessions(tmp_path: Path) -> None:
+    """Merging a root session brings its child (subagent) sessions and their rows along."""
+    dest_db = tmp_path / "dest.db"
+    source_db = tmp_path / "src.db"
+    write_opencode_session(dest_db, "ses_a", "/dest/work")
+    write_opencode_session(source_db, "ses_root", "/src/work", message_id="msg_root")
+    write_opencode_session(source_db, "ses_child", "/src/work", parent_id="ses_root", message_id="msg_child")
+    _apply_merge_sql(dest_db, source_db, "ses_root")
+    connection = sqlite3.connect(dest_db)
+    try:
+        sessions = {row[0] for row in connection.execute("SELECT id FROM session").fetchall()}
+        messages = {row[0] for row in connection.execute("SELECT id FROM message").fetchall()}
+    finally:
+        connection.close()
+    assert sessions == {"ses_a", "ses_root", "ses_child"}
+    assert messages == {"msg_root", "msg_child"}
+
+
+def test_build_opencode_merge_sql_never_copies_global_migration_rows(tmp_path: Path) -> None:
+    """The merge copies session/project-scoped rows only, never the global ``migration`` table."""
+    dest_db = tmp_path / "dest.db"
+    source_db = tmp_path / "src.db"
+    write_opencode_session(dest_db, "ses_a", "/dest/work")
+    write_opencode_session(source_db, "ses_b", "/src/work")
+    for db_path, mig_id in ((dest_db, "mig_dest"), (source_db, "mig_src")):
+        connection = sqlite3.connect(db_path)
+        connection.execute("INSERT INTO migration (id, time_completed) VALUES (?, 1)", (mig_id,))
+        connection.commit()
+        connection.close()
+    _apply_merge_sql(dest_db, source_db, "ses_b")
+    connection = sqlite3.connect(dest_db)
+    try:
+        migrations = {row[0] for row in connection.execute("SELECT id FROM migration").fetchall()}
+    finally:
+        connection.close()
+    assert migrations == {"mig_dest"}
+
+
+def test_build_opencode_merge_sql_is_idempotent(tmp_path: Path) -> None:
+    """Re-merging the same session is a no-op (``INSERT OR IGNORE`` skips already-present rows)."""
+    dest_db = tmp_path / "dest.db"
+    source_db = tmp_path / "src.db"
+    write_opencode_session(dest_db, "ses_a", "/dest/work")
+    write_opencode_session(source_db, "ses_b", "/src/work", message_id="msg_b")
+    _apply_merge_sql(dest_db, source_db, "ses_b")
+    _apply_merge_sql(dest_db, source_db, "ses_b")
+    connection = sqlite3.connect(dest_db)
+    try:
+        message_count = connection.execute("SELECT COUNT(*) FROM message WHERE id='msg_b'").fetchone()[0]
+    finally:
+        connection.close()
+    assert message_count == 1
+
+
+def test_list_source_merge_tables_reports_only_present_tables(tmp_path: Path) -> None:
+    """A source missing ``project_directory`` (some opencode versions) is reported without it."""
+    source_db = tmp_path / "src.db"
+    write_opencode_session(source_db, "ses_b", "/src/work")
+    assert "project_directory" in list_source_merge_tables(source_db)
+    connection = sqlite3.connect(source_db)
+    connection.execute("DROP TABLE project_directory")
+    connection.commit()
+    connection.close()
+    tables = list_source_merge_tables(source_db)
+    assert "project_directory" not in tables
+    assert "session" in tables and "message" in tables

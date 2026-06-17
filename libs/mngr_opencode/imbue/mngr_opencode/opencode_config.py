@@ -427,6 +427,112 @@ def build_opencode_rebind_commands(db_path: Path, session_id: str, new_directory
     )
 
 
+# Tables whose rows are scoped to a session (directly or through the session's owning project), in
+# FK-dependency order (parents before children) so a copy that ever runs with foreign keys enabled
+# still satisfies the references. ``project``/``permission`` are project-scoped; the rest are
+# session-scoped. ``__drizzle_migrations``/``migration``/``control_account`` are global (schema and
+# auth state) and deliberately excluded -- merging them would duplicate migration bookkeeping or
+# clobber the dest agent's own account rows. Verified against the opencode 1.17.7 schema.
+_PROJECT_SCOPED_MERGE_TABLES: Final[tuple[str, ...]] = ("project", "permission")
+_SESSION_SCOPED_MERGE_TABLES: Final[tuple[str, ...]] = (
+    "session",
+    "message",
+    "part",
+    "todo",
+    "session_share",
+)
+# ``project_directory`` is project-scoped but absent on some opencode versions (the installed 1.17.7
+# db lacks it while the rebind still upserts into it), so it is merged only when the source has it.
+_OPTIONAL_PROJECT_SCOPED_MERGE_TABLE: Final[str] = "project_directory"
+
+# All tables the merge may touch; used to detect which actually exist in a given source db.
+_ALL_MERGE_TABLES: Final[tuple[str, ...]] = (
+    *_PROJECT_SCOPED_MERGE_TABLES,
+    _OPTIONAL_PROJECT_SCOPED_MERGE_TABLE,
+    *_SESSION_SCOPED_MERGE_TABLES,
+)
+
+# Column the project-scoped tables key off (``project`` itself keys off ``id``).
+_PROJECT_KEY_BY_TABLE: Final[Mapping[str, str]] = {"project": "id"}
+
+# Column the session-scoped tables key off (the ``session`` row itself keys off its ``id``).
+_SESSION_KEY_BY_TABLE: Final[Mapping[str, str]] = {"session": "id"}
+
+
+def list_source_merge_tables(source_db: Path) -> tuple[str, ...]:
+    """Return which session/project-scoped tables exist in ``source_db`` (opened read-only).
+
+    The source is always a local opencode db, so this is read with the stdlib ``sqlite3`` module.
+    Used to build a merge script that touches only tables the source actually has (e.g. older/newer
+    opencode versions differ on ``project_directory``), so the merge never fails on an absent table.
+    """
+    connection = sqlite3.connect(f"file:{source_db}?mode=ro", uri=True)
+    try:
+        present = {
+            str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+    finally:
+        connection.close()
+    return tuple(table for table in _ALL_MERGE_TABLES if table in present)
+
+
+def build_opencode_merge_sql(staged_source_db: Path, session_id: str, present_tables: Sequence[str]) -> str:
+    """Build the SQL that merges one session's rows from ``staged_source_db`` into the open db.
+
+    Run host-side as ``sqlite3 <dest.db> <this>`` when a *subsequent* ``--adopt`` session must be
+    folded into a dest ``opencode.db`` that already holds an earlier adopted session (the single-file
+    store means later sessions are merged in rather than copied as a fresh db). It attaches the staged
+    source copy and, for the adopted session plus all its descendant (sub-)sessions, copies the owning
+    ``project`` (and ``permission``/``project_directory``) rows and every session-scoped row
+    (``session``/``message``/``part``/``todo``/``session_share``). ``INSERT OR IGNORE`` makes a shared
+    project or an already-present row a harmless no-op, so re-merging is idempotent. ``present_tables``
+    (from :func:`list_source_merge_tables`) bounds the copy to tables the source actually has.
+
+    The descendant walk follows ``session.parent_id`` so a resumed root brings its subagent sessions;
+    rows are copied in FK-dependency order. The session set / project set live in temp tables so the
+    recursive walk runs once. ``staged_source_db`` is the source db *as a path on the host* (it must be
+    staged there first, with its ``-wal``/``-shm`` sidecars, so the attach sees uncheckpointed writes).
+    """
+    quoted_source = _sqlite_quote(str(staged_source_db))
+    quoted_session = _sqlite_quote(session_id)
+    statements: list[str] = [
+        f"ATTACH DATABASE {quoted_source} AS src;",
+        # Adopted session + all descendant (sub-)sessions, walked via parent_id.
+        "CREATE TEMP TABLE _adopt_sessions AS "
+        "WITH RECURSIVE descendants(id) AS ("
+        f"SELECT id FROM src.session WHERE id = {quoted_session} "
+        "UNION "
+        "SELECT s.id FROM src.session s JOIN descendants d ON s.parent_id = d.id"
+        ") SELECT id FROM descendants;",
+        "CREATE TEMP TABLE _adopt_projects AS "
+        "SELECT DISTINCT project_id AS id FROM src.session WHERE id IN (SELECT id FROM _adopt_sessions);",
+    ]
+    for table in present_tables:
+        if table in _SESSION_SCOPED_MERGE_TABLES:
+            key_column = _SESSION_KEY_BY_TABLE.get(table, "session_id")
+            statements.append(
+                f"INSERT OR IGNORE INTO main.{table} SELECT * FROM src.{table} "
+                f"WHERE {key_column} IN (SELECT id FROM _adopt_sessions);"
+            )
+        else:
+            key_column = _PROJECT_KEY_BY_TABLE.get(table, "project_id")
+            statements.append(
+                f"INSERT OR IGNORE INTO main.{table} SELECT * FROM src.{table} "
+                f"WHERE {key_column} IN (SELECT id FROM _adopt_projects);"
+            )
+    statements.append("DROP TABLE _adopt_sessions;")
+    statements.append("DROP TABLE _adopt_projects;")
+    statements.append("DETACH DATABASE src;")
+    return "".join(statements)
+
+
+def build_opencode_merge_command(
+    dest_db: Path, staged_source_db: Path, session_id: str, present_tables: Sequence[str]
+) -> str:
+    """Wrap :func:`build_opencode_merge_sql` as a host ``sqlite3 <dest_db>`` shell command."""
+    return f"sqlite3 {shlex.quote(str(dest_db))} {shlex.quote(build_opencode_merge_sql(staged_source_db, session_id, present_tables))}"
+
+
 def _sqlite_quote(value: str) -> str:
     """Quote a value as a SQLite string literal (single quotes doubled)."""
     escaped = value.replace("'", "''")

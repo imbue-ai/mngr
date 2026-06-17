@@ -65,8 +65,8 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
-from imbue.mngr.api.preservation import dispatch_session_adoption
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
@@ -121,6 +121,7 @@ from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import build_opencode_config
+from imbue.mngr_opencode.opencode_config import build_opencode_merge_command
 from imbue.mngr_opencode.opencode_config import build_opencode_rebind_commands
 from imbue.mngr_opencode.opencode_config import collect_adopt_search_db_paths
 from imbue.mngr_opencode.opencode_config import get_opencode_app_data_dir
@@ -133,6 +134,7 @@ from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 from imbue.mngr_opencode.opencode_config import get_opencode_root_session_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_server_port_file_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
+from imbue.mngr_opencode.opencode_config import list_source_merge_tables
 from imbue.mngr_opencode.opencode_config import read_only_root_session_id
 from imbue.mngr_opencode.opencode_config import read_opencode_config
 from imbue.mngr_opencode.opencode_config import resolve_adopt_session_db
@@ -166,6 +168,10 @@ _PROMPT_ENDPOINT_TEMPLATE: Final[str] = "http://127.0.0.1:{port}/session/{sessio
 # exactly this dir from the source agent's state dir into its own (the db file relpath under
 # it is what ``test_opencode_agent.py`` declares as the preserved native store).
 _OPENCODE_NATIVE_STORE_RELPATH: Final[Path] = Path(*AGENT_OPENCODE_DB_RELPATH.parts[:-1])
+
+# Subdir of the agent state dir where a subsequent ``--adopt`` source db is staged before being
+# merged into the agent's own ``opencode.db`` (the merge attaches it host-side, then it is removed).
+_ADOPT_MERGE_STAGING_DIRNAME: Final[str] = "adopt_merge_staging"
 
 
 def _build_prompt_post_command(port: str, session_id: str, message: str) -> str:
@@ -501,77 +507,127 @@ class OpenCodeAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt an existing OpenCode session so the new agent resumes that conversation.
+        """Adopt existing OpenCode session(s) so the new agent resumes that conversation.
 
-        Two triggers, mutually exclusive (enforced by the core adopt gate):
+        Delegates to :func:`~imbue.mngr.api.preservation.adopt_sessions`, which copies every
+        ``--adopt`` session (``copy_explicit``) and the ``--from`` clone (``copy_clone``) into
+        this agent, then resumes one (``resume``): the clone when ``--from`` is given, otherwise
+        the last ``--adopt`` value. The rest stay available in the agent's session switcher.
 
-        * ``--adopt`` (``options.adopt_session``, a tuple since the option is
-          ``multiple=True``): each argument is a ``ses_...`` id (resolved across the user-native
-          db and every live/preserved mngr agent's db) or an absolute path to a source
-          ``opencode.db``. OpenCode resumes a single root conversation, so the last entry wins.
-        * ``--from <agent>`` (``options.source_agent_state_location``): a generic clone that
-          copies the source workspace but not its state dir. ``_adopt_cloned_session`` transfers
-          just the source's native opencode store and resumes its root session.
+        * ``--adopt`` (``options.adopt_session``, a tuple): each arg is a ``ses_...`` id (resolved
+          across the user-native db and every live/preserved mngr agent's db) or an absolute path
+          to a source ``opencode.db``. OpenCode's store is a single ``opencode.db``, so the *first*
+          adopted session is copied in as a fresh db (trio) and each *subsequent* one is **merged**
+          into it (its session + descendant rows folded in), rather than overwriting.
+        * ``--from <agent>`` (``options.source_agent_state_location``): a generic clone copying the
+          source workspace but not its state dir; the source's native opencode store is transferred
+          in and its lone root session resumed.
 
-        Resolving, copying, rebinding, and writing the resume pointer happen here -- the same
-        create-time seam where the launch script first records ``root_session_id``. The
-        explicit-vs-clone dispatch lives in the shared ``dispatch_session_adoption``.
+        Each ``copy_explicit``/``copy_clone`` rebinds the adopted session's stored worktree to this
+        agent's work dir and returns its id; ``resume`` writes ``root_session_id``. Whether a given
+        session is copied as a fresh db or merged into an existing one is decided by checking for the
+        dest ``opencode.db`` on the host (the first session creates it; later ones merge), so no
+        cross-call state is threaded through the callbacks.
         """
-        dispatch_session_adoption(
+        adopt_sessions(
             options.adopt_session,
             options.source_agent_state_location,
-            on_explicit=lambda args: self._adopt_explicit_session(host, args[-1], mngr_ctx),
-            on_clone=lambda location: self._adopt_cloned_session(host, location),
+            copy_explicit=lambda arg: self._copy_explicit_session(host, mngr_ctx, arg),
+            copy_clone=lambda location: self._adopt_cloned_session(host, location),
+            resume=lambda session_id: self._point_resume_at_session(host, session_id),
         )
 
-    def _adopt_explicit_session(self, host: OnlineHostInterface, adopt_arg: str, mngr_ctx: MngrContext) -> None:
-        """Resolve an explicit ``--adopt`` value, copy its db into this agent, and rebind."""
-        with log_span("Adopting OpenCode session from {}", adopt_arg):
-            session_id, source_db = resolve_adopt_session_db(adopt_arg, _adopt_search_db_paths(mngr_ctx))
-            self._copy_session_db_into_agent(host, source_db)
-            self._rebind_and_point_resume(host, session_id)
+    def _has_dest_db(self, host: OnlineHostInterface) -> bool:
+        """Return whether this agent's ``opencode.db`` already exists (an earlier session placed it)."""
+        return host.path_exists(get_opencode_db_path_for_data_home(self._get_opencode_data_home()))
 
-    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+    def _copy_explicit_session(self, host: OnlineHostInterface, mngr_ctx: MngrContext, arg: str) -> str:
+        """Resolve one ``--adopt`` value, copy or merge its db into this agent, rebind, and return its id."""
+        with log_span("Adopting OpenCode session from {}", arg):
+            session_id, source_db = resolve_adopt_session_db(arg, _adopt_search_db_paths(mngr_ctx))
+            if self._has_dest_db(host):
+                self._merge_session_db_into_agent(host, source_db, session_id)
+            else:
+                self._copy_session_db_into_agent(host, source_db)
+            self._rebind_adopted_session(host, session_id)
+        return session_id
+
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
         """Resume the source agent's conversation after a ``--from <agent>`` clone.
 
         A ``--from`` clone copies the source workspace but not its state dir, so the source's
-        native opencode store (``opencode.db`` + ``-wal``/``-shm``) is transferred in via the
-        shared ``transfer_cloned_agent_session_store`` helper. The source's lone root session id
-        is then read from the just-transferred db (no external resolve needed) and rebound to
-        this agent's work dir before being written to ``root_session_id``. If the source has no
-        store, the clone starts a fresh session.
+        native opencode store (``opencode.db`` + ``-wal``/``-shm``) is brought in: when this agent
+        has no db yet the store is transferred in wholesale; when an earlier ``--adopt`` already
+        placed a db, the clone's root session is *merged* into it (a file copy would clobber the
+        earlier session, since the store is a single ``opencode.db``). The source's lone root session
+        id is read from the source store and rebound to this agent's work dir; the returned id is what
+        the caller resumes.
+
+        A ``--from`` clone is meant to resume the source's conversation, so a source with no store
+        is a hard error (:class:`AgentStartError`) rather than a silent fresh start.
         """
-        transferred = transfer_cloned_agent_session_store(
-            host, self._get_agent_dir(), source_location, _OPENCODE_NATIVE_STORE_RELPATH
-        )
-        if not transferred:
-            logger.warning(
-                "Clone adopt: no OpenCode session store at source {}; cloned agent will start a fresh session",
-                source_location.path / _OPENCODE_NATIVE_STORE_RELPATH,
+        source_db = source_location.path / AGENT_OPENCODE_DB_RELPATH
+        if not source_location.host.path_exists(source_db):
+            raise AgentStartError(
+                str(self.name),
+                f"Clone adopt: no OpenCode session store at source "
+                f"{source_location.path / _OPENCODE_NATIVE_STORE_RELPATH}; nothing to resume.",
             )
-            return
-        dest_db = get_opencode_db_path_for_data_home(self._get_opencode_data_home())
-        session_id = read_only_root_session_id(dest_db)
+        session_id = read_only_root_session_id(source_db)
         with log_span("Adopting cloned OpenCode session {}", session_id):
-            self._rebind_and_point_resume(host, session_id)
+            if self._has_dest_db(host):
+                self._merge_session_db_into_agent(host, source_db, session_id)
+            else:
+                transfer_cloned_agent_session_store(
+                    host, self._get_agent_dir(), source_location, _OPENCODE_NATIVE_STORE_RELPATH
+                )
+            self._rebind_adopted_session(host, session_id)
+        return session_id
 
     def _copy_session_db_into_agent(self, host: OnlineHostInterface, source_db: Path) -> None:
         """Copy the resolved source ``opencode.db`` (+ its ``-wal``/``-shm`` sidecars) into this agent.
 
         rsync just the db trio out of the source opencode dir (its sibling auth.json is a
         symlink to shared creds and log/ is noise); additive copy into the provisioned dest.
+        Used for the *first* adopted session, when this agent has no ``opencode.db`` yet;
+        subsequent sessions are folded in via :meth:`_merge_session_db_into_agent`.
         """
         dest_app_dir = get_opencode_app_data_dir(self._get_opencode_data_home())
         db_include = "--include=opencode.db --include=opencode.db-wal --include=opencode.db-shm --exclude=*"
         host.copy_directory(host, source_db.parent, dest_app_dir, extra_args=db_include)
 
-    def _rebind_and_point_resume(self, host: OnlineHostInterface, session_id: str) -> None:
-        """Rebind this agent's already-present session db to its work dir and point resume at it.
+    def _merge_session_db_into_agent(self, host: OnlineHostInterface, source_db: Path, session_id: str) -> None:
+        """Fold one ``--adopt`` session's rows into the agent's already-present ``opencode.db``.
 
-        Checkpoints + rebinds the stored source-worktree path on the agent's own ``opencode.db``
-        to this agent's resolved work dir (so recall hits the session instead of silently
-        no-opping), then writes the adopted session id into ``root_session_id`` so the launch
-        script attaches to it instead of creating a fresh session.
+        OpenCode's store is a single ``opencode.db``, so a second (or later) ``--adopt`` value can't
+        be added by copying files (that would clobber the earlier session). Instead the source db
+        trio is staged onto the host and a host-side ``sqlite3`` script attaches it and copies the
+        adopted session's connected rows -- its ``session`` row(s) (including descendant sub-sessions),
+        owning ``project``/``permission``/``project_directory`` rows, and every ``message``/``part``/
+        ``todo``/``session_share`` row -- into the dest db. The staged copy is removed afterward.
+        """
+        present_tables = list_source_merge_tables(source_db)
+        staging_dir = self._get_agent_dir() / _ADOPT_MERGE_STAGING_DIRNAME
+        db_include = "--include=opencode.db --include=opencode.db-wal --include=opencode.db-shm --exclude=*"
+        host.copy_directory(host, source_db.parent, staging_dir, extra_args=db_include)
+        staged_db = staging_dir / source_db.name
+        dest_db = get_opencode_db_path_for_data_home(self._get_opencode_data_home())
+        merge_command = build_opencode_merge_command(dest_db, staged_db, session_id, present_tables)
+        result = host.execute_idempotent_command(merge_command, timeout_seconds=60.0)
+        host.execute_idempotent_command(f"rm -rf {shlex.quote(str(staging_dir))}", timeout_seconds=10.0)
+        if not result.success:
+            raise AgentStartError(
+                str(self.name),
+                f"Failed to merge adopted OpenCode session {session_id} into the agent db "
+                f"({merge_command!r}): {result.stderr or result.stdout}",
+            )
+
+    def _rebind_adopted_session(self, host: OnlineHostInterface, session_id: str) -> None:
+        """Rebind an already-present adopted session's stored source-worktree paths to this work dir.
+
+        Checkpoints + rewrites the stored source-worktree path on the agent's ``opencode.db`` for
+        ``session_id`` to this agent's resolved work dir, so recall hits the session instead of
+        silently no-opping. Pointing resume at a session is the separate :meth:`_point_resume_at_session`.
         """
         dest_db = get_opencode_db_path_for_data_home(self._get_opencode_data_home())
         new_directory = self._resolve_work_dir_on_host()
@@ -583,9 +639,12 @@ class OpenCodeAgent(
                     f"Failed to rebind adopted OpenCode session {session_id} ({command!r}): "
                     f"{result.stderr or result.stdout}",
                 )
-
-        host.write_text_file(self._get_root_session_file_path(), session_id)
         logger.info("Adopted OpenCode session {} into agent {}", session_id, self.name)
+
+    def _point_resume_at_session(self, host: OnlineHostInterface, session_id: str) -> None:
+        """Write ``session_id`` into ``root_session_id`` so the launch script resumes it (not a fresh one)."""
+        host.write_text_file(self._get_root_session_file_path(), session_id)
+        logger.info("Resuming OpenCode session {} in agent {}", session_id, self.name)
 
     def _resolve_work_dir_on_host(self) -> Path:
         """Return ``self.work_dir`` with symlinks resolved as the host sees it.
