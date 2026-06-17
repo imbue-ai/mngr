@@ -13,6 +13,7 @@ from typing import ClassVar
 
 import pytest
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
@@ -661,9 +662,6 @@ def test_adopt_session_multi_merges_both_sessions_and_resumes_last(
     assert messages == {"msg_a", "msg_b"}
     assert directories == {_resolved_work_dir(agent)}
 
-    # The staging dir used to merge the second session is cleaned up afterward.
-    assert not (agent._get_agent_dir() / "adopt_merge_staging").exists()
-
 
 @pytest.mark.rsync
 def test_adopt_session_from_clone_resumes_the_clone(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
@@ -705,6 +703,45 @@ def test_adopt_session_from_clone_with_no_store_raises(local_provider: LocalProv
             CreateAgentOptions(agent_type=AgentTypeName("opencode"), source_agent_state_location=source_location),
             agent.mngr_ctx,
         )
+
+
+class _RemoteSourceHost(FrozenModel):
+    """A non-local host stand-in whose file reads map onto the local filesystem (for the remote-clone path)."""
+
+    is_local: bool = False
+
+    def path_exists(self, path: Path) -> bool:
+        return path.exists()
+
+    def read_file(self, path: Path) -> bytes:
+        return path.read_bytes()
+
+
+@pytest.mark.rsync
+def test_adopt_cloned_session_from_remote_source_pulls_db_locally(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A ``--from`` clone whose source lives on a remote host pulls the db locally, then stages it.
+
+    ``_localize_source_db`` must copy the source ``opencode.db`` (and its sidecars) off the remote host
+    before the local stdlib-``sqlite3`` merge/rebind can touch it; the staged db then lands on the dest.
+    """
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    source_state_dir = tmp_path / "remote_source"
+    clone_db = source_state_dir / AGENT_OPENCODE_DB_RELPATH
+    write_opencode_session(clone_db, "ses_remote", "/remote/work", message_id="msg_remote")
+    # A read-only sidecar alongside the db so the pull-sidecars branch is exercised too.
+    (clone_db.parent / "opencode.db-wal").write_bytes(b"")
+    source_location = HostLocation.model_construct(host=_RemoteSourceHost(), path=source_state_dir)
+
+    agent.adopt_session(
+        agent.host,
+        CreateAgentOptions(agent_type=AgentTypeName("opencode"), source_agent_state_location=source_location),
+        agent.mngr_ctx,
+    )
+
+    assert _dest_db_sessions(agent) == {"ses_remote"}
+    assert agent._get_root_session_file_path().read_text() == "ses_remote"
 
 
 # =============================================================================

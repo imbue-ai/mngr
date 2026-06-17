@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import sqlite3
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -281,11 +280,15 @@ def serialize_opencode_config(config: Mapping[str, Any]) -> str:
     return json.dumps(dict(config), indent=2)
 
 
-# The agent's native ``opencode.db`` relative to its state dir (under the per-agent
-# ``XDG_DATA_HOME``). The plugin passes this to the shared live/preserved agent scanner
-# (``iter_agent_session_paths``) to find every local agent's db; kept here so the path layout
-# stays defined alongside the other opencode-data constants.
-AGENT_OPENCODE_DB_RELPATH: Final[Path] = Path(*_DATA_HOME_RELATIVE_PATH, _OPENCODE_APP_DIR_NAME, _DB_FILENAME)
+# The agent's native opencode store dir (the dir holding ``opencode.db`` + its ``-wal``/``-shm``
+# sidecars), relative to its state dir (under the per-agent ``XDG_DATA_HOME``). A ``--from`` clone
+# transfers exactly this dir from the source agent's state dir into its own.
+AGENT_OPENCODE_STORE_RELPATH: Final[Path] = Path(*_DATA_HOME_RELATIVE_PATH, _OPENCODE_APP_DIR_NAME)
+
+# The agent's native ``opencode.db`` relative to its state dir. The plugin passes this to the shared
+# live/preserved agent scanner (``iter_agent_session_paths``) to find every local agent's db; kept
+# here so the path layout stays defined alongside the other opencode-data constants.
+AGENT_OPENCODE_DB_RELPATH: Final[Path] = AGENT_OPENCODE_STORE_RELPATH / _DB_FILENAME
 
 # Where a user-native (plain-CLI) OpenCode install keeps its data, relative to the data
 # home root resolved from ``$XDG_DATA_HOME`` (or ``~/.local/share``).
@@ -331,8 +334,9 @@ def _db_has_session(db_path: Path, session_id: str) -> bool:
         cursor = connection.execute("SELECT 1 FROM session WHERE id = ? LIMIT 1", (session_id,))
         return cursor.fetchone() is not None
     except sqlite3.Error as exc:
-        # File exists but is malformed/corrupt: surface at trace level rather than silently swallow.
-        logger.trace("Could not query sessions in OpenCode db {} (treated as no match): {}", db_path, exc)
+        # File exists but is malformed/corrupt: a real anomaly worth surfacing, but still treated as
+        # no match so resolution continues against the other stores.
+        logger.warning("Could not query sessions in OpenCode db {} (treated as no match): {}", db_path, exc)
         return False
     finally:
         connection.close()
@@ -418,13 +422,20 @@ def build_opencode_rebind_sql(session_id: str, new_directory: Path) -> str:
     )
 
 
-def build_opencode_rebind_commands(db_path: Path, session_id: str, new_directory: Path) -> tuple[str, ...]:
-    """Wrap the rebind SQL as host ``sqlite3`` shell commands: WAL checkpoint, then the rebind."""
-    quoted_db = shlex.quote(str(db_path))
-    return (
-        f"sqlite3 {quoted_db} {shlex.quote(_WAL_CHECKPOINT_SQL)}",
-        f"sqlite3 {quoted_db} {shlex.quote(build_opencode_rebind_sql(session_id, new_directory))}",
-    )
+def apply_opencode_rebind(db_path: Path, session_id: str, new_directory: Path) -> None:
+    """Checkpoint then rebind ``session_id``'s stored worktree paths in ``db_path`` to ``new_directory``.
+
+    Applied to a LOCAL staging db via the stdlib ``sqlite3`` module (not the host ``sqlite3`` CLI), so
+    no CLI dependency on the destination host. The WAL checkpoint folds the ``-wal``/``-shm`` sidecars
+    into the main file first, so a subsequent file copy to the host carries the rebound rows.
+    """
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(_WAL_CHECKPOINT_SQL)
+        connection.executescript(build_opencode_rebind_sql(session_id, new_directory))
+        connection.commit()
+    finally:
+        connection.close()
 
 
 # Tables whose rows are scoped to a session (directly or through the session's owning project), in
@@ -479,8 +490,8 @@ def list_source_merge_tables(source_db: Path) -> tuple[str, ...]:
 def build_opencode_merge_sql(staged_source_db: Path, session_id: str, present_tables: Sequence[str]) -> str:
     """Build the SQL that merges one session's rows from ``staged_source_db`` into the open db.
 
-    Run host-side as ``sqlite3 <dest.db> <this>`` when a *subsequent* ``--adopt`` session must be
-    folded into a dest ``opencode.db`` that already holds an earlier adopted session (the single-file
+    Applied via :func:`apply_opencode_merge` when a *subsequent* ``--adopt`` session must be folded
+    into a staging ``opencode.db`` that already holds an earlier adopted session (the single-file
     store means later sessions are merged in rather than copied as a fresh db). It attaches the staged
     source copy and, for the adopted session plus all its descendant (sub-)sessions, copies the owning
     ``project`` (and ``permission``/``project_directory``) rows and every session-scoped row
@@ -490,8 +501,8 @@ def build_opencode_merge_sql(staged_source_db: Path, session_id: str, present_ta
 
     The descendant walk follows ``session.parent_id`` so a resumed root brings its subagent sessions;
     rows are copied in FK-dependency order. The session set / project set live in temp tables so the
-    recursive walk runs once. ``staged_source_db`` is the source db *as a path on the host* (it must be
-    staged there first, with its ``-wal``/``-shm`` sidecars, so the attach sees uncheckpointed writes).
+    recursive walk runs once. ``staged_source_db`` is the source db *as a local path* (it must be the
+    full trio -- db + ``-wal``/``-shm`` sidecars -- so the attach sees uncheckpointed writes).
     """
     quoted_source = _sqlite_quote(str(staged_source_db))
     quoted_session = _sqlite_quote(session_id)
@@ -526,11 +537,21 @@ def build_opencode_merge_sql(staged_source_db: Path, session_id: str, present_ta
     return "".join(statements)
 
 
-def build_opencode_merge_command(
-    dest_db: Path, staged_source_db: Path, session_id: str, present_tables: Sequence[str]
-) -> str:
-    """Wrap :func:`build_opencode_merge_sql` as a host ``sqlite3 <dest_db>`` shell command."""
-    return f"sqlite3 {shlex.quote(str(dest_db))} {shlex.quote(build_opencode_merge_sql(staged_source_db, session_id, present_tables))}"
+def apply_opencode_merge(dest_db: Path, staged_source_db: Path, session_id: str) -> None:
+    """Merge ``session_id`` (and its descendants) from ``staged_source_db`` into a LOCAL ``dest_db``.
+
+    Applied via the stdlib ``sqlite3`` module (not the host ``sqlite3`` CLI), so no CLI dependency on
+    the destination host. Reads which tables the source actually has (:func:`list_source_merge_tables`)
+    and runs :func:`build_opencode_merge_sql`, which attaches the staged source and copies the session's
+    connected rows. Both dbs are local staging paths.
+    """
+    present_tables = list_source_merge_tables(staged_source_db)
+    connection = sqlite3.connect(dest_db)
+    try:
+        connection.executescript(build_opencode_merge_sql(staged_source_db, session_id, present_tables))
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _sqlite_quote(value: str) -> str:

@@ -9,3 +9,7 @@ Triggered by the central `--adopt` flag (`mngr create opencode --adopt <id-or-db
 A bad or ambiguous `--adopt` id is now reported as a clean error before any host or worktree is created, rather than surfacing as a traceback during provisioning.
 
 The adopt value is now read from the first-class `CreateAgentOptions.adopt_session` field (and `OnBeforeCreateArgs.agent_options.adopt_session`) instead of the previous `plugin_data["adopt_session"]` namespaced key, following the core migration that promoted it to a typed option.
+
+Adoption no longer requires the `sqlite3` command-line tool on the destination host. The agent's `opencode.db` is now assembled entirely on a local staging copy -- the first source db is copied in, each subsequent `--adopt` (and the `--from` clone) is merged in, and every adopted session is rebound to the new agent's work dir, all via Python's bundled SQLite -- and the finished db is copied onto the (possibly remote) host once at the end. A `--from` clone whose source lives on a remote host has that source db pulled across first. This removes a fragile dependency that could fail on hosts lacking the `sqlite3` CLI.
+
+A corrupt or unreadable opencode db encountered while searching for an adopt session id is now logged as a warning (it is a real anomaly) rather than at trace level; resolution still continues against the other stores.

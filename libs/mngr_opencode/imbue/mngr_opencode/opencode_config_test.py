@@ -2,7 +2,6 @@
 
 import importlib.resources
 import json
-import shlex
 import sqlite3
 from pathlib import Path
 
@@ -31,9 +30,9 @@ from imbue.mngr_opencode.opencode_config import ROLE_ENV_VAR
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_PORT_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_ROLE
+from imbue.mngr_opencode.opencode_config import apply_opencode_merge
+from imbue.mngr_opencode.opencode_config import apply_opencode_rebind
 from imbue.mngr_opencode.opencode_config import build_opencode_config
-from imbue.mngr_opencode.opencode_config import build_opencode_merge_sql
-from imbue.mngr_opencode.opencode_config import build_opencode_rebind_commands
 from imbue.mngr_opencode.opencode_config import build_opencode_rebind_sql
 from imbue.mngr_opencode.opencode_config import collect_adopt_search_db_paths
 from imbue.mngr_opencode.opencode_config import get_opencode_app_data_dir
@@ -254,24 +253,27 @@ def test_build_opencode_rebind_sql_rewrites_every_stored_source_worktree_path(tm
         connection.close()
 
 
-def test_build_opencode_rebind_commands_wraps_sql_as_sqlite3_cli_invocations(tmp_path: Path) -> None:
-    """The host commands are a WAL checkpoint then the rebind script, both shell-quoted for sqlite3."""
-    commands = build_opencode_rebind_commands(tmp_path / "opencode.db", "ses_root", tmp_path / "new" / "work")
-    assert len(commands) == 2
-    assert commands[0].startswith("sqlite3 ") and "wal_checkpoint" in commands[0]
-    assert commands[1].startswith("sqlite3 ") and "UPDATE session" in commands[1]
-    # The db path is shell-quoted (it is a literal arg, not a SQL string literal).
-    assert shlex.quote(str(tmp_path / "opencode.db")) in commands[0]
+def test_apply_opencode_rebind_checkpoints_and_rewrites_paths(tmp_path: Path) -> None:
+    """``apply_opencode_rebind`` rewrites the session/project/project_directory paths in a local db."""
+    db_path = tmp_path / "opencode.db"
+    write_opencode_session(db_path, "ses_root", "/old/src/work")
+    new_directory = tmp_path / "new" / "work"
+    apply_opencode_rebind(db_path, "ses_root", new_directory)
+    connection = sqlite3.connect(db_path)
+    try:
+        assert connection.execute("SELECT directory FROM session WHERE id='ses_root'").fetchone()[0] == str(
+            new_directory
+        )
+        assert connection.execute("SELECT worktree FROM project").fetchone()[0] == str(new_directory)
+        directories = {row[0] for row in connection.execute("SELECT directory FROM project_directory").fetchall()}
+        assert str(new_directory) in directories
+    finally:
+        connection.close()
 
 
 def _apply_merge_sql(dest_db: Path, source_db: Path, session_id: str) -> None:
-    """Apply the merge SQL via the stdlib sqlite3 module (the engine the host CLI runs)."""
-    connection = sqlite3.connect(dest_db)
-    try:
-        connection.executescript(build_opencode_merge_sql(source_db, session_id, list_source_merge_tables(source_db)))
-        connection.commit()
-    finally:
-        connection.close()
+    """Apply the merge via the lib (stdlib sqlite3 module), folding ``session_id`` from source into dest."""
+    apply_opencode_merge(dest_db, source_db, session_id)
 
 
 def test_build_opencode_merge_sql_folds_session_and_dependents_keeping_existing(tmp_path: Path) -> None:
