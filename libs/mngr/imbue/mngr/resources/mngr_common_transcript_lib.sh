@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # mngr_common_transcript_lib.sh -- Shared primitives for common-transcript converters.
 #
-# Sourced by per-agent common_transcript.sh converters (claude, antigravity) and
-# by the turn-end hooks that flush them (claude's wait_for_stop_hook.sh,
-# antigravity's statusline.sh). Centralizes the parts of common-transcript
+# Sourced by per-agent common_transcript.sh converters (claude, antigravity,
+# codex) and by the turn-end hooks that flush them (claude's
+# wait_for_stop_hook.sh, antigravity's statusline.sh, codex's
+# clear_active_marker.sh and subagent_stopped.sh). Centralizes the parts of
+# common-transcript
 # handling that are structurally identical regardless of the agent's native
 # session schema:
 #
