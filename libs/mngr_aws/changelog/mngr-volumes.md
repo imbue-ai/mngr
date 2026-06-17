@@ -29,3 +29,5 @@ Internal refactor (no behavior change): the offline `host_dir` machinery (identi
 Internal refactor (no behavior change): `S3StateBucket` now extends the shared `BaseStateBucket`, keeping only the S3 client, the raw object primitives, error translation, and the bucket lifecycle; the record marshalling / key layout / offline-read volume are inherited.
 
 Internal refactor (no behavior change): `mngr aws prepare`'s host-dir identity provisioning now threads the already-resolved state-bucket name into `_resolve_and_provision_host_identity` (instead of a `was_bucket_set_up` bool), removing a redundant bucket-name re-resolution and an unreachable None-handling branch in `_provision_host_identity`.
+
+Internal refactor (no behavior change): `mngr aws prepare` / `cleanup` output now routes its format dispatch through the shared `emit_operator_result` helper instead of an inline `match` on the output format.

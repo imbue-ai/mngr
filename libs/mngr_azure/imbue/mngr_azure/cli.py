@@ -20,7 +20,6 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
-from typing import assert_never
 
 import click
 from azure.core.exceptions import AzureError
@@ -29,9 +28,8 @@ from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.output_helpers import emit_event
+from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
@@ -338,24 +336,20 @@ def _output_prepare_result(
         "state_bucket_created": was_bucket_created,
         "host_identity_name": host_identity_name,
     }
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(data)
-        case OutputFormat.JSONL:
-            emit_event("prepared", data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            write_human_line("Prepared Azure resource group {} in region {}", result.resource_group, result.region)
-            if state_account_name is not None:
-                write_human_line(
-                    "{} Azure state storage account {} in region {}",
-                    "Created" if was_bucket_created else "Reused existing",
-                    state_account_name,
-                    result.region,
-                )
-            if host_identity_name is not None:
-                write_human_line("Provisioned host-dir managed identity {}", host_identity_name)
-        case _ as unreachable:
-            assert_never(unreachable)
+
+    def _human() -> None:
+        write_human_line("Prepared Azure resource group {} in region {}", result.resource_group, result.region)
+        if state_account_name is not None:
+            write_human_line(
+                "{} Azure state storage account {} in region {}",
+                "Created" if was_bucket_created else "Reused existing",
+                state_account_name,
+                result.region,
+            )
+        if host_identity_name is not None:
+            write_human_line("Provisioned host-dir managed identity {}", host_identity_name)
+
+    emit_operator_result("prepared", data, output_format, _human)
 
 
 def _output_cleanup_result(
@@ -383,24 +377,18 @@ def _output_cleanup_result(
         "state_storage_account_deleted": deleted_account_name,
         "host_identity_deleted": deleted_host_identity_name,
     }
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(data)
-        case OutputFormat.JSONL:
-            emit_event("cleaned_up", data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            if deleted_resource_group is None:
-                write_human_line(
-                    "Nothing to clean up: no mngr-owned resource group in subscription {}.", subscription_id
-                )
-            else:
-                write_human_line("Cleaned up Azure resource group {} in region {}", deleted_resource_group, region)
-            if deleted_account_name is not None:
-                write_human_line("Deleted Azure state storage account {} in region {}", deleted_account_name, region)
-            if deleted_host_identity_name is not None:
-                write_human_line("Deleted host-dir managed identity {}", deleted_host_identity_name)
-        case _ as unreachable:
-            assert_never(unreachable)
+
+    def _human() -> None:
+        if deleted_resource_group is None:
+            write_human_line("Nothing to clean up: no mngr-owned resource group in subscription {}.", subscription_id)
+        else:
+            write_human_line("Cleaned up Azure resource group {} in region {}", deleted_resource_group, region)
+        if deleted_account_name is not None:
+            write_human_line("Deleted Azure state storage account {} in region {}", deleted_account_name, region)
+        if deleted_host_identity_name is not None:
+            write_human_line("Deleted host-dir managed identity {}", deleted_host_identity_name)
+
+    emit_operator_result("cleaned_up", data, output_format, _human)
 
 
 @click.group(name="azure")

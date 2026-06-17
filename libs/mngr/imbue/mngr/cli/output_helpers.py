@@ -1,6 +1,7 @@
 import json
 import string
 import sys
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
@@ -140,6 +141,31 @@ def emit_event(
         case OutputFormat.JSON:
             # JSON mode: silent until final output
             pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def emit_operator_result(
+    event_name: str,
+    data: Mapping[str, Any],
+    output_format: OutputFormat,
+    write_human: Callable[[], None],
+) -> None:
+    """Emit an operator-command result (e.g. provider ``prepare`` / ``cleanup``) in the requested format.
+
+    Centralizes the format dispatch the provider operator commands share: JSON
+    writes ``data`` as one object, JSONL emits a ``<event_name>`` event carrying
+    ``data``, and HUMAN delegates to ``write_human`` (the provider writes its own
+    result lines). Each provider still owns its ``data`` dict and human wording --
+    only the format switch lives here.
+    """
+    match output_format:
+        case OutputFormat.JSON:
+            write_json_line(data)
+        case OutputFormat.JSONL:
+            emit_event(event_name, data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            write_human()
         case _ as unreachable:
             assert_never(unreachable)
 

@@ -23,3 +23,5 @@ Internal refactor (no behavior change): the offline `host_dir` machinery (identi
 Internal refactor (no behavior change): `BlobStateBucket` now extends the shared `BaseStateBucket`, keeping only the Blob/storage clients, the raw object primitives, error translation, and the storage-account + container lifecycle; the record marshalling / key layout / offline-read volume are inherited.
 
 Internal refactor (no behavior change): replaced the bare-prefix `host_dir_blob_prefix_for` passthrough with a real `host_dir_sync_target_for(account, container, host_id)` that returns the full blob sync-target URL (mirroring the AWS helper), and consumed the shared `managed-by` tag constants from `state_keys`.
+
+Internal refactor (no behavior change): `mngr azure prepare` / `cleanup` output now routes its format dispatch through the shared `emit_operator_result` helper instead of an inline `match` on the output format.

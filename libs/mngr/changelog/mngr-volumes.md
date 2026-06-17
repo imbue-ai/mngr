@@ -3,3 +3,5 @@ Regenerated the `mngr aws` / `mngr azure` CLI doc pages to cover the state-bucke
 `TagLimitExceededError` now accepts an optional `actual` count (defaulting to omitted) and an optional `remediation` string appended to the message, so providers can surface actionable guidance (e.g. "run `mngr aws prepare`") when a host exhausts the provider's tag mirror.
 
 Test-only: raised the per-test timeout on the tmux lifecycle tests `test_start_restart_running_agent` / `test_start_restart_stopped_agent` from the default 10s to 30s (they run several sequential tmux create/stop/restart operations that can exceed 10s on a loaded CI runner).
+
+Added a shared `emit_operator_result` helper in `mngr.cli.output_helpers` that centralizes the JSON / JSONL / human format dispatch the provider `prepare` / `cleanup` operator commands share (each provider still supplies its own result data and human wording).
