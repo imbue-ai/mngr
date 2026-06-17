@@ -906,7 +906,9 @@ class PiCodingAgent(
             self._adopt_session(host, adopt_args[-1])
         elif options.source_agent_state_location is not None:
             self._adopt_cloned_session(host, options.source_agent_state_location)
-        # Neither --adopt nor --from: the agent starts a fresh session (nothing to do).
+        else:
+            # Neither --adopt nor --from: the agent starts a fresh session.
+            return
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
         """Copy the resolved session into this agent's store, rebind it, and point resume at it.

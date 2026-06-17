@@ -970,16 +970,17 @@ class CodexAgent(
         """Return the session id of the most-recent rollout under ``sessions_dir``, or None.
 
         Codex files rollouts under ``sessions/YYYY/MM/DD/`` as
-        ``rollout-<timestamp>-<id>.jsonl``; ``find ... | xargs ls -t`` walks the date
+        ``rollout-<timestamp>-<id>.jsonl``; ``find ... | xargs -r ls -t`` walks the date
         nesting and picks the newest by mtime, and its trailing UUID is the id codex
         resumes by. Resolved over the host shell (a recursive ``find``, not a globstar
         glob) so it works remotely and under any shell. ``|| true`` keeps an empty store
-        non-fatal.
+        non-fatal; ``xargs -r`` (``--no-run-if-empty``) is required because GNU xargs would
+        otherwise run ``ls -t`` with no args (listing the cwd) when ``find`` matches nothing.
         """
         quoted_dir = shlex.quote(str(sessions_dir))
         result = host.execute_idempotent_command(
             f"find {quoted_dir} -type f -name 'rollout-*.jsonl' -print0 2>/dev/null "
-            "| xargs -0 ls -t 2>/dev/null | head -n1 || true",
+            "| xargs -0 -r ls -t 2>/dev/null | head -n1 || true",
             timeout_seconds=10.0,
         )
         latest = result.stdout.strip()
