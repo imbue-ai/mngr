@@ -14,6 +14,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.data_types import AgentEndpoint
+from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.data_types import RealizePlacementContext
 from imbue.mngr_vps.data_types import RealizedPlacement
 from imbue.mngr_vps.host_store import VpsHostRecord
@@ -68,7 +69,7 @@ class HostRealizer(MutableModel, ABC):
         """
 
     @abstractmethod
-    def start_activity_watcher(self, outer: OuterHostInterface, container_name: str | None) -> None:
+    def start_activity_watcher(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
         """Launch the idle/auto-shutdown activity watcher for the placement."""
 
     @property
@@ -124,25 +125,25 @@ class HostRealizer(MutableModel, ABC):
         """
 
     @abstractmethod
-    def is_placement_running(self, outer: OuterHostInterface, record: VpsHostRecord) -> bool:
+    def is_placement_running(self, outer: OuterHostInterface, handle: PlacementHandle) -> bool:
         """Whether the placement is currently running (container up / VM reachable)."""
 
     @abstractmethod
     def collect_listing_output(
-        self, outer: OuterHostInterface, record: VpsHostRecord, script: str, timeout_seconds: float = 30.0
+        self, outer: OuterHostInterface, handle: PlacementHandle, script: str, timeout_seconds: float = 30.0
     ) -> str:
         """Run the inner listing script against the placement and return raw output."""
 
     @abstractmethod
-    def stop_placement(self, outer: OuterHostInterface, record: VpsHostRecord, timeout_seconds: float) -> None:
+    def stop_placement(self, outer: OuterHostInterface, handle: PlacementHandle, timeout_seconds: float) -> None:
         """Pause the placement on the machine (container realizer: ``docker stop``; bare: no-op)."""
 
     @abstractmethod
-    def start_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> None:
+    def start_placement(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
         """Resume the placement on a running machine, without waiting for its sshd."""
 
     @abstractmethod
-    def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, record: VpsHostRecord) -> None:
+    def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, handle: PlacementHandle) -> None:
         """Remove the placement and its per-host storage (makes no VPS-client calls).
 
         Best-effort cleanup: attempts every step, records a ``CleanupFailure`` for
@@ -164,7 +165,7 @@ class SnapshotCapableRealizer(HostRealizer, ABC):
     """
 
     @abstractmethod
-    def snapshot_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> SnapshotId:
+    def snapshot_placement(self, outer: OuterHostInterface, host_id: HostId, handle: PlacementHandle) -> SnapshotId:
         """Create a placement snapshot and return its id."""
 
     @abstractmethod

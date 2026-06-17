@@ -122,3 +122,15 @@ rule, and the cheap probe reads `.State.Status` (the same string the listing
 emits) instead of `.State.Running`. The cheap probe path is preserved: the
 get-host / discover callers still learn is-running without triggering the heavy
 listing script. No behavior change.
+
+The realizer's placement-lifecycle methods now take an opaque `PlacementHandle`
+(the container name/id/volume bundle for the container realizer; empty for bare)
+instead of the whole `VpsHostRecord`. The realizer mints the handle in
+`realize_placement` and the provider extracts it once from the persisted record
+at each call boundary (`PlacementHandle.from_record`), so the repeated
+`record.config.container_name` reads (and their `assert record.config is not None
+and record.config.container_name is not None` guards) collapse to a single
+boundary extraction, the bare realizer's "ignore the record" becomes an explicit
+empty handle, and `start_activity_watcher` no longer takes a `container_name`
+parameter (the realizer reads it from its handle). Internal refactor; no
+user-visible behavior change.

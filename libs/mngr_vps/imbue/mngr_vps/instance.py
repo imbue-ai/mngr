@@ -97,6 +97,7 @@ from imbue.mngr_vps.container_setup import remove_container
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import remove_volume
 from imbue.mngr_vps.container_setup import snapshot_trigger_volume_name_for
+from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.data_types import RealizePlacementContext
 from imbue.mngr_vps.data_types import RealizedPlacement
 from imbue.mngr_vps.docker_realizer import CONTAINER_HOST_KEY_NAME
@@ -1094,11 +1095,10 @@ class VpsProvider(BaseProviderInstance):
         vps_host_public_key: str,
     ) -> Host:
         """Create the Host object, configure activity watching, and persist state."""
-        # The container realizer fills these in; a bare placement has no container
-        # or per-host docker volume, so they are None (the matching
-        # ``VpsHostConfig`` fields are nullable to represent that).
-        container_name = realized.container_name
-        volume_name = realized.volume_name
+        # The container realizer fills the handle in; a bare placement's handle is
+        # empty, so these are None (the matching ``VpsHostConfig`` fields are
+        # nullable to represent that).
+        handle = realized.handle
         host = self._create_host_object(host_id, name, vps_ip)
 
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -1124,7 +1124,7 @@ class VpsProvider(BaseProviderInstance):
 
         self._create_shutdown_script(host)
         with log_span("Starting activity watcher"):
-            self._realizer.start_activity_watcher(outer, container_name)
+            self._realizer.start_activity_watcher(outer, handle)
 
         host_record = VpsHostRecord(
             certified_host_data=host_data,
@@ -1137,11 +1137,11 @@ class VpsProvider(BaseProviderInstance):
                 plan=plan,
                 start_args=effective_start_args,
                 image=base_image,
-                container_name=container_name,
-                volume_name=volume_name,
+                container_name=handle.container_name,
+                volume_name=handle.volume_name,
                 vps_ssh_key_id=vps_ssh_key_id,
             ),
-            container_id=realized.container_id,
+            container_id=handle.container_id,
         )
         host_store = self._realizer.open_host_store(outer, host_id)
         host_store.write_host_record(host_record)
@@ -1261,7 +1261,7 @@ class VpsProvider(BaseProviderInstance):
         self._evict_cached_host(host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            self._realizer.stop_placement(outer, host_record, timeout_seconds)
+            self._realizer.stop_placement(outer, PlacementHandle.from_record(host_record), timeout_seconds)
 
             # Update the host record (bump updated_at). A subclass that stops more
             # than the container -- e.g. AWS stopping the EC2 instance -- passes a
@@ -1298,8 +1298,9 @@ class VpsProvider(BaseProviderInstance):
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
 
+        handle = PlacementHandle.from_record(host_record)
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            self._realizer.start_placement(outer, host_record)
+            self._realizer.start_placement(outer, handle)
 
             with log_span("Waiting for container SSH"):
                 self._wait_for_container_sshd(host_record.vps_ip)
@@ -1323,7 +1324,7 @@ class VpsProvider(BaseProviderInstance):
             # can't auto-stop is better than a failed resume.
             with log_span("Relaunching activity watcher"):
                 try:
-                    self._realizer.start_activity_watcher(outer, host_record.config.container_name)
+                    self._realizer.start_activity_watcher(outer, handle)
                 except MngrError as e:
                     logger.warning(
                         "Failed to relaunch the activity watcher on resume for host {} ({}); "
@@ -1379,7 +1380,7 @@ class VpsProvider(BaseProviderInstance):
                     # cleanup failures and raises a ``CleanupFailedGroup``, which we
                     # absorb into this destroy's aggregate.
                     try:
-                        self._realizer.teardown_placement(outer, host_id, host_record)
+                        self._realizer.teardown_placement(outer, host_id, PlacementHandle.from_record(host_record))
                     except CleanupFailedGroup as group:
                         collect_cleanup_failures(failures, group)
 
@@ -1483,7 +1484,7 @@ class VpsProvider(BaseProviderInstance):
         if vps_ip is not None and host_record.config is not None:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 # Check if the placement is running.
-                if self._realizer.is_placement_running(outer, host_record):
+                if self._realizer.is_placement_running(outer, PlacementHandle.from_record(host_record)):
                     return self._create_host_object(
                         host_id, HostName(host_record.certified_host_data.host_name), vps_ip
                     )
@@ -1524,7 +1525,7 @@ class VpsProvider(BaseProviderInstance):
             # Cache the host object
             if record.vps_ip is not None and record.config is not None:
                 with self._make_outer_for_vps_ip(record.vps_ip) as outer:
-                    if self._realizer.is_placement_running(outer, record):
+                    if self._realizer.is_placement_running(outer, PlacementHandle.from_record(record)):
                         self._create_host_object(host_id, host_name, record.vps_ip)
                     else:
                         self._create_offline_host(record)
@@ -1854,7 +1855,7 @@ class VpsProvider(BaseProviderInstance):
                 with log_span("Collecting listing data via single SSH command"):
                     raw_output = self._realizer.collect_listing_output(
                         outer,
-                        host_record,
+                        PlacementHandle.from_record(host_record),
                         script,
                         timeout_seconds=30.0,
                     )
@@ -2081,7 +2082,7 @@ class VpsProvider(BaseProviderInstance):
         snapshot_name = name or SnapshotName(f"mngr-snapshot-{host_id}-{int(time.time())}")
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            snapshot_id = realizer.snapshot_placement(outer, host_record)
+            snapshot_id = realizer.snapshot_placement(outer, host_id, PlacementHandle.from_record(host_record))
 
             # Store snapshot record in host data
             snapshot_record = SnapshotRecord(

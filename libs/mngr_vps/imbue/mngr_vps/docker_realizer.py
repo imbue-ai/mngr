@@ -55,6 +55,7 @@ from imbue.mngr_vps.container_setup import start_container
 from imbue.mngr_vps.container_setup import start_container_sshd
 from imbue.mngr_vps.container_setup import stop_container
 from imbue.mngr_vps.data_types import AgentEndpoint
+from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.data_types import RealizePlacementContext
 from imbue.mngr_vps.data_types import RealizedPlacement
 from imbue.mngr_vps.host_store import VpsHostRecord
@@ -190,15 +191,19 @@ class DockerRealizer(SnapshotCapableRealizer):
             parsed.get("container_state")
         )
 
-    def is_placement_running(self, outer: OuterHostInterface, record: VpsHostRecord) -> bool:
-        assert record.config is not None and record.config.container_name is not None
-        return docker_inspect_running(outer, record.config.container_name)
+    @staticmethod
+    def _require_container_name(handle: PlacementHandle) -> str:
+        """The container name the docker realizer needs to act on its placement."""
+        assert handle.container_name is not None, "DockerRealizer placement handle has no container name"
+        return handle.container_name
+
+    def is_placement_running(self, outer: OuterHostInterface, handle: PlacementHandle) -> bool:
+        return docker_inspect_running(outer, self._require_container_name(handle))
 
     def collect_listing_output(
-        self, outer: OuterHostInterface, record: VpsHostRecord, script: str, timeout_seconds: float = 30.0
+        self, outer: OuterHostInterface, handle: PlacementHandle, script: str, timeout_seconds: float = 30.0
     ) -> str:
-        assert record.config is not None and record.config.container_name is not None
-        return exec_in_container(outer, record.config.container_name, script, timeout_seconds=timeout_seconds)
+        return exec_in_container(outer, self._require_container_name(handle), script, timeout_seconds=timeout_seconds)
 
     # --- placement creation ------------------------------------------------
 
@@ -328,26 +333,26 @@ class DockerRealizer(SnapshotCapableRealizer):
             public_key=container_host_public_key,
         )
         return RealizedPlacement(
-            container_name=container_name,
-            container_id=container_id,
-            volume_name=volume_name,
+            handle=PlacementHandle(
+                container_name=container_name,
+                container_id=container_id,
+                volume_name=volume_name,
+            ),
             container_ssh_host_public_key=container_host_public_key,
         )
 
     # --- placement lifecycle ----------------------------------------------
 
-    def start_activity_watcher(self, outer: OuterHostInterface, container_name: str | None) -> None:
-        assert container_name is not None, "DockerRealizer requires a container name to start the activity watcher"
+    def start_activity_watcher(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
+        container_name = self._require_container_name(handle)
         exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
 
-    def stop_placement(self, outer: OuterHostInterface, record: VpsHostRecord, timeout_seconds: float) -> None:
-        assert record.config is not None and record.config.container_name is not None
+    def stop_placement(self, outer: OuterHostInterface, handle: PlacementHandle, timeout_seconds: float) -> None:
         with log_span("Stopping container on VPS"):
-            stop_container(outer, record.config.container_name, timeout_seconds=int(timeout_seconds))
+            stop_container(outer, self._require_container_name(handle), timeout_seconds=int(timeout_seconds))
 
-    def start_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> None:
-        assert record.config is not None and record.config.container_name is not None
-        container_name = record.config.container_name
+    def start_placement(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
+        container_name = self._require_container_name(handle)
         with log_span("Starting container on VPS"):
             start_container(outer, container_name)
         # sshd is launched via `docker exec`, not the container's entrypoint, so a
@@ -357,23 +362,21 @@ class DockerRealizer(SnapshotCapableRealizer):
         with log_span("Restarting sshd in container"):
             start_container_sshd(outer, container_name)
 
-    def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, record: VpsHostRecord) -> None:
-        assert record.config is not None
-        vps_config = record.config
+    def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, handle: PlacementHandle) -> None:
         with collecting_cleanup_failures() as failures:
             # Stop and remove the agent container; removing the volume below will
             # fail otherwise because the container still holds it open.
             # ``tolerate_missing`` makes an already-gone container a no-op, so any
             # error raised here means a container that exists but could not be removed.
-            if vps_config.container_name is not None:
+            if handle.container_name is not None:
                 try:
-                    remove_container(outer, vps_config.container_name, force=True, tolerate_missing=True)
+                    remove_container(outer, handle.container_name, force=True, tolerate_missing=True)
                 except MngrError as e:
                     logger.warning("Failed to remove container: {}", e)
                     failures.append(
                         CleanupFailure(
                             category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                            message=f"failed to remove container {vps_config.container_name} for host {host_id}: {e}",
+                            message=f"failed to remove container {handle.container_name} for host {host_id}: {e}",
                             host_id=host_id,
                         )
                     )
@@ -399,15 +402,15 @@ class DockerRealizer(SnapshotCapableRealizer):
             # Remove the unified host volume (the named entry; the data lived on the
             # subvolume above). ``docker volume rm -f`` no-ops on a missing volume,
             # so any raised error means the named volume entry remains.
-            if vps_config.volume_name is not None:
+            if handle.volume_name is not None:
                 try:
-                    remove_volume(outer, vps_config.volume_name)
+                    remove_volume(outer, handle.volume_name)
                 except MngrError as e:
                     logger.warning("Failed to remove host volume: {}", e)
                     failures.append(
                         CleanupFailure(
                             category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                            message=f"failed to remove host volume {vps_config.volume_name} for host {host_id}: {e}",
+                            message=f"failed to remove host volume {handle.volume_name} for host {host_id}: {e}",
                             host_id=host_id,
                         )
                     )
@@ -428,12 +431,10 @@ class DockerRealizer(SnapshotCapableRealizer):
                     )
                 )
 
-    def snapshot_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> SnapshotId:
-        assert record.config is not None and record.config.container_name is not None
-        host_id = HostId(record.certified_host_data.host_id)
+    def snapshot_placement(self, outer: OuterHostInterface, host_id: HostId, handle: PlacementHandle) -> SnapshotId:
         image_tag = f"mngr-snapshot-{host_id.get_uuid().hex}-{int(time.time())}"
         with log_span("Creating Docker snapshot"):
-            image_id = commit_container(outer, record.config.container_name, image_tag)
+            image_id = commit_container(outer, self._require_container_name(handle), image_tag)
         return SnapshotId(image_id)
 
     def delete_snapshot_placement(self, outer: OuterHostInterface, snapshot_id: SnapshotId) -> None:

@@ -20,8 +20,8 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps.bare_realizer import BARE_HOST_STORE_DIR
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.data_types import RealizePlacementContext
-from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
 from imbue.mngr_vps.primitives import VPS_SSH_KEY_NAME
@@ -79,8 +79,8 @@ def _context(
     )
 
 
-# The lifecycle/snapshot methods never read the record, so a construct-only stub is enough.
-_STUB_RECORD = VpsHostRecord.model_construct(vps_ip="203.0.113.7")
+# The bare realizer ignores the placement handle, so the empty handle is enough.
+_EMPTY_HANDLE = PlacementHandle()
 
 
 def test_bare_realizer_is_not_snapshot_capable(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
@@ -120,10 +120,8 @@ def test_realize_placement_installs_packages_and_seeds_store_without_container(
 
     placement = realizer.realize_placement(outer, _context())
 
-    # No container/volume on a bare placement.
-    assert placement.container_name is None
-    assert placement.container_id is None
-    assert placement.volume_name is None
+    # No container/volume on a bare placement: the handle is empty.
+    assert placement.handle == PlacementHandle()
     assert placement.container_ssh_host_public_key is None
 
     joined = "\n".join(stub.commands)
@@ -155,7 +153,7 @@ def test_realize_placement_applies_extra_known_hosts_and_authorized_keys(
 def test_start_activity_watcher_runs_on_the_vm(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
     outer, stub = _recording_outer()
-    realizer.start_activity_watcher(outer, None)
+    realizer.start_activity_watcher(outer, _EMPTY_HANDLE)
     assert any("activity_watcher" in command for command in stub.commands)
 
 
@@ -163,9 +161,9 @@ def test_lifecycle_steps_are_no_ops(temp_mngr_ctx: MngrContext, tmp_path: Path) 
     """stop/start/teardown issue no commands -- machine lifecycle is the substrate's job."""
     realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
     outer, stub = _recording_outer()
-    realizer.stop_placement(outer, _STUB_RECORD, timeout_seconds=60.0)
-    realizer.start_placement(outer, _STUB_RECORD)
-    realizer.teardown_placement(outer, HostId.generate(), _STUB_RECORD)
+    realizer.stop_placement(outer, _EMPTY_HANDLE, timeout_seconds=60.0)
+    realizer.start_placement(outer, _EMPTY_HANDLE)
+    realizer.teardown_placement(outer, HostId.generate(), _EMPTY_HANDLE)
     assert stub.commands == []
 
 
@@ -173,7 +171,7 @@ def test_is_placement_running_is_true_when_vm_reachable(temp_mngr_ctx: MngrConte
     """For bare the agent IS the VM, so a reachable VM is a running host."""
     realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
     outer, _stub = _recording_outer()
-    assert realizer.is_placement_running(outer, _STUB_RECORD) is True
+    assert realizer.is_placement_running(outer, _EMPTY_HANDLE) is True
 
 
 def test_read_live_listing_runs_inner_script_directly_on_the_vm(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
@@ -198,9 +196,9 @@ def test_collect_listing_output_returns_stdout_and_raises_on_failure(
     realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
     ok_outer, ok_stub = _recording_outer()
     ok_stub.response_stdout = "LISTING_OUTPUT"
-    assert realizer.collect_listing_output(ok_outer, _STUB_RECORD, "echo hi") == "LISTING_OUTPUT"
+    assert realizer.collect_listing_output(ok_outer, _EMPTY_HANDLE, "echo hi") == "LISTING_OUTPUT"
 
     fail_outer, fail_stub = _recording_outer()
     fail_stub.response_success = False
     with pytest.raises(MngrError):
-        realizer.collect_listing_output(fail_outer, _STUB_RECORD, "echo hi")
+        realizer.collect_listing_output(fail_outer, _EMPTY_HANDLE, "echo hi")

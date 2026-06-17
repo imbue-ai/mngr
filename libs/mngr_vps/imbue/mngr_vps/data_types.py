@@ -7,6 +7,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr_vps.host_store import VpsHostRecord
 
 
 class AgentEndpoint(FrozenModel):
@@ -49,17 +50,49 @@ class RealizePlacementContext(FrozenModel):
     authorized_keys: Sequence[str] | None = Field(default=None, description="Extra authorized_keys for the agent")
 
 
-class RealizedPlacement(FrozenModel):
-    """What a realizer returns after placing an agent on a VPS.
+class PlacementHandle(FrozenModel):
+    """Opaque identity the provider hands a realizer to act on an existing placement.
 
-    Carries the realizer-owned fields the provider copies into the host record.
-    The container realizer fills these in; the bare realizer leaves them ``None``
-    (there is no container or per-host docker volume).
+    The realizer mints it in ``realize_placement`` and the provider extracts it
+    once from the persisted host record (``PlacementHandle.from_record``) at each
+    realizer call boundary -- so the realizer's lifecycle methods receive just the
+    fields they need rather than the whole ``VpsHostRecord``. The container
+    realizer fills these in; the bare realizer's handle is the empty case (all
+    ``None``), since there is no container or per-host docker volume.
     """
 
     container_name: str | None = Field(default=None, description="Agent container name on the VPS")
     container_id: str | None = Field(default=None, description="Agent container ID on the VPS")
     volume_name: str | None = Field(default=None, description="Per-host unified docker volume name")
+
+    @classmethod
+    def from_record(cls, record: VpsHostRecord) -> "PlacementHandle":
+        """Extract the placement handle from a persisted host record.
+
+        ``container_name`` / ``volume_name`` live on the record's ``config``;
+        ``container_id`` lives on the record itself. A record with no ``config``
+        (or a bare placement, whose fields are ``None``) yields the empty handle.
+        """
+        config = record.config
+        return cls(
+            container_name=config.container_name if config is not None else None,
+            container_id=record.container_id,
+            volume_name=config.volume_name if config is not None else None,
+        )
+
+
+class RealizedPlacement(FrozenModel):
+    """What a realizer returns after placing an agent on a VPS.
+
+    Carries the realizer-owned fields the provider copies into the host record:
+    the :class:`PlacementHandle` (container/volume identity) plus the agent
+    sshd's host public key. The bare realizer returns an empty handle and a
+    ``None`` host key.
+    """
+
+    handle: PlacementHandle = Field(
+        default_factory=PlacementHandle, description="Placement identity for lifecycle ops"
+    )
     container_ssh_host_public_key: str | None = Field(
         default=None, description="The agent sshd's host public key (for the host record)"
     )

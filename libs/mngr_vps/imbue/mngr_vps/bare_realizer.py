@@ -17,6 +17,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_com
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps.data_types import AgentEndpoint
+from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.data_types import RealizePlacementContext
 from imbue.mngr_vps.data_types import RealizedPlacement
 from imbue.mngr_vps.host_store import AGENTS_SUBPATH
@@ -112,12 +113,12 @@ class BareRealizer(HostRealizer):
         parsed = parse_listing_collection_output(raw)
         return extract_agent_data_from_parsed_listing(parsed), True
 
-    def is_placement_running(self, outer: OuterHostInterface, record: VpsHostRecord) -> bool:
+    def is_placement_running(self, outer: OuterHostInterface, handle: PlacementHandle) -> bool:
         # No container: the agent IS the VM, so a reachable VM is a running host.
         return True
 
     def collect_listing_output(
-        self, outer: OuterHostInterface, record: VpsHostRecord, script: str, timeout_seconds: float = 30.0
+        self, outer: OuterHostInterface, handle: PlacementHandle, script: str, timeout_seconds: float = 30.0
     ) -> str:
         return self._run_listing_script(outer, script, timeout_seconds=timeout_seconds)
 
@@ -161,10 +162,11 @@ class BareRealizer(HostRealizer):
         if authorized_keys_cmd is not None:
             _run_on_outer(outer, authorized_keys_cmd, label="add-authorized-keys")
 
-        # A bare placement has no container, volume, or container host key.
+        # A bare placement has no container, volume, or container host key, so the
+        # handle is empty and the container host key is None.
         return RealizedPlacement()
 
-    def start_activity_watcher(self, outer: OuterHostInterface, container_name: str | None) -> None:
+    def start_activity_watcher(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
         # Runs on the VM directly (the watcher is pure shell + jq), not via docker exec.
         _run_on_outer(
             outer,
@@ -172,17 +174,17 @@ class BareRealizer(HostRealizer):
             label="start-activity-watcher",
         )
 
-    def stop_placement(self, outer: OuterHostInterface, record: VpsHostRecord, timeout_seconds: float) -> None:
+    def stop_placement(self, outer: OuterHostInterface, handle: PlacementHandle, timeout_seconds: float) -> None:
         # No container to stop; stopping the machine is the substrate's job (the
         # aws/gcp/azure stop_host override stops the instance).
         return None
 
-    def start_placement(self, outer: OuterHostInterface, record: VpsHostRecord) -> None:
+    def start_placement(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
         # The agent's sshd is the VM's own sshd, brought back by the instance
         # start; nothing to re-exec. start_host relaunches the activity watcher
         # separately via start_activity_watcher.
         return None
 
-    def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, record: VpsHostRecord) -> None:
+    def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, handle: PlacementHandle) -> None:
         # Nothing to tear down on the placement: destroy_host destroys the whole VM.
         return None
