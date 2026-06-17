@@ -28,8 +28,8 @@ from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.output_helpers import OperatorResultPart
 from imbue.mngr.cli.output_helpers import emit_operator_result
-from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
@@ -328,23 +328,30 @@ def _output_prepare_result(
     bucket setup was skipped, e.g. missing storage permissions). Mirrors
     ``mngr aws prepare``.
     """
-    data = {
-        "resource_group": result.resource_group,
-        "region": result.region,
-        "created": result.was_created,
-        "state_storage_account_name": state_account_name,
-        "state_bucket_created": was_bucket_created,
-        "host_identity_name": host_identity_name,
-    }
-
-    if output_format is OutputFormat.HUMAN:
-        write_human_line(f"Prepared Azure resource group {result.resource_group} in region {result.region}")
-        if state_account_name is not None:
-            verb = "Created" if was_bucket_created else "Reused existing"
-            write_human_line(f"{verb} Azure state storage account {state_account_name} in region {result.region}")
-        if host_identity_name is not None:
-            write_human_line(f"Provisioned host-dir managed identity {host_identity_name}")
-    emit_operator_result("prepared", data, output_format)
+    account_verb = "Created" if was_bucket_created else "Reused existing"
+    emit_operator_result(
+        "prepared",
+        [
+            OperatorResultPart.shown(
+                f"Prepared Azure resource group {result.resource_group} in region {result.region}",
+                resource_group=result.resource_group,
+                region=result.region,
+                created=result.was_created,
+            ),
+            OperatorResultPart.shown_if(
+                state_account_name,
+                f"{account_verb} Azure state storage account {state_account_name} in region {result.region}",
+                state_storage_account_name=state_account_name,
+                state_bucket_created=was_bucket_created,
+            ),
+            OperatorResultPart.shown_if(
+                host_identity_name,
+                f"Provisioned host-dir managed identity {host_identity_name}",
+                host_identity_name=host_identity_name,
+            ),
+        ],
+        output_format,
+    )
 
 
 def _output_cleanup_result(
@@ -364,25 +371,31 @@ def _output_cleanup_result(
     the deleted managed-identity name (or None when none existed). Mirrors
     ``mngr aws cleanup``.
     """
-    data = {
-        "resource_group": deleted_resource_group,
-        "subscription_id": subscription_id,
-        "region": region,
-        "deleted": deleted_resource_group is not None,
-        "state_storage_account_deleted": deleted_account_name,
-        "host_identity_deleted": deleted_host_identity_name,
-    }
-
-    if output_format is OutputFormat.HUMAN:
-        if deleted_resource_group is None:
-            write_human_line(f"Nothing to clean up: no mngr-owned resource group in subscription {subscription_id}.")
-        else:
-            write_human_line(f"Cleaned up Azure resource group {deleted_resource_group} in region {region}")
-        if deleted_account_name is not None:
-            write_human_line(f"Deleted Azure state storage account {deleted_account_name} in region {region}")
-        if deleted_host_identity_name is not None:
-            write_human_line(f"Deleted host-dir managed identity {deleted_host_identity_name}")
-    emit_operator_result("cleaned_up", data, output_format)
+    emit_operator_result(
+        "cleaned_up",
+        [
+            OperatorResultPart.shown(
+                f"Cleaned up Azure resource group {deleted_resource_group} in region {region}"
+                if deleted_resource_group is not None
+                else f"Nothing to clean up: no mngr-owned resource group in subscription {subscription_id}.",
+                resource_group=deleted_resource_group,
+                subscription_id=subscription_id,
+                region=region,
+                deleted=deleted_resource_group is not None,
+            ),
+            OperatorResultPart.shown_if(
+                deleted_account_name,
+                f"Deleted Azure state storage account {deleted_account_name} in region {region}",
+                state_storage_account_deleted=deleted_account_name,
+            ),
+            OperatorResultPart.shown_if(
+                deleted_host_identity_name,
+                f"Deleted host-dir managed identity {deleted_host_identity_name}",
+                host_identity_deleted=deleted_host_identity_name,
+            ),
+        ],
+        output_format,
+    )
 
 
 @click.group(name="azure")

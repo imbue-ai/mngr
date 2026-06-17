@@ -2,4 +2,4 @@ Internal refactor (no behavior change): the byte-identical `_find_instance_for_h
 
 Internal refactor (no behavior change): `GcpProvider` no longer overrides the full `persist_agent_data` / `remove_persisted_agent_data`; it now implements just the `_mirror_agent_record` / `_remove_mirrored_agent_record` hooks (its GCE-metadata writes), inheriting the shared persist/remove envelope from `OfflineCapableVpsDockerProvider`.
 
-Internal refactor (no behavior change): `mngr gcp prepare` / `cleanup` output now emits its machine-readable record (JSON / JSONL) through the shared `emit_operator_result` helper and renders its human line inline via `write_human_line`, rather than passing a `human_lines` list into the helper.
+Internal refactor (no behavior change): `mngr gcp prepare` / `cleanup` output now declares its result as a list of `OperatorResultPart`s (each pairing structured fields with its human line, via `shown`) and hands them to the shared `emit_operator_result` helper, which owns the JSON / JSONL / human format dispatch -- replacing the separate `data` dict and inline human-line block.

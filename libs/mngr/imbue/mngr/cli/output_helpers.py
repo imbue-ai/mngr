@@ -7,7 +7,9 @@ from typing import Any
 from typing import assert_never
 
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -155,28 +157,66 @@ def emit_event(
             assert_never(unreachable)
 
 
+class OperatorResultPart(FrozenModel):
+    """One part of an operator-command result, paired across audiences.
+
+    ``data`` holds the structured fields, always emitted in JSON / JSONL (even
+    when a value is None, so a caller can tell a skipped step from a created one).
+    ``human`` is the matching human-readable line, or None when this part
+    contributes structured fields but no human output (e.g. a skipped optional
+    resource). Authoring both forms together keeps the machine and human renderings
+    of the same fact from drifting apart.
+
+    Build parts with ``shown`` (a line that always prints) or ``shown_if`` (a line
+    that prints only when an optional resource is present); both take the
+    structured fields as keyword arguments.
+    """
+
+    data: Mapping[str, Any] = Field(description="Structured fields, emitted in JSON / JSONL")
+    human: str | None = Field(default=None, description="Matching human line, or None to emit no human output")
+
+    @classmethod
+    def shown(cls, human: str, **data: Any) -> "OperatorResultPart":
+        """A part whose human line always prints."""
+        return cls(data=data, human=human)
+
+    @classmethod
+    def shown_if(cls, present: object | None, human: str, **data: Any) -> "OperatorResultPart":
+        """A part whose fields are always emitted but whose human line prints only when ``present`` is not None."""
+        return cls(data=data, human=human if present is not None else None)
+
+
 def emit_operator_result(
     event_name: str,
-    data: Mapping[str, Any],
+    parts: Sequence[OperatorResultPart],
     output_format: OutputFormat,
 ) -> None:
-    """Emit the machine-readable record of an operator-command result (provider ``prepare`` / ``cleanup``).
+    """Emit an operator-command result (provider ``prepare`` / ``cleanup``), rendering the same parts for every audience.
 
-    JSON writes ``data`` as one terminal object; JSONL writes a ``<event_name>``
-    event carrying ``data``. HUMAN is a no-op: the human wording for these
-    commands is command-specific and multi-line, so each caller renders its own
-    ``write_human_line`` output. Only the structured-format dispatch -- the part
-    every provider shares -- lives here.
+    JSON writes the parts' merged ``data`` as one terminal object; JSONL writes
+    it as a ``<event_name>`` event; HUMAN writes each part's ``human`` line
+    (skipping parts that have none). The format dispatch lives only here, so no
+    call site has to enumerate the formats -- callers just declare the parts.
     """
     match output_format:
         case OutputFormat.JSON:
-            write_json_line(data)
+            write_json_line(_merge_operator_result_data(parts))
         case OutputFormat.JSONL:
-            write_event_line(event_name, data)
+            write_event_line(event_name, _merge_operator_result_data(parts))
         case OutputFormat.HUMAN:
-            pass
+            for part in parts:
+                if part.human is not None:
+                    write_human_line(part.human)
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _merge_operator_result_data(parts: Sequence[OperatorResultPart]) -> dict[str, Any]:
+    """Merge every part's structured fields into one record, in part order."""
+    merged: dict[str, Any] = {}
+    for part in parts:
+        merged.update(part.data)
+    return merged
 
 
 def on_error(

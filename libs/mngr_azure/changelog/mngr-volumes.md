@@ -24,6 +24,6 @@ Internal refactor (no behavior change): `BlobStateBucket` now extends the shared
 
 Internal refactor (no behavior change): replaced the bare-prefix `host_dir_blob_prefix_for` passthrough with a real `host_dir_sync_target_for(account, container, host_id)` that returns the full blob sync-target URL (mirroring the AWS helper), and consumed the shared `managed-by` tag constants from `state_keys`.
 
-Internal refactor (no behavior change): `mngr azure prepare` / `cleanup` output now emits its machine-readable record (JSON / JSONL) through the shared `emit_operator_result` helper and renders its human lines inline via `write_human_line`, rather than passing a `human_lines` list into the helper.
+Internal refactor (no behavior change): `mngr azure prepare` / `cleanup` output now declares its result as a list of `OperatorResultPart`s (each pairing structured fields with its human line, via `shown` / `shown_if`) and hands them to the shared `emit_operator_result` helper, which owns the JSON / JSONL / human format dispatch -- replacing the separate `data` dict and inline human-line block.
 
 Test-only: tightened the offline-`host_dir` empty-prefix test to also assert no misleading missing-identity warning is emitted when the VM can't be resolved.
