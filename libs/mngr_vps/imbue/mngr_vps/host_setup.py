@@ -211,7 +211,7 @@ def apply_host_setup_on_outer(
     for step in steps:
         with log_span("Applying host-setup step on {}: {}", outer.get_name(), step.description):
             result = outer.execute_idempotent_command(
-                _remote_script_command(step.script),
+                build_remote_script_command(step.script),
                 timeout_seconds=_HOST_SETUP_COMMAND_TIMEOUT_SECONDS,
             )
         if not result.success:
@@ -222,7 +222,7 @@ def apply_host_setup_on_outer(
 
 
 @pure
-def _remote_script_command(script: str) -> str:
+def build_remote_script_command(script: str) -> str:
     """Wrap a shell script so it survives transport to the remote shell verbatim.
 
     Base64-encodes the script and decodes it on the remote before piping to sh,

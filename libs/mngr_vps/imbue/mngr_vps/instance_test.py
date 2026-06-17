@@ -23,6 +23,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_vps.bare_realizer import BareRealizer
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.container_setup import emit_docker_build_output
 from imbue.mngr_vps.container_setup import is_retryable_rsync_error
@@ -71,6 +72,25 @@ def test_minimal_vps_docker_provider_parse_build_args_rejects_dropped_vps_prefix
     minimal = MinimalVpsProvider.model_construct()
     with pytest.raises(MngrError, match="no longer supported"):
         minimal._parse_build_args(["--vps-region=ewr"])
+
+
+class _ParsedSubBuildOptions(ParsedVpsBuildOptions):
+    """A provider-specific ParsedVpsBuildOptions subclass for _require_parsed tests."""
+
+
+def test_require_parsed_returns_narrowed_instance() -> None:
+    """_require_parsed returns the same object, typed as the expected subclass, on a match."""
+    minimal = MinimalVpsProvider.model_construct()
+    parsed = _ParsedSubBuildOptions(region="r", plan="p", docker_build_args=())
+    assert minimal._require_parsed(parsed, _ParsedSubBuildOptions) is parsed
+
+
+def test_require_parsed_raises_uniformly_on_mismatch() -> None:
+    """_require_parsed raises a clear MngrError when the parsed shape is not the expected subclass."""
+    minimal = MinimalVpsProvider.model_construct()
+    parsed = ParsedVpsBuildOptions(region="r", plan="p", docker_build_args=())
+    with pytest.raises(MngrError, match="expected _ParsedSubBuildOptions, got ParsedVpsBuildOptions"):
+        minimal._require_parsed(parsed, _ParsedSubBuildOptions)
 
 
 def test_remove_host_from_known_hosts_port_22(tmp_path: Path) -> None:

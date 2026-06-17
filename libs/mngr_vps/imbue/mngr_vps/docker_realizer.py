@@ -1,6 +1,7 @@
 import json
 import shlex
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -121,6 +122,34 @@ def _read_live_listing_from_vps(
             f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
         )
     return parse_listing_collection_output(result.stdout)
+
+
+def _record_cleanup_attempt(
+    failures: list[CleanupFailure],
+    host_id: HostId,
+    op: Callable[[], None],
+    *,
+    action: str,
+    resource: str,
+) -> None:
+    """Run one best-effort teardown step; record a HOST_RESOURCE_REMAINS failure if it raises.
+
+    Each ``op`` already no-ops on an already-absent resource, so a raised
+    ``MngrError`` means the resource exists but could not be removed. The failure is
+    logged and appended to ``failures`` (which ``collecting_cleanup_failures`` raises
+    as a group at the end) rather than aborting the remaining teardown steps.
+    """
+    try:
+        op()
+    except MngrError as e:
+        logger.warning("Failed to {} {}: {}", action, resource, e)
+        failures.append(
+            CleanupFailure(
+                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                message=f"failed to {action} {resource} for host {host_id}: {e}",
+                host_id=host_id,
+            )
+        )
 
 
 class DockerRealizer(SnapshotCapableRealizer):
@@ -368,18 +397,15 @@ class DockerRealizer(SnapshotCapableRealizer):
             # fail otherwise because the container still holds it open.
             # ``tolerate_missing`` makes an already-gone container a no-op, so any
             # error raised here means a container that exists but could not be removed.
-            if handle.container_name is not None:
-                try:
-                    remove_container(outer, handle.container_name, force=True, tolerate_missing=True)
-                except MngrError as e:
-                    logger.warning("Failed to remove container: {}", e)
-                    failures.append(
-                        CleanupFailure(
-                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                            message=f"failed to remove container {handle.container_name} for host {host_id}: {e}",
-                            host_id=host_id,
-                        )
-                    )
+            container_name = handle.container_name
+            if container_name is not None:
+                _record_cleanup_attempt(
+                    failures,
+                    host_id,
+                    lambda: remove_container(outer, container_name, force=True, tolerate_missing=True),
+                    action="remove container",
+                    resource=container_name,
+                )
 
             # Delete the per-host btrfs subvolume before the named volume. The
             # VPS-destroy that follows takes the whole loop file with it, so this is
@@ -387,49 +413,38 @@ class DockerRealizer(SnapshotCapableRealizer):
             # VPS. ``delete_btrfs_subvolume_on_outer`` already no-ops on an absent
             # subvolume, so any raised error means a present subvolume remains.
             subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
-            try:
-                delete_btrfs_subvolume_on_outer(outer, subvolume_path)
-            except MngrError as e:
-                logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
-                failures.append(
-                    CleanupFailure(
-                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                        message=f"failed to delete btrfs subvolume {subvolume_path} for host {host_id}: {e}",
-                        host_id=host_id,
-                    )
-                )
+            _record_cleanup_attempt(
+                failures,
+                host_id,
+                lambda: delete_btrfs_subvolume_on_outer(outer, subvolume_path),
+                action="delete btrfs subvolume",
+                resource=str(subvolume_path),
+            )
 
             # Remove the unified host volume (the named entry; the data lived on the
             # subvolume above). ``docker volume rm -f`` no-ops on a missing volume,
             # so any raised error means the named volume entry remains.
-            if handle.volume_name is not None:
-                try:
-                    remove_volume(outer, handle.volume_name)
-                except MngrError as e:
-                    logger.warning("Failed to remove host volume: {}", e)
-                    failures.append(
-                        CleanupFailure(
-                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                            message=f"failed to remove host volume {handle.volume_name} for host {host_id}: {e}",
-                            host_id=host_id,
-                        )
-                    )
+            volume_name = handle.volume_name
+            if volume_name is not None:
+                _record_cleanup_attempt(
+                    failures,
+                    host_id,
+                    lambda: remove_volume(outer, volume_name),
+                    action="remove host volume",
+                    resource=volume_name,
+                )
 
             # Remove the per-host snapshot-trigger volume (the named entry; the shared
             # bind source at OUTER_SNAPSHOT_TRIGGER_DIR is left alone). Same ``-f``
             # no-op-on-missing semantics as the host volume above.
             trigger_volume_name = snapshot_trigger_volume_name_for(host_id)
-            try:
-                remove_volume(outer, trigger_volume_name)
-            except MngrError as e:
-                logger.warning("Failed to remove snapshot trigger volume: {}", e)
-                failures.append(
-                    CleanupFailure(
-                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                        message=f"failed to remove snapshot trigger volume {trigger_volume_name} for host {host_id}: {e}",
-                        host_id=host_id,
-                    )
-                )
+            _record_cleanup_attempt(
+                failures,
+                host_id,
+                lambda: remove_volume(outer, trigger_volume_name),
+                action="remove snapshot trigger volume",
+                resource=trigger_volume_name,
+            )
 
     def snapshot_placement(self, outer: OuterHostInterface, host_id: HostId, handle: PlacementHandle) -> SnapshotId:
         image_tag = f"mngr-snapshot-{host_id.get_uuid().hex}-{int(time.time())}"

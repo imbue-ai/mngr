@@ -10,6 +10,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -57,6 +58,17 @@ class VpsHostRecord(FrozenModel):
     container_ssh_host_public_key: str | None = Field(default=None, description="Container SSH host public key")
     config: VpsHostConfig | None = Field(default=None, description="VPS and container configuration")
     container_id: str | None = Field(default=None, description="Docker container ID")
+
+    def with_certified_updates(self, *certified_updates: tuple[str, Any]) -> "VpsHostRecord":
+        """Return a copy with the given updates applied to the nested ``certified_host_data``.
+
+        ``certified_updates`` are ``to_update`` pairs over the certified data's own
+        ``field_ref()`` (e.g. ``updated_at`` / ``stop_reason``). Wraps the
+        "update the certified data, then re-wrap the record" idiom so the nested
+        copy and the re-wrap can never drift apart at a call site.
+        """
+        updated_data = self.certified_host_data.model_copy_update(*certified_updates)
+        return self.model_copy_update(to_update(self.field_ref().certified_host_data, updated_data))
 
 
 def _run_outer_command(outer: OuterHostInterface, command: str, *, label: str) -> str:

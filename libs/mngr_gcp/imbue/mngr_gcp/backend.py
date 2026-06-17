@@ -243,15 +243,9 @@ class GcpProvider(KeyValueMirrorVpsProvider):
         ``image`` kwargs are statically visible, mirroring
         ``AwsProvider._create_vps_instance``.
         """
-        match parsed:
-            case ParsedGcpBuildOptions(spot=spot, image=image):
-                pass
-            case _:
-                raise MngrError(
-                    f"GcpProvider._create_vps_instance expected ParsedGcpBuildOptions, "
-                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
-                    "non-GCP shape; _parse_build_args must return ParsedGcpBuildOptions."
-                )
+        gcp_parsed = self._require_parsed(parsed, ParsedGcpBuildOptions)
+        spot = gcp_parsed.spot
+        image = gcp_parsed.image
         return self.gcp_client.create_instance(
             label=label,
             region=parsed.region,
@@ -298,20 +292,9 @@ class GcpProvider(KeyValueMirrorVpsProvider):
             timeout_seconds=timeout_seconds,
         )
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return external IPs of GCE instances labeled with this provider's name.
-
-        Credentials are guaranteed to be resolvable here: ``build_provider_instance``
-        raises ``ProviderUnavailableError`` when ``config.get_credentials_and_resolved_project()``
-        fails, so any GcpProvider that reaches this point has working credentials.
-        """
-        instances = self._list_instances_cached()
-        vps_ips: list[str] = []
-        for instance in instances:
-            main_ip = instance.get("main_ip", "")
-            if main_ip:
-                vps_ips.append(main_ip)
-        return vps_ips
+    # The shared ``KeyValueMirrorVpsProvider._list_provider_vps_hostnames``
+    # (cached listing -> non-empty main_ip) covers GCP unchanged: a stopped GCE
+    # instance loses its external IP and is excluded by the non-empty IP check.
 
     # =========================================================================
     # Native GCE stop/start (idle-pause + resume) -- the base

@@ -15,7 +15,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_azure.backend import AGENT_TAG_PREFIX
 from imbue.mngr_azure.backend import AzureProvider
 from imbue.mngr_azure.backend import AzureProviderBackend
 from imbue.mngr_azure.backend import ParsedAzureBuildOptions
@@ -28,6 +27,7 @@ from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
+from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
 from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
