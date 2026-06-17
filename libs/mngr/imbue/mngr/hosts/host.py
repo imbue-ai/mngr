@@ -3345,8 +3345,9 @@ def _build_start_agent_shell_command(
         f" {shlex.quote(env_shell_cmd)}"
     )
 
-    # Load mngr's own tmux config (options and key bindings) into the server.
-    # tmux reads a config file automatically only when it starts the server.
+    # Source mngr's own tmux config (options and key bindings) into the server.
+    # tmux's automatic config load at server start only pulls in the user's
+    # ~/.tmux.conf, never mngr's, so mngr's settings must be applied explicitly.
     # Non-fatal (|| true): this config is cosmetic (status bar, titles, hotkeys),
     # so a sourcing error must not block agent startup.
     steps.append(f"tmux source-file {shlex.quote(str(tmux_config_path))} || true")

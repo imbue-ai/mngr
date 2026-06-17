@@ -787,12 +787,12 @@ def test_build_start_agent_shell_command_sources_config_after_new_session(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """The config is sourced after new-session so an already-running server picks it up.
+    """mngr's config is sourced explicitly, after new-session.
 
-    tmux loads a config automatically only when it starts a new server, so a
-    session created on a server an earlier session already started would otherwise
-    never get it. The step is non-fatal so a sourcing error in this cosmetic config
-    does not abort the agent-start chain.
+    tmux's automatic config load at server start only pulls in the user's
+    ~/.tmux.conf, never mngr's, so mngr's settings must be sourced explicitly. The
+    step is non-fatal so a sourcing error in this cosmetic config does not abort
+    the agent-start chain.
     """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
