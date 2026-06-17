@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: `start_host` (the `mngr stop --stop-host` resume path) now restarts the container's sshd after `docker start`. sshd is launched via `docker exec`, not the container entrypoint, so it does not survive a container stop/start (or a host VM reboot that takes the container down, e.g. an AWS instance stop/start) — without restarting it, the resume timed out waiting for container SSH. Latent gap for every VPS-Docker provider; AWS's native instance stop/start surfaced it.
+- Fixed: `start_host` now also relaunches the in-container activity watcher on resume and records a fresh `BOOT` activity timestamp. The watcher is a backgrounded process that does not survive a container stop/start, so without relaunching it a resumed host would silently stop auto-stopping on idle (a latent gap for every VPS-Docker provider). Refreshing `BOOT` activity is required alongside the relaunch: otherwise a resumed-but-idle host keeps its pre-stop activity-file mtimes and the watcher re-stops it within one poll — so resuming an idle host would race a near-immediate auto-stop.
+
 ## [v0.1.8] - 2026-06-16
 
 ### Changed

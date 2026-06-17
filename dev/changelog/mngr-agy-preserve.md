@@ -1,1 +1,0 @@
-Extended the local-scratch gitignore convention to Python and text files: `**/*.local.py` and `**/*.local.txt` are now ignored, mirroring the existing `**/*.local.md` and `**/*.local.sh` patterns. Lets one-off validation harnesses and probe scripts (named `whatever.local.py` / `whatever.local.txt`) stay untracked and survive the stop hook's working-tree cleanup.
