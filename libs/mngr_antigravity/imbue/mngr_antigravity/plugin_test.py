@@ -267,6 +267,9 @@ def _make_antigravity_agent(
     # These setup tests run against a real local host where agy is not installed; the
     # install check is irrelevant to provision setup (files/trust/config) and is covered
     # separately, so skip it unless a caller opted in explicitly.
+    # FIXME: this should be routed through the real config-loading path (a settings.toml
+    # [agent_types.antigravity] config_overrides block) rather than mutating the config
+    # object here based on model_fields_set introspection.
     if "check_installation" not in agent_config.model_fields_set:
         agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))

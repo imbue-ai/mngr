@@ -109,13 +109,29 @@ def make_azure_http_error(status_code: int, message: str) -> HttpResponseError:
 
 
 class FakePoller:
-    """Stand-in for an azure LROPoller: ``result()`` returns a preset value or raises."""
+    """Stand-in for an azure LROPoller: ``result()``/``wait()`` return a preset value or raise.
 
-    def __init__(self, result_value: Any = None, error: Exception | None = None) -> None:
+    ``wait()`` re-raises the preset error (like the real poller surfacing the
+    operation's failure) but, like the real one, does NOT raise merely because a
+    timeout elapsed. Set ``completes=False`` to model an operation still in flight
+    after ``wait(timeout)`` so ``done()`` reports ``False`` (the timeout path).
+    """
+
+    def __init__(self, result_value: Any = None, error: Exception | None = None, completes: bool = True) -> None:
         self._result_value = result_value
         self._error = error
+        self._completes = completes
 
-    def result(self) -> Any:
+    def wait(self, timeout: float | None = None) -> None:
+        del timeout
+        if self._error is not None:
+            raise self._error
+
+    def done(self) -> bool:
+        return self._completes
+
+    def result(self, timeout: float | None = None) -> Any:
+        del timeout
         if self._error is not None:
             raise self._error
         return self._result_value
@@ -127,14 +143,26 @@ class FakeVirtualMachinesOperations:
     def __init__(self) -> None:
         self.created: list[tuple[str, Any]] = []
         self.deleted: list[str] = []
+        self.deallocated: list[str] = []
+        self.started: list[str] = []
         self.create_error: Exception | None = None
         self.delete_error: Exception | None = None
+        self.deallocate_error: Exception | None = None
+        self.start_error: Exception | None = None
+        # When False, the corresponding long-running-operation poller reports ``done()`` as False after
+        # ``wait(timeout)`` -- models an operation still in flight at the deadline.
+        self.deallocate_completes: bool = True
+        self.start_completes: bool = True
         self.instance_view_result: Any = None
         self.instance_view_error: Exception | None = None
         self.get_result: Any = None
         self.get_error: Exception | None = None
         self.list_result: list[Any] = []
         self.list_error: Exception | None = None
+        # Records the ``expand`` value the production code passes to ``list`` so a
+        # test can assert it is NOT ``instanceView`` (Azure 400s that on a
+        # resource-group list; power state is fetched per-VM via instance_view).
+        self.last_list_expand: str | None = None
 
     def begin_create_or_update(self, resource_group: str, vm_name: str, parameters: Any) -> FakePoller:
         self.created.append((vm_name, parameters))
@@ -146,6 +174,18 @@ class FakeVirtualMachinesOperations:
         self.deleted.append(vm_name)
         return FakePoller()
 
+    def begin_deallocate(self, resource_group: str, vm_name: str) -> FakePoller:
+        if self.deallocate_error is not None:
+            return FakePoller(error=self.deallocate_error)
+        self.deallocated.append(vm_name)
+        return FakePoller(completes=self.deallocate_completes)
+
+    def begin_start(self, resource_group: str, vm_name: str) -> FakePoller:
+        if self.start_error is not None:
+            return FakePoller(error=self.start_error)
+        self.started.append(vm_name)
+        return FakePoller(completes=self.start_completes)
+
     def instance_view(self, resource_group: str, vm_name: str) -> Any:
         if self.instance_view_error is not None:
             raise self.instance_view_error
@@ -156,7 +196,8 @@ class FakeVirtualMachinesOperations:
             raise self.get_error
         return self.get_result
 
-    def list(self, resource_group: str) -> list[Any]:
+    def list(self, resource_group: str, expand: str | None = None) -> list[Any]:
+        self.last_list_expand = expand
         if self.list_error is not None:
             raise self.list_error
         return self.list_result
@@ -318,12 +359,66 @@ class FakeProvidersOperations:
         return SimpleNamespace(namespace=namespace)
 
 
+class FakeTagsOperations:
+    """Fake ResourceManagementClient.tags: records server-side tag Merge/Delete patches."""
+
+    def __init__(self) -> None:
+        # (scope, parameters) for each begin_update_at_scope call.
+        self.updates: list[tuple[str, Any]] = []
+        self.update_error: Exception | None = None
+
+    def begin_update_at_scope(self, scope: str, parameters: Any) -> FakePoller:
+        if self.update_error is not None:
+            return FakePoller(error=self.update_error)
+        self.updates.append((scope, parameters))
+        return FakePoller()
+
+
 class FakeResourceClient:
-    """Fake ResourceManagementClient bundling resource_groups + providers."""
+    """Fake ResourceManagementClient bundling resource_groups + providers + tags."""
 
     def __init__(self) -> None:
         self.resource_groups = FakeResourceGroupsOperations()
         self.providers = FakeProvidersOperations()
+        self.tags = FakeTagsOperations()
+
+
+class FakeRoleDefinitionsOperations:
+    """Fake AuthorizationManagementClient.role_definitions."""
+
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str, Any]] = []
+        self.create_error: Exception | None = None
+
+    def create_or_update(self, scope: str, role_definition_id: str, role_definition: Any) -> Any:
+        if self.create_error is not None:
+            raise self.create_error
+        self.created.append((scope, role_definition_id, role_definition))
+        return SimpleNamespace(
+            id=f"/subscriptions/sub/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
+        )
+
+
+class FakeRoleAssignmentsOperations:
+    """Fake AuthorizationManagementClient.role_assignments."""
+
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str, Any]] = []
+        self.create_error: Exception | None = None
+
+    def create(self, scope: str, role_assignment_name: str, parameters: Any) -> Any:
+        if self.create_error is not None:
+            raise self.create_error
+        self.created.append((scope, role_assignment_name, parameters))
+        return SimpleNamespace(id=f"{scope}/providers/Microsoft.Authorization/roleAssignments/{role_assignment_name}")
+
+
+class FakeAuthorizationClient:
+    """Fake AuthorizationManagementClient bundling role_definitions + role_assignments."""
+
+    def __init__(self) -> None:
+        self.role_definitions = FakeRoleDefinitionsOperations()
+        self.role_assignments = FakeRoleAssignmentsOperations()
 
 
 class _StubbedAzureVpsClient(AzureVpsClient):
@@ -340,6 +435,7 @@ class _StubbedAzureVpsClient(AzureVpsClient):
     stubbed_compute_client: Any = Field(default=None, description="Fake ComputeManagementClient")
     stubbed_network_client: Any = Field(default=None, description="Fake NetworkManagementClient")
     stubbed_resource_client: Any = Field(default=None, description="Fake ResourceManagementClient")
+    stubbed_authorization_client: Any = Field(default=None, description="Fake AuthorizationManagementClient")
 
     def _compute(self) -> Any:
         return self.stubbed_compute_client
@@ -349,3 +445,6 @@ class _StubbedAzureVpsClient(AzureVpsClient):
 
     def _resource(self) -> Any:
         return self.stubbed_resource_client
+
+    def _authorization(self) -> Any:
+        return self.stubbed_authorization_client

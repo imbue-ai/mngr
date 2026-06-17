@@ -11,9 +11,12 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AzureVmName
 from imbue.mngr_azure.client import LinuxHostname
+from imbue.mngr_azure.client import SELF_DEALLOCATE_ROLE_ID
+from imbue.mngr_azure.client import SELF_DEALLOCATE_ROLE_NAME
 from imbue.mngr_azure.client import _computer_name
 from imbue.mngr_azure.client import _make_vm_name
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
+from imbue.mngr_azure.testing import FakeAuthorizationClient
 from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
@@ -33,6 +36,7 @@ def _make_client(
     compute: FakeComputeClient | None = None,
     network: FakeNetworkClient | None = None,
     resource: FakeResourceClient | None = None,
+    authorization: FakeAuthorizationClient | None = None,
     allowed_ssh_cidrs: tuple[str, ...] = ("203.0.113.4/32",),
     subnet_present: bool = True,
 ) -> _StubbedAzureVpsClient:
@@ -48,6 +52,7 @@ def _make_client(
         stubbed_compute_client=compute or FakeComputeClient(),
         stubbed_network_client=fake_network,
         stubbed_resource_client=resource or FakeResourceClient(),
+        stubbed_authorization_client=authorization or FakeAuthorizationClient(),
     )
 
 
@@ -471,8 +476,8 @@ def test_get_instance_ip_raises_when_not_assigned() -> None:
 def test_list_instances_filters_by_provider_tag() -> None:
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure"}),
-        SimpleNamespace(name="vm-b", tags={"mngr-provider": "other"}),
+        SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure"}, instance_view=None),
+        SimpleNamespace(name="vm-b", tags={"mngr-provider": "other"}, instance_view=None),
     ]
     network = FakeNetworkClient()
     network.public_ip_addresses.list_result = [SimpleNamespace(name="vm-a-ip", ip_address="203.0.113.7")]
@@ -494,9 +499,9 @@ def test_list_mngr_managed_vms_spans_provider_names() -> None:
     """Returns every managed-by=mngr VM across provider names, excluding untagged VMs."""
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure-west"}),
-        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr", "mngr-provider": "azure-east"}),
-        SimpleNamespace(name="vm-c", tags={"team": "infra"}),
+        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure-west"}, instance_view=None),
+        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr", "mngr-provider": "azure-east"}, instance_view=None),
+        SimpleNamespace(name="vm-c", tags={"team": "infra"}, instance_view=None),
     ]
     client = _make_client(compute=compute)
     managed = client.list_mngr_managed_vms()
@@ -543,3 +548,230 @@ def test_destroy_instance_idempotent_on_404() -> None:
     client = _make_client(compute=compute)
     # Should not raise.
     client.destroy_instance(VpsInstanceId("vm1"))
+
+
+# =========================================================================
+# deallocate_instance / start_instance (Azure-only idle-pause + resume)
+# =========================================================================
+
+
+def test_deallocate_instance_records_the_deallocate() -> None:
+    """deallocate_instance issues begin_deallocate (halting compute billing) and awaits it."""
+    compute = FakeComputeClient()
+    client = _make_client(compute=compute)
+    client.deallocate_instance(VpsInstanceId("vm1"))
+    assert compute.virtual_machines.deallocated == ["vm1"]
+
+
+def test_start_instance_returns_preserved_public_ip_and_records_start() -> None:
+    """start_instance issues begin_start, then returns the VM's preserved static public IP.
+
+    The IP is allocated Static, so it is unchanged across deallocate/start (this is
+    why AzureProvider.start_host needs no known_hosts rebind). The returned address
+    is whatever ``get_instance_ip`` reports for the started VM.
+    """
+    compute = FakeComputeClient()
+    network = FakeNetworkClient()
+    network.public_ip_addresses.get_result = SimpleNamespace(ip_address="203.0.113.7")
+    client = _make_client(compute=compute, network=network)
+    assert client.start_instance(VpsInstanceId("vm1")) == "203.0.113.7"
+    assert compute.virtual_machines.started == ["vm1"]
+
+
+def test_deallocate_instance_raises_when_the_operation_outlasts_the_timeout() -> None:
+    """A deallocate long-running operation still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.deallocate_completes = False
+    client = _make_client(compute=compute)
+    with pytest.raises(VpsProvisioningError, match="did not finish within"):
+        client.deallocate_instance(VpsInstanceId("vm1"), timeout_seconds=0.01)
+
+
+def test_start_instance_raises_when_the_operation_outlasts_the_timeout() -> None:
+    """A start long-running operation still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.start_completes = False
+    client = _make_client(compute=compute)
+    with pytest.raises(VpsProvisioningError, match="did not finish within"):
+        client.start_instance(VpsInstanceId("vm1"), timeout_seconds=0.01)
+
+
+# =========================================================================
+# add_tags / remove_tags (server-side tag Merge/Delete, offline-discovery mirror)
+# =========================================================================
+
+
+def _self_vm_scope(vm_name: str) -> str:
+    return f"/subscriptions/{_SUBSCRIPTION}/resourceGroups/mngr/providers/Microsoft.Compute/virtualMachines/{vm_name}"
+
+
+def test_add_tags_records_merge_patch_with_scope_and_tags() -> None:
+    """add_tags issues a server-side tag Merge scoped to the VM with the given tags."""
+    resource = FakeResourceClient()
+    client = _make_client(resource=resource)
+    client.add_tags(VpsInstanceId("vm1"), {"mngr-agent-x": "v"})
+    assert len(resource.tags.updates) == 1
+    scope, parameters = resource.tags.updates[0]
+    assert scope == _self_vm_scope("vm1")
+    assert parameters.operation == "Merge"
+    assert parameters.properties.tags == {"mngr-agent-x": "v"}
+
+
+def test_add_tags_empty_is_noop() -> None:
+    """No tags means no tag-update call at all."""
+    resource = FakeResourceClient()
+    client = _make_client(resource=resource)
+    client.add_tags(VpsInstanceId("vm1"), {})
+    assert resource.tags.updates == []
+
+
+def test_remove_tags_records_delete_patch_with_keys() -> None:
+    """remove_tags issues a server-side tag Delete naming the keys to drop (values ignored)."""
+    resource = FakeResourceClient()
+    client = _make_client(resource=resource)
+    client.remove_tags(VpsInstanceId("vm1"), ["mngr-agent-x", "mngr-agent-y"])
+    assert len(resource.tags.updates) == 1
+    scope, parameters = resource.tags.updates[0]
+    assert scope == _self_vm_scope("vm1")
+    assert parameters.operation == "Delete"
+    assert set(parameters.properties.tags) == {"mngr-agent-x", "mngr-agent-y"}
+
+
+def test_remove_tags_empty_is_noop() -> None:
+    """No keys means no tag-update call."""
+    resource = FakeResourceClient()
+    client = _make_client(resource=resource)
+    client.remove_tags(VpsInstanceId("vm1"), [])
+    assert resource.tags.updates == []
+
+
+# =========================================================================
+# list power-state population (deallocated VM surfaces state="deallocated")
+# =========================================================================
+
+
+def test_list_instances_does_not_request_instance_view_expand() -> None:
+    """The VM list must NOT pass expand=instanceView (Azure 400s it on a resource-group list).
+
+    Regression guard: ``expand=instanceView`` is only valid with a VM Scale Set
+    filter, so requesting it on the resource-group VM list breaks every Azure
+    operation (create/list/stop/start). The list therefore carries no power state
+    (``state`` is always empty); live power state is fetched per-VM via
+    ``get_instance_status``.
+    """
+    compute = FakeComputeClient()
+    compute.virtual_machines.list_result = [
+        SimpleNamespace(
+            name="vm-a",
+            tags={"mngr-provider": "azure"},
+            # Even if an instance view is present on the object, the list must not
+            # surface it as state (and must not have requested the expand).
+            instance_view=SimpleNamespace(statuses=[SimpleNamespace(code="PowerState/deallocated")]),
+        )
+    ]
+    client = _make_client(compute=compute)
+    instances = client.list_instances()
+    assert compute.virtual_machines.last_list_expand is None
+    assert len(instances) == 1
+    assert instances[0]["state"] == ""
+
+
+# =========================================================================
+# ensure_self_deallocate_role / assign_self_deallocate_role (graceful fallback)
+# =========================================================================
+
+
+def test_ensure_self_deallocate_role_creates_role_and_returns_id() -> None:
+    """ensure_self_deallocate_role records the custom role definition and returns its id."""
+    authorization = FakeAuthorizationClient()
+    client = _make_client(authorization=authorization)
+    role_id = client.ensure_self_deallocate_role()
+    assert role_id is not None
+    assert len(authorization.role_definitions.created) == 1
+    scope, role_definition_id, role_definition = authorization.role_definitions.created[0]
+    assert scope == f"/subscriptions/{_SUBSCRIPTION}"
+    assert role_definition_id == SELF_DEALLOCATE_ROLE_ID
+    assert role_definition.role_name == SELF_DEALLOCATE_ROLE_NAME
+    assert "Microsoft.Compute/virtualMachines/deallocate/action" in role_definition.permissions[0].actions
+
+
+def test_ensure_self_deallocate_role_returns_none_on_403(log_warnings: list[str]) -> None:
+    """A 403 (operator lacks roleDefinitions/write) degrades to None with nothing recorded."""
+    authorization = FakeAuthorizationClient()
+    authorization.role_definitions.create_error = make_azure_http_error(403, "AuthorizationFailed")
+    client = _make_client(authorization=authorization)
+    assert client.ensure_self_deallocate_role() is None
+    assert authorization.role_definitions.created == []
+    assert any("custom role" in w for w in log_warnings), log_warnings
+
+
+def _vm_with_principal(principal_id: str | None) -> SimpleNamespace:
+    identity = SimpleNamespace(principal_id=principal_id) if principal_id is not None else None
+    return SimpleNamespace(identity=identity)
+
+
+def test_assign_self_deallocate_role_creates_assignment_scoped_to_vm() -> None:
+    """A successful assignment is scoped to the VM and carries the VM's identity principal id."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.get_result = _vm_with_principal("principal-123")
+    authorization = FakeAuthorizationClient()
+    client = _make_client(compute=compute, authorization=authorization)
+    assert client.assign_self_deallocate_role("vm1") is True
+    assert len(authorization.role_assignments.created) == 1
+    scope, _name, parameters = authorization.role_assignments.created[0]
+    assert scope == _self_vm_scope("vm1")
+    assert parameters.principal_id == "principal-123"
+    assert SELF_DEALLOCATE_ROLE_ID in parameters.role_definition_id
+
+
+def test_assign_self_deallocate_role_false_when_no_principal(log_warnings: list[str]) -> None:
+    """A VM with no system-assigned identity principal cannot be assigned the role -> False."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.get_result = _vm_with_principal(None)
+    authorization = FakeAuthorizationClient()
+    client = _make_client(compute=compute, authorization=authorization)
+    assert client.assign_self_deallocate_role("vm1") is False
+    assert authorization.role_assignments.created == []
+    assert any("no system-assigned identity principal" in w for w in log_warnings), log_warnings
+
+
+def test_assign_self_deallocate_role_false_on_403(log_warnings: list[str]) -> None:
+    """A 403 (operator lacks roleAssignments/write) degrades to False with a warning."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.get_result = _vm_with_principal("principal-123")
+    authorization = FakeAuthorizationClient()
+    authorization.role_assignments.create_error = make_azure_http_error(403, "AuthorizationFailed")
+    client = _make_client(compute=compute, authorization=authorization)
+    assert client.assign_self_deallocate_role("vm1") is False
+    assert any("Could not assign the self-deallocate role" in w for w in log_warnings), log_warnings
+
+
+def test_assign_self_deallocate_role_true_when_assignment_already_exists() -> None:
+    """A 409 RoleAssignmentExists is treated as success (idempotent re-assign) -> True."""
+    compute = FakeComputeClient()
+    compute.virtual_machines.get_result = _vm_with_principal("principal-123")
+    authorization = FakeAuthorizationClient()
+    authorization.role_assignments.create_error = make_azure_http_error(409, "RoleAssignmentExists")
+    client = _make_client(compute=compute, authorization=authorization)
+    assert client.assign_self_deallocate_role("vm1") is True
+
+
+# =========================================================================
+# _is_authorization_error / _is_role_assignment_exists (error classifiers)
+# =========================================================================
+
+
+def test_is_authorization_error_classifies_403_and_message() -> None:
+    client = _make_client()
+    assert client._is_authorization_error(VpsApiError(403, "denied")) is True
+    assert client._is_authorization_error(VpsApiError(400, "AuthorizationFailed for scope")) is True
+    assert client._is_authorization_error(VpsApiError(404, "not found")) is False
+
+
+def test_is_role_assignment_exists_classifies_409_and_message() -> None:
+    client = _make_client()
+    assert client._is_role_assignment_exists(VpsApiError(409, "conflict")) is True
+    assert client._is_role_assignment_exists(VpsApiError(400, "RoleAssignmentExists")) is True
+    # Whitespace-insensitive match (the message can be spaced "Role Assignment Exists").
+    assert client._is_role_assignment_exists(VpsApiError(400, "Role Assignment Exists")) is True
+    assert client._is_role_assignment_exists(VpsApiError(400, "some other error")) is False
