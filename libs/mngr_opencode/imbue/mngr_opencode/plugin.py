@@ -78,11 +78,13 @@ from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -233,6 +235,8 @@ class OpenCodeAgentConfig(AgentTypeConfig):
 
 class OpenCodeAgent(
     BaseAgent[OpenCodeAgentConfig],
+    InteractiveAgentMixin,
+    CliBackedAgentMixin,
     HasCommonTranscriptMixin,
     HasSessionPreservationMixin,
     HasUnattendedModeMixin,
@@ -458,7 +462,7 @@ class OpenCodeAgent(
         per_agent_config = build_opencode_config(
             base_config,
             self.agent_config.config_overrides,
-            self.agent_config.auto_allow_permissions,
+            self.is_unattended_enabled(),
         )
         config_path = get_opencode_config_file_path(self._get_opencode_config_dir())
         with log_span("Writing per-agent opencode config to {}", config_path):

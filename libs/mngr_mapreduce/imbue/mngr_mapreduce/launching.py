@@ -17,6 +17,8 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.rsync import rsync_to_remote
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.agent import require_interactive_agent
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -323,7 +325,7 @@ def stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name:
     try:
         host.stop_agents([agent_id])
         logger.info("Stopped agent '{}'", agent_name)
-    except MngrError as exc:
+    except (MngrError, CleanupFailedGroup) as exc:
         logger.warning("Failed to stop agent '{}': {}", agent_name, exc)
 
 
@@ -575,7 +577,7 @@ def launch_reducer_agent(
         cg=mngr_ctx.concurrency_group,
     )
     logger.info("Sending reducer prompt to '{}'", agent_name)
-    create_result.agent.send_message(prompt)
+    require_interactive_agent(create_result.agent).send_message(prompt)
 
     return (
         ReducerInfo(

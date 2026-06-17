@@ -221,3 +221,15 @@ def test_long_tool_output_is_truncated(tmp_path: Path) -> None:
 
 def test_missing_input_file_returns_zero(tmp_path: Path) -> None:
     assert common_transcript_convert.convert(str(tmp_path / "missing.jsonl"), str(tmp_path / "out.jsonl")) == 0
+
+
+def test_non_utf8_byte_in_input_does_not_abort(tmp_path: Path) -> None:
+    in_f, out_f = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    # Raw transcript streams can carry arbitrary bytes; a single undecodable byte
+    # must not abort the (append-only) conversion pass.
+    valid_line = json.dumps(
+        _event(conv_id="c1", step_index=0, source="USER_EXPLICIT", type_="USER_INPUT", content="real")
+    ).encode()
+    in_f.write_bytes(b"\xff\xfe garbage byte line\n" + valid_line + b"\n")
+    assert common_transcript_convert.convert(str(in_f), str(out_f)) == 1
+    assert _events(out_f)[0]["content"] == "real"

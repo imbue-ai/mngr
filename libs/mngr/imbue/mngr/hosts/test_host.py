@@ -838,7 +838,7 @@ def test_unset_vars_applied_during_agent_start(
 
 def _collect_pane_pids(host: Host, session_name: str) -> list[str]:
     """Collect all pane PIDs and their descendant PIDs for a tmux session (across all windows)."""
-    return host._collect_session_pids(session_name)
+    return host._collect_session_pids(session_name, [], None)
 
 
 @pytest.mark.flaky
@@ -1176,7 +1176,7 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
             # Sanity-check: orphan is NOT a descendant of any pane PID. This is what makes
             # it invisible to the old pane-descendant walk and is precisely the case the
             # env-scan fix addresses.
-            pane_descendant_pids = host._collect_session_pids(session_name)
+            pane_descendant_pids = host._collect_session_pids(session_name, [], None)
             assert orphan_pid not in pane_descendant_pids, (
                 f"Test setup invalid: orphan {orphan_pid} is in pane descendants "
                 f"{pane_descendant_pids}; reparenting did not occur"

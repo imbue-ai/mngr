@@ -5,3 +5,7 @@ Also declares the `HasUnattendedModeMixin` capability (`is_unattended_enabled` r
 Also declares `HasPermissionPolicyMixin` (per-resource permission policy via the settings `permissions` block).
 
 Also declares `HasAutoInstallMixin`: provisioning now checks whether the `agy` CLI is installed and installs it (`curl -fsSL https://antigravity.google/cli/install.sh | bash`) if missing, gated by consent on local hosts and the remote-install config flag on remote hosts. A new `check_installation` config field (default `True`) disables the check when set to `False`.
+
+The auto-allow permission apply-path (the `--dangerously-skip-permissions` flag) now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
+
+`AntigravityAgent` now also declares `CliBackedAgentMixin`, marking it as wrapping a specific external CLI so the CLI-only capability-matrix rows scope to it positively (rather than by the absence of a command-runner marker). Behavior is unchanged.

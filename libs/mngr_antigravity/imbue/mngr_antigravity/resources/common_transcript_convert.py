@@ -79,7 +79,7 @@ def _load_existing_ids(output_file: str) -> set[str]:
     ids: set[str] = set()
     if not os.path.isfile(output_file):
         return ids
-    with open(output_file) as f:
+    with open(output_file, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -102,7 +102,7 @@ def convert(input_file: str, output_file: str) -> int:
     # CODE_ACTION events can be paired with their originating tool call.
     last_tool_call_by_conv: dict[str, dict[str, Any]] = {}
 
-    with open(input_file) as f:
+    with open(input_file, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -247,7 +247,7 @@ def convert(input_file: str, output_file: str) -> int:
 
     new_events.sort(key=lambda x: x[0])
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "a") as f:
+    with open(output_file, "a", encoding="utf-8") as f:
         for _, event in new_events:
             f.write(json.dumps(event, separators=(",", ":")) + "\n")
 

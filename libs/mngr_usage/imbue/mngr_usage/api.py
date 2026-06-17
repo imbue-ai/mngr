@@ -882,7 +882,7 @@ def _walk_agent_events_session_incremental(events: list[UsageEvent], source_name
             )
             if resolved_cost.total_cost_usd is not None:
                 total_cost_usd = (total_cost_usd or 0.0) + resolved_cost.total_cost_usd
-            if tokens is not None and provenance == CostProvenance.ESTIMATED:
+            if provenance == CostProvenance.ESTIMATED:
                 is_any_estimated = True
             summed_tokens = _sum_token_snapshots(summed_tokens, tokens)
 

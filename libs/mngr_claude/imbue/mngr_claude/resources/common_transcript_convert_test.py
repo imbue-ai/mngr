@@ -161,6 +161,16 @@ def test_corrupt_existing_output_line_is_skipped(tmp_path: Path) -> None:
     assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
 
 
+def test_non_utf8_byte_in_input_does_not_abort(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    # Raw transcript streams can carry arbitrary bytes (e.g. tool output). A single
+    # undecodable byte must not abort the (append-only) conversion pass.
+    valid_line = json.dumps(_user_text("u1", "real message")).encode()
+    input_file.write_bytes(b"\xff\xfe garbage byte line\n" + valid_line + b"\n")
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
+    assert [e.get("content") for e in _events(output_file)] == ["real message"]
+
+
 def test_null_message_line_is_dropped(tmp_path: Path) -> None:
     input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     # A null (rather than dict) message carries no usable content, so the line is

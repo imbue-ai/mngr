@@ -37,7 +37,13 @@ def _meta_value(obj: dict[str, Any], payload: JsonValue, key: str) -> JsonValue:
 
 
 def _tokens_from_total_usage(total_usage: JsonValue) -> dict[str, Any] | None:
-    """Map codex cumulative usage to the wire token buckets (input is cache-exclusive)."""
+    """Map codex cumulative usage to the wire token buckets (input is cache-exclusive).
+
+    Returns None for a non-dict input and also for a dict with no usable buckets
+    (e.g. ``{}``), so the caller's "tokens is None and rate_limits is None" guard
+    drops content-free token blocks rather than emitting an all-None snapshot that
+    the reader would price as a spurious $0.00 estimated session.
+    """
     if not isinstance(total_usage, dict):
         return None
     input_tokens = total_usage.get("input_tokens")
@@ -47,13 +53,16 @@ def _tokens_from_total_usage(total_usage: JsonValue) -> dict[str, Any] | None:
         non_cached_input = input_tokens - cached
     else:
         non_cached_input = input_tokens
-    return {
+    buckets = {
         "input": non_cached_input,
         "output": output_tokens,
         "cache_read": cached,
         # OpenAI caching is automatic (read discount only); no cache-write bucket.
         "cache_creation": None,
     }
+    if all(value is None for value in buckets.values()):
+        return None
+    return buckets
 
 
 def _window(entry: JsonValue) -> dict[str, Any] | None:

@@ -29,6 +29,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
@@ -1686,7 +1687,7 @@ def test_provision_raises_when_remote_installation_disabled(
 
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=non_local_host, options=options, mngr_ctx=ctx)
-        assert isinstance(exc_info.value.main_exception, PluginMngrError)
+        assert isinstance(exc_info.value.main_exception, AgentInstallationError)
         assert "automatic remote installation is disabled" in str(exc_info.value.main_exception)
 
 
@@ -3408,7 +3409,7 @@ def test_provision_raises_on_version_mismatch(
 
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=host_with_wrong_version, options=options, mngr_ctx=ctx)
-        assert isinstance(exc_info.value.main_exception, PluginMngrError)
+        assert isinstance(exc_info.value.main_exception, AgentInstallationError)
         assert "Claude version mismatch" in str(exc_info.value.main_exception)
 
 
@@ -3491,14 +3492,38 @@ def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
     assert attended.is_unattended_enabled() is False
 
 
-def test_get_version_policy_auto_updates_when_unpinned() -> None:
+def _version_stub_host(version_output: str) -> OnlineHostInterface:
+    """A host whose `claude --version` returns ``version_output`` (for reconcile tests)."""
+    return cast(
+        OnlineHostInterface,
+        SimpleNamespace(
+            execute_idempotent_command=lambda *args, **kwargs: SimpleNamespace(
+                success=True, stdout=version_output, stderr=""
+            )
+        ),
+    )
+
+
+def test_reconcile_installed_version_unpinned_is_noop() -> None:
+    # Unpinned: claude follows its own auto-update, so there is nothing to enforce and
+    # reconcile returns without touching the host.
     agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
-    assert agent.get_version_policy() == "auto-update"
+    agent.reconcile_installed_version(
+        cast(OnlineHostInterface, SimpleNamespace()), cast(MngrContext, SimpleNamespace())
+    )
 
 
-def test_get_version_policy_returns_pinned_version() -> None:
+def test_reconcile_installed_version_pinned_match_is_noop() -> None:
     agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
-    assert agent.get_version_policy() == "2.1.50"
+    agent.reconcile_installed_version(_version_stub_host("2.1.50 (Claude Code)"), cast(MngrContext, SimpleNamespace()))
+
+
+def test_reconcile_installed_version_raises_on_mismatch() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    with pytest.raises(AgentInstallationError, match="version mismatch"):
+        agent.reconcile_installed_version(
+            _version_stub_host("9.9.9 (Claude Code)"), cast(MngrContext, SimpleNamespace())
+        )
 
 
 # =============================================================================
@@ -3563,7 +3588,7 @@ def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrConte
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    with pytest.raises(UserInputError, match="--adopt-session can only be used with a Claude agent type"):
+    with pytest.raises(UserInputError, match="--adopt-session can only be used with an interactive Claude agent type"):
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 

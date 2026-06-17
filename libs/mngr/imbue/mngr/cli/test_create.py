@@ -102,6 +102,8 @@ def test_cli_create_via_subprocess(
         )
 
 
+# Shells out to `uv run mngr create`, whose cold startup occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_cli_create_rejects_dirty_tree_by_default(
     temp_git_repo: Path,
     temp_host_dir: Path,
