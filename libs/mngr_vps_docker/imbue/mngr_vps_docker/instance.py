@@ -3198,7 +3198,7 @@ class TagMirrorVpsDockerProvider(OfflineCapableVpsDockerProvider):
         try:
             return VpsDockerProvider.to_offline_host(self, host_id)
         except HostNotFoundError:
-            record = self._state_store.read_host_record_with_tag_fallback(host_id)
+            record = self._state_store.read_host_record(host_id)
             if record is None:
                 raise
             return self._create_offline_host(record)

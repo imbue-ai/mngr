@@ -133,9 +133,9 @@ def test_to_offline_host_falls_back_to_tags_when_bucket_record_absent(
 ) -> None:
     """Bucket mode but no host_state.json yet: to_offline_host reconstructs from the instance's own tags.
 
-    Covers ``read_host_record_with_tag_fallback`` -- a bucket-mode host created
-    before the bucket existed has no ``host_state.json``, so the offline
-    reconstruction must fall back to the EC2 tag mirror rather than 404.
+    Covers the bucket store's tag fallback -- a bucket-mode host created before
+    the bucket existed has no ``host_state.json``, so the offline reconstruction
+    must fall back to the EC2 tag mirror rather than 404.
     """
     provider, stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()

@@ -55,18 +55,12 @@ class HostStateStore(MutableModel, ABC):
 
     @abstractmethod
     def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Reconstruct the host record from the mirror, or None when the host is unknown to the store."""
+        """Reconstruct the host record from the mirror, or None when the host is unknown to the store.
 
-    def read_host_record_with_tag_fallback(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Read the host record, falling back to the instance's own tags when the primary mirror lacks it.
-
-        Default (tag store): identical to ``read_host_record`` -- it already reads
-        the instance's tags. The bucket store overrides this to try its
-        ``host_state.json`` first and then the tag fallback, so a bucket-mode host
-        created before the bucket existed (no ``host_state.json`` yet) is still
-        reconstructed from its tags.
+        The tag store reads the instance's own tags. The bucket store reads its
+        ``host_state.json``, falling back to the tag store when absent (so a
+        bucket-mode host created before the bucket existed is still reconstructed).
         """
-        return self.read_host_record(host_id)
 
 
 class HostDirBackend(MutableModel, ABC):
@@ -204,17 +198,13 @@ class BucketHostStateStore(HostStateStore):
             record_json = self.bucket.read_host_record_json(host_id)
         except self.bucket_error_type as e:
             logger.warning("Failed to read host record for {} from {}: {}", host_id, self.bucket_label, e)
-            return None
+            record_json = None
         if record_json is None:
-            return None
+            # No host_state.json (e.g. a host created before the bucket existed): fall
+            # back to the tag store so it is still reconstructed from its instance tags.
+            return self.fallback.read_host_record(host_id) if self.fallback is not None else None
         try:
             return VpsDockerHostRecord.model_validate_json(record_json)
         except ValueError as e:
             logger.warning("Malformed host record for {} in {}: {}", host_id, self.bucket_label, e)
             return None
-
-    def read_host_record_with_tag_fallback(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        record = self.read_host_record(host_id)
-        if record is None and self.fallback is not None:
-            return self.fallback.read_host_record(host_id)
-        return record
