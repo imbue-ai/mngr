@@ -120,6 +120,34 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(temp_mngr
     assert offline.certified_host_data.host_name == "recovered-host"
 
 
+def test_to_offline_host_falls_back_to_tags_when_bucket_record_absent(temp_mngr_ctx: MngrContext) -> None:
+    """Bucket mode but no host_state.json yet: to_offline_host reconstructs from the VM's own tags.
+
+    Covers ``read_host_record_with_tag_fallback`` -- a bucket-mode host created
+    before the bucket existed has no ``host_state.json``, so the offline
+    reconstruction must fall back to the VM tag mirror rather than 404.
+    """
+    provider, compute = _build_bucket_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    # Nothing is written to the bucket for this host, so the bucket read misses
+    # and the tag fallback (reconstruction from the VM's own tags) runs.
+    compute.virtual_machines.list_result = [
+        SimpleNamespace(
+            name="vm-1",
+            tags={
+                "mngr-provider": "azure-test",
+                "mngr-host-id": str(host_id),
+                "mngr-host-name": "mngr-myhost",
+                "mngr-created-at": "2026-01-01T00:00:00+00:00",
+            },
+            instance_view=None,
+        )
+    ]
+    offline = provider.to_offline_host(host_id)
+    assert offline.id == host_id
+    assert str(offline.get_certified_data().host_name) == "myhost"
+
+
 def test_bucket_mode_remove_agent_clears_bucket_record(temp_mngr_ctx: MngrContext) -> None:
     provider, _compute = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
