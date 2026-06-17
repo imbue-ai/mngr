@@ -11,15 +11,24 @@ from datetime import timezone
 from typing import Any
 from typing import Final
 from typing import Self
+from uuid import NAMESPACE_URL
 from uuid import uuid4
+from uuid import uuid5
 
 from azure.core.exceptions import HttpResponseError
+from azure.core.polling import LROPoller
+from azure.mgmt.authorization import AuthorizationManagementClient
+from azure.mgmt.authorization.v2022_04_01.models import Permission
+from azure.mgmt.authorization.v2022_04_01.models import RoleAssignmentCreateParameters
+from azure.mgmt.authorization.v2022_04_01.models import RoleDefinition
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.compute import models as compute_models
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.network import models as network_models
 from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.resource.resources.models import ResourceGroup
+from azure.mgmt.resource.resources.models import Tags
+from azure.mgmt.resource.resources.models import TagsPatchResource
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -49,6 +58,20 @@ from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 # tag (not the VM name) to find leaked VMs, which means tests do not have to
 # constrain host naming: any agent name works.
 AZURE_PYTEST_LAUNCHED_TAG: Final[str] = "mngr-pytest-launched"
+
+# Tag holding the human host name (``mngr-<host_name>``) so a deallocated VM still
+# resolves by name in offline discovery (the read side strips the ``mngr-`` prefix).
+HOST_NAME_TAG_KEY: Final[str] = "mngr-host-name"
+
+# Least-privilege custom role that lets a VM's system-assigned managed identity
+# deallocate ITSELF (idle self-stop) -- the only way to halt Azure compute billing
+# from inside the guest, since an OS shutdown leaves the VM "Stopped (not
+# deallocated)" still billing. ``mngr azure prepare`` creates the role
+# definition; ``create``-time assigns it to each VM's identity scoped to that VM.
+# The role-definition name must be a GUID, so derive a deterministic one from the
+# role name (uuid5) to keep re-runs idempotent.
+SELF_DEALLOCATE_ROLE_NAME: Final[str] = "mngr-self-deallocate"
+SELF_DEALLOCATE_ROLE_ID: Final[str] = str(uuid5(NAMESPACE_URL, "mngr-self-deallocate-role"))
 
 # Resource providers a brand-new subscription must have registered before any
 # compute/network deploy. New pay-as-you-go subscriptions often start with these
@@ -249,6 +272,7 @@ class AzureVpsClient(VpsClientInterface):
     _cached_compute_client: Any = PrivateAttr(default=None)
     _cached_network_client: Any = PrivateAttr(default=None)
     _cached_resource_client: Any = PrivateAttr(default=None)
+    _cached_authorization_client: Any = PrivateAttr(default=None)
 
     # =========================================================================
     # Management clients
@@ -272,6 +296,11 @@ class AzureVpsClient(VpsClientInterface):
         if self._cached_resource_client is None:
             self._cached_resource_client = ResourceManagementClient(self.credential, self.subscription_id)
         return self._cached_resource_client
+
+    def _authorization(self) -> Any:
+        if self._cached_authorization_client is None:
+            self._cached_authorization_client = AuthorizationManagementClient(self.credential, self.subscription_id)
+        return self._cached_authorization_client
 
     @contextmanager
     def _translate_azure_errors(self) -> Iterator[None]:
@@ -515,6 +544,9 @@ class AzureVpsClient(VpsClientInterface):
 
         vm_tags: dict[str, str] = {**self._base_tags(), **dict(tags)}
         vm_tags["mngr-created-at"] = datetime.now(timezone.utc).isoformat()
+        # Host name as a tag so a deallocated VM still resolves by name in offline
+        # discovery (``label`` is ``mngr-<host_name>``; the read side strips it).
+        vm_tags[HOST_NAME_TAG_KEY] = label
         # Mark VMs launched during pytest so the conftest session-end orphan
         # scanner can identify and force-delete any leaks without having to
         # constrain the agent / host name shape.
@@ -672,7 +704,16 @@ class AzureVpsClient(VpsClientInterface):
             properties.priority = "Spot"
             properties.eviction_policy = "Delete"
             properties.billing_profile = compute_models.BillingProfile(max_price=-1.0)
-        return compute_models.VirtualMachine(location=self.region, tags=dict(vm_tags), properties=properties)
+        return compute_models.VirtualMachine(
+            location=self.region,
+            tags=dict(vm_tags),
+            properties=properties,
+            # System-assigned managed identity: the in-VM idle watcher uses its IMDS
+            # token to deallocate this VM itself (see AzureProvider's idle watcher).
+            # A per-VM role assignment (assign_self_deallocate_role) grants it the
+            # least-privilege deallocate action scoped to just this VM.
+            identity=compute_models.VirtualMachineIdentity(type="SystemAssigned"),
+        )
 
     def _public_ip_name(self, vm_name: str) -> str:
         return f"{vm_name}-ip"
@@ -811,6 +852,202 @@ class AzureVpsClient(VpsClientInterface):
             return
         logger.info("Deleted Azure VM {} (NIC, public IP and OS disk cascade via delete_option)", instance_id)
 
+    def _await_long_running_operation(self, poller: LROPoller[None], timeout_seconds: float, description: str) -> None:
+        """Block on an Azure long-running operation up to ``timeout_seconds``.
+
+        ``LROPoller.wait(timeout)`` re-raises the operation's own error (translated
+        to ``VpsApiError`` by the surrounding ``_translate_azure_errors``) but does
+        NOT raise when the timeout merely elapses -- it returns with the poll still
+        in flight. So we check ``done()`` afterward and surface a clear
+        ``VpsProvisioningError``, matching the AWS/GCP clients' wait contract (the
+        operation itself keeps running server-side).
+        """
+        poller.wait(timeout_seconds)
+        if not poller.done():
+            raise VpsProvisioningError(f"Azure operation did not finish within {timeout_seconds}s: {description}")
+
+    def deallocate_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> None:
+        """Deallocate (not delete) an Azure VM, halting compute billing; the OS disk persists.
+
+        Critically distinct from an OS-level shutdown, which only powers the VM
+        off ("Stopped (not deallocated)") and STILL bills compute -- only a
+        ``deallocate`` halts compute billing. The OS disk (and all on-disk state)
+        survives, so ``start_instance`` resumes it. The ``begin_deallocate``
+        long-running operation is bounded by ``timeout_seconds`` (re-raised as ``VpsProvisioningError`` on
+        exceedance, matching the AWS/GCP clients' wait contract). Idempotent.
+
+        Widens ``AzureVpsClient`` beyond the shared ``VpsClientInterface`` (which
+        has no stop/start); ``AzureProvider`` reaches it via ``self.azure_client``.
+        """
+        with self._translate_azure_errors():
+            poller = self._compute().virtual_machines.begin_deallocate(self.resource_group, str(instance_id))
+            self._await_long_running_operation(poller, timeout_seconds, f"deallocate VM {instance_id}")
+        logger.info("Deallocated Azure VM {} (compute billing halted; OS disk preserved)", instance_id)
+
+    def start_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
+        """Start a deallocated Azure VM and return its public IP.
+
+        The public IP is allocated ``Static`` (see ``_create_public_ip_and_nic``),
+        so it is PRESERVED across deallocate/start -- the returned IP equals the
+        pre-stop address. (This is why ``AzureProvider.start_host`` needs no
+        known_hosts rebind, unlike AWS/GCP whose ephemeral IPs change.) The
+        ``begin_start`` long-running operation is bounded by ``timeout_seconds`` (re-raised as
+        ``VpsProvisioningError`` on exceedance). Idempotent.
+
+        Azure-only, like ``deallocate_instance`` -- reached via ``self.azure_client``.
+        """
+        with self._translate_azure_errors():
+            poller = self._compute().virtual_machines.begin_start(self.resource_group, str(instance_id))
+            self._await_long_running_operation(poller, timeout_seconds, f"start VM {instance_id}")
+        logger.info("Started Azure VM {}", instance_id)
+        return self.get_instance_ip(instance_id)
+
+    def _vm_resource_id(self, vm_name: str) -> str:
+        """Full ARM resource id of a VM in this client's subscription + resource group."""
+        return (
+            f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
+            f"/providers/Microsoft.Compute/virtualMachines/{vm_name}"
+        )
+
+    def add_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
+        """Merge ``tags`` onto a VM via a server-side tag Merge (no read-modify-write race).
+
+        Used to mirror offline-discoverable metadata (per-agent records) onto the
+        VM so a deallocated VM -- SSH-unreachable -- still surfaces in ``mngr list``
+        and resumes by name. No-op when ``tags`` is empty. AWS does the equivalent
+        with EC2 ``CreateTags``; Azure tags accept large permissive values, like
+        EC2's.
+        """
+        if not tags:
+            return
+        with self._translate_azure_errors():
+            self._resource().tags.begin_update_at_scope(
+                self._vm_resource_id(str(instance_id)),
+                TagsPatchResource(operation="Merge", properties=Tags(tags=dict(tags))),
+            ).result()
+
+    def remove_tags(self, instance_id: VpsInstanceId, keys: Sequence[str]) -> None:
+        """Delete tags (by key) from a VM via a server-side tag Delete. No-op when ``keys`` is empty.
+
+        The Delete operation removes the listed keys regardless of value (the
+        values in the patch are ignored), so this drops a persisted-agent tag when
+        its agent is destroyed.
+        """
+        if not keys:
+            return
+        with self._translate_azure_errors():
+            self._resource().tags.begin_update_at_scope(
+                self._vm_resource_id(str(instance_id)),
+                TagsPatchResource(operation="Delete", properties=Tags(tags={key: "" for key in keys})),
+            ).result()
+
+    def ensure_self_deallocate_role(self) -> str | None:
+        """Create the least-privilege custom role that lets a VM deallocate itself. Best-effort.
+
+        Idempotent (deterministic role-definition GUID). Returns the role
+        definition's resource id, or ``None`` when the operator lacks
+        ``Microsoft.Authorization/roleDefinitions/write`` (Owner / User Access
+        Administrator): in that case idle self-deallocate is disabled and only
+        ``mngr stop``/``start`` will halt billing (an in-VM OS ``shutdown`` does not,
+        on Azure). The missing privilege is logged at WARNING and swallowed rather
+        than failing ``mngr azure prepare``. See specs/gcp-azure-stop-start-lifecycle.
+        """
+        subscription_scope = f"/subscriptions/{self.subscription_id}"
+        role_definition = RoleDefinition(
+            role_name=SELF_DEALLOCATE_ROLE_NAME,
+            description="Lets a mngr-managed VM's identity deallocate itself (idle self-stop).",
+            role_type="CustomRole",
+            permissions=[
+                Permission(
+                    actions=[
+                        "Microsoft.Compute/virtualMachines/deallocate/action",
+                        "Microsoft.Compute/virtualMachines/read",
+                    ]
+                )
+            ],
+            assignable_scopes=[subscription_scope],
+        )
+        try:
+            with self._translate_azure_errors():
+                created = self._authorization().role_definitions.create_or_update(
+                    scope=subscription_scope,
+                    role_definition_id=SELF_DEALLOCATE_ROLE_ID,
+                    role_definition=role_definition,
+                )
+        except VpsApiError as e:
+            if self._is_authorization_error(e):
+                logger.warning(
+                    "Could not create the {!r} custom role (needs Microsoft.Authorization/roleDefinitions/write -- "
+                    "Owner or User Access Administrator). Idle self-deallocate is disabled; only `mngr stop`/`start` "
+                    "will halt billing (an in-VM OS shutdown does not, on Azure). ({})",
+                    SELF_DEALLOCATE_ROLE_NAME,
+                    e,
+                )
+                return None
+            raise
+        logger.info("Ensured custom role {!r} in subscription {}", SELF_DEALLOCATE_ROLE_NAME, self.subscription_id)
+        return created.id
+
+    def assign_self_deallocate_role(self, vm_name: str) -> bool:
+        """Assign the self-deallocate role to a VM's identity, scoped to that VM. Best-effort.
+
+        Returns True on success (or when the assignment already exists). Returns
+        False -- after a single clear WARNING -- when the VM has no system-assigned
+        identity principal yet, or when the operator lacks
+        ``Microsoft.Authorization/roleAssignments/write``: idle self-deallocate is
+        then disabled for this host but manual ``mngr stop``/``start`` still works.
+        """
+        with self._translate_azure_errors():
+            vm = self._compute().virtual_machines.get(self.resource_group, vm_name)
+        identity = vm.identity
+        principal_id = identity.principal_id if identity is not None else None
+        if not principal_id:
+            logger.warning(
+                "Azure VM {} has no system-assigned identity principal; skipping self-deallocate role assignment "
+                "(idle self-deallocate disabled for this host)",
+                vm_name,
+            )
+            return False
+        role_definition_id = (
+            f"/subscriptions/{self.subscription_id}/providers/Microsoft.Authorization/"
+            f"roleDefinitions/{SELF_DEALLOCATE_ROLE_ID}"
+        )
+        parameters = RoleAssignmentCreateParameters(
+            role_definition_id=role_definition_id,
+            principal_id=principal_id,
+            principal_type="ServicePrincipal",
+        )
+        try:
+            with self._translate_azure_errors():
+                self._authorization().role_assignments.create(
+                    scope=self._vm_resource_id(vm_name),
+                    role_assignment_name=str(uuid4()),
+                    parameters=parameters,
+                )
+        except VpsApiError as e:
+            if self._is_role_assignment_exists(e):
+                return True
+            if self._is_authorization_error(e):
+                logger.warning(
+                    "Could not assign the self-deallocate role to VM {} (needs "
+                    "Microsoft.Authorization/roleAssignments/write). Idle self-deallocate disabled for this host; "
+                    "manual `mngr stop`/`start` still works. ({})",
+                    vm_name,
+                    e,
+                )
+                return False
+            raise
+        logger.info("Assigned self-deallocate role to VM {} managed identity", vm_name)
+        return True
+
+    def _is_authorization_error(self, error: VpsApiError) -> bool:
+        """True when an Azure error is a permission denial (so callers can degrade gracefully)."""
+        return error.status_code == 403 or "authorization" in str(error).lower()
+
+    def _is_role_assignment_exists(self, error: VpsApiError) -> bool:
+        """True when a role-assignment create failed only because the assignment already exists."""
+        return error.status_code == 409 or "roleassignmentexists" in str(error).lower().replace(" ", "")
+
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
         try:
             with self._translate_azure_errors():
@@ -835,6 +1072,11 @@ class AzureVpsClient(VpsClientInterface):
         return public_ip.ip_address
 
     def _normalize_vm(self, vm: Any, ip_by_name: Mapping[str, str]) -> dict[str, Any]:
+        # ``state`` is left empty: Azure's resource-group VM list cannot return
+        # power state (``expand=instanceView`` is rejected unless a VM Scale Set
+        # filter is applied), so callers that need the live power state of a
+        # specific VM fetch it on demand via ``get_instance_status`` (a per-VM
+        # ``instance_view`` call). See ``AzureProvider.discover_hosts_and_agents``.
         tags = dict(vm.tags or {})
         return {
             "id": vm.name,
@@ -847,9 +1089,13 @@ class AzureVpsClient(VpsClientInterface):
         """List all VMs in the resource group, normalized with their public IPs.
 
         Resolves each VM's public IP from a single ``public_ip_addresses.list``
-        call (Azure's VM list does not include IPs). Returns ``[]`` when the
-        resource group does not exist yet (pre-prepare), so discovery does not
-        error on an unconfigured subscription.
+        call (Azure's VM list does not include IPs). Power state is NOT requested
+        here: Azure rejects ``expand=instanceView`` on a resource-group VM list
+        (it is only valid with a VM Scale Set filter), so the normalized ``state``
+        is empty and live power state is fetched per-VM on demand via
+        ``get_instance_status``. Returns ``[]`` when the resource group does not
+        exist yet (pre-prepare), so discovery does not error on an unconfigured
+        subscription.
         """
         try:
             with self._translate_azure_errors():
