@@ -889,6 +889,8 @@ def _splice_config_table(readme_text: str, table_md: str, readme: str) -> str:
         raise ValueError(
             f"{readme} is missing the generated-config-table markers ({CONFIG_TABLE_BEGIN} ... {CONFIG_TABLE_END})"
         )
+    if end < begin:
+        raise ValueError(f"{readme} has the config-table markers in the wrong order (END before BEGIN)")
     before = readme_text[: begin + len(CONFIG_TABLE_BEGIN)]
     after = readme_text[end:]
     return f"{before}\n{table_md}\n{after}"
