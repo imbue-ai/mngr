@@ -123,6 +123,7 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_state_store import HostDirBackend
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
+from imbue.mngr_vps_docker.host_state_store import NullHostDirBackend
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -2616,14 +2617,47 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         self._sync_host_dir_before_pause(host_id, host_record.vps_ip)
         self._pause_cloud_instance(host_record.config.vps_instance_id)
 
+    @property
+    def _host_dir_backend(self) -> HostDirBackend:
+        """The offline ``host_dir`` capability: bucket-backed when enabled + present, else a no-op.
+
+        Offline ``host_dir`` is a bucket feature, so this lives on the offline-capable
+        layer (not the tag mirror). The default is the no-op ``NullHostDirBackend`` --
+        correct for a provider with no bucket (e.g. GCP). Providers that mirror
+        host_dir to a bucket override this with a selected-once cached property, so
+        the host_dir paths below never re-test ``is_offline_host_dir_enabled`` /
+        bucket presence.
+        """
+        return NullHostDirBackend()
+
     def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Hook: flush the host's offline ``host_dir`` mirror while still reachable, before pausing.
+        """Push host_dir to the external store one final time before the instance pauses.
 
         Runs in ``stop_host`` after the container has stopped (host_dir quiesced)
-        and before the instance is paused (still SSH-reachable). Default no-op; a
-        provider that mirrors host_dir to an external store overrides this to push
-        a final copy so the offline view is current the moment the instance stops.
+        and before the instance is paused (still SSH-reachable), so the offline view
+        is current the moment the instance stops. The no-op backend makes this a
+        no-op for providers without a bucket.
         """
+        self._host_dir_backend.trigger_final_sync(host_id, vps_ip)
+
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return the bucket-backed host_dir volume *reference* (cheap, no network probe), or None.
+
+        Delegates to the selected host_dir backend (the no-op backend returns None
+        when the feature is off or no bucket exists).
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        return self._host_dir_backend.volume_reference(host_id)
+
+    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return the bucket-backed host_dir volume, with a light existence probe, or None.
+
+        Delegates to the selected host_dir backend, which probes that the host's
+        ``host_dir/`` prefix has objects and, when empty, warns if the instance was
+        never granted the bucket-write identity. Returns None when unavailable.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        return self._host_dir_backend.volume(host_id)
 
     def start_host(
         self,
@@ -3148,41 +3182,6 @@ class TagMirrorVpsDockerProvider(OfflineCapableVpsDockerProvider):
         concrete providers (the bucket-existence probe runs at most once).
         """
         ...
-
-    @property
-    @abstractmethod
-    def _host_dir_backend(self) -> HostDirBackend:
-        """The offline ``host_dir`` capability: bucket-backed when enabled + present, else the no-op fallback.
-
-        The host_dir sibling of ``_state_store``: selecting one backend here lets
-        the host_dir paths below stop branching on ``is_offline_host_dir_enabled``
-        / bucket presence. Implemented as a cached property by the concrete
-        providers.
-        """
-        ...
-
-    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Push host_dir to the external store one final time before the instance pauses."""
-        self._host_dir_backend.trigger_final_sync(host_id, vps_ip)
-
-    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return the bucket-backed host_dir volume *reference* (cheap, no network probe), or None.
-
-        Delegates to the selected host_dir backend (the no-op backend returns None
-        when the feature is off or no bucket exists).
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        return self._host_dir_backend.volume_reference(host_id)
-
-    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return the bucket-backed host_dir volume, with a light existence probe, or None.
-
-        Delegates to the selected host_dir backend, which probes that the host's
-        ``host_dir/`` prefix has objects and, when empty, warns if the instance was
-        never granted the bucket-write identity. Returns None when unavailable.
-        """
-        host_id = host.id if isinstance(host, HostInterface) else host
-        return self._host_dir_backend.volume(host_id)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Return an offline host, reconstructing a stopped instance's record from the external store.
