@@ -377,30 +377,24 @@ def test_run_adopt_session_preflight_skips_for_nonmatching_type(temp_mngr_ctx: M
 
 
 def test_require_unique_match_returns_the_lone_match() -> None:
-    assert require_unique_match(
-        [Path("/a")], not_found_message="nope", ambiguous_header="many:", ambiguous_hint="pick one"
-    ) == Path("/a")
+    assert require_unique_match([Path("/a")], not_found_message="nope", ambiguous_message="many:") == Path("/a")
 
 
 def test_require_unique_match_raises_not_found_for_zero() -> None:
     with pytest.raises(UserInputError, match="session xyz not found"):
-        require_unique_match(
-            [], not_found_message="session xyz not found", ambiguous_header="many:", ambiguous_hint="pick one"
-        )
+        require_unique_match([], not_found_message="session xyz not found", ambiguous_message="many:")
 
 
-def test_require_unique_match_raises_ambiguous_for_many_with_listing() -> None:
+def test_require_unique_match_raises_ambiguous_for_many_with_listing_last() -> None:
     with pytest.raises(UserInputError) as exc:
         require_unique_match(
             [Path("/a"), Path("/b")],
             not_found_message="nope",
-            ambiguous_header="found in multiple stores:",
-            ambiguous_hint="pass the full path",
+            ambiguous_message="found in multiple stores; pass the full path:",
         )
     message = str(exc.value)
-    assert "found in multiple stores:" in message
-    assert "  /a" in message and "  /b" in message
-    assert message.endswith("pass the full path")
+    # The single message comes first, then the candidate list last (one per indented line).
+    assert message == "found in multiple stores; pass the full path:\n  /a\n  /b"
 
 
 def test_dispatch_session_adoption_routes_to_explicit_with_full_tuple(

@@ -217,8 +217,10 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
             f"Session {adopt_session_arg} not found. "
             "Check that the session ID is correct, or pass a path to the .jsonl file."
         ),
-        ambiguous_header=f"Session {adopt_session_arg} found in multiple project directories:",
-        ambiguous_hint="Pass the full path to the .jsonl file to specify which one.",
+        ambiguous_message=(
+            f"Session {adopt_session_arg} found in multiple project directories; "
+            "pass the full path to the .jsonl file to specify which one:"
+        ),
     )
     return adopt_session_arg, match.parent
 

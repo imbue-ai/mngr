@@ -265,8 +265,10 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, home_d
             f"pi session {adopt_session_arg} not found. "
             "Check that the session id is correct, or pass an absolute path to the .jsonl file."
         ),
-        ambiguous_header=f"pi session {adopt_session_arg} found in multiple session stores:",
-        ambiguous_hint="Pass the absolute path to the .jsonl file to specify which one.",
+        ambiguous_message=(
+            f"pi session {adopt_session_arg} found in multiple session stores; "
+            "pass the absolute path to the .jsonl file to specify which one:"
+        ),
     )
 
 

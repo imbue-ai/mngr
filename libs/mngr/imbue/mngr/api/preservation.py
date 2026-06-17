@@ -149,23 +149,21 @@ def require_unique_match(
     matches: Sequence[_MatchT],
     *,
     not_found_message: str,
-    ambiguous_header: str,
-    ambiguous_hint: str,
+    ambiguous_message: str,
 ) -> _MatchT:
     """Return the single element of ``matches``, raising :class:`UserInputError` for zero or many.
 
     Every per-CLI adopt resolver scans its native store(s) for a session id and ends the same
-    way: zero hits is an unknown-id error, more than one is an ambiguity the user must
-    disambiguate (with the colliding stores listed), exactly one is the answer. Only the store
-    scanning differs per CLI; this shared tail keeps the not-found/ambiguous error shape uniform.
-    The ambiguous error is ``ambiguous_header``, then each match on its own indented line, then
-    ``ambiguous_hint`` (typically "pass the full path to <store> to specify which one").
+    way: zero hits is an unknown-id error (``not_found_message``), more than one is an ambiguity
+    (``ambiguous_message`` followed by the colliding candidates, one per indented line), exactly
+    one is the answer. Only the store scanning differs per CLI; this shared tail keeps the
+    not-found/ambiguous error shape uniform.
     """
     if not matches:
         raise UserInputError(not_found_message)
     if len(matches) > 1:
         listing = "\n".join(f"  {match}" for match in matches)
-        raise UserInputError(f"{ambiguous_header}\n{listing}\n{ambiguous_hint}")
+        raise UserInputError(f"{ambiguous_message}\n{listing}")
     return matches[0]
 
 

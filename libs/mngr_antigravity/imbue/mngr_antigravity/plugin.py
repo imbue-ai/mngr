@@ -361,8 +361,10 @@ def _resolve_adopt_session(adopt_arg: str, mngr_ctx: MngrContext) -> tuple[str, 
             f"Conversation {adopt_arg} not found. "
             "Check that the conversation id is correct, or pass an absolute path to the <id>.db file."
         ),
-        ambiguous_header=f"Conversation {adopt_arg} found in multiple conversation directories:",
-        ambiguous_hint="Pass the full path to the <id>.db file to specify which one.",
+        ambiguous_message=(
+            f"Conversation {adopt_arg} found in multiple conversation directories; "
+            "pass the full path to the <id>.db file to specify which one:"
+        ),
     )
     return adopt_arg, match
 

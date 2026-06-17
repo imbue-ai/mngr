@@ -1146,8 +1146,10 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, user_c
             "or pass an absolute path to the rollout .jsonl file. (Searched the user's "
             "~/.codex/sessions, every live mngr codex agent, and every preserved one.)"
         ),
-        ambiguous_header=f"Codex session {adopt_session_arg} found in multiple session stores:",
-        ambiguous_hint="Pass the absolute path to the rollout .jsonl file to specify which one.",
+        ambiguous_message=(
+            f"Codex session {adopt_session_arg} found in multiple session stores; "
+            "pass the absolute path to the rollout .jsonl file to specify which one:"
+        ),
     )
     return adopt_session_arg, matched_dir
 
