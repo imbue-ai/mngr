@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr-opencode-usage"
-version = "0.1.1"
+version = "0.1.0"
 description = "OpenCode usage data provider for `mngr usage` (per-agent in-process plugin that captures per-message cost + tokens)"
 readme = "README.md"
 requires-python = ">=3.12"

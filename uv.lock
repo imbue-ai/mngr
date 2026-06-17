@@ -2407,7 +2407,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-opencode-usage"
-version = "0.1.1"
+version = "0.1.0"
 source = { editable = "libs/mngr_opencode_usage" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -2467,7 +2467,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-pi-coding-usage"
-version = "0.1.1"
+version = "0.1.0"
 source = { editable = "libs/mngr_pi_coding_usage" }
 dependencies = [
     { name = "imbue-mngr" },
