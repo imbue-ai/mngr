@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import TagLimitExceededError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
@@ -55,9 +56,9 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
 # EC2 allows 50 (non-``aws:``) tags per resource. When a host has so many agents
-# that mirroring another would exceed this, we surface a NotImplementedError
-# (which the CLI turns into an "open an issue" prompt) rather than failing
-# obscurely -- the S3-backed agent store is the planned fix for many-agent hosts.
+# that mirroring another would exceed this, we surface a TagLimitExceededError
+# pointing the user at the S3 state bucket (which has no such ceiling) rather
+# than failing obscurely.
 _AWS_MAX_TAGS_PER_INSTANCE: Final[int] = 50
 # EC2 states in which the host OS is down (so the SSH-based sweep can't see the
 # host) but the instance still exists and its agents must be reconstructed from
@@ -531,16 +532,20 @@ class AwsProvider(TagMirrorVpsDockerProvider):
             self.aws_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
         except VpsApiError as e:
             # EC2 caps a resource at 50 (non-aws:) tags. Hitting it means the host
-            # has more agents than the tag mirror can hold; surface it as a
-            # NotImplementedError so the CLI offers to open an issue rather than
-            # failing obscurely. Configuring a state bucket (mngr aws prepare)
-            # removes this ceiling entirely.
+            # has more agents than the tag mirror can hold; surface an actionable
+            # TagLimitExceededError pointing at the S3 state bucket, which has no
+            # such ceiling and supersedes the tag mirror once it exists.
             if "TagLimitExceeded" in str(e):
-                raise NotImplementedError(
-                    f"The AWS host for agent {agent_id!r} has reached EC2's {_AWS_MAX_TAGS_PER_INSTANCE}-tag-per-"
-                    "instance limit, so this agent can't be mirrored to tags for stopped-host listing and "
-                    "resume-by-name. Run `mngr aws prepare` to create an S3 state bucket (which has no such "
-                    "limit), or open an issue at https://github.com/imbue-ai/mngr/issues."
+                raise TagLimitExceededError(
+                    self.name,
+                    limit=_AWS_MAX_TAGS_PER_INSTANCE,
+                    remediation=(
+                        f"The AWS host for agent {agent_id!r} has more agents than EC2 tags can mirror for "
+                        "stopped-host listing and resume-by-name. Run `mngr aws prepare` to create an S3 state "
+                        "bucket (no tag ceiling); the provider uses it automatically once it exists. To pin a "
+                        "specific bucket name first, run "
+                        f"`mngr config set --scope user providers.{self.name}.state_bucket_name <name>`."
+                    ),
                 ) from e
             raise
         if delete_keys:

@@ -4,7 +4,7 @@ Added an optional S3 state bucket that holds mngr's control-plane state (the ful
 
 - `mngr aws cleanup` now also deletes the state bucket. Since it runs after the refuse-while-instances-exist check, any state left in the bucket is orphaned (hosts no longer present as instances), so cleanup refuses to delete a non-empty bucket rather than silently dropping offline records; pass the new `--force` flag to delete the bucket and its remaining state.
 
-- When a state bucket is configured, the per-agent `mngr-agent-<id>-*` EC2 tags are no longer written; agent records and the full offline host record live in the bucket instead. This removes both the silent 256-char `labels` drop and the `TagLimitExceeded` failure at EC2's 50-tag ceiling. Without a configured bucket, the EC2 tag mirror is retained unchanged as a graceful fallback.
+- When a state bucket is configured, the per-agent `mngr-agent-<id>-*` EC2 tags are no longer written; agent records and the full offline host record live in the bucket instead. This removes both the silent 256-char `labels` drop and the `TagLimitExceeded` failure at EC2's 50-tag ceiling. Without a configured bucket, the EC2 tag mirror is retained unchanged as a graceful fallback. If the tag mirror does hit EC2's 50-tag ceiling (no bucket configured), mngr now raises an actionable `TagLimitExceededError` that points you at `mngr aws prepare` to create the state bucket, instead of the previous `NotImplementedError` that prompted you to open a GitHub issue.
 
 - A stopped host's full `VpsDockerHostRecord` is now reconstructed from the bucket (instead of the lossy tag subset) for `mngr list` / `mngr start` when a bucket is present.
 
