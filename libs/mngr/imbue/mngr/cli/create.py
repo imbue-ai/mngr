@@ -454,11 +454,10 @@ class _CreateCommand(click.Command):
     multiple=True,
     help=(
         "Adopt an existing session into this newly created agent so it resumes that conversation. "
-        "The agent type must support session adoption. Accepts a session id or a path to the "
-        "session file; a session id is searched across the relevant user/config store, every live "
-        "local mngr agent, and preserved sessions from destroyed agents. Repeatable: the last named "
-        "session is the one resumed on startup. Incompatible with --from. (--adopt-session is an "
-        "accepted alias.)"
+        "Accepts a session id or a path to the session file; a session id is searched across the "
+        "relevant user/config store, every live local mngr agent, and preserved sessions from "
+        "destroyed agents. Repeatable: the last named session is the one resumed on startup. "
+        "Incompatible with --from."
     ),
 )
 @optgroup.option(

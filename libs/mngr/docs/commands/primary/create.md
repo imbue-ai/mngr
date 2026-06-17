@@ -105,7 +105,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH &#x7C; GIT_URL]. A bare name refers to an agent; use :PATH for a directory. GIT_URL (e.g. https://github.com/owner/repo or git@gitlab.com:owner/repo.git) is cloned to ~/.mngr/clones/<name>-<id>/ using local git auth. Defaults to git root if omitted | None |
-| `--adopt`, `--adopt-session` | text | Adopt an existing session into this newly created agent so it resumes that conversation. The agent type must support session adoption. Accepts a session id or a path to the session file; a session id is searched across the relevant user/config store, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: the last named session is the one resumed on startup. Incompatible with --from. (--adopt-session is an accepted alias.) | None |
+| `--adopt`, `--adopt-session` | text | Adopt an existing session into this newly created agent so it resumes that conversation. Accepts a session id or a path to the session file; a session id is searched across the relevant user/config store, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: the last named session is the one resumed on startup. Incompatible with --from. | None |
 | `--rsync`, `--no-rsync` | boolean | Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled] | None |
 | `--rsync-args` | text | Additional arguments to pass to rsync | None |
 
