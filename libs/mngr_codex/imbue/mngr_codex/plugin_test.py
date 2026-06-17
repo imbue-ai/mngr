@@ -73,7 +73,7 @@ def test_codex_agent_config_has_correct_defaults() -> None:
 def test_codex_agent_config_merge_with_replaces_cli_args() -> None:
     base = CodexAgentConfig()
     override = CodexAgentConfig(cli_args=("--foo",))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert isinstance(merged, CodexAgentConfig)
     assert merged.cli_args == ("--foo",)
     assert str(merged.command) == "codex"

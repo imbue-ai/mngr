@@ -311,7 +311,7 @@ def test_claude_agent_config_merge_overrides_command() -> None:
     base = ClaudeAgentConfig()
     override = ClaudeAgentConfig(command=CommandString("custom-claude"))
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert merged.command == CommandString("custom-claude")
 
@@ -321,7 +321,7 @@ def test_claude_agent_config_merge_replaces_cli_args() -> None:
     base = ClaudeAgentConfig(cli_args=("--verbose",))
     override = ClaudeAgentConfig(cli_args=("--model", "sonnet"))
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert merged.cli_args == ("--model", "sonnet")
 
@@ -331,7 +331,7 @@ def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> N
     base = ClaudeAgentConfig()
     override = ClaudeAgentConfig(cli_args=("--verbose",))
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert merged.cli_args == ("--verbose",)
 

@@ -171,7 +171,7 @@ def test_effective_staleness_threshold_uses_explicit_value_when_set() -> None:
 # The kanpan plugin no longer carries a custom ``merge_with`` that unions its dict fields
 # across config scopes. Cross-scope merges now go through the standard overlay pipeline,
 # which assigns-by-default and surfaces any cross-scope drop through the narrowing paths
-# returned by ``MngrConfig.merge_with_narrowings``. These tests lock in that the per-field
+# returned by ``MngrConfig.merge_with``. These tests lock in that the per-field
 # paths (``plugins.kanpan.<field>``) are flagged on a drop and pass on a pure superset addition.
 
 
@@ -207,7 +207,8 @@ def test_kanpan_commands_cross_scope_drop_is_flagged_as_narrowing() -> None:
     override = _kanpan_mngr_config_override(
         KanpanPluginConfig.model_construct(commands={"a": CustomCommand.model_construct(name="A")})
     )
-    assert "plugins.kanpan.commands" in base.merge_with_narrowings(override)[1]
+    _, narrowings = base.merge_with(override)
+    assert "plugins.kanpan.commands" in narrowings
 
 
 def test_kanpan_commands_cross_scope_superset_does_not_narrow() -> None:
@@ -222,7 +223,8 @@ def test_kanpan_commands_cross_scope_superset_does_not_narrow() -> None:
             }
         )
     )
-    assert "plugins.kanpan.commands" not in base.merge_with_narrowings(override)[1]
+    _, narrowings = base.merge_with(override)
+    assert "plugins.kanpan.commands" not in narrowings
 
 
 def test_kanpan_shell_commands_cross_scope_drop_is_flagged_as_narrowing() -> None:
@@ -239,7 +241,8 @@ def test_kanpan_shell_commands_cross_scope_drop_is_flagged_as_narrowing() -> Non
             shell_commands={"slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"}}
         )
     )
-    assert "plugins.kanpan.shell_commands" in base.merge_with_narrowings(override)[1]
+    _, narrowings = base.merge_with(override)
+    assert "plugins.kanpan.shell_commands" in narrowings
 
 
 def test_kanpan_shell_commands_cross_scope_superset_does_not_narrow() -> None:
@@ -256,4 +259,5 @@ def test_kanpan_shell_commands_cross_scope_superset_does_not_narrow() -> None:
             }
         )
     )
-    assert "plugins.kanpan.shell_commands" not in base.merge_with_narrowings(override)[1]
+    _, narrowings = base.merge_with(override)
+    assert "plugins.kanpan.shell_commands" not in narrowings

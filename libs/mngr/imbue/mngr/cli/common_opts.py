@@ -483,7 +483,7 @@ def apply_settings_to_config(
     # ``--setting`` cannot silently drop entries from the merged config either.
     # Honor the existing setting on ``config``, since ``--setting`` runs after
     # config-file loading, so the resolved value is already known here.
-    merged, violations = config.merge_with_narrowings(settings_config)
+    merged, violations = config.merge_with(settings_config)
     if violations and not config.allow_settings_key_assignment_narrowing:
         raise _build_setting_narrowing_error(violations)
     return merged

@@ -24,8 +24,6 @@ from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.field_markers import SettingsPatchField
-from imbue.mngr.config.field_markers import get_registry_field_names
-from imbue.mngr.config.field_markers import get_settings_patch_field_names
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import ConfigParseError
@@ -42,65 +40,6 @@ from imbue.overlay.markers import ScalarTuple
 from imbue.overlay.markers import StaticList
 from imbue.overlay.markers import StaticTuple
 from imbue.overlay.narrowing import would_assignment_narrow
-
-
-def _is_settings_patch_rooted(
-    dotted_path: str,
-    override_patch_field_names: frozenset[str],
-    container_dict_field_names: frozenset[str],
-    container_entry_classes: dict[str, dict[Any, type[Any]]],
-) -> bool:
-    """True if ``dotted_path`` is rooted at a ``SettingsPatchField`` field -- either the
-    merged model's own top-level patch field, or a patch field of a container entry's
-    concrete class (``<container>.<entry>.<settings_field>...``)."""
-    segments = dotted_path.split(".")
-    if segments[0] in override_patch_field_names:
-        return True
-    if (
-        len(segments) >= 3
-        and segments[0] in container_dict_field_names
-        and segments[1] in container_entry_classes.get(segments[0], {})
-    ):
-        entry_class = container_entry_classes[segments[0]][segments[1]]
-        return segments[2] in get_settings_patch_field_names(entry_class)
-    return False
-
-
-def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
-    """Drive the live overlay narrowing detector and return the NON-settings-patch subset
-    -- the exact output the deleted model-walker produced.
-
-    The model-walker was removed from production once all config-load narrowing moved onto
-    the overlay merge (``merge_with_narrowings``), which now returns *every* narrowing
-    (settings-patch drops included). This test-side helper reruns that merge with the same
-    kwargs the loader uses, then drops the ``SettingsPatchField``-rooted paths (which the
-    walker exempted), so the existing assertions exercise the surviving production path
-    unchanged. There is no separate reference implementation to compare against -- the
-    walker was removed, and this helper drives the live production detector directly.
-    """
-    override_patch_field_names = get_settings_patch_field_names(type(override))
-    if isinstance(base, MngrConfig):
-        container_field_names = get_registry_field_names(type(override))
-        narrowings = base.merge_with_narrowings(override)[1]
-    else:
-        container_field_names = frozenset()
-        narrowings = merge_models_via_overlay(base, override)[1]
-    base_fields = dict(base)
-    override_fields = dict(override)
-    container_entry_classes: dict[str, dict[Any, type[Any]]] = {
-        field_name: {
-            **{key: type(value) for key, value in (base_fields.get(field_name) or {}).items()},
-            **{key: type(value) for key, value in (override_fields.get(field_name) or {}).items()},
-        }
-        for field_name in container_field_names
-    }
-    return [
-        dotted_path
-        for dotted_path in narrowings
-        if not _is_settings_patch_rooted(
-            dotted_path, override_patch_field_names, container_field_names, container_entry_classes
-        )
-    ]
 
 
 class _TestAgentTypeConfig(AgentTypeConfig):
@@ -125,7 +64,7 @@ def test_merge_with_combines_settings_patch_field_same_key_extend() -> None:
     override = _PatchFieldAgentConfig.model_construct(
         settings_overrides={"permissions__extend": {"allow__extend": ["B"]}},
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.settings_overrides == {"permissions__extend": {"allow__extend": ["A", "B"]}}
 
 
@@ -137,7 +76,7 @@ def test_merge_with_combines_settings_patch_field_disjoint_keys() -> None:
     override = _PatchFieldAgentConfig.model_construct(
         settings_overrides={"model": "opus"},
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.settings_overrides == {
         "permissions__extend": {"allow__extend": ["A"]},
         "model": "opus",
@@ -148,21 +87,8 @@ def test_merge_with_assigns_unmarked_dict_field_by_default() -> None:
     """A non-marked dict field still assigns by default (whole-dict replace)."""
     base = _PatchFieldAgentConfig.model_construct(plain_map={"a": 1, "b": 2})
     override = _PatchFieldAgentConfig.model_construct(plain_map={"c": 3})
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.plain_map == {"c": 3}
-
-
-def test_detect_settings_narrowing_exempts_settings_patch_field() -> None:
-    """A higher scope's ``settings_overrides`` is never flagged as narrowing -- it
-    accumulates (combine), so it cannot drop a lower scope's entries. Even an
-    apparent bare-drop is deferred to the provision fold rather than flagged here."""
-    base = _PatchFieldAgentConfig.model_construct(
-        settings_overrides={"permissions": {"allow": ["A"], "deny": ["B"]}},
-    )
-    override = _PatchFieldAgentConfig.model_construct(
-        settings_overrides={"permissions": {"allow": ["A"]}},
-    )
-    assert detect_settings_narrowing(base, override) == []
 
 
 def test_env_var_from_string_parses_simple_pair() -> None:
@@ -234,7 +160,7 @@ def test_agent_type_config_merge_with_overrides_parent_type() -> None:
     """AgentTypeConfig.merge_with should override parent type."""
     base = AgentTypeConfig(parent_type=AgentTypeName("claude"))
     override = AgentTypeConfig(parent_type=AgentTypeName("codex"))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.parent_type == AgentTypeName("codex")
 
 
@@ -242,7 +168,7 @@ def test_agent_type_config_merge_with_overrides_command() -> None:
     """AgentTypeConfig.merge_with should override command."""
     base = AgentTypeConfig(command=CommandString("cmd1"))
     override = AgentTypeConfig(command=CommandString("cmd2"))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.command == CommandString("cmd2")
 
 
@@ -250,7 +176,7 @@ def test_agent_type_config_merge_with_replaces_cli_args() -> None:
     """AgentTypeConfig.merge_with assigns cli_args from override (no concat)."""
     base = AgentTypeConfig(cli_args=("--arg1",))
     override = AgentTypeConfig(cli_args=("--arg2",))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.cli_args == ("--arg2",)
 
 
@@ -258,7 +184,7 @@ def test_agent_type_config_merge_with_handles_empty_base_cli_args() -> None:
     """AgentTypeConfig.merge_with should handle empty base cli_args."""
     base = AgentTypeConfig(cli_args=())
     override = AgentTypeConfig(cli_args=("--arg",))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.cli_args == ("--arg",)
 
 
@@ -266,7 +192,7 @@ def test_agent_type_config_merge_with_replaces_with_empty_override_cli_args() ->
     """AgentTypeConfig.merge_with assigns even an empty override (assign-by-default)."""
     base = AgentTypeConfig(cli_args=("--arg",))
     override = AgentTypeConfig(cli_args=())
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.cli_args == ()
 
 
@@ -274,7 +200,7 @@ def test_agent_type_config_merge_with_replaces_extra_provision_command() -> None
     """AgentTypeConfig.merge_with assigns extra_provision_command from override."""
     base = AgentTypeConfig(extra_provision_command=("echo base",))
     override = AgentTypeConfig(extra_provision_command=("echo override",))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.extra_provision_command == ("echo override",)
 
 
@@ -282,7 +208,7 @@ def test_agent_type_config_merge_with_replaces_env() -> None:
     """AgentTypeConfig.merge_with assigns env from override (no concat)."""
     base = AgentTypeConfig(env=("FOO=1",))
     override = AgentTypeConfig(env=("BAR=2",))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.env == ("BAR=2",)
 
 
@@ -290,7 +216,7 @@ def test_agent_type_config_merge_with_replaces_upload_file() -> None:
     """AgentTypeConfig.merge_with assigns upload_file from override (no concat)."""
     base = AgentTypeConfig(upload_file=("a.txt:/a.txt",))
     override = AgentTypeConfig(upload_file=("b.txt:/b.txt",))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.upload_file == ("b.txt:/b.txt",)
 
 
@@ -298,7 +224,7 @@ def test_agent_type_config_merge_with_preserves_unset_provisioning_fields() -> N
     """Base provisioning fields are preserved when override doesn't touch them."""
     base = AgentTypeConfig(extra_provision_command=("echo setup",), env=("KEY=val",))
     override = AgentTypeConfig(cli_args=("--flag",))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.extra_provision_command == ("echo setup",)
     assert merged.env == ("KEY=val",)
     assert merged.cli_args == ("--flag",)
@@ -313,7 +239,7 @@ def test_agent_type_config_merge_with_preserves_subclass_fields() -> None:
     override = _TestAgentTypeConfig.model_construct(
         cli_args=("--override",),
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert isinstance(merged, _TestAgentTypeConfig)
     assert merged.cli_args == ("--override",)
     assert merged.custom_flag is True
@@ -323,7 +249,7 @@ def test_agent_type_config_merge_with_overrides_subclass_fields_when_set() -> No
     """AgentTypeConfig.merge_with should override subclass fields that were explicitly set."""
     base = _TestAgentTypeConfig(custom_flag=True)
     override = _TestAgentTypeConfig.model_construct(custom_flag=False)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert isinstance(merged, _TestAgentTypeConfig)
     assert merged.custom_flag is False
 
@@ -332,7 +258,7 @@ def test_agent_type_config_merge_with_accepts_base_class_override() -> None:
     """AgentTypeConfig.merge_with on a subclass should accept a base-class override."""
     base = _TestAgentTypeConfig(custom_flag=True, cli_args=("--base",))
     override = AgentTypeConfig.model_construct(cli_args=("--override",))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert isinstance(merged, _TestAgentTypeConfig)
     assert merged.cli_args == ("--override",)
     assert merged.custom_flag is True
@@ -359,7 +285,7 @@ def test_mngr_config_merge_with_overrides_prefix(mngr_test_prefix: str) -> None:
     """MngrConfig.merge_with should override prefix."""
     base = MngrConfig(prefix=f"{mngr_test_prefix}base-")
     override = MngrConfig(prefix=f"{mngr_test_prefix}override-")
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.prefix == f"{mngr_test_prefix}override-"
 
 
@@ -367,7 +293,7 @@ def test_mngr_config_merge_with_overrides_default_host_dir(mngr_test_prefix: str
     """MngrConfig.merge_with should override default_host_dir."""
     base = MngrConfig(prefix=mngr_test_prefix, default_host_dir=Path("/base"))
     override = MngrConfig(prefix=mngr_test_prefix, default_host_dir=Path("/override"))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.default_host_dir == Path("/override")
 
 
@@ -375,7 +301,7 @@ def test_mngr_config_merge_with_replaces_unset_vars(mngr_test_prefix: str) -> No
     """MngrConfig.merge_with assigns unset_vars from override (no concat)."""
     base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["VAR1", "VAR2"])
     override = MngrConfig(prefix=mngr_test_prefix, unset_vars=["VAR3"])
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.unset_vars == ["VAR3"]
 
 
@@ -387,7 +313,7 @@ def test_mngr_config_merge_with_none_base_retry_takes_override() -> None:
     base = MngrConfig().model_copy_update(("retry", None), ("logging", None))
     assert base.retry is None and base.logging is None
     override = MngrConfig(retry=RetryConfig(connect_retry_times=7))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.retry == RetryConfig(connect_retry_times=7)
 
 
@@ -395,7 +321,7 @@ def test_mngr_config_merge_with_none_override_retry_keeps_base() -> None:
     """When the override's ``retry``/``logging`` is ``None``, the base value is kept."""
     base = MngrConfig(retry=RetryConfig(connect_retry_times=9))
     override = MngrConfig().model_copy_update(("retry", None), ("logging", None))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.retry == RetryConfig(connect_retry_times=9)
 
 
@@ -407,7 +333,7 @@ def test_mngr_config_merge_with_merges_agent_types_per_key(mngr_test_prefix: str
     override = MngrConfig(
         prefix=mngr_test_prefix, agent_types={AgentTypeName("claude"): AgentTypeConfig(cli_args=("--override",))}
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     # cli_args is assign-by-default at the AgentTypeConfig level.
     assert merged.agent_types[AgentTypeName("claude")].cli_args == ("--override",)
 
@@ -420,7 +346,7 @@ def test_mngr_config_merge_with_adds_new_agent_types(mngr_test_prefix: str) -> N
     override = MngrConfig(
         prefix=mngr_test_prefix, agent_types={AgentTypeName("codex"): AgentTypeConfig(cli_args=("--codex",))}
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert AgentTypeName("claude") in merged.agent_types
     assert AgentTypeName("codex") in merged.agent_types
 
@@ -439,7 +365,7 @@ def test_mngr_config_merge_with_merges_providers(mngr_test_prefix: str) -> None:
             ProviderInstanceName("docker"): ProviderInstanceConfig(backend=ProviderBackendName("docker")),
         },
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert ProviderInstanceName("local") in merged.providers
     assert ProviderInstanceName("docker") in merged.providers
 
@@ -458,7 +384,7 @@ def test_mngr_config_merge_with_merges_same_provider_key(mngr_test_prefix: str) 
             ProviderInstanceName("my-docker"): ProviderInstanceConfig(backend=ProviderBackendName("modal")),
         },
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert ProviderInstanceName("my-docker") in merged.providers
     assert merged.providers[ProviderInstanceName("my-docker")].backend == ProviderBackendName("modal")
 
@@ -467,7 +393,7 @@ def test_mngr_config_merge_with_merges_plugins(mngr_test_prefix: str) -> None:
     """MngrConfig.merge_with should merge plugins dicts."""
     base = MngrConfig(prefix=mngr_test_prefix, plugins={PluginName("plugin1"): PluginConfig(enabled=True)})
     override = MngrConfig(prefix=mngr_test_prefix, plugins={PluginName("plugin1"): PluginConfig(enabled=False)})
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.plugins[PluginName("plugin1")].enabled is False
 
 
@@ -475,7 +401,7 @@ def test_mngr_config_merge_with_adds_new_plugins(mngr_test_prefix: str) -> None:
     """MngrConfig.merge_with should add new plugins from override."""
     base = MngrConfig(prefix=mngr_test_prefix, plugins={PluginName("plugin1"): PluginConfig(enabled=True)})
     override = MngrConfig(prefix=mngr_test_prefix, plugins={PluginName("plugin2"): PluginConfig(enabled=True)})
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert PluginName("plugin1") in merged.plugins
     assert PluginName("plugin2") in merged.plugins
 
@@ -484,7 +410,7 @@ def test_mngr_config_merge_with_merges_commands(mngr_test_prefix: str) -> None:
     """MngrConfig.merge_with should merge commands dicts."""
     base = MngrConfig(prefix=mngr_test_prefix, commands={"create": CommandDefaults(defaults={"name": "base"})})
     override = MngrConfig(prefix=mngr_test_prefix, commands={"create": CommandDefaults(defaults={"name": "override"})})
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.commands["create"].defaults["name"] == "override"
 
 
@@ -492,7 +418,7 @@ def test_mngr_config_merge_with_adds_new_commands(mngr_test_prefix: str) -> None
     """MngrConfig.merge_with should add new commands from override."""
     base = MngrConfig(prefix=mngr_test_prefix, commands={"create": CommandDefaults(defaults={"name": "base"})})
     override = MngrConfig(prefix=mngr_test_prefix, commands={"list": CommandDefaults(defaults={"format": "json"})})
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert "create" in merged.commands
     assert "list" in merged.commands
 
@@ -501,7 +427,7 @@ def test_mngr_config_merge_with_merges_logging(mngr_test_prefix: str) -> None:
     """MngrConfig.merge_with should merge logging config."""
     base = MngrConfig(prefix=mngr_test_prefix, logging=LoggingConfig(file_level=LogLevel.DEBUG))
     override = MngrConfig(prefix=mngr_test_prefix, logging=LoggingConfig(file_level=LogLevel.TRACE))
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.logging.file_level == LogLevel.TRACE
 
 
@@ -524,7 +450,7 @@ def test_mngr_config_merge_with_merges_create_templates_per_key(mngr_test_prefix
             CreateTemplateName("modal"): CreateTemplate(options={"target_path": "/override"}),
         },
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     modal_template = merged.create_templates[CreateTemplateName("modal")]
     # options is assign-by-default at the CreateTemplate level.
     assert modal_template.options == {"target_path": "/override"}
@@ -540,7 +466,7 @@ def test_mngr_config_merge_with_adds_new_create_templates(mngr_test_prefix: str)
         prefix=mngr_test_prefix,
         create_templates={CreateTemplateName("docker"): CreateTemplate(options={"new_host": "docker"})},
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert CreateTemplateName("modal") in merged.create_templates
     assert CreateTemplateName("docker") in merged.create_templates
 
@@ -566,7 +492,7 @@ def test_mngr_config_merge_with_replaces_pre_command_scripts(mngr_test_prefix: s
         prefix=mngr_test_prefix,
         pre_command_scripts={"create": ["echo override"]},
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     # Whole dict replaced; the unrelated "list" entry is dropped.
     assert merged.pre_command_scripts == {"create": ["echo override"]}
 
@@ -580,7 +506,7 @@ def test_mngr_config_merge_with_preserves_pre_command_scripts_when_override_does
         pre_command_scripts={"create": ["echo create"]},
     )
     override = MngrConfig.model_construct(prefix=mngr_test_prefix, pre_command_scripts=None)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.pre_command_scripts == {"create": ["echo create"]}
 
 
@@ -611,7 +537,7 @@ def test_mngr_config_merge_with_replaces_work_dir_extra_paths(mngr_test_prefix: 
         prefix=mngr_test_prefix,
         work_dir_extra_paths={".venv": WorkDirExtraPathMode.COPY},
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.work_dir_extra_paths == {".venv": WorkDirExtraPathMode.COPY}
 
 
@@ -624,7 +550,7 @@ def test_mngr_config_merge_with_preserves_work_dir_extra_paths_when_override_doe
         work_dir_extra_paths={".venv": WorkDirExtraPathMode.SHARE},
     )
     override = MngrConfig.model_construct(prefix=mngr_test_prefix, work_dir_extra_paths=None)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.work_dir_extra_paths == {".venv": WorkDirExtraPathMode.SHARE}
 
 
@@ -676,7 +602,7 @@ def test_mngr_config_merge_enabled_backends_override_wins_when_not_empty(mngr_te
         prefix=mngr_test_prefix,
         enabled_backends=[ProviderBackendName("modal")],
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.enabled_backends == [ProviderBackendName("modal")]
 
 
@@ -690,7 +616,7 @@ def test_mngr_config_merge_enabled_backends_replaces_with_empty(mngr_test_prefix
         prefix=mngr_test_prefix,
         enabled_backends=[],
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     # Empty list is a real assignment, not "unset"; base is replaced.
     assert merged.enabled_backends == []
 
@@ -704,7 +630,7 @@ def test_mngr_config_merge_enabled_backends_preserves_base_when_override_does_no
         enabled_backends=[ProviderBackendName("local")],
     )
     override = MngrConfig.model_construct(prefix=mngr_test_prefix, enabled_backends=None)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.enabled_backends == [ProviderBackendName("local")]
 
 
@@ -717,7 +643,7 @@ def test_mngr_config_merge_is_remote_agent_installation_allowed_override_wins(mn
     """MngrConfig merge should use override's is_remote_agent_installation_allowed when set."""
     base = MngrConfig(prefix=mngr_test_prefix, is_remote_agent_installation_allowed=True)
     override = MngrConfig(prefix=mngr_test_prefix, is_remote_agent_installation_allowed=False)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.is_remote_agent_installation_allowed is False
 
 
@@ -821,7 +747,7 @@ def test_mngr_config_default_destroyed_host_persisted_seconds_is_seven_days(mngr
 def test_mngr_config_merge_overrides_default_destroyed_host_persisted_seconds(mngr_test_prefix: str) -> None:
     base = MngrConfig(prefix=mngr_test_prefix, default_destroyed_host_persisted_seconds=604800.0)
     override = MngrConfig(prefix=mngr_test_prefix, default_destroyed_host_persisted_seconds=86400.0)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.default_destroyed_host_persisted_seconds == 86400.0
 
 
@@ -833,7 +759,7 @@ def test_mngr_config_merge_keeps_base_destroyed_host_persisted_seconds_when_over
         prefix=mngr_test_prefix,
         default_destroyed_host_persisted_seconds=None,
     )
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.default_destroyed_host_persisted_seconds == 86400.0
 
 
@@ -855,7 +781,7 @@ def test_mngr_config_default_min_online_host_age_seconds_is_ten_minutes(mngr_tes
 def test_mngr_config_merge_overrides_default_min_online_host_age_seconds(mngr_test_prefix: str) -> None:
     base = MngrConfig(prefix=mngr_test_prefix, default_min_online_host_age_seconds=600.0)
     override = MngrConfig(prefix=mngr_test_prefix, default_min_online_host_age_seconds=300.0)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.default_min_online_host_age_seconds == 300.0
 
 
@@ -864,21 +790,21 @@ def test_mngr_config_merge_keeps_base_min_online_host_age_seconds_when_override_
 ) -> None:
     base = MngrConfig(prefix=mngr_test_prefix, default_min_online_host_age_seconds=300.0)
     override = MngrConfig.model_construct(prefix=mngr_test_prefix, default_min_online_host_age_seconds=None)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.default_min_online_host_age_seconds == 300.0
 
 
 def test_mngr_config_merge_overrides_connect_command(mngr_test_prefix: str) -> None:
     base = MngrConfig(prefix=mngr_test_prefix, connect_command="base-cmd")
     override = MngrConfig(prefix=mngr_test_prefix, connect_command="override-cmd")
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.connect_command == "override-cmd"
 
 
 def test_mngr_config_merge_keeps_base_connect_command_when_override_none(mngr_test_prefix: str) -> None:
     base = MngrConfig(prefix=mngr_test_prefix, connect_command="base-cmd")
     override = MngrConfig.model_construct(prefix=mngr_test_prefix, connect_command=None)
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.connect_command == "base-cmd"
 
 
@@ -893,22 +819,24 @@ def test_mngr_config_connect_command_defaults_to_none(mngr_test_prefix: str) -> 
 
 
 # =============================================================================
-# Tests for detect_settings_narrowing
+# Tests for cross-scope narrowing surfaced by the overlay merge (``merge_with``)
 # =============================================================================
 
 
-def test_detect_settings_narrowing_flags_list_replacement(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_list_replacement(mngr_test_prefix: str) -> None:
     """Replacing a non-empty list with a different non-empty list is flagged."""
     base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE"])
     override = MngrConfig(prefix=mngr_test_prefix, unset_vars=["OTHER"])
-    assert detect_settings_narrowing(base, override) == ["unset_vars"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["unset_vars"]
 
 
-def test_detect_settings_narrowing_allows_superset_list(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_allows_superset_list(mngr_test_prefix: str) -> None:
     """A list override that contains every base entry (e.g. from __extend) is not narrowing."""
     base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE"])
     override = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE", "EXTRA"])
-    assert detect_settings_narrowing(base, override) == []
+    _, narrowings = base.merge_with(override)
+    assert narrowings == []
 
 
 class _NestedContainerNamed(FrozenModel):
@@ -921,7 +849,7 @@ class _OuterWithNested(FrozenModel):
     nested: _NestedContainerNamed = Field(default_factory=_NestedContainerNamed)
 
 
-def test_detect_settings_narrowing_flags_drop_in_nested_container_named_field() -> None:
+def test_settings_narrowing_flags_drop_in_nested_container_named_field() -> None:
     """A sub-model field named like a top-level container dict (``commands``) is
     narrowing-checked as a leaf aggregate -- not mis-treated as a top-level container
     (which per-key recurses and silently skips dropped keys). The container match is
@@ -929,10 +857,12 @@ def test_detect_settings_narrowing_flags_drop_in_nested_container_named_field() 
     nested namesake (non-empty path) falls through to the leaf check."""
     base = _OuterWithNested(nested=_NestedContainerNamed(commands={"a": "x"}))
     override = _OuterWithNested(nested=_NestedContainerNamed(commands={"b": "y"}))
-    assert detect_settings_narrowing(base, override) == ["nested.commands"]
+    # ``_OuterWithNested`` is a plain model (no ``merge_with``); drive the overlay merge directly.
+    _, narrowings = merge_models_via_overlay(base, override)
+    assert narrowings == ["nested.commands"]
 
 
-def test_detect_settings_narrowing_flags_empty_override_clearing_non_empty_base(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_empty_override_clearing_non_empty_base(mngr_test_prefix: str) -> None:
     """Clearing a non-empty value with an explicit empty override is the most
     extreme narrowing case (every base entry is dropped) and must be flagged
     unless the user opts in via ``allow_settings_key_assignment_narrowing``.
@@ -943,17 +873,19 @@ def test_detect_settings_narrowing_flags_empty_override_clearing_non_empty_base(
     """
     base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE"])
     override = MngrConfig(prefix=mngr_test_prefix, unset_vars=[])
-    assert detect_settings_narrowing(base, override) == ["unset_vars"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["unset_vars"]
 
 
-def test_detect_settings_narrowing_ignores_empty_override_over_empty_base(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_ignores_empty_override_over_empty_base(mngr_test_prefix: str) -> None:
     """An empty override over an empty base is a no-op and not flagged."""
     base = MngrConfig(prefix=mngr_test_prefix, unset_vars=[])
     override = MngrConfig(prefix=mngr_test_prefix, unset_vars=[])
-    assert detect_settings_narrowing(base, override) == []
+    _, narrowings = base.merge_with(override)
+    assert narrowings == []
 
 
-def test_detect_settings_narrowing_ignores_unwritten_layer_field(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_ignores_unwritten_layer_field(mngr_test_prefix: str) -> None:
     """A layer that doesn't write a field (``parse_config`` defaults it to None)
     never narrows the base, even when the base is non-empty.
 
@@ -963,10 +895,11 @@ def test_detect_settings_narrowing_ignores_unwritten_layer_field(mngr_test_prefi
     # A layer that touches only an unrelated field -- parse_config leaves
     # unset_vars at None so the merge can fall back to base.
     override = parse_config({"prefix": "other-"}, disabled_plugins=frozenset())
-    assert detect_settings_narrowing(base, override) == []
+    _, narrowings = base.merge_with(override)
+    assert narrowings == []
 
 
-def test_detect_settings_narrowing_recurses_into_command_defaults(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_recurses_into_command_defaults(mngr_test_prefix: str) -> None:
     """Per-key recursion through ``commands`` (a container dict) and ``CommandDefaults.defaults``
     flags the deepest path where data is actually lost.
     """
@@ -979,17 +912,19 @@ def test_detect_settings_narrowing_recurses_into_command_defaults(mngr_test_pref
         commands={"create": CommandDefaults(defaults={"env": ["X=4"], "branch": "main", "extra": "x"})},
     )
     # Override is a superset -- no narrowing.
-    assert detect_settings_narrowing(base, override) == []
+    _, narrowings = base.merge_with(override)
+    assert narrowings == []
 
     override_drops_branch = MngrConfig(
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"env": ["X=4"]})},
     )
     # Override drops the "branch" key from defaults -- flagged at the defaults level.
-    assert detect_settings_narrowing(base, override_drops_branch) == ["commands.create.defaults"]
+    _, narrowings = base.merge_with(override_drops_branch)
+    assert narrowings == ["commands.create.defaults"]
 
 
-def test_detect_settings_narrowing_flags_nested_value_replacement(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_nested_value_replacement(mngr_test_prefix: str) -> None:
     """When a shared dict key's value is itself a non-empty aggregate being replaced,
     the deeper path is flagged.
     """
@@ -1001,7 +936,8 @@ def test_detect_settings_narrowing_flags_nested_value_replacement(mngr_test_pref
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
     )
-    assert detect_settings_narrowing(base, override) == ["commands.create.defaults.env"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["commands.create.defaults.env"]
 
 
 # === Narrowing detection across agent_types / providers / create_templates / plugins ===
@@ -1013,7 +949,7 @@ def test_detect_settings_narrowing_flags_nested_value_replacement(mngr_test_pref
 # (four, with plugins) mechanisms honour the same __extend / narrowing semantics.
 
 
-def test_detect_settings_narrowing_allows_adding_new_agent_type_entry(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_allows_adding_new_agent_type_entry(mngr_test_prefix: str) -> None:
     """Adding a new agent_type key in a higher layer never narrows -- the
     container-level merge is per-key additive, so the base entry survives."""
     base = MngrConfig(
@@ -1024,10 +960,11 @@ def test_detect_settings_narrowing_allows_adding_new_agent_type_entry(mngr_test_
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("b"): AgentTypeConfig(cli_args=("--y",))},
     )
-    assert detect_settings_narrowing(base, override) == []
+    _, narrowings = base.merge_with(override)
+    assert narrowings == []
 
 
-def test_detect_settings_narrowing_flags_agent_type_cli_args_replacement(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_agent_type_cli_args_replacement(mngr_test_prefix: str) -> None:
     """Reassigning ``agent_types.<name>.cli_args`` over a non-empty base is narrowing."""
     base = MngrConfig(
         prefix=mngr_test_prefix,
@@ -1037,10 +974,11 @@ def test_detect_settings_narrowing_flags_agent_type_cli_args_replacement(mngr_te
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--verbose",))},
     )
-    assert detect_settings_narrowing(base, override) == ["agent_types.my_claude.cli_args"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["agent_types.my_claude.cli_args"]
 
 
-def test_detect_settings_narrowing_flags_agent_type_cli_args_clearing(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_agent_type_cli_args_clearing(mngr_test_prefix: str) -> None:
     """Explicitly clearing ``agent_types.<name>.cli_args`` to an empty tuple still narrows."""
     base = MngrConfig(
         prefix=mngr_test_prefix,
@@ -1050,10 +988,11 @@ def test_detect_settings_narrowing_flags_agent_type_cli_args_clearing(mngr_test_
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=())},
     )
-    assert detect_settings_narrowing(base, override) == ["agent_types.my_claude.cli_args"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["agent_types.my_claude.cli_args"]
 
 
-def test_detect_settings_narrowing_allows_agent_type_cli_args_superset(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_allows_agent_type_cli_args_superset(mngr_test_prefix: str) -> None:
     """An assign that includes every base entry (e.g. the materialised result of
     ``cli_args__extend``) preserves all prior entries and does not narrow."""
     base = MngrConfig(
@@ -1064,13 +1003,14 @@ def test_detect_settings_narrowing_allows_agent_type_cli_args_superset(mngr_test
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug", "--verbose"))},
     )
-    assert detect_settings_narrowing(base, override) == []
+    _, narrowings = base.merge_with(override)
+    assert narrowings == []
 
 
-def test_detect_settings_narrowing_still_flags_plain_tuple_override(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_still_flags_plain_tuple_override(mngr_test_prefix: str) -> None:
     """Sanity check that the ``ScalarTuple`` marker is the actual discriminator: the
     same shape with a plain ``tuple`` override is still flagged as narrowing.
-    Together with ``test_detect_settings_narrowing_exempts_scalar_tuple_override``, this
+    Together with ``test_settings_narrowing_exempts_scalar_tuple_override``, this
     proves the marker is what gates the exemption rather than some incidental shape
     property.
     """
@@ -1082,7 +1022,8 @@ def test_detect_settings_narrowing_still_flags_plain_tuple_override(mngr_test_pr
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=("--verbose",))},
     )
-    assert detect_settings_narrowing(base, override) == ["agent_types.my_claude.cli_args"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["agent_types.my_claude.cli_args"]
 
 
 def test_would_assignment_narrow_exempts_scalar_tuple() -> None:
@@ -1104,9 +1045,9 @@ def test_scalar_tuple_is_a_static_tuple() -> None:
     assert isinstance(ScalarTuple(("--verbose",)), StaticTuple)
 
 
-def test_detect_settings_narrowing_exempts_static_list_override(mngr_test_prefix: str) -> None:
-    """The ``StaticList`` exemption holds through the full ``detect_settings_narrowing``
-    walk; a plain-list override of the same shape still narrows."""
+def test_settings_narrowing_exempts_static_list_override(mngr_test_prefix: str) -> None:
+    """The ``StaticList`` exemption holds through the full ``merge_with`` narrowing
+    detection; a plain-list override of the same shape still narrows."""
     base = MngrConfig(
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug", "--trace"))},
@@ -1115,19 +1056,20 @@ def test_detect_settings_narrowing_exempts_static_list_override(mngr_test_prefix
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=StaticList(["--verbose"]))},
     )
-    assert detect_settings_narrowing(base, exempt_override) == []
+    _, narrowings = base.merge_with(exempt_override)
+    assert narrowings == []
     plain_override = MngrConfig.model_construct(
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=("--verbose",))},
     )
-    assert detect_settings_narrowing(base, plain_override) == ["agent_types.my_claude.cli_args"]
+    _, narrowings = base.merge_with(plain_override)
+    assert narrowings == ["agent_types.my_claude.cli_args"]
 
 
-def test_detect_settings_narrowing_exempts_scalar_tuple_override(mngr_test_prefix: str) -> None:
-    """The leaf-level ``ScalarTuple`` exemption holds through the full
-    ``detect_settings_narrowing`` walk: a ``ScalarTuple`` override over a
-    non-empty tuple base reports no narrowing, while a plain-tuple override of
-    the same shape still does.
+def test_settings_narrowing_exempts_scalar_tuple_override(mngr_test_prefix: str) -> None:
+    """The leaf-level ``ScalarTuple`` exemption holds through the full ``merge_with``
+    narrowing detection: a ``ScalarTuple`` override over a non-empty tuple base reports
+    no narrowing, while a plain-tuple override of the same shape still does.
     """
     base = MngrConfig(
         prefix=mngr_test_prefix,
@@ -1139,15 +1081,17 @@ def test_detect_settings_narrowing_exempts_scalar_tuple_override(mngr_test_prefi
             AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=ScalarTuple(("--verbose",)))
         },
     )
-    assert detect_settings_narrowing(base, exempt_override) == []
+    _, narrowings = base.merge_with(exempt_override)
+    assert narrowings == []
     plain_override = MngrConfig.model_construct(
         prefix=mngr_test_prefix,
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=("--verbose",))},
     )
-    assert detect_settings_narrowing(base, plain_override) == ["agent_types.my_claude.cli_args"]
+    _, narrowings = base.merge_with(plain_override)
+    assert narrowings == ["agent_types.my_claude.cli_args"]
 
 
-def test_detect_settings_narrowing_flags_provider_subclass_list_replacement(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_provider_subclass_list_replacement(mngr_test_prefix: str) -> None:
     """A provider sub-config's list field follows the same narrowing rule via
     sub-model recursion. Uses ``_TestProviderConfigWithListAndDict`` because
     ``ProviderInstanceConfig`` itself has no list fields (those are added by
@@ -1172,10 +1116,11 @@ def test_detect_settings_narrowing_flags_provider_subclass_list_replacement(mngr
             )
         },
     )
-    assert detect_settings_narrowing(base, override) == ["providers.my_p.tags"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["providers.my_p.tags"]
 
 
-def test_detect_settings_narrowing_flags_provider_subclass_dict_replacement(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_provider_subclass_dict_replacement(mngr_test_prefix: str) -> None:
     """A provider sub-config's dict field also follows the narrowing rule."""
     base = MngrConfig(
         prefix=mngr_test_prefix,
@@ -1198,10 +1143,11 @@ def test_detect_settings_narrowing_flags_provider_subclass_dict_replacement(mngr
             )
         },
     )
-    assert detect_settings_narrowing(base, override) == ["providers.my_p.options"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["providers.my_p.options"]
 
 
-def test_detect_settings_narrowing_flags_create_template_options_replacement(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_create_template_options_replacement(mngr_test_prefix: str) -> None:
     """Re-assigning a list value inside ``create_templates.<name>.options`` is flagged
     at the deepest path (``options.<param>``) where the loss actually happens."""
     base = MngrConfig(
@@ -1212,10 +1158,11 @@ def test_detect_settings_narrowing_flags_create_template_options_replacement(mng
         prefix=mngr_test_prefix,
         create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=2"]})},
     )
-    assert detect_settings_narrowing(base, override) == ["create_templates.dev.options.env"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["create_templates.dev.options.env"]
 
 
-def test_detect_settings_narrowing_flags_create_template_options_key_drop(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_create_template_options_key_drop(mngr_test_prefix: str) -> None:
     """Re-assigning ``create_templates.<name>.options`` to a dict missing a base key
     flags at the ``options`` level (the dict itself was truncated)."""
     base = MngrConfig(
@@ -1227,10 +1174,11 @@ def test_detect_settings_narrowing_flags_create_template_options_key_drop(mngr_t
         prefix=mngr_test_prefix,
         create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"]})},
     )
-    assert detect_settings_narrowing(base, override) == ["create_templates.dev.options"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["create_templates.dev.options"]
 
 
-def test_detect_settings_narrowing_allows_create_template_options_superset(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_allows_create_template_options_superset(mngr_test_prefix: str) -> None:
     """An override that preserves every base options key (and value) does not narrow."""
     base = MngrConfig(
         prefix=mngr_test_prefix,
@@ -1240,7 +1188,8 @@ def test_detect_settings_narrowing_allows_create_template_options_superset(mngr_
         prefix=mngr_test_prefix,
         create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"], "name": "agent"})},
     )
-    assert detect_settings_narrowing(base, override) == []
+    _, narrowings = base.merge_with(override)
+    assert narrowings == []
 
 
 class _TestPluginConfigWithListField(PluginConfig):
@@ -1249,7 +1198,7 @@ class _TestPluginConfigWithListField(PluginConfig):
     items: list[str] = Field(default_factory=list)
 
 
-def test_detect_settings_narrowing_flags_plugin_subclass_list_replacement(mngr_test_prefix: str) -> None:
+def test_settings_narrowing_flags_plugin_subclass_list_replacement(mngr_test_prefix: str) -> None:
     """Plugin sub-configs (subclasses of PluginConfig with extra fields) follow the
     same narrowing rule. Plugin configs are routinely extended by plugin authors with
     list / dict fields; the safety net must reach them too."""
@@ -1261,7 +1210,8 @@ def test_detect_settings_narrowing_flags_plugin_subclass_list_replacement(mngr_t
         prefix=mngr_test_prefix,
         plugins={PluginName("my-plugin"): _TestPluginConfigWithListField(enabled=True, items=["b"])},
     )
-    assert detect_settings_narrowing(base, override) == ["plugins.my-plugin.items"]
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["plugins.my-plugin.items"]
 
 
 def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
@@ -1336,7 +1286,7 @@ def test_mngr_config_merge_with_round_trips_every_field(mngr_test_prefix: str) -
     # because pydantic fills in defaults for fields not passed, making the
     # override look like every default-valued field was explicitly set.
     empty_override = parse_config({}, disabled_plugins=frozenset())
-    merged = populated.merge_with(empty_override)
+    merged, _ = populated.merge_with(empty_override)
     assert merged == populated
 
 

@@ -74,7 +74,7 @@ def test_agent_type_config_merge_preserves_command() -> None:
     base = AgentTypeConfig(command=CommandString("base-command"))
     override = AgentTypeConfig(command=CommandString("override-command"))
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert merged.command == CommandString("override-command")
 
@@ -84,7 +84,7 @@ def test_agent_type_config_merge_keeps_base_command_when_override_none() -> None
     base = AgentTypeConfig(command=CommandString("base-command"))
     override = AgentTypeConfig()
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert merged.command == CommandString("base-command")
 
@@ -94,7 +94,7 @@ def test_agent_type_config_merge_replaces_cli_args() -> None:
     base = AgentTypeConfig(cli_args=("--verbose",))
     override = AgentTypeConfig(cli_args=("--debug",))
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert merged.cli_args == ("--debug",)
 
@@ -104,7 +104,7 @@ def test_agent_type_config_merge_cli_args_with_empty_base() -> None:
     base = AgentTypeConfig()
     override = AgentTypeConfig(cli_args=("--debug",))
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert merged.cli_args == ("--debug",)
 
@@ -114,7 +114,7 @@ def test_agent_type_config_merge_cli_args_with_empty_override() -> None:
     base = AgentTypeConfig(cli_args=("--verbose",))
     override = AgentTypeConfig()
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert merged.cli_args == ("--verbose",)
 

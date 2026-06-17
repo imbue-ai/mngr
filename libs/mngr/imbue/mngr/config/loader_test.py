@@ -2408,10 +2408,10 @@ def test_collect_narrowing_attributes_highest_precedence_lower_layer() -> None:
     project_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A", "B"]})})
     # ``base`` is the accumulated merge the local layer is detected against; under
     # assign-by-default it equals the project layer's value (the highest prior).
-    base = user_layer.merge_with(project_layer)
+    base, _ = user_layer.merge_with(project_layer)
     local_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["C"]})})
 
-    narrowing_paths = base.merge_with_narrowings(local_layer)[1]
+    _, narrowing_paths = base.merge_with(local_layer)
     # Build the provenance map the loader threads through its fold: each prior layer's
     # assigned paths, recorded in precedence order so the highest-precedence prior
     # owner wins.

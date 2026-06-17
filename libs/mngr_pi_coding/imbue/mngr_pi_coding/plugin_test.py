@@ -149,7 +149,7 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
     base = PiCodingAgentConfig()
     override = PiCodingAgentConfig(cli_args=("--verbose",))
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert isinstance(merged, PiCodingAgentConfig)
     assert merged.cli_args == ("--verbose",)

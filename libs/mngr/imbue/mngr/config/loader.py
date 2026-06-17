@@ -230,7 +230,7 @@ def load_config(
             strict=strict,
             silent=silent_unknown_fields,
         )
-        config, narrowing_paths = config.merge_with_narrowings(parsed_layer)
+        config, narrowing_paths = config.merge_with(parsed_layer)
         # Read provenance BEFORE this layer updates it: a dropped value belongs to
         # a prior layer, so its source is whatever held the path before now.
         narrowing_violations.extend(_collect_narrowing(narrowing_paths, file_source, provenance))
@@ -251,7 +251,7 @@ def load_config(
             strict=strict,
             silent=silent_unknown_fields,
         )
-        config, env_narrowing_paths = config.merge_with_narrowings(parsed_env_layer)
+        config, env_narrowing_paths = config.merge_with(parsed_env_layer)
         narrowing_violations.extend(_collect_narrowing(env_narrowing_paths, env_source, provenance))
         _record_provenance(provenance, parsed_env_layer, env_source)
 
@@ -419,7 +419,7 @@ def _collect_narrowing(
     """Build narrowing violations for the cross-scope bare-drops the overlay merge
     surfaced, attributing each side.
 
-    ``narrowing_paths`` is the full list ``MngrConfig.merge_with_narrowings`` returned
+    ``narrowing_paths`` is the full list ``MngrConfig.merge_with`` returned
     for merging this layer onto the accumulated config -- both assign-by-default field
     drops and ``SettingsPatchField`` drops inside an accumulating patch. ``source`` is the
     layer doing the assignment. ``dropped_from`` is read from ``provenance`` (the

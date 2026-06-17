@@ -64,7 +64,7 @@ def test_antigravity_agent_config_merge_with_replaces_cli_args() -> None:
     base = AntigravityAgentConfig()
     override = AntigravityAgentConfig(cli_args=("--verbose",))
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert isinstance(merged, AntigravityAgentConfig)
     # Override's cli_args replaces (rather than concatenates onto) the base.

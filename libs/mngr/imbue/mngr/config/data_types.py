@@ -206,8 +206,10 @@ class AgentTypeConfig(FrozenModel):
             return split_cli_args_string(value) if value else ()
         return tuple(value)
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
+    def merge_with(self, override: Self) -> tuple[Self, list[str]]:
+        """Merge this config with an override config, returning the merged config and every
+        narrowing path the overlay merge surfaced (see ``MngrConfig.merge_with`` for what a
+        narrowing is; callers that only need the merged value drop the second element).
 
         Uses ``model_fields_set`` so a sparse override preserves subclass-specific
         fields (e.g. ``ClaudeAgentConfig.auto_dismiss_dialogs``). Aggregate fields
@@ -223,11 +225,8 @@ class AgentTypeConfig(FrozenModel):
 
         # Computed via the overlay pipeline (behavior-identical to the old
         # field-by-field merge); see ``overlay_merge.merge_models_via_overlay``
-        # and ``config/README.md``. ``merge_with`` only needs the merged value, so
-        # the cross-scope narrowings are dropped here (see ``merge_with_narrowings``
-        # on ``MngrConfig`` for the path that surfaces them).
-        merged, _narrowings = merge_models_via_overlay(self, override)
-        return merged
+        # and ``config/README.md``.
+        return merge_models_via_overlay(self, override)
 
 
 class ProviderInstanceConfig(FrozenModel):
@@ -471,31 +470,24 @@ class MngrConfig(FrozenModel):
         ),
     )
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config (the loader's whole-config merge).
+    def merge_with(self, override: Self) -> tuple[Self, list[str]]:
+        """Merge this config with an override config (the loader's whole-config merge),
+        returning the merged config and every narrowing path the overlay merge surfaced.
 
         Assign-by-default for aggregate fields; the top-level container dicts
         (``agent_types``, ``providers``, ``plugins``, ``commands``, ``create_templates``)
-        merge per-key (a shared key invokes the entry's own ``merge_with``), and
-        ``SettingsPatchField`` fields accumulate. Computed via the overlay pipeline,
-        behavior-identical to the old field-by-field merge; see ``config/README.md``
-        for the scheme. Delegates to ``merge_with_narrowings``.
-        """
-        merged, _narrowings = self.merge_with_narrowings(override)
-        return merged
+        merge per-key, and ``SettingsPatchField`` fields accumulate. Computed via the
+        overlay pipeline, behavior-identical to the old field-by-field merge; see
+        ``config/README.md`` for the scheme.
 
-    def merge_with_narrowings(self, override: Self) -> tuple[Self, list[str]]:
-        """Like ``merge_with``, but also return every narrowing path the overlay merge
-        surfaced -- the single config-load narrowing detector.
-
-        These are the cross-scope bare-drops of a non-empty aggregate by a
-        higher-precedence layer: both ordinary assign-by-default field drops (e.g.
-        ``agent_types.<name>.cli_args``, ``commands.create.defaults.env``) and
-        ``SettingsPatchField`` drops *inside* an accumulating settings patch (e.g.
-        ``agent_types.<name>.settings_overrides.<key>...``). ``Static*`` atomic
-        aggregates are exempt via the override-side re-marking. The loader routes the
-        whole list into its flag-gated narrowing aggregation. ``merge_with`` delegates
-        here and discards the paths for callers that only need the merged value.
+        The narrowings are the single config-load narrowing detector: cross-scope
+        bare-drops of a non-empty aggregate by a higher-precedence layer -- both ordinary
+        assign-by-default field drops (e.g. ``agent_types.<name>.cli_args``,
+        ``commands.create.defaults.env``) and ``SettingsPatchField`` drops *inside* an
+        accumulating settings patch (e.g. ``agent_types.<name>.settings_overrides.<key>...``).
+        ``Static*`` atomic aggregates are exempt via the override-side re-marking. The loader
+        routes the whole list into its flag-gated narrowing aggregation; callers that only
+        need the merged value drop the second element explicitly.
         """
         return merge_models_via_overlay(
             self,

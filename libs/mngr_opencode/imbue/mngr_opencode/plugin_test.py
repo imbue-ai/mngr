@@ -63,7 +63,7 @@ def test_opencode_agent_config_merge_with_replaces_cli_args_and_overrides() -> N
     base = OpenCodeAgentConfig()
     override = OpenCodeAgentConfig(cli_args=("--verbose",), config_overrides={"model": "anthropic/claude-sonnet-4-5"})
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
 
     assert isinstance(merged, OpenCodeAgentConfig)
     assert merged.cli_args == ("--verbose",)

@@ -1,7 +1,7 @@
 """Direct-assertion coverage for the overlay-backed config merge wiring.
 
 These tests pin user-visible behaviors of the overlay node algebra as wired into
-``MngrConfig.merge_with`` / ``merge_with_narrowings``: container-entry subclass
+``MngrConfig.merge_with``: container-entry subclass
 preservation through a top-level merge, and partial sub-model overrides carrying the
 base's unset sub-fields through (rather than reverting them to defaults) without
 spuriously narrowing. Each asserts on explicit values, not on a frozen reference.
@@ -66,7 +66,7 @@ def _base_from_layers(*raw_layers: dict[str, Any]) -> MngrConfig:
     production ``merge_with`` -- the genuine left-operand shape of a real merge."""
     config = _initial_config()
     for raw in raw_layers:
-        config = config.merge_with(_parse_layer(raw))
+        config, _ = config.merge_with(_parse_layer(raw))
     return config
 
 
@@ -107,7 +107,7 @@ def test_mngr_container_entry_subclass_is_preserved() -> None:
     through ``MngrConfig.merge_with``, so subclass-only fields survive."""
     base = _base_from_layers({"agent_types": {"c": {"parent_type": "claude", "auto_dismiss_dialogs": True}}})
     override = _parse_layer({"agent_types": {"c": {"parent_type": "claude", "cli_args": "--y"}}})
-    actual = base.merge_with(override)
+    actual, _ = base.merge_with(override)
     entry = actual.agent_types[AgentTypeName("c")]
     assert type(entry) is _MngrClaudeLikeConfig
     assert entry.auto_dismiss_dialogs is True
@@ -133,7 +133,7 @@ def test_partial_logging_override_carries_base_unset_fields() -> None:
         prefix="m-", logging=LoggingConfig(console_level=LogLevel.INFO, file_level=LogLevel.ERROR)
     )
     override = MngrConfig.model_construct(logging=LoggingConfig.model_construct(console_level=LogLevel.TRACE))
-    merged, narrowings = base.merge_with_narrowings(override)
+    merged, narrowings = base.merge_with(override)
     assert merged.logging.console_level == LogLevel.TRACE
     assert merged.logging.file_level == LogLevel.ERROR
     assert narrowings == []
@@ -144,7 +144,7 @@ def test_partial_retry_override_carries_base_unset_fields() -> None:
     non-default ``connect_retry_times`` (carried through) and surfaces no narrowing."""
     base = MngrConfig.model_construct(prefix="m-", retry=RetryConfig(connect_retry_times=9, connect_retry_delay="5s"))
     override = MngrConfig.model_construct(retry=RetryConfig.model_construct(connect_retry_delay="30s"))
-    merged, narrowings = base.merge_with_narrowings(override)
+    merged, narrowings = base.merge_with(override)
     assert merged.retry.connect_retry_delay == "30s"
     assert merged.retry.connect_retry_times == 9
     assert narrowings == []
@@ -156,7 +156,7 @@ def test_partial_logging_override_via_loader_shaped_layers_carries_base() -> Non
     through) with no narrowing, reproducing a project+local settings merge."""
     base = _base_from_layers({"logging": {"file_level": "ERROR"}})
     override = _parse_layer({"logging": {"console_level": "TRACE"}})
-    merged, narrowings = base.merge_with_narrowings(override)
+    merged, narrowings = base.merge_with(override)
     assert merged.logging.file_level == LogLevel.ERROR
     assert merged.logging.console_level == LogLevel.TRACE
     assert narrowings == []
@@ -188,7 +188,7 @@ def test_container_entry_submodel_carries_base_unset_fields() -> None:
             {"providers": {"p": {"backend": "docker", "volume": {"name": "data", "size_gb": 50}}}}
         )
         override = _parse_layer({"providers": {"p": {"backend": "docker", "volume": {"size_gb": 99}}}})
-        merged, narrowings = base.merge_with_narrowings(override)
+        merged, narrowings = base.merge_with(override)
         entry = merged.providers[ProviderInstanceName("p")]
         assert isinstance(entry, _ProviderWithSubmodel)
         assert entry.volume.size_gb == 99
