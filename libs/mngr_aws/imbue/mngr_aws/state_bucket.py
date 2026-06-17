@@ -156,7 +156,7 @@ class S3StateBucket(BaseStateBucket):
             )
             self._s3().put_bucket_tagging(
                 Bucket=self.bucket_name,
-                Tagging={"TagSet": [{"Key": "managed-by", "Value": "mngr"}]},
+                Tagging={"TagSet": [{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}]},
             )
         logger.info("Created S3 state bucket {} in region {}", self.bucket_name, self.region)
         return True
@@ -316,7 +316,7 @@ class S3StateHostIdentity(MutableModel):
                 RoleName=self.identity_name,
                 AssumeRolePolicyDocument=_EC2_TRUST_POLICY,
                 Description=f"Auto-created by mngr_aws so EC2 instances can sync host_dir to {self.bucket_name}",
-                Tags=[{"Key": "managed-by", "Value": "mngr"}],
+                Tags=[{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}],
             )
         except ClientError as e:
             if e.response.get("Error", {}).get("Code", "") != "EntityAlreadyExists":
@@ -326,7 +326,7 @@ class S3StateHostIdentity(MutableModel):
         try:
             self._iam().create_instance_profile(
                 InstanceProfileName=self.identity_name,
-                Tags=[{"Key": "managed-by", "Value": "mngr"}],
+                Tags=[{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}],
             )
         except ClientError as e:
             if e.response.get("Error", {}).get("Code", "") != "EntityAlreadyExists":

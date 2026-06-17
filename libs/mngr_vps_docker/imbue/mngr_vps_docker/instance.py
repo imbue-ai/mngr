@@ -124,6 +124,7 @@ from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_state_store import HostDirBackend
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_state_store import NullHostDirBackend
+from imbue.mngr_vps_docker.host_state_store import StateBucket
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -3142,6 +3143,70 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
             return super().list_persisted_agent_data_for_host(host_id)
         except HostNotFoundError:
             return self._offline_agent_dicts_for(host_id)
+
+
+class BucketHostDirBackend(HostDirBackend):
+    """Shared offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
+
+    Selected only when offline host_dir is on and the state bucket exists, so
+    ``bucket`` is always present and no method re-tests it. Holds a back-reference
+    to the provider for the SSH-to-outer / path plumbing the sync needs. The
+    offline-read (``volume`` / ``volume_reference``) and final-sync-before-pause
+    flow live here once; subclasses supply only the cloud-specific pieces
+    (identity provisioning, the sync-daemon install, the missing-identity probe)
+    and three small hooks (unit name, stop-action word, bucket error type).
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    provider: OfflineCapableVpsDockerProvider
+    bucket: StateBucket
+    bucket_error_type: type[MngrError]
+
+    @abstractmethod
+    def _sync_unit_name(self) -> str:
+        """systemd unit base name for the host_dir sync daemon (e.g. ``mngr-aws-host-dir-sync``)."""
+        ...
+
+    @abstractmethod
+    def _pause_action(self) -> str:
+        """The pause verb for log context: ``stop`` (AWS/EC2) or ``deallocate`` (Azure)."""
+        ...
+
+    def volume_reference(self, host_id: HostId) -> HostVolume | None:
+        return HostVolume(volume=self.bucket.volume_for_host(host_id))
+
+    def volume(self, host_id: HostId) -> HostVolume | None:
+        try:
+            if not self.bucket.host_dir_prefix_has_objects(host_id):
+                self._warn_if_identity_missing(host_id)
+                return None
+        except self.bucket_error_type as e:
+            logger.warning(
+                "Could not probe host_dir prefix for host {}; treating volume as unavailable: {}", host_id, e
+            )
+            return None
+        return self.volume_reference(host_id)
+
+    def trigger_final_sync(self, host_id: HostId, vps_ip: str) -> None:
+        try:
+            with log_span(f"Triggering final host_dir sync before {self._pause_action()}"):
+                with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
+                    outer.execute_idempotent_command(
+                        f"systemctl start --wait {self._sync_unit_name()}.service", timeout_seconds=300.0
+                    )
+        except MngrError as e:
+            logger.warning(
+                "Final host_dir sync before stopping host {} failed; the offline copy will be as of "
+                "the last periodic sync: {}",
+                host_id,
+                e,
+            )
+
+    @abstractmethod
+    def _warn_if_identity_missing(self, host_id: HostId) -> None:
+        """Warn (best-effort) when an empty host_dir prefix is explained by a missing cloud identity."""
+        ...
 
 
 # Per-agent records are mirrored into instance tags as up to three tags per agent,

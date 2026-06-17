@@ -27,3 +27,9 @@ Internal refactor (no behavior change): renamed the low-level state-bucket metho
 Internal refactor (no behavior change): added shared `build_oneshot_sync_service_unit` / `build_sync_timer_unit` systemd-unit builders; the AWS and Azure host_dir-sync daemons now generate their `.service` / `.timer` units through them (the cloud-specific `aws s3 sync` / `azcopy sync` command stays per-provider).
 
 Internal refactor (no behavior change): the find-instance-then-reassemble-from-tags lookup that the default `_offline_agent_dicts_for` and both providers' tag-mirror stores each re-derived now lives once in a shared `_agent_dicts_from_tags` helper on `OfflineCapableVpsDockerProvider`.
+
+Internal refactor (no behavior change): folded the host-record tag fallback into `BucketHostStateStore.read_host_record` (a bucket miss falls back to the tag store) and removed the now-redundant `read_host_record_with_tag_fallback` method.
+
+Internal refactor (no behavior change): the offline `host_dir` selector (`_host_dir_backend`, defaulting to the no-op `NullHostDirBackend`) and the `get_volume_for_host` / `get_volume_reference_for_host` / final-sync-before-pause methods moved up from `TagMirrorVpsDockerProvider` to `OfflineCapableVpsDockerProvider`, since offline `host_dir` is an offline-capability concern rather than a tag-mirror one (GCP keeps its prior behavior via the inherited no-op).
+
+Internal refactor (no behavior change): extracted a shared `BucketHostDirBackend` holding the offline-read (`volume` / `volume_reference`) and final-sync flow; the AWS / Azure host_dir backends now inherit those and supply only the cloud-specific identity, sync-daemon install, and missing-identity probe.

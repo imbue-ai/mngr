@@ -21,7 +21,6 @@ from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -42,6 +41,7 @@ from imbue.mngr_vps_docker.host_state_store import NullHostDirBackend
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
+from imbue.mngr_vps_docker.instance import BucketHostDirBackend
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
 from imbue.mngr_vps_docker.instance import build_oneshot_sync_service_unit
@@ -665,19 +665,27 @@ class _VmTagHostStateStore(HostStateStore):
         return self.provider._host_record_from_instance_tags(host_id)
 
 
-class _BlobHostDirBackend(HostDirBackend):
+class _BlobHostDirBackend(BucketHostDirBackend):
     """Bucket-backed offline host_dir for Azure: managed-identity + ``azcopy sync`` to the Blob bucket.
 
     Selected only when offline host_dir is on and the state bucket exists, so
-    ``self.bucket`` is always present here and no method re-tests it. Holds a
-    back-reference to the provider for the SSH-to-outer / cloud-client / path
-    plumbing the sync needs. Mirrors ``mngr_aws.backend._S3HostDirBackend``.
+    ``self.bucket`` is always present here and no method re-tests it. The
+    offline-read + final-sync flow is inherited from ``BucketHostDirBackend``;
+    this supplies the Azure-specific identity, sync-daemon install, and probes.
+    Mirrors ``mngr_aws.backend._S3HostDirBackend``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     provider: AzureProvider
     bucket: BlobStateBucket
+    bucket_error_type: type[MngrError] = BlobStateBucketError
+
+    def _sync_unit_name(self) -> str:
+        return HOST_DIR_SYNC_UNIT_NAME
+
+    def _pause_action(self) -> str:
+        return "deallocate"
 
     def create_identity(self) -> str | None:
         identity = self.provider._host_identity()
@@ -726,36 +734,6 @@ class _BlobHostDirBackend(HostDirBackend):
                 outer.execute_idempotent_command("systemctl daemon-reload")
                 outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
         logger.info("Azure host_dir sync daemon installed for host {} (target {})", host_id, blob_prefix_url)
-
-    def trigger_final_sync(self, host_id: HostId, vps_ip: str) -> None:
-        try:
-            with log_span("Triggering final host_dir sync before deallocate"):
-                with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
-                    outer.execute_idempotent_command(
-                        f"systemctl start --wait {HOST_DIR_SYNC_UNIT_NAME}.service", timeout_seconds=300.0
-                    )
-        except MngrError as e:
-            logger.warning(
-                "Final host_dir sync before stopping host {} failed; the offline copy will be as of "
-                "the last periodic sync: {}",
-                host_id,
-                e,
-            )
-
-    def volume_reference(self, host_id: HostId) -> HostVolume | None:
-        return HostVolume(volume=self.bucket.volume_for_host(host_id))
-
-    def volume(self, host_id: HostId) -> HostVolume | None:
-        try:
-            if not self.bucket.host_dir_prefix_has_objects(host_id):
-                self._warn_if_identity_missing(host_id)
-                return None
-        except BlobStateBucketError as e:
-            logger.warning(
-                "Could not probe host_dir prefix for host {}; treating volume as unavailable: {}", host_id, e
-            )
-            return None
-        return self.volume_reference(host_id)
 
     def _warn_if_identity_missing(self, host_id: HostId) -> None:
         """Warn when an empty host_dir prefix is explained by the VM having no managed identity.

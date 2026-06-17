@@ -33,3 +33,5 @@ Internal refactor (no behavior change): `mngr aws prepare`'s host-dir identity p
 Internal refactor (no behavior change): `mngr aws prepare` / `cleanup` output now routes its format dispatch through the shared `emit_operator_result` helper instead of an inline `match` on the output format.
 
 Test-only: moved the duplicated moto `aws_session` / `aws_mock` fixtures into `mngr_aws`'s `conftest.py` (one definition instead of three), and tightened two state-bucket backend tests to assert the exact tag write / the absence of a misleading missing-identity warning.
+
+Internal refactor (no behavior change): the AWS state bucket / host-identity now tag resources via the shared `state_keys.MANAGED_BY_TAG_KEY` / `MANAGED_BY_TAG_VALUE` constants instead of raw `managed-by=mngr` literals.

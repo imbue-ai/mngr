@@ -10,6 +10,7 @@ from pydantic import ConfigDict
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.volume import HostVolume
+from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 
@@ -142,6 +143,10 @@ class StateBucket(Protocol):
     def remove_agent_record(self, host_id: HostId, agent_id: str) -> None: ...
 
     def delete_host_state(self, host_id: HostId) -> None: ...
+
+    def host_dir_prefix_has_objects(self, host_id: HostId) -> bool: ...
+
+    def volume_for_host(self, host_id: HostId) -> Volume: ...
 
 
 class BucketHostStateStore(HostStateStore):
