@@ -85,8 +85,7 @@ All operations are pure functions over a `Patch`.
 
 | Function | Purpose |
 | --- | --- |
-| `lift(raw)` | Suffix-keyed surface dict -> `Patch`. Resolves within-layer "reset then add"; raises on the bare-plus-`__assign` conflict. |
-| `lift_concrete(base)` | A plain, already-resolved dict -> an all-`Default` `Patch`. Use it to put a concrete base at the bottom of the fold. |
+| `lift(raw)` | Suffix-keyed surface dict -> `Patch`. Resolves within-layer "reset then add"; raises on the bare-plus-`__assign` conflict. A plain, already-resolved dict (no operators) lifts to an all-`Default` `Patch`, so use `lift` for a concrete base too. |
 | `merge(lower, higher)` | Combine `higher` over `lower`; **raises `NarrowingError`** (aggregating every narrowing path) -- the strict default. |
 | `merge_narrowing_allowed(lower, higher)` | Same combine, but returns `(patch, narrowing_paths)` for the caller to surface or discard instead of raising. |
 | `finalize(patch)` | Collapse a `Patch` to a plain, marker-free `dict` (a surviving `Extend` resolves against nothing = assign). |
@@ -107,9 +106,10 @@ for layer in (user_layer, project_layer, local_layer):
 result = finalize(patch)                # plain dict; re-parse into your own types
 ```
 
-If you have a concrete runtime base, put it at the **bottom** with `lift_concrete` so a
+If you have a concrete runtime base, `lift` it and put it at the **bottom** of the fold so a
 higher `Extend` extends it and a higher `Default` replaces (and is narrowing-checked)
-against it.
+against it. A base with no operators lifts to all-`Default`; a stray `__extend` in it is
+honored (extend-against-nothing = the value).
 
 ### Deferred resolution against a runtime base
 

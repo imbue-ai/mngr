@@ -17,7 +17,6 @@ from imbue.overlay.node_merge import extend_plain_value
 from imbue.overlay.node_merge import finalize
 from imbue.overlay.node_merge import finalize_payload
 from imbue.overlay.node_merge import lift
-from imbue.overlay.node_merge import lift_concrete
 from imbue.overlay.node_merge import lower
 from imbue.overlay.node_merge import merge
 from imbue.overlay.node_merge import merge_narrowing_allowed
@@ -130,24 +129,6 @@ def test_lift_stacked_assign_extend_does_not_reactivate() -> None:
     finalized = finalize(lifted)
     assert finalized == {"a__assign": [1, 2]}
     assert "a" not in finalized
-
-
-# =============================================================================
-# lift_concrete -- plain base dict -> all-Default patch
-# =============================================================================
-
-
-def test_lift_concrete_wraps_values_as_default() -> None:
-    assert lift_concrete({"a": 1, "b": ["x"]}) == {"a": Default(1), "b": Default(["x"])}
-
-
-def test_lift_concrete_recurses_into_dicts() -> None:
-    assert lift_concrete({"p": {"allow": ["x"]}}) == {"p": Default({"allow": Default(["x"])})}
-
-
-def test_lift_concrete_takes_suffixed_keys_literally() -> None:
-    """A concrete base carries no operators; ``__extend`` in a key is a literal name."""
-    assert lift_concrete({"a__extend": [1]}) == {"a__extend": Default([1])}
 
 
 # =============================================================================
@@ -362,14 +343,14 @@ def test_finalize_payload_returns_leaf_unchanged() -> None:
 
 
 def test_merge_returns_patch_when_no_narrowing() -> None:
-    base = lift_concrete({"permissions": {"allow": ["old"]}})
+    base = lift({"permissions": {"allow": ["old"]}})
     higher = lift({"permissions__extend": {"allow__extend": ["X"]}})
     merged = merge(base, higher)
     assert finalize(merged) == {"permissions": {"allow": ["old", "X"]}}
 
 
 def test_merge_raises_aggregating_all_narrowing_paths() -> None:
-    base = lift_concrete({"a": ["x"], "b": ["y"]})
+    base = lift({"a": ["x"], "b": ["y"]})
     higher = lift({"a": [], "b": []})
     with pytest.raises(NarrowingError) as exc_info:
         merge(base, higher)
@@ -378,7 +359,7 @@ def test_merge_raises_aggregating_all_narrowing_paths() -> None:
 
 
 def test_merge_narrowing_allowed_returns_paths_without_raising() -> None:
-    base = lift_concrete({"a": ["x"], "b": ["y"]})
+    base = lift({"a": ["x"], "b": ["y"]})
     higher = lift({"a": [], "b": []})
     merged, narrowings = merge_narrowing_allowed(base, higher)
     assert sorted(narrowings) == ["a", "b"]
@@ -386,7 +367,7 @@ def test_merge_narrowing_allowed_returns_paths_without_raising() -> None:
 
 
 def test_merge_default_over_non_empty_aggregate_narrows() -> None:
-    base = lift_concrete({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
+    base = lift({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
     higher = lift({"permissions": {"allow": ["X"]}})
     _, narrowings = merge_narrowing_allowed(base, higher)
     assert narrowings == ["permissions"]
@@ -396,14 +377,14 @@ def test_merge_nested_dict_value_narrowing_reports_deep_leaf_path() -> None:
     """A same-keys dict whose nested value narrows reports the deep leaf path, not the
     containing field: ``commands.create.defaults`` keeps all keys, but its ``env`` list
     drops an entry, so the narrowing is reported at ``commands.create.defaults.env``."""
-    base = lift_concrete({"commands": {"create": {"defaults": {"env": ["A", "B"]}}}})
+    base = lift({"commands": {"create": {"defaults": {"env": ["A", "B"]}}}})
     higher = lift({"commands": {"create": {"defaults": {"env": ["A"]}}}})
     _, narrowings = merge_narrowing_allowed(base, higher)
     assert narrowings == ["commands.create.defaults.env"]
 
 
 def test_merge_static_payload_suppresses_narrowing() -> None:
-    base = lift_concrete({"cli_args": ["--debug", "--trace"]})
+    base = lift({"cli_args": ["--debug", "--trace"]})
     higher = lift({"cli_args": StaticList(["--verbose"])})
     merged, narrowings = merge_narrowing_allowed(base, higher)
     assert finalize(merged) == {"cli_args": ["--verbose"]}
@@ -421,21 +402,21 @@ def test_static_dict_is_an_atomic_leaf_through_lift_finalize_lower() -> None:
     # It round-trips through lower unchanged (no key__... suffixes leak in).
     assert lower(lift({"permissions": static})) == {"permissions": static}
     # And it suppresses narrowing even though it drops base keys.
-    base = lift_concrete({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
+    base = lift({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
     merged, narrowings = merge_narrowing_allowed(base, lift({"permissions": static}))
     assert narrowings == []
     assert finalize(merged) == {"permissions": {"allow": ["X"]}}
 
 
 def test_merge_scalar_tuple_payload_suppresses_narrowing() -> None:
-    base = lift_concrete({"cidrs": ("0.0.0.0/0",)})
+    base = lift({"cidrs": ("0.0.0.0/0",)})
     higher = lift({"cidrs": ScalarTuple(("203.0.113.4/32",))})
     _, narrowings = merge_narrowing_allowed(base, higher)
     assert narrowings == []
 
 
 def test_merge_assign_payload_suppresses_narrowing() -> None:
-    base = lift_concrete({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
+    base = lift({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
     bare = lift({"permissions": {"allow": ["X"]}})
     _, bare_narrowings = merge_narrowing_allowed(base, bare)
     assert bare_narrowings == ["permissions"]
@@ -445,7 +426,7 @@ def test_merge_assign_payload_suppresses_narrowing() -> None:
 
 
 def test_merge_extend_against_base_does_not_narrow() -> None:
-    base = lift_concrete({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
+    base = lift({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
     higher = lift({"permissions__extend": {"allow__extend": ["X"]}})
     merged, narrowings = merge_narrowing_allowed(base, higher)
     assert finalize(merged) == {"permissions": {"defaultMode": "acceptEdits", "allow": ["old", "X"]}}
@@ -453,7 +434,7 @@ def test_merge_extend_against_base_does_not_narrow() -> None:
 
 
 def test_merge_assigns_absent_key_without_narrowing() -> None:
-    base = lift_concrete({"permissions": {"defaultMode": "acceptEdits"}})
+    base = lift({"permissions": {"defaultMode": "acceptEdits"}})
     higher = lift({"model": "opus"})
     merged, narrowings = merge_narrowing_allowed(base, higher)
     assert finalize(merged) == {"permissions": {"defaultMode": "acceptEdits"}, "model": "opus"}
@@ -465,7 +446,7 @@ def test_merge_nested_bare_drop_inside_extend_is_recorded() -> None:
     but a bare (``Default``) assign nested inside the extend payload that drops a lower
     aggregate is still recorded at its deep dotted path. ``assign_drops`` must thread
     through ``apply_extend``'s internal ``combine`` for this to be caught."""
-    base = lift_concrete({"foo": {"bar": ["Y", "Z"]}})
+    base = lift({"foo": {"bar": ["Y", "Z"]}})
     higher = lift({"foo__extend": {"bar": ["X"]}})
     merged, narrowings = merge_narrowing_allowed(base, higher)
     assert narrowings == ["foo.bar"]
@@ -475,7 +456,7 @@ def test_merge_nested_bare_drop_inside_extend_is_recorded() -> None:
 def test_merge_nested_add_inside_extend_does_not_narrow() -> None:
     """A sibling key added inside an ``__extend`` is a pure addition: it preserves the
     untouched sibling and records no narrowing."""
-    base = lift_concrete({"foo": {"bar": ["Y", "Z"]}})
+    base = lift({"foo": {"bar": ["Y", "Z"]}})
     higher = lift({"foo__extend": {"baz": ["W"]}})
     merged, narrowings = merge_narrowing_allowed(base, higher)
     assert narrowings == []
@@ -485,7 +466,7 @@ def test_merge_nested_add_inside_extend_does_not_narrow() -> None:
 def test_merge_nested_extend_inside_extend_does_not_narrow() -> None:
     """A nested ``__extend`` inside an ``__extend`` is a superset at every level and
     never narrows."""
-    base = lift_concrete({"foo": {"bar": ["Y", "Z"]}})
+    base = lift({"foo": {"bar": ["Y", "Z"]}})
     higher = lift({"foo__extend": {"bar__extend": ["X"]}})
     merged, narrowings = merge_narrowing_allowed(base, higher)
     assert narrowings == []
@@ -510,7 +491,7 @@ def test_merge_nested_drop_when_combining_two_extends_is_recorded() -> None:
 def test_merge_against_concrete_base_extend_round_trip() -> None:
     base = {"model": "opus", "permissions": {"allow": ["old"]}}
     higher = lift({"permissions__extend": {"allow__extend": ["X"]}})
-    merged, narrowings = merge_narrowing_allowed(lift_concrete(base), higher)
+    merged, narrowings = merge_narrowing_allowed(lift(base), higher)
     assert finalize(merged) == {"model": "opus", "permissions": {"allow": ["old", "X"]}}
     assert narrowings == []
 
@@ -518,7 +499,7 @@ def test_merge_against_concrete_base_extend_round_trip() -> None:
 def test_merge_against_concrete_base_default_round_trip() -> None:
     base = {"model": "opus"}
     higher = lift({"model": "sonnet"})
-    merged = merge(lift_concrete(base), higher)
+    merged = merge(lift(base), higher)
     assert finalize(merged) == {"model": "sonnet"}
 
 
@@ -566,7 +547,7 @@ def test_merge_is_associative_under_finalize(
 ) -> None:
     """``finalize(merge(merge(B, X), Y)) == finalize(merge(B, merge(X, Y)))`` over node
     patches, for the combine cases plus nested-dict recursion and ``__assign``."""
-    base_patch = lift_concrete(base)
+    base_patch = lift(base)
     lower_patch = lift(lower)
     higher_patch = lift(higher)
     assert _assoc_left(base_patch, lower_patch, higher_patch) == _assoc_right(base_patch, lower_patch, higher_patch)

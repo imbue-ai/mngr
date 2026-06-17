@@ -109,7 +109,6 @@ from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 from imbue.overlay.node_merge import finalize
 from imbue.overlay.node_merge import lift
-from imbue.overlay.node_merge import lift_concrete
 from imbue.overlay.node_merge import merge_narrowing_allowed
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -574,7 +573,7 @@ def _build_settings_json(
     # (see the mngr config/README.md and the ``imbue.overlay`` README). ``Extend`` merges
     # onto the base, bare ``Default`` assigns, and ``Assign`` / ``Static*`` suppress the
     # narrowing otherwise recorded for a dropped aggregate.
-    merged, narrowings = merge_narrowing_allowed(lift_concrete(base), lift(config.settings_overrides))
+    merged, narrowings = merge_narrowing_allowed(lift(base), lift(config.settings_overrides))
 
     # Narrowing guard: any bare override key (at any depth) that drops a non-empty
     # aggregate from ``B`` hard-errors unless the escape hatch is set.

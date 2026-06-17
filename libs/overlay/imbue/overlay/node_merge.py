@@ -17,7 +17,6 @@ Pipeline:
 
 - ``lift`` turns a suffix-keyed surface dict into a node ``Patch`` (one node per
   field, with the within-layer "reset then add" already folded in).
-- ``lift_concrete`` wraps a plain resolved base dict as an all-``Default`` patch.
 - ``combine`` folds ``higher`` over ``lower`` (both node patches), pure/recursive,
   collecting ``AssignDrop`` candidates for the narrowing filter.
 - ``finalize`` collapses a node patch to a plain dict.
@@ -159,21 +158,6 @@ def lower(patch: Patch) -> dict[str, Any]:
         else:
             result[field] = lowered
     return result
-
-
-def lift_concrete(base: dict[str, Any]) -> Patch:
-    """Lift a plain (already-resolved) base dict to an all-``Default`` ``Patch``.
-
-    Every value is wrapped as a ``Default`` (an already-set assign), recursing into
-    nested dicts. This is what "merge against a concrete base" needs: the concrete
-    base becomes the lowest layer, so a higher ``Extend`` extends a base value and a
-    higher ``Default`` replaces and is narrowing-checked. Unlike ``lift``, no suffix
-    parsing happens -- keys are taken literally (a concrete base carries no operators).
-    """
-    patch: Patch = {}
-    for key, value in base.items():
-        patch[key] = Default(lift_concrete(value)) if isinstance(value, dict) else Default(value)
-    return patch
 
 
 # =============================================================================
@@ -373,9 +357,10 @@ def extend_plain_value(current: Any, extend: Any, field_path: str) -> Any:
     The mngr-boundary plain-value entry into the node extend algebra: a thin
     lift/finalize adapter so a suffix-keyed-dict consumer (``key_resolver`` /
     ``common_opts``) shares the one node ``apply_extend`` rather than a parallel
-    plain-dict recursion. A dict ``current`` lifts as a concrete base and a dict
-    ``extend`` lifts as a patch (so nested ``key__extend`` recurses and a nested bare
-    key assigns); leaf values pass straight through to ``apply_extend``. ``current is
+    plain-dict recursion. Both a dict ``current`` and a dict ``extend`` are lifted via
+    ``lift`` (so a nested ``key__extend`` recurses and a nested bare key assigns) -- an
+    ``__extend`` marker in ``current`` is honored too, since extend-against-nothing just
+    yields the value; leaf values pass straight through to ``apply_extend``. ``current is
     None`` makes the extend act as assign. ``OverlayError``s propagate (callers wrap).
 
     A conflicting bare/``__assign`` key at the top level of a dict ``extend`` is rejected
@@ -383,7 +368,7 @@ def extend_plain_value(current: Any, extend: Any, field_path: str) -> Any:
     lifting), matching the location the plain-dict resolver used to surface; ``lift``'s own
     engine-level check still covers any conflict nested deeper, without a location.
     """
-    cur = lift_concrete(current) if isinstance(current, Mapping) else current
+    cur = lift(current) if isinstance(current, Mapping) else current
     if isinstance(extend, Mapping):
         check_no_conflicting_assign(extend, field_path)
         ext: Any = lift(extend)
