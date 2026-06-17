@@ -43,7 +43,7 @@ from imbue.mngr.hosts.host import install_packaged_script_on_host
 from imbue.mngr.hosts.host import read_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr_claude.plugin import ClaudeAgent
+from imbue.mngr_claude.plugin import ClaudeCoreAgent
 from imbue.mngr_claude_usage import resources as _resources
 from imbue.mngr_usage.api import aggregate_process_cumulative
 from imbue.mngr_usage.data_types import UsageEvent
@@ -214,11 +214,12 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
 
     All writes go through ``host.write_file`` so the provisioner works for local
     and remote agents the same way. Skips non-Claude agents only; the
-    ``isinstance`` check covers ``claude``, ``headless_claude``, and user-defined
+    ``isinstance`` check is against ``ClaudeCoreAgent`` (the shared base of every
+    Claude agent), so it covers ``claude``, ``headless_claude``, and user-defined
     agent types whose ``parent_type`` chain reaches ``claude`` (e.g.
     config-defined templates like ``write-plus``).
     """
-    if not isinstance(agent, ClaudeAgent):
+    if not isinstance(agent, ClaudeCoreAgent):
         return
     _provision_statusline_shim(
         host,

@@ -6,9 +6,11 @@ import json
 import shlex
 import shutil
 import tomllib
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 from typing import cast
 
 import pytest
@@ -18,6 +20,8 @@ from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -104,6 +108,96 @@ def test_register_agent_type_returns_codex_class_and_config() -> None:
 
 
 # =============================================================================
+# Capability-mixin contract methods (install / unattended / permission / version)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_codex() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert agent.get_install_binary_name() == "codex"
+
+
+def test_get_install_command_installs_codex() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert agent.get_install_command() == "npm i -g @openai/codex"
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = CodexAgent.model_construct(agent_config=CodexAgentConfig(auto_allow_permissions=True))
+    attended = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def test_get_permission_policy_carries_sandbox_mode() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(sandbox_mode="read-only"))
+    policy = agent.get_permission_policy()
+    assert policy["sandbox_mode"] == "read-only"
+
+
+def test_get_permission_policy_includes_approval_policy_override() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(config_overrides={"approval_policy": "never"}))
+    policy = agent.get_permission_policy()
+    assert policy["sandbox_mode"] == "workspace-write"
+    assert policy["approval_policy"] == "never"
+
+
+def test_reconcile_installed_version_delegates_to_update_check() -> None:
+    # codex's version reconciliation IS its update check: reconcile resolves the codex
+    # home and runs _maybe_check_for_codex_update against it. (The update decision logic
+    # itself is covered by the _read_codex_versions-override tests below.)
+    recorded: dict[str, object] = {}
+
+    class _RecordingAgent(CodexAgent):
+        def _resolve_user_codex_home(self, host: object) -> Path:
+            return Path("/sentinel/codex-home")
+
+        def _maybe_check_for_codex_update(self, host: object, user_codex_home: Path, mngr_ctx: object) -> None:
+            recorded["home"] = user_codex_home
+
+    agent = _RecordingAgent.model_construct(agent_config=CodexAgentConfig())
+    agent.reconcile_installed_version(cast(OnlineHostInterface, object()), cast(MngrContext, object()))
+    assert recorded["home"] == Path("/sentinel/codex-home")
+
+
+class _StubHost(FakeHost):
+    """FakeHost that returns scripted results for commands matched by substring.
+
+    Records every command and returns the first ``command_results`` entry whose
+    pattern is a substring of the command; otherwise falls through to the local
+    FakeHost. Lets the host-shell helpers (version probe, codex update,
+    CODEX_HOME resolution) be exercised without a real codex binary.
+    """
+
+    command_results: dict[str, CommandResult] = {}
+    executed_commands: list[str] = []
+
+    def _execute_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.executed_commands.append(command)
+        for pattern, result in self.command_results.items():
+            if pattern in command:
+                return result
+        return super()._execute_command(command, user, cwd, env, timeout_seconds)
+
+
+def _stub_host(
+    host_dir: Path,
+    *,
+    is_local: bool = True,
+    command_results: dict[str, CommandResult] | None = None,
+) -> Any:
+    """Create a _StubHost typed as Any to satisfy OnlineHostInterface parameters in tests."""
+    return _StubHost(host_dir=host_dir, is_local=is_local, command_results=command_results or {})
+
+
+# =============================================================================
 # Construction helpers
 # =============================================================================
 
@@ -117,6 +211,11 @@ def _make_codex_agent(
     is_interactive: bool = False,
     is_auto_approve: bool = False,
 ) -> CodexAgent:
+    # These setup tests run against a real local host where codex is not installed; the
+    # install check is irrelevant to provision setup (files/trust/config) and is covered
+    # separately, so skip it unless a caller opted in explicitly.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir(exist_ok=True)
@@ -199,6 +298,16 @@ def test_resolve_user_codex_home_defaults_to_home_dot_codex(codex_agent: CodexAg
     resolved = codex_agent._resolve_user_codex_home(host)
     assert resolved.name == ".codex"
     assert resolved.parent == Path.home()
+
+
+def test_resolve_user_codex_home_aborts_when_resolution_fails(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """A failed CODEX_HOME-resolution probe is fatal: the shared auth.json can't be located."""
+    host = _stub_host(
+        tmp_path,
+        command_results={"${CODEX_HOME:-$HOME/.codex}": CommandResult(stdout="", stderr="boom", success=False)},
+    )
+    with pytest.raises(SystemExit):
+        codex_agent._resolve_user_codex_home(host)
 
 
 def test_resolve_canonical_path_resolves_symlinks(codex_agent: CodexAgent, tmp_path: Path) -> None:
@@ -443,6 +552,17 @@ class _UnknownVersionCodexAgent(_OutdatedCodexAgent):
         return (None, None)
 
 
+class _OutdatedRealUpdateAgent(CodexAgent):
+    """Reports a fixed outdated pair but runs the *real* ``_run_codex_update``.
+
+    Unlike ``_OutdatedCodexAgent`` it does not stub ``_run_codex_update``, so the
+    AUTO path exercises the actual ``codex update`` host call (stubbed on the host).
+    """
+
+    def _read_codex_versions(self, host: object, user_codex_home: Path) -> tuple[str | None, str | None]:
+        return ("0.140.0", "0.141.0")
+
+
 def _check_update(agent: CodexAgent) -> None:
     # user_codex_home is irrelevant in the decision tests (the probe is overridden).
     agent._maybe_check_for_codex_update(agent.host, agent.work_dir, agent.mngr_ctx)
@@ -557,6 +677,31 @@ def test_never_policy_only_notifies(local_provider: LocalProviderInstance, tmp_p
     _check_update(agent)
 
 
+def test_auto_policy_runs_real_codex_update_on_success(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """AUTO with an outdated codex shells out ``codex update`` over the host; a clean exit just logs."""
+    agent = _make_codex_agent(
+        _OutdatedRealUpdateAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
+    )
+    host = _stub_host(tmp_path, command_results={"codex update": CommandResult(stdout="ok", stderr="", success=True)})
+    agent._maybe_check_for_codex_update(host, agent.work_dir, agent.mngr_ctx)
+    assert any("codex update" in command for command in host.executed_commands)
+
+
+def test_auto_policy_real_codex_update_failure_is_not_fatal(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A non-zero ``codex update`` is warned about but never aborts provisioning."""
+    agent = _make_codex_agent(
+        _OutdatedRealUpdateAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
+    )
+    host = _stub_host(
+        tmp_path,
+        command_results={"codex update": CommandResult(stdout="", stderr="updater missing", success=False)},
+    )
+    agent._maybe_check_for_codex_update(host, agent.work_dir, agent.mngr_ctx)
+    assert any("codex update" in command for command in host.executed_commands)
+
+
 def test_read_codex_versions_parses_installed_and_cached(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
@@ -586,6 +731,20 @@ def test_read_codex_versions_latest_is_none_when_cache_absent(
     )
     installed, latest = agent._read_codex_versions(agent.host, agent._resolve_user_codex_home(agent.host))
     assert installed == "1.2.3"
+    assert latest is None
+
+
+def test_read_codex_versions_returns_none_when_probe_fails(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A non-zero version probe (codex absent / shell error) yields (None, None) without raising."""
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig())
+    host = _stub_host(
+        tmp_path,
+        command_results={"--version": CommandResult(stdout="", stderr="no such file", success=False)},
+    )
+    installed, latest = agent._read_codex_versions(host, tmp_path / ".codex")
+    assert installed is None
     assert latest is None
 
 

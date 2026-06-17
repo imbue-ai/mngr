@@ -63,6 +63,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
@@ -77,7 +78,13 @@ from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -206,6 +213,11 @@ class OpenCodeAgentConfig(AgentTypeConfig):
         description="When True, auto-approve every action not explicitly denied "
         "(injects a wildcard allow into the opencode.json permission block).",
     )
+    check_installation: bool = Field(
+        default=True,
+        description="Check whether opencode is installed and install it if missing "
+        "(if False, assume it is already present).",
+    )
     # emit_common_transcript gates the raw -> common-schema converter that writes
     # events/opencode/common_transcript/events.jsonl. The raw transcript at
     # logs/opencode_transcript/events.jsonl is always captured (by the in-process
@@ -221,7 +233,16 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
 
 
-class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
+class OpenCodeAgent(
+    BaseAgent[OpenCodeAgentConfig],
+    InteractiveAgentMixin,
+    CliBackedAgentMixin,
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
+    HasPermissionPolicyMixin,
+    HasAutoInstallMixin,
+):
     """Agent implementation for OpenCode (driven via its server, not TUI keystrokes)."""
 
     # How long send_message waits for the launch script to have written the
@@ -418,6 +439,8 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         3. Point the per-agent ``auth.json`` at the shared host auth (symlink or copy).
         4. Install the launch orchestrator under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
+        if self.agent_config.check_installation:
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
         host_home = self._resolve_host_home(host)
         self._provision_opencode_config(host, host_home)
         self._provision_plugin(host)
@@ -439,7 +462,7 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         per_agent_config = build_opencode_config(
             base_config,
             self.agent_config.config_overrides,
-            self.agent_config.auto_allow_permissions,
+            self.is_unattended_enabled(),
         )
         config_path = get_opencode_config_file_path(self._get_opencode_config_dir())
         with log_span("Writing per-agent opencode config to {}", config_path):
@@ -528,10 +551,27 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
             launch_command = f"{launch_command} {forwarded_args}"
         return CommandString(launch_command)
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_opencode_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
+
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        # opencode's per-resource policy lives in the `permission` config-overrides key.
+        policy = self.agent_config.config_overrides.get("permission", {})
+        return policy if isinstance(policy, Mapping) else {}
+
+    def get_install_binary_name(self) -> str:
+        return "opencode"
+
+    def get_install_command(self) -> str:
+        return "curl -fsSL https://opencode.ai/install | bash"
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_opencode_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
 
 def _opencode_preserved_items() -> list[PreservedItem]:

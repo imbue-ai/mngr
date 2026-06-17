@@ -17,6 +17,7 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.rsync import rsync_to_remote
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
@@ -576,7 +577,7 @@ def launch_reducer_agent(
         cg=mngr_ctx.concurrency_group,
     )
     logger.info("Sending reducer prompt to '{}'", agent_name)
-    create_result.agent.send_message(prompt)
+    require_interactive_agent(create_result.agent).send_message(prompt)
 
     return (
         ReducerInfo(

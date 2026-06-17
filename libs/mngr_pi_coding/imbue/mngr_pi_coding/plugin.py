@@ -6,14 +6,17 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import click
 from loguru import logger
 from pydantic import Field
+from pydantic import field_validator
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
@@ -25,9 +28,16 @@ from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import classify_waiting_reason
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -36,6 +46,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_pi_coding import resources as _pi_resources
@@ -104,6 +115,10 @@ _READY_TIMEOUT_SECONDS: float = 30.0
 # into the live session via pi.sendUserMessage (no tmux keystrokes, TUI stays
 # viewable). Kept in sync with INBOX_NAME in mngr_pi_lifecycle.ts.
 _INBOX_FILE_NAME: str = "pi_inbox"
+
+# The lifecycle marker the pi extension maintains while a turn is in flight
+# (RUNNING vs WAITING). Kept in sync with ACTIVE_MARKER_NAME in mngr_pi_lifecycle.ts.
+_ACTIVE_MARKER_NAME: str = "active"
 
 # After inboxing a message, wait up to this long for the turn to start (the
 # ``active`` marker to appear) as delivery confirmation. Covers the extension's
@@ -175,6 +190,12 @@ def _get_pi_home_dir(home_dir: Path | None = None) -> Path:
     return home_dir / _PI_HOME_DIR_NAME / _PI_AGENT_SUBDIR
 
 
+class PiAutoAllowRequiredError(PluginMngrError, ValueError):
+    """Raised when pi's auto_allow_permissions is set to False, which pi cannot honor."""
+
+    ...
+
+
 class PiCodingAgentConfig(AgentTypeConfig):
     """Config for the pi-coding agent type."""
 
@@ -194,6 +215,22 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=True,
         description="Check if pi is installed (if False, assumes it is already present)",
     )
+    auto_allow_permissions: bool = Field(
+        default=True,
+        description="pi runs every tool without an approval prompt, so it always operates unattended; "
+        "setting this to False is an error because pi cannot enforce a deny.",
+    )
+
+    @field_validator("auto_allow_permissions")
+    @classmethod
+    def _require_auto_allow(cls, value: bool) -> bool:
+        if not value:
+            raise PiAutoAllowRequiredError(
+                "pi runs every tool without an approval prompt, so it cannot honor "
+                "auto_allow_permissions=False; pi always operates unattended."
+            )
+        return value
+
     resume_session: bool = Field(
         default=True,
         description=(
@@ -229,24 +266,8 @@ class PiCodingAgentConfig(AgentTypeConfig):
     )
 
 
-def _check_pi_installed(host: OnlineHostInterface) -> bool:
-    """Check if pi is installed on the host."""
-    result = host.execute_idempotent_command("command -v pi", timeout_seconds=10.0)
-    return result.success
-
-
-# The npm package pi ships under (used for the remote-host auto-install).
+# The npm package pi ships under (used for the auto-install command).
 _PI_NPM_PACKAGE: str = "@earendil-works/pi-coding-agent"
-
-
-def _install_pi(host: OnlineHostInterface) -> None:
-    """Install pi on the host via npm."""
-    result = host.execute_idempotent_command(
-        f"npm install -g {_PI_NPM_PACKAGE}",
-        timeout_seconds=300.0,
-    )
-    if not result.success:
-        raise PluginMngrError(f"Failed to install pi. stderr: {result.stderr}")
 
 
 def _has_api_credentials_available(
@@ -286,7 +307,15 @@ def _has_api_credentials_available(
     return False
 
 
-class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
+class PiCodingAgent(
+    BaseAgent[PiCodingAgentConfig],
+    InteractiveAgentMixin,
+    CliBackedAgentMixin,
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
+    HasAutoInstallMixin,
+):
     """Agent implementation for the pi coding agent.
 
     pi's only lifecycle-event surface is its TypeScript extension API (no
@@ -358,7 +387,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
 
     def _confirm_turn_started(self, timeout: float = _TURN_CONFIRM_TIMEOUT_SECONDS) -> None:
         """Wait for the injected message to start a turn (the ``active`` marker appearing)."""
-        marker_path = self._get_agent_dir() / "active"
+        marker_path = self._get_agent_dir() / _ACTIVE_MARKER_NAME
         if self._check_file_exists(marker_path):
             # Already running: the followUp message is queued; no marker-based confirmation.
             return
@@ -599,21 +628,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         config = self.agent_config
 
         if config.check_installation:
-            is_installed = _check_pi_installed(host)
-            if is_installed:
-                logger.debug("pi is already installed on the host")
-            else:
-                install_hint = f"npm install -g {_PI_NPM_PACKAGE}"
-                if host.is_local and not mngr_ctx.is_auto_approve:
-                    raise PluginMngrError(f"pi is not installed. Please install it with:\n  {install_hint}")
-                elif not host.is_local and not mngr_ctx.config.is_remote_agent_installation_allowed:
-                    raise PluginMngrError(
-                        "pi is not installed on the remote host and automatic remote installation is disabled."
-                    )
-                else:
-                    logger.info("Installing pi...")
-                    _install_pi(host)
-                    logger.info("pi installed successfully")
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
 
         # Trust gate first (consent + durable global record), so a declined /
         # non-interactive-without-opt-in case exits cleanly before any setup.
@@ -764,6 +779,20 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
     ) -> None:
         """No post-provisioning steps needed."""
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_pi_coding_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        # pi has no tool-approval gate, so it always runs unattended; the config
+        # field is pinned True (False is rejected at validation).
+        return self.agent_config.auto_allow_permissions
+
+    def get_install_binary_name(self) -> str:
+        return "pi"
+
+    def get_install_command(self) -> str:
+        return f"npm install -g {_PI_NPM_PACKAGE}"
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and the session-file pointer before the state dir is deleted.
 
@@ -771,7 +800,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         other cleanup to do.
         """
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_pi_coding_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
 
 def _pi_coding_preserved_items() -> list[PreservedItem]:
@@ -793,6 +822,26 @@ def _pi_coding_preserved_items() -> list[PreservedItem]:
 def _pi_coding_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
     """Return the items to preserve for a discovered (offline) pi-coding agent, or None to skip it."""
     return flag_gated_items(ref, "preserve_on_destroy", _pi_coding_preserved_items())
+
+
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting, or None while it is active.
+
+    pi has no tool-approval gate, so it can never be blocked on a permission
+    prompt: ``is_blocked_on_permission`` is always False and the only possible
+    reason is ``END_OF_TURN`` (the agent is idle). Wired through the same shared
+    ``classify_waiting_reason`` the other plugins use, so the single-value result
+    is a real extension point if pi ever gains an approval gate.
+    """
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    is_active = host.path_exists(agent_dir / _ACTIVE_MARKER_NAME)
+    return classify_waiting_reason(is_active, is_blocked_on_permission=False)
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose pi-coding-specific agent fields for listing."""
+    return (_PI_AGENT_TYPE, {"waiting_reason": _waiting_reason})
 
 
 @hookimpl
