@@ -149,7 +149,7 @@ class FakeVirtualMachinesOperations:
         self.delete_error: Exception | None = None
         self.deallocate_error: Exception | None = None
         self.start_error: Exception | None = None
-        # When False, the corresponding LRO poller reports ``done()`` as False after
+        # When False, the corresponding long-running-operation poller reports ``done()`` as False after
         # ``wait(timeout)`` -- models an operation still in flight at the deadline.
         self.deallocate_completes: bool = True
         self.start_completes: bool = True
