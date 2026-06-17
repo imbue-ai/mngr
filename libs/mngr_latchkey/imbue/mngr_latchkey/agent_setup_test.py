@@ -26,6 +26,7 @@ from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
+from imbue.mngr_latchkey.agent_setup import recover_missing_host_permissions
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -245,6 +246,69 @@ def test_finalize_propagates_link_errors(tmp_path: Path) -> None:
     missing_path = tmp_path / "definitely-not-there.json"
     with pytest.raises(LatchkeyStoreError):
         finalize_host_permissions(fake, missing_path, HostId())
+
+
+# -- recover_missing_host_permissions ----------------------------------------
+
+
+def test_recover_links_standalone_opaque_when_host_file_missing(tmp_path: Path) -> None:
+    """The common recovery: a standalone opaque baseline handle, no canonical file yet."""
+    fake = _full_fake(tmp_path)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
+    assert setup.opaque_permissions_path is not None
+    host_id = HostId()
+    canonical = permissions_path_for_host(fake.plugin_data_dir, host_id)
+    assert not canonical.exists()
+
+    did_recover = recover_missing_host_permissions(fake, host_id, setup.opaque_permissions_path)
+
+    assert did_recover is True
+    # The canonical file now exists and the opaque handle is a symlink to it,
+    # exactly as a successful ``finalize_host_permissions`` would leave things.
+    assert canonical.is_file()
+    assert setup.opaque_permissions_path.is_symlink()
+    assert setup.opaque_permissions_path.resolve() == canonical.resolve()
+
+
+def test_recover_is_noop_when_host_file_already_present(tmp_path: Path) -> None:
+    """A host that was already finalized needs no repair."""
+    fake = _full_fake(tmp_path)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
+    assert setup.opaque_permissions_path is not None
+    host_id = HostId()
+    finalize_host_permissions(fake, setup.opaque_permissions_path, host_id)
+
+    did_recover = recover_missing_host_permissions(fake, host_id, setup.opaque_permissions_path)
+
+    assert did_recover is False
+
+
+def test_recover_rejects_opaque_path_outside_opaque_directory(tmp_path: Path) -> None:
+    """A target outside the plugin's opaque directory is refused (defense-in-depth)."""
+    fake = _full_fake(tmp_path)
+    stray = tmp_path / "elsewhere" / "permissions.json"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("{}")
+    with pytest.raises(LatchkeyStoreError):
+        recover_missing_host_permissions(fake, HostId(), stray)
+
+
+def test_recover_materializes_baseline_when_opaque_handle_missing(tmp_path: Path) -> None:
+    """Defensive branch: handle gone but a valid opaque-dir path -> write baseline at canonical."""
+    fake = _full_fake(tmp_path)
+    host_id = HostId()
+    # A path under the opaque directory that was never materialized.
+    phantom = opaque_permissions_dir(fake.plugin_data_dir) / "deadbeefdeadbeefdeadbeefdeadbeef.json"
+    canonical = permissions_path_for_host(fake.plugin_data_dir, host_id)
+    assert not canonical.exists()
+
+    did_recover = recover_missing_host_permissions(fake, host_id, phantom)
+
+    assert did_recover is True
+    assert canonical.is_file()
+    # The baseline carries the gateway-self + minds-api-proxy scaffolding rules.
+    config = json.loads(canonical.read_text())
+    assert len(config["rules"]) > 0
 
 
 # -- AgentLatchkeySetup model -------------------------------------------------

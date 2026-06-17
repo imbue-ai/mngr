@@ -76,12 +76,16 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_latchkey.agent_setup import recover_missing_host_permissions
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # How long `minds run` waits for the spawned `mngr forward` plugin to report
 # its bound port via a `listening` envelope before treating startup as failed.
@@ -429,7 +433,7 @@ def run(
     # ``root_concurrency_group``.
     permission_requests_consumer = PermissionRequestsConsumer(
         gateway_client=gateway_client,
-        on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver),
+        on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver, latchkey=latchkey),
     )
     permission_requests_consumer.start(root_concurrency_group)
     # Stash on app.state so the lifespan shutdown can stop() the consumer
@@ -533,9 +537,16 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         frozen=True,
         description="Resolver whose ``notify_change()`` wakes the chrome SSE so the panel updates promptly.",
     )
+    latchkey: Latchkey = Field(
+        frozen=True,
+        description=(
+            "Latchkey instance used to repair a host whose canonical "
+            "``latchkey_permissions.json`` is missing when a fresh request arrives."
+        ),
+    )
 
-    # ``FastAPI`` and ``MngrCliBackendResolver`` are not pydantic
-    # natives; tolerate them with ``arbitrary_types_allowed``.
+    # ``FastAPI``, ``MngrCliBackendResolver`` and ``Latchkey`` are not
+    # pydantic natives; tolerate them with ``arbitrary_types_allowed``.
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
     def __call__(self, event: RequestEvent) -> None:
@@ -551,6 +562,11 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         # wake the SSE for nothing.
         if current.get_request_by_id(str(event.event_id)) is not None:
             return
+        # Repair a host whose canonical permissions file was never
+        # materialized *before* surfacing the request, so the user's
+        # eventual approval actually takes effect. Best-effort: failures
+        # are logged and the request is still surfaced.
+        self._maybe_recover_host_permissions(event)
         self.app.state.request_inbox = current.add_request(event)
         if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
             logger.info(
@@ -574,6 +590,61 @@ class _StreamedPermissionRequestHandler(FrozenModel):
                 event.event_id,
             )
         self.backend_resolver.notify_change()
+
+    def _maybe_recover_host_permissions(self, event: RequestEvent) -> None:
+        """Recreate a missing per-host permissions file for the request's agent.
+
+        The streamed request carries ``permissions_target_path`` -- the
+        agent's opaque permissions handle (what its gateway JWT resolves
+        to). When the canonical host-keyed permissions file does not yet
+        exist, :func:`recover_missing_host_permissions` swings that handle
+        into the canonical path so grants written by the approval flow are
+        visible to the agent. No-op when the target is absent (non-latchkey
+        request) or the host is not yet known to discovery.
+        """
+        target = event.permissions_target_path
+        if target is None:
+            return
+        host_id = self._resolve_host_id(AgentId(event.agent_id))
+        if host_id is None:
+            return
+        try:
+            did_recover = recover_missing_host_permissions(
+                latchkey=self.latchkey,
+                host_id=host_id,
+                opaque_permissions_path=Path(target),
+            )
+        except LatchkeyStoreError as e:
+            logger.warning(
+                "Could not recover missing latchkey permissions file for host {} (agent {}): {}",
+                host_id,
+                event.agent_id,
+                e,
+            )
+            return
+        if did_recover:
+            logger.info(
+                "Recovered missing latchkey permissions file for host {} (agent {}) from opaque handle {}",
+                host_id,
+                event.agent_id,
+                target,
+            )
+
+    def _resolve_host_id(self, agent_id: AgentId) -> HostId | None:
+        """Resolve the host an agent runs on, or ``None`` when discovery hasn't caught up.
+
+        Mirrors the resolution the permission-grant handler does: the
+        backend resolver maps the agent id to its host id, and the
+        placeholder ``"localhost"`` string (used by static / in-memory
+        resolvers) is treated as "unknown host".
+        """
+        info = self.backend_resolver.get_agent_display_info(agent_id)
+        if info is None:
+            return None
+        try:
+            return HostId(info.host_id)
+        except ValueError:
+            return None
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:

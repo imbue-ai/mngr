@@ -70,6 +70,9 @@ def test_streamed_request_to_event_maps_predefined_fields() -> None:
     assert event.permissions == ("slack-read-all",)
     assert event.rationale == "needs to read messages"
     assert event.request_type == str(RequestType.LATCHKEY_PERMISSION)
+    # ``target`` (the agent's opaque permissions handle) is carried through so
+    # the inbox handler can recover a missing canonical host permissions file.
+    assert event.permissions_target_path == "/tmp/permissions.json"
 
 
 def test_streamed_request_to_event_maps_file_sharing_fields() -> None:
@@ -82,6 +85,7 @@ def test_streamed_request_to_event_maps_file_sharing_fields() -> None:
     assert event.access == "WRITE"
     assert event.rationale == "needs data"
     assert event.request_type == str(RequestType.FILE_SHARING_PERMISSION)
+    assert event.permissions_target_path == "/tmp/permissions.json"
 
 
 def _wait_until(predicate, timeout: float = _POLL_TIMEOUT_SECONDS) -> bool:
