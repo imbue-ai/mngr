@@ -321,11 +321,19 @@ def test_get_volume_for_host_returns_volume_when_objects_present(temp_mngr_ctx: 
 
 
 def test_get_volume_for_host_returns_none_when_prefix_empty(temp_mngr_ctx: MngrContext) -> None:
-    """An empty host_dir prefix yields None (the diagnostic runs, non-fatally)."""
+    """An empty host_dir prefix with no resolvable VM yields None and emits no diagnostic warning.
+
+    Complement of ``..._warns_when_vm_has_no_managed_identity``: when the
+    diagnostic can't find the VM it returns early, so the user must not see the
+    (misleading) 'no managed identity' warning. Together the two pin the
+    empty-prefix matrix (vm-without-identity -> warn; no-vm -> silent).
+    """
     provider, _compute = _build_provider_with_identity(temp_mngr_ctx)
     host_id = HostId.generate()
     # No VM matches the host id, so the diagnostic returns early (no identity probe).
-    assert provider.get_volume_for_host(host_id) is None
+    with capture_log_warnings() as warnings:
+        assert provider.get_volume_for_host(host_id) is None
+    assert not any("no attached user-assigned managed identity" in message for message in warnings)
 
 
 def test_get_volume_for_host_warns_when_vm_has_no_managed_identity(temp_mngr_ctx: MngrContext) -> None:

@@ -1,13 +1,10 @@
 """Tests for the AwsProvider's S3-state-bucket vs tag agent-data behavior."""
 
-from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
 
 import boto3
-import pytest
 from botocore.stub import Stubber
-from moto import mock_aws
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -26,12 +23,6 @@ from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.testing import seed_stopped_host_record
 
 _BUCKET_NAME = "mngr-state-test-bucket"
-
-
-@pytest.fixture
-def aws_mock() -> Iterator[None]:
-    with mock_aws():
-        yield
 
 
 def _build_bucket_provider(
@@ -257,7 +248,19 @@ def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
             ]
         },
     )
-    stubber.add_response("create_tags", {})
+    # Assert the exact tag write (the Stubber validates expected_params), not just
+    # that some create_tags happened -- this pins the agent record to the tag mirror.
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={
+            "Resources": ["i-1"],
+            "Tags": [
+                {"Key": f"mngr-agent-{agent_id}-name", "Value": "alpha"},
+                {"Key": f"mngr-agent-{agent_id}-type", "Value": "claude"},
+            ],
+        },
+    )
     stubber.activate()
     try:
         provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
@@ -290,7 +293,13 @@ def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(aws_mock: None, te
 
 
 def test_get_volume_for_host_returns_none_when_prefix_empty(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """An empty host_dir prefix yields None (and the diagnostic runs, non-fatally)."""
+    """An empty host_dir prefix with no resolvable instance yields None and emits no diagnostic warning.
+
+    Complement of ``..._warns_when_instance_has_no_iam_profile``: when the
+    diagnostic can't even find the instance it returns early, so the user must not
+    see the (misleading) 'no IAM profile' warning. Together the two pin the
+    empty-prefix matrix (instance-without-profile -> warn; no-instance -> silent).
+    """
     provider, stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     # The diagnostic calls _find_instance_for_host, which lists instances, finds
@@ -300,9 +309,11 @@ def test_get_volume_for_host_returns_none_when_prefix_empty(aws_mock: None, temp
     stubber.add_response("describe_instances", {"Reservations": []})
     stubber.activate()
     try:
-        assert provider.get_volume_for_host(host_id) is None
+        with capture_log_warnings() as warnings:
+            assert provider.get_volume_for_host(host_id) is None
     finally:
         stubber.deactivate()
+    assert not any("no attached IAM instance profile" in message for message in warnings)
 
 
 def test_get_volume_for_host_warns_when_instance_has_no_iam_profile(

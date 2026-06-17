@@ -1,11 +1,8 @@
 """Unit tests for ``S3StateHostIdentity`` (IAM role + instance profile) using moto."""
 
 import json
-from collections.abc import Iterator
 
 import boto3
-import pytest
-from moto import mock_aws
 
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
 from imbue.mngr_aws.state_bucket import build_host_identity_inline_policy
@@ -13,17 +10,6 @@ from imbue.mngr_aws.state_bucket import host_identity_name_for_bucket
 
 _US_EAST_1 = "us-east-1"
 _BUCKET = "mngr-state-123456789012-us-east-1"
-
-
-@pytest.fixture
-def aws_session() -> Iterator[boto3.Session]:
-    """A boto3 Session with moto's in-memory AWS backend active and dummy creds."""
-    with mock_aws():
-        yield boto3.Session(
-            aws_access_key_id="testing",
-            aws_secret_access_key="testing",
-            region_name=_US_EAST_1,
-        )
 
 
 def _identity(session: boto3.Session) -> S3StateHostIdentity:
