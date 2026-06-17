@@ -112,3 +112,13 @@ at its boundary: a snapshot request on a bare placement now fails up front with
 `SnapshotsNotSupportedError` instead of reaching into the realizer mid-operation.
 No behavior change for container hosts; a bare snapshot still fails with a clear
 error (just earlier).
+
+The placement "is running" predicate is now computed exactly one way. Previously
+the container realizer derived running-state two ways -- a cheap `docker inspect`
+probe (`is_placement_running`, used by `get_host` / `discover_hosts` without a
+full listing read) versus parsing the listing script's `CONTAINER_STATE` -- which
+could disagree. Both now route through a single `is_running_container_state`
+rule, and the cheap probe reads `.State.Status` (the same string the listing
+emits) instead of `.State.Running`. The cheap probe path is preserved: the
+get-host / discover callers still learn is-running without triggering the heavy
+listing script. No behavior change.

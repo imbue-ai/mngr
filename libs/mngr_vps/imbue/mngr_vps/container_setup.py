@@ -177,14 +177,31 @@ def snapshot_trigger_volume_name_for(host_id: HostId) -> str:
     return f"mngr-snapshot-trigger-{host_id.get_uuid().hex}"
 
 
+# The single rule mapping a container's state string (``.State.Status`` or a
+# parsed listing's ``CONTAINER_STATE=`` value) to "is the placement running".
+# Both the cheap inspect probe and the listing-derived state route through this,
+# so the two paths can never disagree on what "running" means.
+RUNNING_CONTAINER_STATE: Final[str] = "running"
+
+
+def is_running_container_state(state: str | None) -> bool:
+    """Whether a container state string denotes a running container."""
+    return state == RUNNING_CONTAINER_STATE
+
+
 def docker_inspect_running(outer: OuterHostInterface, container_name: str) -> bool:
-    """Return True iff a container with the given name is running on outer."""
+    """Return True iff a container with the given name is running on outer.
+
+    Reads ``.State.Status`` and applies the same running-state rule the listing
+    path uses (``is_running_container_state``), so the cheap probe and the
+    listing-derived state can never disagree.
+    """
     result = outer.execute_idempotent_command(
-        f"docker inspect --format '{{{{.State.Running}}}}' {shlex.quote(container_name)}"
+        f"docker inspect --format '{{{{.State.Status}}}}' {shlex.quote(container_name)}"
     )
     if not result.success:
         return False
-    return result.stdout.strip().lower() == "true"
+    return is_running_container_state(result.stdout.strip())
 
 
 def check_file_exists_on_outer(outer: OuterHostInterface, path: Path) -> bool:

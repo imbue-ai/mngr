@@ -43,6 +43,7 @@ from imbue.mngr_vps.container_setup import is_btrfs_progs_installed_on_outer
 from imbue.mngr_vps.container_setup import is_fstab_entry_present_on_outer
 from imbue.mngr_vps.container_setup import is_path_mounted_on_outer
 from imbue.mngr_vps.container_setup import is_retryable_rsync_error
+from imbue.mngr_vps.container_setup import is_running_container_state
 from imbue.mngr_vps.container_setup import prepare_btrfs_on_outer
 from imbue.mngr_vps.container_setup import pull_image
 from imbue.mngr_vps.container_setup import redact_secret_env
@@ -165,15 +166,24 @@ def test_is_retryable_rsync_error_returns_false_for_other_errors() -> None:
 # =============================================================================
 
 
+def test_is_running_container_state() -> None:
+    """Only the exact ``running`` state denotes a running container -- one rule for both paths."""
+    assert is_running_container_state("running") is True
+    assert is_running_container_state("exited") is False
+    assert is_running_container_state("paused") is False
+    assert is_running_container_state(None) is False
+    assert is_running_container_state("") is False
+
+
 def test_docker_inspect_running_returns_true_when_running() -> None:
-    outer = _outer(CommandResult(stdout="true\n", stderr="", success=True))
+    outer = _outer(CommandResult(stdout="running\n", stderr="", success=True))
     assert docker_inspect_running(outer, "my-container") is True
-    assert "docker inspect --format" in _stub(outer).recorded[0].command
+    assert ".State.Status" in _stub(outer).recorded[0].command
     assert "my-container" in _stub(outer).recorded[0].command
 
 
 def test_docker_inspect_running_returns_false_when_not_running() -> None:
-    outer = _outer(CommandResult(stdout="false\n", stderr="", success=True))
+    outer = _outer(CommandResult(stdout="exited\n", stderr="", success=True))
     assert docker_inspect_running(outer, "my-container") is False
 
 

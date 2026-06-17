@@ -40,6 +40,7 @@ from imbue.mngr_vps.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps.container_setup import docker_inspect_running
 from imbue.mngr_vps.container_setup import exec_in_container
 from imbue.mngr_vps.container_setup import host_volume_name_for
+from imbue.mngr_vps.container_setup import is_running_container_state
 from imbue.mngr_vps.container_setup import prepare_btrfs_on_outer
 from imbue.mngr_vps.container_setup import provision_snapshot_helper_on_outer
 from imbue.mngr_vps.container_setup import pull_image
@@ -185,7 +186,9 @@ class DockerRealizer(SnapshotCapableRealizer):
         self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
     ) -> tuple[list[dict[str, Any]], bool]:
         parsed = _read_live_listing_from_vps(outer, host_id, host_dir, prefix)
-        return extract_agent_data_from_parsed_listing(parsed), parsed.get("container_state") == "running"
+        return extract_agent_data_from_parsed_listing(parsed), is_running_container_state(
+            parsed.get("container_state")
+        )
 
     def is_placement_running(self, outer: OuterHostInterface, record: VpsHostRecord) -> bool:
         assert record.config is not None and record.config.container_name is not None
