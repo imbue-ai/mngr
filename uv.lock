@@ -2261,6 +2261,7 @@ dependencies = [
     { name = "loguru" },
     { name = "paramiko" },
     { name = "pluggy" },
+    { name = "psutil" },
     { name = "psycopg2-binary" },
     { name = "pydantic" },
 ]
@@ -2278,6 +2279,7 @@ requires-dist = [
     { name = "loguru" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy" },
+    { name = "psutil" },
     { name = "psycopg2-binary" },
     { name = "pydantic", specifier = ">=2.0" },
 ]
