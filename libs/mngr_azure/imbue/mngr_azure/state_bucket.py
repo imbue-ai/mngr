@@ -1,4 +1,3 @@
-import json
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -33,17 +32,13 @@ from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_vps import state_keys
+from imbue.mngr_vps.state_bucket_base import BaseStateBucket
 
 # The Azure analog of an S3 bucket is a Blob *container* inside a *storage
 # account*. The container name is fixed (container names allow hyphens, 3-63
 # lowercase); the storage-account name is derived per scope (3-24 chars,
 # lowercase alphanumeric only) -- see ``AzureProviderConfig`` for derivation.
 DEFAULT_STATE_CONTAINER_NAME: Final[str] = "mngr-state"
-
-# Tag/metadata marking the storage account as mngr-managed, mirroring the AWS
-# bucket's ``managed-by=mngr`` tag (so a future cleanup can prove ownership).
-_MANAGED_BY_TAG_KEY: Final[str] = "managed-by"
-_MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
 
 # Storage account SKU + kind for the state account: locally-redundant standard
 # storage with a general-purpose-v2 account (the modern default), private.
@@ -76,9 +71,14 @@ def host_identity_name_for_account(account_name: str) -> str:
     return f"mngrid-{account_name}"
 
 
-def host_dir_blob_prefix_for(host_id: HostId) -> str:
-    """Return the ``hosts/<host_id_hex>/host_dir/`` blob prefix the sync daemon pushes to."""
-    return state_keys.host_dir_prefix(host_id)
+def host_dir_sync_target_for(account_name: str, container_name: str, host_id: HostId) -> str:
+    """Return the ``https://<account>.blob.core.windows.net/<container>/hosts/<id>/host_dir`` sync target.
+
+    The full blob URL the on-box ``azcopy sync`` pushes to. Mirrors the AWS
+    ``host_dir_sync_target_for`` (which returns the ``s3://`` URI).
+    """
+    prefix = state_keys.host_dir_prefix(host_id).rstrip("/")
+    return f"https://{account_name}.blob.core.windows.net/{container_name}/{prefix}"
 
 
 class BlobStateBucketError(MngrError):
@@ -89,7 +89,7 @@ class BlobStateHostIdentityError(MngrError):
     """A managed-identity / role-assignment host-identity operation failed."""
 
 
-class BlobStateBucket(MutableModel):
+class BlobStateBucket(BaseStateBucket):
     """Reads/writes mngr control-plane state in an Azure Blob container, readable while offline.
 
     The Azure analog of ``S3StateBucket``: a Blob container inside a storage
@@ -99,6 +99,10 @@ class BlobStateBucket(MutableModel):
     tag limit. Data-plane access uses AAD (the same ``DefaultAzureCredential`` the
     provider uses) against ``https://<account>.blob.core.windows.net``; the
     storage account itself is created/deleted via the storage management plane.
+
+    The cloud-agnostic record marshalling + key layout live on ``BaseStateBucket``;
+    this class supplies the Blob/storage clients, the raw object primitives, error
+    translation, and the storage-account + container lifecycle.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -134,81 +138,18 @@ class BlobStateBucket(MutableModel):
     def _container(self) -> Any:
         return self._blob_service().get_container_client(self.container_name)
 
-    def write_host_record(self, host_id: HostId, record_json: str) -> None:
-        """Write the host record JSON for a host, overwriting any existing blob."""
-        self._put_blob(state_keys.host_state_key(host_id), record_json)
+    @property
+    def _store_label(self) -> str:
+        return f"Azure container {self.container_name}"
 
-    def read_host_record(self, host_id: HostId) -> str | None:
-        """Return the host record JSON for a host, or None if no blob exists."""
-        return self._get_blob(state_keys.host_state_key(host_id))
-
-    def write_agent_record(self, host_id: HostId, agent_id: str, data: Mapping[str, object]) -> None:
-        """Write a single agent's record (serialized as JSON) under the host's prefix."""
-        self._put_blob(state_keys.agent_key(host_id, agent_id), json.dumps(dict(data)))
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        """Return every agent record stored under the host's ``agents/`` prefix.
-
-        A stored blob that is not valid JSON (externally edited / corrupted) is
-        skipped with a warning rather than crashing the listing.
-        """
-        records: list[dict] = []
-        for key in self._list_keys(state_keys.agents_prefix(host_id)):
-            body = self._get_blob(key)
-            if body is None:
-                continue
-            try:
-                parsed = json.loads(body)
-            except json.JSONDecodeError as e:
-                logger.warning("Skipping unparseable agent record {} in container {}: {}", key, self.container_name, e)
-                continue
-            if isinstance(parsed, dict):
-                records.append(parsed)
-            else:
-                logger.warning("Skipping agent record {} in container {}: not a JSON object", key, self.container_name)
-        return records
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        """Delete a single agent's record. Idempotent (no error if absent)."""
-        self._delete_blob(state_keys.agent_key(host_id, agent_id))
-
-    def delete_host_state(self, host_id: HostId) -> None:
-        """Delete every blob under the host's prefix. Idempotent."""
-        for key in self._list_keys(f"{state_keys.host_prefix(host_id)}/"):
-            self._delete_blob(key)
-
-    def has_any_host_state(self) -> bool:
-        """Return whether any blob exists under the ``hosts/`` prefix."""
-        with _translate_blob_errors(self.account_name):
-            for _ in self._container().list_blobs(name_starts_with=f"{state_keys.HOSTS_PREFIX}/"):
-                return True
-        return False
-
-    def volume_for_host(self, host_id: HostId) -> Volume:
-        """Return a Volume scoped to ``hosts/<host_id_hex>/host_dir/`` for offline reads.
-
-        Reads use the operator's credentials (this same data-plane client), so no
-        VM identity is required to read -- only to push. The returned volume is
-        rooted at the host's ``host_dir`` tree, matching how
-        ``OfflineHostWithVolume`` addresses files (relative to ``host_dir``).
-        Mirrors ``S3StateBucket.volume_for_host``.
-        """
-        host_dir_prefix = state_keys.host_dir_prefix(host_id).rstrip("/")
+    def _make_host_dir_volume(self) -> Volume:
         return BlobVolume(
             credential=self.credential,
             account_name=self.account_name,
             container_name=self.container_name,
-        ).scoped(host_dir_prefix)
+        )
 
-    def host_dir_prefix_has_objects(self, host_id: HostId) -> bool:
-        """Return whether any blob exists under the host's ``host_dir/`` prefix.
-
-        Used by the offline-read path as a light existence probe: an empty prefix
-        means the VM never pushed its host_dir (e.g. the sync daemon never ran, or
-        the VM has no bucket-write managed identity). Mirrors
-        ``S3StateBucket.host_dir_prefix_has_objects``.
-        """
-        prefix = state_keys.host_dir_prefix(host_id)
+    def _prefix_has_objects(self, prefix: str) -> bool:
         with _translate_blob_errors(self.account_name):
             for _ in self._container().list_blobs(name_starts_with=prefix):
                 return True
@@ -255,7 +196,7 @@ class BlobStateBucket(MutableModel):
             sku=Sku(name=_STORAGE_ACCOUNT_SKU),
             kind=_STORAGE_ACCOUNT_KIND,
             location=self.region,
-            tags={_MANAGED_BY_TAG_KEY: _MANAGED_BY_TAG_VALUE},
+            tags={state_keys.MANAGED_BY_TAG_KEY: state_keys.MANAGED_BY_TAG_VALUE},
             properties=StorageAccountPropertiesCreateParameters(
                 allow_blob_public_access=False,
                 minimum_tls_version="TLS1_2",
@@ -297,11 +238,11 @@ class BlobStateBucket(MutableModel):
             self._storage_mgmt().storage_accounts.delete(self.resource_group, self.account_name)
         logger.info("Deleted Azure storage account {} in resource group {}", self.account_name, self.resource_group)
 
-    def _put_blob(self, key: str, body: str) -> None:
+    def _put_object(self, key: str, body: str) -> None:
         with _translate_blob_errors(self.account_name):
             self._container().upload_blob(name=key, data=body.encode("utf-8"), overwrite=True)
 
-    def _get_blob(self, key: str) -> str | None:
+    def _get_object(self, key: str) -> str | None:
         try:
             with _translate_blob_errors(self.account_name):
                 downloader = self._container().download_blob(key)
@@ -311,7 +252,7 @@ class BlobStateBucket(MutableModel):
                 return None
             raise
 
-    def _delete_blob(self, key: str) -> None:
+    def _delete_object(self, key: str) -> None:
         try:
             with _translate_blob_errors(self.account_name):
                 self._container().delete_blob(key)
@@ -320,6 +261,11 @@ class BlobStateBucket(MutableModel):
             if isinstance(e.__cause__, ResourceNotFoundError):
                 return
             raise
+
+    def _delete_keys(self, keys: list[str]) -> None:
+        # Blob storage has no batch delete, so remove one at a time (each idempotent).
+        for key in keys:
+            self._delete_object(key)
 
     def _list_keys(self, prefix: str) -> list[str]:
         with _translate_blob_errors(self.account_name):
@@ -421,7 +367,7 @@ class BlobStateHostIdentity(MutableModel):
             identity = self._msi().user_assigned_identities.create_or_update(
                 self.resource_group,
                 self.identity_name,
-                Identity(location=self.region, tags={_MANAGED_BY_TAG_KEY: _MANAGED_BY_TAG_VALUE}),
+                Identity(location=self.region, tags={state_keys.MANAGED_BY_TAG_KEY: state_keys.MANAGED_BY_TAG_VALUE}),
             )
             principal_id = identity.principal_id
             if not principal_id:

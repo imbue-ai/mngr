@@ -167,24 +167,17 @@ class AwsProviderConfig(VpsProviderConfig):
     state_bucket_name: str | None = Field(
         default=None,
         description=(
-            "Name of the S3 bucket holding mngr control-plane state (the full host record and "
-            "per-agent records) so a stopped instance's state is readable without SSH and without "
-            "the 256-char EC2 tag limit. When None, the effective name is derived as "
-            "'mngr-state-<account_id>-<region>' (account id from sts:GetCallerIdentity). When a "
-            "bucket is configured/derivable, the per-agent EC2 tag mirror is dropped in favor of "
-            "the bucket; without one, mngr falls back to the tag mirror."
+            "S3 bucket where mngr stores a stopped instance's state so it is readable without "
+            "starting the instance. When None, named 'mngr-state-<account_id>-<region>'. Without a "
+            "bucket, mngr falls back to EC2 tags, which hold less and cap the number of agents."
         ),
     )
-    is_host_dir_synced_to_bucket: bool = Field(
+    is_offline_host_dir_enabled: bool = Field(
         default=True,
         description=(
-            "Whether the instance syncs its host_dir to the S3 state bucket so it is readable "
-            "while the instance is stopped (a Lima-style offline host_dir; mirrors Lima's "
-            "is_host_data_volume_exposed). On by default. When on (and a bucket is present), the "
-            "create path attaches the prepare-provisioned IAM instance profile, an on-box daemon "
-            "periodically `aws s3 sync`s host_dir to hosts/<host_id>/host_dir/, and "
-            "get_volume_for_host serves offline reads from the bucket. Set False to disable the "
-            "host_dir sync entirely (offline host metadata still works via the bucket)."
+            "When on (default), a stopped instance's host_dir is readable without starting it, so "
+            "`mngr event` / `mngr transcript` / `mngr file` work against it. `mngr aws prepare` sets "
+            "up the access it needs. Set False to turn it off."
         ),
     )
     terminate_on_shutdown: bool = Field(

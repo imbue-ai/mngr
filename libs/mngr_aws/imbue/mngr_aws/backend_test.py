@@ -13,6 +13,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import TagLimitExceededError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
@@ -28,6 +29,7 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
+from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -303,6 +305,58 @@ def test_persist_agent_data_writes_labels_in_their_own_tag(temp_mngr_ctx: MngrCo
             host_id,
             {"id": str(agent_id), "name": "a1", "type": "command", "labels": {"env": "prod"}},
         )
+    finally:
+        stubber.deactivate()
+
+
+def test_persist_agent_data_translates_tag_limit_to_actionable_error(temp_mngr_ctx: MngrContext) -> None:
+    """Hitting EC2's 50-tag ceiling surfaces a TagLimitExceededError pointing at the S3 state bucket.
+
+    Many agents on one host can exhaust the tag mirror; rather than failing
+    obscurely the provider tells the user to run ``mngr aws prepare`` (the bucket
+    has no tag ceiling and supersedes the mirror once it exists).
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    seed_stopped_host_record(provider, host_id)
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
+    )
+    stubber.add_client_error(
+        "create_tags",
+        service_error_code="TagLimitExceeded",
+        service_message="The maximum number of tags for this resource has been reached.",
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(TagLimitExceededError, match="mngr aws prepare"):
+            provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "a1", "type": "command"})
+    finally:
+        stubber.deactivate()
+
+
+def test_persist_agent_data_reraises_non_tag_limit_api_error(temp_mngr_ctx: MngrContext) -> None:
+    """A create-tags failure that is not the tag-limit case propagates unchanged (not remapped)."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    seed_stopped_host_record(provider, host_id)
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
+    )
+    stubber.add_client_error(
+        "create_tags",
+        service_error_code="UnauthorizedOperation",
+        service_message="You are not authorized to perform this operation.",
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(VpsApiError, match="UnauthorizedOperation") as exc_info:
+            provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "a1", "type": "command"})
+        assert not isinstance(exc_info.value, TagLimitExceededError)
     finally:
         stubber.deactivate()
 

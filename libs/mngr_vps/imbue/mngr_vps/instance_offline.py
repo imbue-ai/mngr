@@ -9,6 +9,7 @@ from typing import Any
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
@@ -22,6 +23,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -31,7 +33,10 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
+from imbue.mngr_vps.host_state_store import NullHostDirBackend
+from imbue.mngr_vps.host_state_store import StateBucket
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -491,99 +496,56 @@ class OfflineCapableVpsProvider(VpsProvider):
         logger.info("Idle self-stop watcher installed for host {}", host_id)
 
     # =========================================================================
-    # Host-side host_dir-to-bucket sync daemon
+    # Host-side offline host_dir capability (select-once backend)
     #
-    # The install / before-pause sequences are uniform; the provider supplies the
-    # CLI install command, the per-host sync ``.service`` body, the target URI, and
-    # the enable gate (off for GCP, which has no object store).
+    # Offline host_dir is a bucket feature: a provider mirrors host_dir to an object
+    # store so a stopped host's host_dir is still readable. The provider selects one
+    # ``HostDirBackend`` once (bucket-backed when enabled + present, else the no-op
+    # ``NullHostDirBackend``), so the call sites below never re-test the feature flag
+    # or bucket presence. GCP has no object store and keeps the no-op default.
     # =========================================================================
 
-    def _is_host_dir_sync_enabled(self) -> bool:
-        """Whether this provider syncs host_dir to an object store for offline reads.
+    @property
+    def _host_dir_backend(self) -> HostDirBackend:
+        """The offline ``host_dir`` capability: bucket-backed when enabled + present, else a no-op.
 
-        Default False (GCP inherits the no-op and installs nothing). AWS/Azure
-        override to gate on their config flag AND a state bucket being present.
+        Offline ``host_dir`` is a bucket feature, so this lives on the offline-capable
+        layer (not the tag mirror). The default is the no-op ``NullHostDirBackend`` --
+        correct for a provider with no bucket (e.g. GCP). Providers that mirror
+        host_dir to a bucket override this with a selected-once cached property, so
+        the host_dir paths below never re-test ``is_offline_host_dir_enabled`` /
+        bucket presence.
         """
-        return False
-
-    def _host_dir_sync_install_command(self) -> str | None:
-        """Best-effort CLI install command for the sync tool, or None to skip the install step.
-
-        AWS returns the awscli install; Azure returns the azcopy install. Default
-        None (no install). Only called when ``_is_host_dir_sync_enabled`` is True.
-        """
-        return None
-
-    def _host_dir_sync_service_unit(self, host_dir_on_outer: str, target: str) -> str:
-        """Provider's oneshot ``.service`` body that syncs ``host_dir_on_outer`` to ``target``.
-
-        AWS: ``aws s3 sync`` with IMDS instance-profile creds. Azure: ``azcopy sync``
-        with the MSI env pinning the bucket-write identity. Only reached when
-        ``_is_host_dir_sync_enabled`` is True, so a provider that enables sync must
-        override this; the default fails loudly rather than installing a no-op unit.
-        """
-        raise MngrError(
-            f"Provider {self.name!r} enabled host_dir sync but did not override _host_dir_sync_service_unit"
-        )
-
-    def _host_dir_sync_target_uri(self, host_id: HostId) -> str:
-        """The sync target for this host (AWS: ``s3://`` URI; Azure: blob prefix URL).
-
-        Only reached when ``_is_host_dir_sync_enabled`` is True, so a provider that
-        enables sync must override this; the default fails loudly.
-        """
-        raise MngrError(f"Provider {self.name!r} enabled host_dir sync but did not override _host_dir_sync_target_uri")
-
-    def _install_host_dir_sync(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the host-side host_dir-to-bucket sync daemon on the outer host.
-
-        Gated on ``_is_host_dir_sync_enabled``. Installs the sync CLI (best-effort,
-        when ``_host_dir_sync_install_command`` is non-None) and a systemd oneshot
-        ``.service`` + ``.timer`` pair that runs the provider sync every
-        ``HOST_DIR_SYNC_INTERVAL_SECONDS``. Returns early (no-op) when the feature is
-        off.
-        """
-        if not self._is_host_dir_sync_enabled():
-            return
-        host_dir_on_outer = str(self._realizer.host_dir_path_on_outer(host_id))
-        target = self._host_dir_sync_target_uri(host_id)
-        service_unit = self._host_dir_sync_service_unit(host_dir_on_outer, target)
-        timer_unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
-        install_command = self._host_dir_sync_install_command()
-        with log_span("Installing host_dir sync daemon"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                if install_command is not None:
-                    outer.execute_idempotent_command(install_command, timeout_seconds=300.0)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
-        logger.info("host_dir sync daemon installed for host {} (target {})", host_id, target)
+        return NullHostDirBackend()
 
     def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Run the host_dir sync once (best-effort) so the offline copy is current before the pause.
+        """Push host_dir to the external store one final time before the instance pauses.
 
-        Called by the base ``stop_host`` while the instance is still reachable.
-        Starts the oneshot sync service synchronously (``--wait`` blocks until it
-        finishes). Best-effort: any failure is logged at WARNING and swallowed so a
-        sync hiccup never blocks the stop -- the offline copy is then simply "as of
-        the last periodic sync". A no-op when ``_is_host_dir_sync_enabled`` is False.
+        Runs in ``stop_host`` after the container has stopped (host_dir quiesced)
+        and before the instance is paused (still SSH-reachable), so the offline view
+        is current the moment the instance stops. The no-op backend makes this a
+        no-op for providers without a bucket.
         """
-        if not self._is_host_dir_sync_enabled():
-            return
-        try:
-            with log_span("Triggering final host_dir sync before pause"):
-                with self._make_outer_for_vps_ip(vps_ip) as outer:
-                    outer.execute_idempotent_command(
-                        f"systemctl start --wait {HOST_DIR_SYNC_UNIT_NAME}.service", timeout_seconds=300.0
-                    )
-        except MngrError as e:
-            logger.warning(
-                "Final host_dir sync before stopping host {} failed; the offline copy will be as of "
-                "the last periodic sync: {}",
-                host_id,
-                e,
-            )
+        self._host_dir_backend.trigger_final_sync(host_id, vps_ip)
+
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return the bucket-backed host_dir volume *reference* (cheap, no network probe), or None.
+
+        Delegates to the selected host_dir backend (the no-op backend returns None
+        when the feature is off or no bucket exists).
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        return self._host_dir_backend.volume_reference(host_id)
+
+    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return the bucket-backed host_dir volume, with a light existence probe, or None.
+
+        Delegates to the selected host_dir backend, which probes that the host's
+        ``host_dir/`` prefix has objects and, when empty, warns if the instance was
+        never granted the bucket-write identity. Returns None when unavailable.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        return self._host_dir_backend.volume(host_id)
 
     # =========================================================================
     # Post-finalize provisioning (best-effort idle watcher + host_dir sync)
@@ -608,9 +570,9 @@ class OfflineCapableVpsProvider(VpsProvider):
         The shared list is: install the host-side idle watcher (skipped when the
         realizer's idle command already stops the whole host -- the bare case --
         since a bare placement self-stops directly) and install the host_dir-to-bucket
-        sync daemon (a no-op when ``_is_host_dir_sync_enabled`` is False, e.g. GCP).
-        Providers prepend their own steps via ``_post_finalize_steps`` (Azure: its
-        self-deallocate role assignment).
+        sync daemon (a no-op when the selected ``_host_dir_backend`` is the null
+        backend, e.g. GCP). Providers prepend their own steps via
+        ``_post_finalize_steps`` (Azure: its self-deallocate role assignment).
         """
         steps: list[tuple[str, Callable[[], None]]] = list(self._post_finalize_steps(host_id=host_id, vps_ip=vps_ip))
         if not self._realizer.idle_shutdown_stops_host:
@@ -623,7 +585,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         steps.append(
             (
                 "the stopped host's host_dir will not be readable offline",
-                lambda: self._install_host_dir_sync(host_id=host_id, vps_ip=vps_ip),
+                lambda: self._host_dir_backend.install_sync(host_id=host_id, vps_ip=vps_ip),
             )
         )
         for description, step in steps:
@@ -674,10 +636,21 @@ class OfflineCapableVpsProvider(VpsProvider):
         agents -- which are NOT mirrored into tags -- are still surfaced, and the
         ``instance`` argument is ignored.
         """
+        if instance is not None:
+            return self._persisted_agent_dicts_from_instance(instance)
+        return self._agent_dicts_from_tags(host_id)
+
+    def _agent_dicts_from_tags(self, host_id: HostId) -> list[dict]:
+        """Reassemble a host's agent records from its instance tags/metadata, or [] if the instance is gone.
+
+        Resolves the instance from the cached listing, then reads its mirrored
+        agent records. Shared by the default ``_offline_agent_dicts_for`` and the
+        tag-mirror ``HostStateStore`` implementations (AWS/Azure), which otherwise
+        re-derived the same lookup.
+        """
+        instance = self._find_instance_for_host(host_id)
         if instance is None:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return []
+            return []
         return self._persisted_agent_dicts_from_instance(instance)
 
     @abstractmethod
@@ -825,6 +798,70 @@ class OfflineCapableVpsProvider(VpsProvider):
             return super().list_persisted_agent_data_for_host(host_id)
         except HostNotFoundError:
             return self._offline_agent_dicts_for(host_id)
+
+
+class BucketHostDirBackend(HostDirBackend):
+    """Shared offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
+
+    Selected only when offline host_dir is on and the state bucket exists, so
+    ``bucket`` is always present and no method re-tests it. Holds a back-reference
+    to the provider for the SSH-to-outer / path plumbing the sync needs. The
+    offline-read (``volume`` / ``volume_reference``) and final-sync-before-pause
+    flow live here once; subclasses supply only the cloud-specific pieces
+    (identity provisioning, the sync-daemon install, the missing-identity probe)
+    and three small hooks (unit name, stop-action word, bucket error type).
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    provider: OfflineCapableVpsProvider
+    bucket: StateBucket
+    bucket_error_type: type[MngrError]
+
+    @abstractmethod
+    def _sync_unit_name(self) -> str:
+        """systemd unit base name for the host_dir sync daemon (e.g. ``mngr-aws-host-dir-sync``)."""
+        ...
+
+    @abstractmethod
+    def _pause_action(self) -> str:
+        """The pause verb for log context: ``stop`` (AWS/EC2) or ``deallocate`` (Azure)."""
+        ...
+
+    def volume_reference(self, host_id: HostId) -> HostVolume | None:
+        return HostVolume(volume=self.bucket.volume_for_host(host_id))
+
+    def volume(self, host_id: HostId) -> HostVolume | None:
+        try:
+            if not self.bucket.host_dir_prefix_has_objects(host_id):
+                self._warn_if_identity_missing(host_id)
+                return None
+        except self.bucket_error_type as e:
+            logger.warning(
+                "Could not probe host_dir prefix for host {}; treating volume as unavailable: {}", host_id, e
+            )
+            return None
+        return self.volume_reference(host_id)
+
+    def trigger_final_sync(self, host_id: HostId, vps_ip: str) -> None:
+        try:
+            with log_span(f"Triggering final host_dir sync before {self._pause_action()}"):
+                with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
+                    outer.execute_idempotent_command(
+                        f"systemctl start --wait {self._sync_unit_name()}.service", timeout_seconds=300.0
+                    )
+        except MngrError as e:
+            logger.warning(
+                "Final host_dir sync before stopping host {} failed; the offline copy will be as of "
+                "the last periodic sync: {}",
+                host_id,
+                e,
+            )
+
+    @abstractmethod
+    def _warn_if_identity_missing(self, host_id: HostId) -> None:
+        """Warn (best-effort) when an empty host_dir prefix is explained by a missing cloud identity."""
+        ...
 
 
 # Per-agent records are mirrored into a key-value map (instance tags or GCE
@@ -1066,6 +1103,25 @@ class TagMirrorVpsProvider(KeyValueMirrorVpsProvider):
         concrete providers (the bucket-existence probe runs at most once).
         """
         ...
+
+    def to_offline_host(self, host_id: HostId) -> OfflineHost:
+        """Return an offline host, reconstructing a stopped instance's record from the external store.
+
+        Falls back to the SSH/volume-backed base path first; if that can't find the
+        host (stopped and unreachable), reconstruct it from the external store --
+        the full ``VpsHostRecord`` when the store has it (bucket ``host_state.json``),
+        otherwise the instance's own tags (which also covers a bucket-mode host
+        created before the bucket existed). Calls the SSH-only ``VpsProvider`` path
+        directly so the ``OfflineCapableVpsProvider`` tag fallback does not pre-empt
+        this store-aware reconstruction.
+        """
+        try:
+            return VpsProvider.to_offline_host(self, host_id)
+        except HostNotFoundError:
+            record = self._state_store.read_host_record(host_id)
+            if record is None:
+                raise
+            return self._create_offline_host(record)
 
     def _offline_kv_map(self, instance: Mapping[str, Any]) -> dict[str, str]:
         """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""

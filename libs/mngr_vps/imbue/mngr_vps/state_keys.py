@@ -16,6 +16,11 @@ AGENTS_SUBPREFIX: Final[str] = "agents"
 # scoped here so reads see exactly the host_dir tree.
 HOST_DIR_SUBPREFIX: Final[str] = "host_dir"
 
+# Tag/label marking a cloud resource (state bucket, host identity) as mngr-managed
+# so cleanup can prove ownership. Shared verbatim by every provider.
+MANAGED_BY_TAG_KEY: Final[str] = "managed-by"
+MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
+
 
 def host_prefix(host_id: HostId) -> str:
     """Return ``hosts/<host_id_hex>`` -- the per-host key prefix (no trailing slash)."""

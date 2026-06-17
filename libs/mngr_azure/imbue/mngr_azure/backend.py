@@ -16,17 +16,13 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
-from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -39,7 +35,7 @@ from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
-from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
+from imbue.mngr_azure.state_bucket import host_dir_sync_target_for
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
 from imbue.mngr_vps.build_args import extract_presence_flag
@@ -47,12 +43,17 @@ from imbue.mngr_vps.build_args import extract_single_value_arg
 from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
+from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
+from imbue.mngr_vps.host_state_store import NullHostDirBackend
 from imbue.mngr_vps.host_store import VpsHostRecord
-from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance_offline import AGENT_TAG_FIELDS
 from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
+from imbue.mngr_vps.instance_offline import BucketHostDirBackend
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
 from imbue.mngr_vps.instance_offline import TagMirrorVpsProvider
+from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 
@@ -75,7 +76,7 @@ _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
 # Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
 # The install / before-pause sequence is shared by the base; Azure supplies the
 # ``azcopy sync`` service body and azcopy install. When
-# ``is_host_dir_synced_to_bucket`` is on and a state bucket exists, the create path
+# ``is_offline_host_dir_enabled`` is on and a state bucket exists, the create path
 # attaches the prepare-provisioned user-assigned managed identity, then the base
 # installs a systemd oneshot ``.service`` + ``.timer`` pair that runs ``azcopy
 # sync`` of ``<host_dir_on_outer>`` to the blob container's ``hosts/<id>/host_dir/``
@@ -153,12 +154,6 @@ def _build_azcopy_install_command() -> str:
         'install -m 0755 "$tmp"/azcopy_linux_*/azcopy /usr/local/bin/azcopy && '
         'rm -rf "$tmp")'
     )
-
-
-def _build_host_dir_blob_url(account_name: str, container_name: str, host_id: HostId) -> str:
-    """Return the ``https://<account>.blob.core.windows.net/<container>/hosts/<id>/host_dir`` sync target."""
-    prefix = host_dir_blob_prefix_for(host_id).rstrip("/")
-    return f"https://{account_name}.blob.core.windows.net/{container_name}/{prefix}"
 
 
 def _build_idle_watcher_service_unit() -> str:
@@ -323,9 +318,25 @@ class AzureProvider(TagMirrorVpsProvider):
         bucket = self._state_bucket
         if bucket is not None:
             return BucketHostStateStore(
-                bucket=bucket, bucket_error_type=BlobStateBucketError, bucket_label="Azure state bucket"
+                bucket=bucket,
+                bucket_error_type=BlobStateBucketError,
+                bucket_label="Azure state bucket",
+                fallback=_VmTagHostStateStore(provider=self),
             )
         return _VmTagHostStateStore(provider=self)
+
+    @cached_property
+    def _host_dir_backend(self) -> HostDirBackend:
+        """Select the offline host_dir backend once: bucket-backed when enabled + present, else no-op.
+
+        The only place ``is_offline_host_dir_enabled`` and ``_state_bucket``
+        presence are tested together; every host_dir call site dispatches through
+        the selected backend. Mirrors ``AwsProvider._host_dir_backend``.
+        """
+        bucket = self._state_bucket
+        if self.azure_config.is_offline_host_dir_enabled and bucket is not None:
+            return _BlobHostDirBackend(provider=self, bucket=bucket)
+        return NullHostDirBackend()
 
     def _host_identity(self) -> BlobStateHostIdentity | None:
         """Return the bucket-write managed-identity helper (uncached), or None when unresolvable.
@@ -470,37 +481,12 @@ class AzureProvider(TagMirrorVpsProvider):
     def _host_dir_sync_identity_resource_id(self) -> str | None:
         """Return the prepare-provisioned user-assigned identity resource id to attach at create, or None.
 
-        Returns the bucket-write identity's resource id only when host_dir sync is
-        on, a state bucket is present, and the identity was actually provisioned by
-        ``mngr azure prepare``. Probing identity existence is best-effort: a failure
-        degrades to None (no identity attached -- offline host_dir just won't work)
-        rather than blocking create. Attaching the identity requires the create
-        credentials to hold the identity's ``.../assign/action``. Mirrors
-        ``AwsProvider._host_dir_sync_instance_profile``.
+        Delegates to the selected host_dir backend (the no-op backend returns None
+        when the feature is off or no bucket exists). Attaching the identity
+        requires the create credentials to hold the identity's
+        ``.../assign/action``. Mirrors ``AwsProvider._host_dir_sync_instance_profile``.
         """
-        if not self.azure_config.is_host_dir_synced_to_bucket:
-            return None
-        if self._state_bucket is None:
-            return None
-        identity = self._host_identity()
-        if identity is None:
-            return None
-        try:
-            if not identity.host_identity_exists():
-                logger.warning(
-                    "host_dir sync is on but the bucket-write managed identity {} does not exist; launching "
-                    "without it (run `mngr azure prepare --use-offline-host-dir yes` to enable offline host_dir)",
-                    identity.identity_name,
-                )
-                return None
-        except BlobStateHostIdentityError as e:
-            logger.warning(
-                "Could not check the bucket-write managed identity {}; launching without it: {}",
-                identity.identity_name,
-                e,
-            )
-            return None
-        return identity.resource_id()
+        return self._host_dir_backend.create_identity()
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return public IPs of Azure VMs tagged with this provider's name.
@@ -605,53 +591,6 @@ class AzureProvider(TagMirrorVpsProvider):
         outer.write_text_file(Path(_DEALLOCATE_SCRIPT_PATH), _build_self_deallocate_script(sentinel_on_outer))
         outer.execute_idempotent_command(f"chmod +x {_DEALLOCATE_SCRIPT_PATH}")
 
-    # =========================================================================
-    # Host-side host_dir-to-bucket sync daemon -- the base owns the install /
-    # before-pause sequence; Azure supplies the gate, azcopy install, ``azcopy
-    # sync`` service body, and blob target URL.
-    # =========================================================================
-
-    def _is_host_dir_sync_enabled(self) -> bool:
-        """Enabled only when sync is configured, a bucket is present, AND the managed identity exists.
-
-        azcopy authenticates as the bucket-write user-assigned identity via MSI;
-        without it the sync would just 403, so the absent-identity case is gated out
-        here (with the actionable WARNING) rather than installing a daemon that can
-        never succeed.
-        """
-        if not self.azure_config.is_host_dir_synced_to_bucket:
-            return False
-        if self._state_bucket is None:
-            logger.debug("No Azure state bucket; host_dir sync is disabled for this provider")
-            return False
-        if self._host_dir_sync_identity_client_id() is None:
-            logger.warning(
-                "host_dir sync is on but the bucket-write managed identity is absent; skipping the sync "
-                "daemon install (run `mngr azure prepare --use-offline-host-dir yes`)"
-            )
-            return False
-        return True
-
-    def _host_dir_sync_identity_client_id(self) -> str | None:
-        """Return the bucket-write managed identity's client id (used to pin azcopy's MSI login), or None."""
-        identity = self._host_identity()
-        return identity.get_host_identity_client_id() if identity is not None else None
-
-    def _host_dir_sync_install_command(self) -> str | None:
-        return _build_azcopy_install_command()
-
-    def _host_dir_sync_service_unit(self, host_dir_on_outer: str, target: str) -> str:
-        # ``_is_host_dir_sync_enabled`` guarantees the identity client id is present.
-        identity_client_id = self._host_dir_sync_identity_client_id()
-        assert identity_client_id is not None, "host_dir sync service unit requested without a managed identity"
-        return _build_host_dir_sync_service_unit(host_dir_on_outer, target, identity_client_id)
-
-    def _host_dir_sync_target_uri(self, host_id: HostId) -> str:
-        # ``_is_host_dir_sync_enabled`` guarantees a present bucket before this runs.
-        bucket = self._state_bucket
-        assert bucket is not None, "host_dir sync target requested without a state bucket"
-        return _build_host_dir_blob_url(bucket.account_name, bucket.container_name, host_id)
-
     def _post_finalize_steps(self, *, host_id: HostId, vps_ip: str) -> list[tuple[str, Callable[[], None]]]:
         """Prepend the Azure self-deallocate role assignment to the shared post-finalize steps.
 
@@ -715,112 +654,6 @@ class AzureProvider(TagMirrorVpsProvider):
         """
         return self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) == VpsInstanceStatus.HALTED
 
-    def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a deallocated VM's record offline.
-
-        Falls back to the base (SSH/volume-backed) path first; if that can't find
-        the host (deallocated and unreachable), reconstruct it from the external
-        store: the *full* ``VpsHostRecord`` when the store has it (Blob
-        ``host_state.json``), otherwise a minimal record rebuilt from the VM's own
-        tags -- which also covers a bucket-mode host created before the bucket
-        existed (so its ``host_state.json`` is absent). Mirrors
-        ``AwsProvider.to_offline_host``. Calls the SSH-only ``VpsProvider``
-        path directly so the ``OfflineCapableVpsProvider`` tag fallback does
-        not pre-empt the bucket-aware reconstruction below.
-        """
-        try:
-            return VpsProvider.to_offline_host(self, host_id)
-        except HostNotFoundError:
-            record = self._state_store.read_host_record(host_id)
-            # In bucket mode, fall back to the VM's own tags for a host whose
-            # host_state.json is absent (created before the bucket existed). The tag
-            # store already reconstructs from tags, so this fallback is bucket-only.
-            if record is None and self._state_bucket is not None:
-                record = self._host_record_from_instance_tags(host_id)
-            if record is None:
-                raise
-            return self._create_offline_host(record)
-
-    # =========================================================================
-    # Offline host_dir volume (reads via the operator's credentials)
-    # =========================================================================
-
-    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return a bucket-backed host_dir volume *reference* (cheap, no network probe).
-
-        Used by ``make_readable_offline_host`` during discovery, so it must stay
-        cheap: it only builds the scoped ``BlobVolume`` (no Blob call) when host_dir
-        sync is on and a state bucket is present. Reads use the operator's
-        credentials, so no VM identity is needed here. Returns None when the feature
-        is off or no bucket is configured. Mirrors
-        ``AwsProvider.get_volume_reference_for_host``.
-        """
-        if not self.azure_config.is_host_dir_synced_to_bucket:
-            return None
-        bucket = self._state_bucket
-        if bucket is None:
-            return None
-        host_id = host.id if isinstance(host, HostInterface) else host
-        return HostVolume(volume=bucket.volume_for_host(host_id))
-
-    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return the bucket-backed host_dir volume, with a light existence probe.
-
-        Like ``get_volume_reference_for_host`` but additionally confirms the host's
-        ``host_dir/`` prefix actually has blobs (a cheap prefix list). When the
-        prefix is empty, runs the missing-identity diagnostic (Decision 7) -- a
-        clear WARNING pointing at ``mngr azure prepare --use-offline-host-dir yes``
-        if the VM has no attached user-assigned identity -- and returns None
-        (callers treat None as "not available"). This never raises. Mirrors
-        ``AwsProvider.get_volume_for_host``.
-        """
-        reference = self.get_volume_reference_for_host(host)
-        if reference is None:
-            return None
-        bucket = self._state_bucket
-        if bucket is None:
-            return None
-        host_id = host.id if isinstance(host, HostInterface) else host
-        try:
-            if not bucket.host_dir_prefix_has_objects(host_id):
-                self._warn_if_host_dir_identity_missing(host_id)
-                return None
-        except BlobStateBucketError as e:
-            logger.warning(
-                "Could not probe host_dir prefix for host {}; treating volume as unavailable: {}", host_id, e
-            )
-            return None
-        return reference
-
-    def _warn_if_host_dir_identity_missing(self, host_id: HostId) -> None:
-        """Warn (non-fatally) when an empty host_dir prefix is explained by a missing managed identity.
-
-        Detects the Decision-7 case directly from cloud state: when the host's VM
-        has no attached user-assigned managed identity, the on-box sync daemon
-        could never push host_dir, which is why the prefix is empty. Points the user
-        at ``mngr azure prepare --use-offline-host-dir yes`` (and recreating the
-        host so it picks up the identity). Best-effort: any probe failure is
-        swallowed (this is purely advisory). Mirrors
-        ``AwsProvider._warn_if_host_dir_identity_missing``.
-        """
-        try:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return
-            identity_ids = self.azure_client.get_instance_user_assigned_identity_ids(VpsInstanceId(instance["id"]))
-        except (MngrError, AzureError) as e:
-            logger.debug(
-                "Could not check managed identity for host {} while diagnosing empty host_dir: {}", host_id, e
-            )
-            return
-        if not identity_ids:
-            logger.warning(
-                "Host {}'s VM has no attached user-assigned managed identity, so its host_dir was never "
-                "pushed to the bucket and is not readable offline. Run `mngr azure prepare "
-                "--use-offline-host-dir yes`, then recreate the host so it picks up the identity.",
-                host_id,
-            )
-
 
 class _VmTagHostStateStore(HostStateStore):
     """Tag-backed host-state mirror: the VM's own tags are the store (no-bucket fallback).
@@ -858,6 +691,104 @@ class _VmTagHostStateStore(HostStateStore):
 
     def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
         return self.provider._host_record_from_instance_tags(host_id)
+
+
+class _BlobHostDirBackend(BucketHostDirBackend):
+    """Bucket-backed offline host_dir for Azure: managed-identity + ``azcopy sync`` to the Blob bucket.
+
+    Selected only when offline host_dir is on and the state bucket exists, so
+    ``self.bucket`` is always present here and no method re-tests it. The
+    offline-read + final-sync flow is inherited from ``BucketHostDirBackend``;
+    this supplies the Azure-specific identity, sync-daemon install, and probes.
+    Mirrors ``mngr_aws.backend._S3HostDirBackend``.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    provider: AzureProvider
+    bucket: BlobStateBucket
+    bucket_error_type: type[MngrError] = BlobStateBucketError
+
+    def _sync_unit_name(self) -> str:
+        return HOST_DIR_SYNC_UNIT_NAME
+
+    def _pause_action(self) -> str:
+        return "deallocate"
+
+    def create_identity(self) -> str | None:
+        identity = self.provider._host_identity()
+        if identity is None:
+            return None
+        try:
+            if not identity.host_identity_exists():
+                logger.warning(
+                    "host_dir sync is on but the bucket-write managed identity {} does not exist; launching "
+                    "without it (re-run `mngr azure prepare` with sufficient permissions to enable offline host_dir)",
+                    identity.identity_name,
+                )
+                return None
+        except BlobStateHostIdentityError as e:
+            logger.warning(
+                "Could not check the bucket-write managed identity {}; launching without it: {}",
+                identity.identity_name,
+                e,
+            )
+            return None
+        return identity.resource_id()
+
+    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
+        # azcopy authenticates as the VM's user-assigned managed identity via MSI;
+        # without it the sync would just 403, so skip the install when it is absent
+        # (a sub-decision within bucket mode, distinct from the bucket-vs-fallback
+        # selection).
+        identity = self.provider._host_identity()
+        identity_client_id = identity.get_host_identity_client_id() if identity is not None else None
+        if identity_client_id is None:
+            logger.warning(
+                "host_dir sync is on but the bucket-write managed identity for host {} is absent; skipping "
+                "the sync daemon install (re-run `mngr azure prepare` with sufficient permissions)",
+                host_id,
+            )
+            return
+        host_dir_on_outer = str(self.provider._realizer.host_dir_path_on_outer(host_id))
+        blob_prefix_url = host_dir_sync_target_for(self.bucket.account_name, self.bucket.container_name, host_id)
+        service_unit = _build_host_dir_sync_service_unit(host_dir_on_outer, blob_prefix_url, identity_client_id)
+        timer_unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
+        with log_span("Installing Azure host_dir sync daemon"):
+            with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
+                outer.execute_idempotent_command(_build_azcopy_install_command(), timeout_seconds=300.0)
+                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
+                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
+                outer.execute_idempotent_command("systemctl daemon-reload")
+                outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
+        logger.info("Azure host_dir sync daemon installed for host {} (target {})", host_id, blob_prefix_url)
+
+    def _warn_if_identity_missing(self, host_id: HostId) -> None:
+        """Warn when an empty host_dir prefix is explained by the VM having no managed identity.
+
+        Detects the missing-identity case directly from cloud state: a VM with no
+        attached user-assigned managed identity could never push host_dir, which is
+        why the prefix is empty. Best-effort -- any probe failure is swallowed.
+        """
+        try:
+            instance = self.provider._find_instance_for_host(host_id)
+            if instance is None:
+                return
+            identity_ids = self.provider.azure_client.get_instance_user_assigned_identity_ids(
+                VpsInstanceId(instance["id"])
+            )
+        except (MngrError, AzureError) as e:
+            logger.debug(
+                "Could not check managed identity for host {} while diagnosing empty host_dir: {}", host_id, e
+            )
+            return
+        if not identity_ids:
+            logger.warning(
+                "Host {}'s VM has no attached user-assigned managed identity, so its host_dir was never "
+                "pushed to the bucket and is not readable offline. Re-run `mngr azure prepare` "
+                "with sufficient permissions, then recreate the host so it picks up the identity.",
+                host_id,
+            )
 
 
 class AzureProviderBackend(ProviderBackendInterface):

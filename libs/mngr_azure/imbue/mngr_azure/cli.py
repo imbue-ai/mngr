@@ -20,7 +20,6 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
-from typing import assert_never
 
 import click
 from azure.core.exceptions import AzureError
@@ -28,14 +27,10 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
-from imbue.mngr.cli.common_opts import add_use_offline_host_dir_option
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
@@ -65,12 +60,10 @@ class _AzureOperatorCliOptions(CommonCliOptions):
 
 class _AzurePrepareCliOptions(_AzureOperatorCliOptions):
     allowed_ssh_cidrs: tuple[str, ...]
-    # Raw CLI choice string ("yes"/"auto"/"no"); parsed to AutoToggle in ``prepare``.
-    use_offline_host_dir: str
 
 
 class _AzureCleanupCliOptions(_AzureOperatorCliOptions):
-    purge_state: bool
+    force: bool
 
 
 def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AzureProviderConfig:
@@ -217,24 +210,24 @@ def _ensure_state_bucket_best_effort(bucket: BlobStateBucket) -> tuple[str | Non
     return bucket.account_name, was_created
 
 
-def _perform_state_bucket_cleanup(bucket: BlobStateBucket, *, purge_state: bool) -> str | None:
+def _perform_state_bucket_cleanup(bucket: BlobStateBucket, *, force: bool) -> str | None:
     """Delete the state storage account, refusing while any managed-host state remains.
 
     Returns the deleted account name, or ``None`` when none existed. Unless
-    ``purge_state`` is set, raises ``AzureProviderError`` when the account still
+    ``force`` is set, raises ``AzureProviderError`` when the account still
     holds ``hosts/`` state. By the time this runs the VM-exists check has already
     passed, so any remaining state is *orphaned* offline state (a host whose VM
     is gone but whose ``delete_host_state`` never ran, or one deleted outside
     mngr) -- deleting it silently could drop offline records the operator still
-    wants, so we refuse and let ``--purge-state`` opt into deleting it. Split out
+    wants, so we refuse and let ``--force`` opt into deleting it. Split out
     so the refuse/delete decision is unit-testable.
     """
     if not bucket.account_exists():
         return None
-    if not purge_state and bucket.container_exists() and bucket.has_any_host_state():
+    if not force and bucket.container_exists() and bucket.has_any_host_state():
         raise AzureProviderError(
             f"Refusing to delete Azure state storage account {bucket.account_name!r}: it still holds offline "
-            "host state (from hosts that are no longer running VMs). Re-run with `--purge-state` to delete "
+            "host state (from hosts that are no longer running VMs). Re-run with `--force` to delete "
             "the account and the remaining state."
         )
     bucket.delete_bucket()
@@ -257,29 +250,17 @@ def _build_host_identity(base: AzureProviderConfig, client: AzureVpsClient) -> B
     )
 
 
-def _provision_host_identity(identity: BlobStateHostIdentity, use_offline_host_dir: AutoToggle) -> str | None:
-    """Provision the bucket-write managed identity per the tri-state flag, returning its name or None.
+def _provision_host_identity(identity: BlobStateHostIdentity) -> str | None:
+    """Provision the bucket-write managed identity best-effort, returning its name or None.
 
-    ``NO`` does nothing (returns None). ``AUTO`` attempts provisioning and
-    degrades a permission/API failure to a WARNING so the network + bucket prepare
+    A permission/API failure degrades to a WARNING so the network + bucket prepare
     still succeed -- offline host_dir just won't work until prepare is re-run with
-    sufficient role-assignment permissions. ``YES`` raises a
-    ``click.ClickException`` when the identity cannot be provisioned, for a clean
-    programmatic "this prepare must yield a working offline host_dir". Mirrors
+    sufficient role-assignment permissions. Mirrors
     ``mngr_aws.cli._provision_host_identity``.
     """
-    if use_offline_host_dir is AutoToggle.NO:
-        return None
-    is_required = use_offline_host_dir is AutoToggle.YES
     try:
         identity.ensure_host_identity()
     except BlobStateHostIdentityError as e:
-        if is_required:
-            raise click.ClickException(
-                f"Failed to provision the host-dir managed identity {identity.identity_name!r} "
-                "(needs Microsoft.ManagedIdentity/userAssignedIdentities/write + "
-                f"Microsoft.Authorization/roleAssignments/write -- Owner or User Access Administrator): {e}"
-            ) from e
         logger.warning(
             "Failed to provision the host-dir managed identity {!r} (offline host_dir reads will be "
             "unavailable until prepare is re-run with sufficient permissions): {}",
@@ -291,26 +272,24 @@ def _provision_host_identity(identity: BlobStateHostIdentity, use_offline_host_d
 
 
 def _provision_host_identity_for_prepare(
-    base: AzureProviderConfig, client: AzureVpsClient, use_offline_host_dir: AutoToggle, *, was_account_set_up: bool
+    base: AzureProviderConfig, client: AzureVpsClient, *, was_account_set_up: bool
 ) -> str | None:
-    """Provision the host-dir identity during prepare, gating on the state account existing.
+    """Provision the host-dir identity during prepare best-effort, gating on the state account.
 
     The identity's Storage Blob Data Contributor role assignment is scoped to the
     state account, so provisioning is only meaningful once that account is set up.
-    When the account setup was skipped (``was_account_set_up`` is False): ``YES``
-    raises (it cannot deliver a working offline host_dir), while ``AUTO`` / ``NO``
-    return None (no identity, the documented degraded outcome). When the account is
-    present, defer to ``_provision_host_identity`` for the tri-state behavior.
+    When the account setup was skipped (``was_account_set_up`` is False), degrades
+    to a WARNING and returns None. Called only when ``is_offline_host_dir_enabled``
+    is set.
     """
-    if was_account_set_up:
-        return _provision_host_identity(_build_host_identity(base, client), use_offline_host_dir)
-    if use_offline_host_dir is AutoToggle.YES:
-        raise click.ClickException(
+    if not was_account_set_up:
+        logger.warning(
             "Cannot provision the host-dir managed identity: the state storage account could not be set up "
             "(its Storage Blob Data Contributor role assignment is scoped to that account). Re-run with "
-            "sufficient Microsoft.Storage permissions, or use --use-offline-host-dir auto/no."
+            "sufficient Microsoft.Storage permissions."
         )
-    return None
+        return None
+    return _provision_host_identity(_build_host_identity(base, client))
 
 
 def _perform_host_identity_cleanup(identity: BlobStateHostIdentity) -> str | None:
@@ -356,24 +335,14 @@ def _output_prepare_result(
         "state_bucket_created": was_bucket_created,
         "host_identity_name": host_identity_name,
     }
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(data)
-        case OutputFormat.JSONL:
-            emit_event("prepared", data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            write_human_line("Prepared Azure resource group {} in region {}", result.resource_group, result.region)
-            if state_account_name is not None:
-                write_human_line(
-                    "{} Azure state storage account {} in region {}",
-                    "Created" if was_bucket_created else "Reused existing",
-                    state_account_name,
-                    result.region,
-                )
-            if host_identity_name is not None:
-                write_human_line("Provisioned host-dir managed identity {}", host_identity_name)
-        case _ as unreachable:
-            assert_never(unreachable)
+
+    human_lines = [f"Prepared Azure resource group {result.resource_group} in region {result.region}"]
+    if state_account_name is not None:
+        verb = "Created" if was_bucket_created else "Reused existing"
+        human_lines.append(f"{verb} Azure state storage account {state_account_name} in region {result.region}")
+    if host_identity_name is not None:
+        human_lines.append(f"Provisioned host-dir managed identity {host_identity_name}")
+    emit_operator_result("prepared", data, output_format, human_lines)
 
 
 def _output_cleanup_result(
@@ -401,24 +370,16 @@ def _output_cleanup_result(
         "state_storage_account_deleted": deleted_account_name,
         "host_identity_deleted": deleted_host_identity_name,
     }
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(data)
-        case OutputFormat.JSONL:
-            emit_event("cleaned_up", data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            if deleted_resource_group is None:
-                write_human_line(
-                    "Nothing to clean up: no mngr-owned resource group in subscription {}.", subscription_id
-                )
-            else:
-                write_human_line("Cleaned up Azure resource group {} in region {}", deleted_resource_group, region)
-            if deleted_account_name is not None:
-                write_human_line("Deleted Azure state storage account {} in region {}", deleted_account_name, region)
-            if deleted_host_identity_name is not None:
-                write_human_line("Deleted host-dir managed identity {}", deleted_host_identity_name)
-        case _ as unreachable:
-            assert_never(unreachable)
+
+    if deleted_resource_group is None:
+        human_lines = [f"Nothing to clean up: no mngr-owned resource group in subscription {subscription_id}."]
+    else:
+        human_lines = [f"Cleaned up Azure resource group {deleted_resource_group} in region {region}"]
+    if deleted_account_name is not None:
+        human_lines.append(f"Deleted Azure state storage account {deleted_account_name} in region {region}")
+    if deleted_host_identity_name is not None:
+        human_lines.append(f"Deleted host-dir managed identity {deleted_host_identity_name}")
+    emit_operator_result("cleaned_up", data, output_format, human_lines)
 
 
 @click.group(name="azure")
@@ -467,7 +428,6 @@ def azure_cli_group() -> None:
         "Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production."
     ),
 )
-@add_use_offline_host_dir_option
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
@@ -516,19 +476,16 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # to a warning so the network prepare still succeeds (offline state then falls
     # back to the VM tag mirror).
     state_account_name, was_bucket_created = _ensure_state_bucket_best_effort(_build_state_bucket(base, client))
-    # Provision the bucket-write managed identity per --use-offline-host-dir
-    # (Decisions 3 & 6). 'auto' degrades a failure to a warning; 'yes' raises;
-    # 'no' returns None. The bucket-only steps above are unconditional, so a
-    # later `prepare --use-offline-host-dir yes` adds just the identity. The
-    # identity's role assignment is scoped to the state account, so it is only
-    # meaningful when the account was set up; skip it when the bucket setup was
-    # itself skipped (state_account_name is None).
-    host_identity_name = _provision_host_identity_for_prepare(
-        base,
-        client,
-        AutoToggle(opts.use_offline_host_dir.upper()),
-        was_account_set_up=state_account_name is not None,
-    )
+    # Provision the bucket-write managed identity (best-effort) when the offline
+    # host_dir feature is enabled. The bucket-only steps above are unconditional,
+    # so flipping is_offline_host_dir_enabled on and re-running prepare adds just
+    # the identity. The identity's role assignment is scoped to the state account,
+    # so it is only meaningful when the account was set up.
+    host_identity_name = None
+    if base.is_offline_host_dir_enabled:
+        host_identity_name = _provision_host_identity_for_prepare(
+            base, client, was_account_set_up=state_account_name is not None
+        )
     _output_prepare_result(
         result, state_account_name, was_bucket_created, host_identity_name, output_opts.output_format
     )
@@ -566,8 +523,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     help="Resource group to delete. Defaults to the resolved provider config's resource_group.",
 )
 @optgroup.option(
-    "--purge-state",
-    "purge_state",
+    "--force",
+    "force",
     is_flag=True,
     default=False,
     help=(
@@ -609,9 +566,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     # (its own refusal mirrors the VM check, as defense in depth). The storage
     # account lives in the resource group, so it is deleted first (its own
     # delete, before the RG cascade).
-    deleted_account_name = _perform_state_bucket_cleanup(
-        _build_state_bucket(base, client), purge_state=opts.purge_state
-    )
+    deleted_account_name = _perform_state_bucket_cleanup(_build_state_bucket(base, client), force=opts.force)
     # Delete the bucket-write managed identity (best-effort, idempotent) before the
     # RG cascade. The RG delete would reap it anyway, but the explicit delete keeps
     # cleanup well-defined when the identity outlives a partial prior cleanup.

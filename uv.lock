@@ -23,6 +23,7 @@ members = [
     "imbue-mngr-claude-subagent-proxy",
     "imbue-mngr-claude-usage",
     "imbue-mngr-codex",
+    "imbue-mngr-codex-usage",
     "imbue-mngr-file",
     "imbue-mngr-forward",
     "imbue-mngr-gcp",
@@ -34,9 +35,11 @@ members = [
     "imbue-mngr-modal",
     "imbue-mngr-notifications",
     "imbue-mngr-opencode",
+    "imbue-mngr-opencode-usage",
     "imbue-mngr-ovh",
     "imbue-mngr-pair",
     "imbue-mngr-pi-coding",
+    "imbue-mngr-pi-coding-usage",
     "imbue-mngr-recursive",
     "imbue-mngr-robinhood",
     "imbue-mngr-schedule",
@@ -2209,6 +2212,23 @@ dependencies = [
 requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
+name = "imbue-mngr-codex-usage"
+version = "0.1.1"
+source = { editable = "libs/mngr_codex_usage" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-codex" },
+    { name = "imbue-mngr-usage" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-codex", editable = "libs/mngr_codex" },
+    { name = "imbue-mngr-usage", editable = "libs/mngr_usage" },
+]
+
+[[package]]
 name = "imbue-mngr-file"
 version = "0.1.12"
 source = { editable = "libs/mngr_file" }
@@ -2448,6 +2468,23 @@ dependencies = [
 requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
+name = "imbue-mngr-opencode-usage"
+version = "0.1.1"
+source = { editable = "libs/mngr_opencode_usage" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-opencode" },
+    { name = "imbue-mngr-usage" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-opencode", editable = "libs/mngr_opencode" },
+    { name = "imbue-mngr-usage", editable = "libs/mngr_usage" },
+]
+
+[[package]]
 name = "imbue-mngr-ovh"
 version = "0.1.4"
 source = { editable = "libs/mngr_ovh" }
@@ -2489,6 +2526,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
+
+[[package]]
+name = "imbue-mngr-pi-coding-usage"
+version = "0.1.1"
+source = { editable = "libs/mngr_pi_coding_usage" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-pi-coding" },
+    { name = "imbue-mngr-usage" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-pi-coding", editable = "libs/mngr_pi_coding" },
+    { name = "imbue-mngr-usage", editable = "libs/mngr_usage" },
+]
 
 [[package]]
 name = "imbue-mngr-recursive"

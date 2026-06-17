@@ -104,7 +104,7 @@ group it owns (tagged `managed-by=mngr`). It also deletes the state storage
 account; because the VM check above has already passed, any remaining state is
 **orphaned** offline state (from hosts no longer running as VMs), so it
 **refuses** to delete a non-empty account rather than silently dropping records
-you may still want -- pass `--purge-state` to delete the account and its
+you may still want -- pass `--force` to delete the account and its
 remaining state. Idempotent.
 
 ```bash
@@ -137,41 +137,41 @@ network prepare still succeeds, and offline state falls back to the VM-tag
 mirror. Existing deployments that never re-ran the new `prepare` keep working on
 that fallback.
 
-### Offline `host_dir` (Lima-style, on by default)
+### Offline `host_dir` (on by default)
 
 A deallocated VM's `host_dir` is also readable without SSH, so `mngr event` /
-`mngr transcript` work against a stopped agent (matching Lima's
-`is_host_data_volume_exposed`). When `is_host_dir_synced_to_bucket` is on (the
-default) and the state bucket exists, an on-box systemd oneshot + timer daemon
+`mngr transcript` work against a stopped agent. When `is_offline_host_dir_enabled`
+is on (the default) and the state bucket exists, an on-box systemd oneshot + timer daemon
 syncs the VM's `host_dir` to the state container's `hosts/<host_id>/host_dir/`
 prefix every 60s, and once more on `mngr stop` just before the VM deallocates
 (so the offline copy is current). The sync runs `azcopy sync` authenticating as
 the VM's managed identity via MSI (`--auth-mode login`; no storage keys on the
 box), excluding large transient caches (`*.tmp`, `__pycache__`, `node_modules`).
-Set `is_host_dir_synced_to_bucket = false` in `[providers.azure]` to disable it
+Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to disable it
 (offline host metadata still works via the bucket).
 
-The instance-push needs a cloud identity, which `prepare` provisions:
+The instance-push needs a cloud identity, which `prepare` provisions
+**best-effort** when `is_offline_host_dir_enabled` is on (the default):
 
 ```bash
-mngr azure prepare --use-offline-host-dir yes   # fail if the identity can't be created
+mngr azure prepare   # provisions the identity best-effort; warns + continues if permissions are denied
 ```
 
-`--use-offline-host-dir {yes,auto,no}` (default `auto`) provisions a
-**user-assigned managed identity** plus a **`Storage Blob Data Contributor`**
-role assignment scoped to **just the state storage account** (least privilege --
-never the resource group or subscription). `auto` warns and continues on a
-permission failure (the network + bucket prepare still succeed; only offline
-`host_dir` is unavailable); `require` fails the command; `skip` does not attempt
-it. `mngr azure cleanup` deletes the identity. `mngr create` attaches it to the
-VM when the feature is on and the identity exists (an operator-supplied identity
-takes precedence).
+`prepare` provisions a **user-assigned managed identity** plus a **`Storage Blob
+Data Contributor`** role assignment scoped to **just the state storage account**
+(least privilege -- never the resource group or subscription). Any missing-
+permission / API failure downgrades to a **warning** (the network + bucket
+prepare still succeed; only offline `host_dir` is unavailable until `prepare` is
+re-run with sufficient permissions). Set `is_offline_host_dir_enabled = false` in
+`[providers.azure]` to skip the identity entirely. `mngr azure cleanup` deletes
+the identity. `mngr create` attaches it to the VM when the feature is on and the
+identity exists (an operator-supplied identity takes precedence).
 
 Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write`
 + `Microsoft.Authorization/roleAssignments/write` (Owner or User Access
 Administrator). When offline `host_dir` is requested for a host whose VM has no
 attached managed identity, mngr logs a non-fatal diagnostic pointing at
-`mngr azure prepare --use-offline-host-dir yes` rather than returning an empty
+`mngr azure prepare` (with sufficient permissions) rather than returning an empty
 volume.
 
 ### Quota note

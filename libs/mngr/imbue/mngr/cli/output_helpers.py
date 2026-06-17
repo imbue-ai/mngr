@@ -144,6 +144,32 @@ def emit_event(
             assert_never(unreachable)
 
 
+def emit_operator_result(
+    event_name: str,
+    data: Mapping[str, Any],
+    output_format: OutputFormat,
+    human_lines: Sequence[str],
+) -> None:
+    """Emit an operator-command result (e.g. provider ``prepare`` / ``cleanup``) in the requested format.
+
+    Centralizes the format dispatch the provider operator commands share: JSON
+    writes ``data`` as one object, JSONL emits a ``<event_name>`` event carrying
+    ``data``, and HUMAN writes each already-formatted line in ``human_lines``.
+    Each provider still owns its ``data`` dict and its human wording (the caller
+    builds ``human_lines``) -- only the format switch lives here.
+    """
+    match output_format:
+        case OutputFormat.JSON:
+            write_json_line(data)
+        case OutputFormat.JSONL:
+            emit_event(event_name, data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            for line in human_lines:
+                write_human_line(line)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def on_error(
     error_msg: str,
     # How to handle the error: ABORT raises AbortError, CONTINUE logs and continues

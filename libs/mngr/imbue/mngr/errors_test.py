@@ -138,6 +138,14 @@ def test_tag_limit_exceeded_error_includes_limit_and_actual() -> None:
     assert "15" in str(error)
 
 
+def test_tag_limit_exceeded_error_appends_remediation_without_actual() -> None:
+    """With no actual count, the message still carries the limit and any remediation."""
+    error = TagLimitExceededError(_TEST_PROVIDER, limit=50, remediation="Run `mngr aws prepare`.")
+    assert error.actual is None
+    assert "50" in str(error)
+    assert "Run `mngr aws prepare`." in str(error)
+
+
 def test_agent_not_found_on_host_error_sets_both_ids() -> None:
     """AgentNotFoundOnHostError should set agent_id and host_id attributes."""
     agent_id = AgentId.generate()

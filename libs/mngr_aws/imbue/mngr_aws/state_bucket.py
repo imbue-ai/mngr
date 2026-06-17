@@ -21,8 +21,9 @@ from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_vps import state_keys
+from imbue.mngr_vps.state_bucket_base import BaseStateBucket
 
-# Trust policy + inline policy name for the per-bucket host identity (Decision 3).
+# Trust policy + inline policy name for the per-bucket host identity.
 # The trust policy lets EC2 assume the role; the inline policy grants ONLY the
 # object actions the on-box sync daemon needs (Put/Get/Delete) scoped to this
 # bucket's ``hosts/*`` prefix, plus ``s3:ListBucket`` on the bucket (required by
@@ -74,13 +75,15 @@ def host_dir_sync_target_for(bucket_name: str, host_id: HostId) -> str:
     return f"s3://{bucket_name}/{state_keys.host_dir_prefix(host_id)}"
 
 
-class S3StateBucket(MutableModel):
+class S3StateBucket(BaseStateBucket):
     """Reads/writes mngr control-plane state in an S3 bucket, readable while offline.
 
     The bucket holds the full host record and per-agent records keyed by host
     id, written by the mngr host machine with the operator's credentials, so a
     stopped instance's state is readable without SSH and without the EC2 tag
-    character limit.
+    character limit. The cloud-agnostic record marshalling + key layout live on
+    ``BaseStateBucket``; this class supplies the S3 client, the raw object
+    primitives, error translation, and the bucket lifecycle.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -96,77 +99,16 @@ class S3StateBucket(MutableModel):
             self._cached_s3_client = self.session.client("s3", region_name=self.region)
         return self._cached_s3_client
 
-    def write_host_record(self, host_id: HostId, record_json: str) -> None:
-        """Write the host record JSON for a host, overwriting any existing object."""
-        self._put_object(state_keys.host_state_key(host_id), record_json)
+    @property
+    def _store_label(self) -> str:
+        return f"S3 bucket {self.bucket_name}"
 
-    def read_host_record(self, host_id: HostId) -> str | None:
-        """Return the host record JSON for a host, or None if no object exists."""
-        return self._get_object(state_keys.host_state_key(host_id))
+    def _make_host_dir_volume(self) -> Volume:
+        return S3Volume(session=self.session, region=self.region, bucket_name=self.bucket_name)
 
-    def write_agent_record(self, host_id: HostId, agent_id: str, data: Mapping[str, object]) -> None:
-        """Write a single agent's record (serialized as JSON) under the host's prefix."""
-        self._put_object(state_keys.agent_key(host_id, agent_id), json.dumps(dict(data)))
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        """Return every agent record stored under the host's ``agents/`` prefix.
-
-        A stored object that is not valid JSON (externally edited / corrupted)
-        is skipped with a warning rather than crashing the listing.
-        """
-        records: list[dict] = []
-        for key in self._list_keys(state_keys.agents_prefix(host_id)):
-            body = self._get_object(key)
-            if body is None:
-                continue
-            try:
-                parsed = json.loads(body)
-            except json.JSONDecodeError as e:
-                logger.warning("Skipping unparseable agent record {} in bucket {}: {}", key, self.bucket_name, e)
-                continue
-            if isinstance(parsed, dict):
-                records.append(parsed)
-            else:
-                logger.warning("Skipping agent record {} in bucket {}: not a JSON object", key, self.bucket_name)
-        return records
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        """Delete a single agent's record. Idempotent (no error if absent)."""
-        self._delete_object(state_keys.agent_key(host_id, agent_id))
-
-    def delete_host_state(self, host_id: HostId) -> None:
-        """Delete every object under the host's prefix. Idempotent."""
-        self._delete_keys(self._list_keys(f"{state_keys.host_prefix(host_id)}/"))
-
-    def volume_for_host(self, host_id: HostId) -> Volume:
-        """Return a Volume scoped to ``hosts/<host_id_hex>/host_dir/`` for offline reads.
-
-        Reads use the operator's credentials (this same session), so no instance
-        identity is required to read -- only to push. The returned volume is
-        rooted at the host's ``host_dir`` tree, matching how
-        ``OfflineHostWithVolume`` addresses files (relative to ``host_dir``).
-        """
-        host_dir_prefix = state_keys.host_dir_prefix(host_id).rstrip("/")
-        return S3Volume(session=self.session, region=self.region, bucket_name=self.bucket_name).scoped(host_dir_prefix)
-
-    def host_dir_prefix_has_objects(self, host_id: HostId) -> bool:
-        """Return whether any object exists under the host's ``host_dir/`` prefix.
-
-        Used by the offline-read path as a light existence probe: an empty prefix
-        means the instance never pushed its host_dir (e.g. the sync daemon never
-        ran, or the instance has no bucket-write identity).
-        """
-        prefix = state_keys.host_dir_prefix(host_id)
+    def _prefix_has_objects(self, prefix: str) -> bool:
         with _translate_s3_errors(self.bucket_name):
             response = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=prefix, MaxKeys=1)
-        return response.get("KeyCount", 0) > 0
-
-    def has_any_host_state(self) -> bool:
-        """Return whether any object exists under the ``hosts/`` prefix."""
-        with _translate_s3_errors(self.bucket_name):
-            response = self._s3().list_objects_v2(
-                Bucket=self.bucket_name, Prefix=f"{state_keys.HOSTS_PREFIX}/", MaxKeys=1
-            )
         return response.get("KeyCount", 0) > 0
 
     def bucket_exists(self) -> bool:
@@ -214,7 +156,7 @@ class S3StateBucket(MutableModel):
             )
             self._s3().put_bucket_tagging(
                 Bucket=self.bucket_name,
-                Tagging={"TagSet": [{"Key": "managed-by", "Value": "mngr"}]},
+                Tagging={"TagSet": [{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}]},
             )
         logger.info("Created S3 state bucket {} in region {}", self.bucket_name, self.region)
         return True
@@ -305,9 +247,9 @@ class S3StateHostIdentity(MutableModel):
 
     The role is assumable by EC2 and carries a least-privilege inline policy
     scoped to the state bucket's ``hosts/*`` prefix. Provisioned by
-    ``mngr aws prepare`` (Decision 3) and attached at host create so the on-box
-    sync daemon can write via IMDS credentials. Reads never need this identity --
-    they use the operator's credentials.
+    ``mngr aws prepare`` and attached at host create so the on-box sync daemon
+    can write via IMDS credentials. Reads never need this identity -- they use
+    the operator's credentials.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -374,7 +316,7 @@ class S3StateHostIdentity(MutableModel):
                 RoleName=self.identity_name,
                 AssumeRolePolicyDocument=_EC2_TRUST_POLICY,
                 Description=f"Auto-created by mngr_aws so EC2 instances can sync host_dir to {self.bucket_name}",
-                Tags=[{"Key": "managed-by", "Value": "mngr"}],
+                Tags=[{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}],
             )
         except ClientError as e:
             if e.response.get("Error", {}).get("Code", "") != "EntityAlreadyExists":
@@ -384,7 +326,7 @@ class S3StateHostIdentity(MutableModel):
         try:
             self._iam().create_instance_profile(
                 InstanceProfileName=self.identity_name,
-                Tags=[{"Key": "managed-by", "Value": "mngr"}],
+                Tags=[{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}],
             )
         except ClientError as e:
             if e.response.get("Error", {}).get("Code", "") != "EntityAlreadyExists":

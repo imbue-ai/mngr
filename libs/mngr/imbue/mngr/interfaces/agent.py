@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from imbue.mngr.interfaces.host import CreateAgentOptions
     from imbue.mngr.interfaces.host import OnlineHostInterface
 
-AgentConfigT = TypeVar("AgentConfigT", bound=AgentTypeConfig)
+AgentConfigT = TypeVar("AgentConfigT", bound=AgentTypeConfig, covariant=True)
 
 
 class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
