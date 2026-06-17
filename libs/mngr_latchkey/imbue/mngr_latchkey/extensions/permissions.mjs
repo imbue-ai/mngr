@@ -59,6 +59,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -286,6 +287,14 @@ function writePermissionsFileAtomic(filePath, value) {
   const tempPath = `${filePath}.tmp.${randomBytes(6).toString('hex')}`;
   const serialized = `${JSON.stringify(value, null, 2)}\n`;
   try {
+    // Materialize the parent directory before writing. POST /permissions/rules
+    // creates the target file if it does not yet exist, and the minds desktop
+    // client points it at ``<root>/hosts/<host_id>/latchkey_permissions.json``
+    // -- a per-host directory that may not exist yet (e.g. when agent
+    // creation's finalize/link step was skipped or failed). Without this, the
+    // atomic write of the temp sibling fails with ENOENT and the grant
+    // surfaces as a confusing 500.
+    mkdirSync(directory, { recursive: true });
     writeFileSync(tempPath, serialized, 'utf-8');
     renameSync(tempPath, filePath);
   } catch (error) {
@@ -294,7 +303,6 @@ function writePermissionsFileAtomic(filePath, value) {
     } catch {
       // best-effort cleanup
     }
-    void directory;
     const message = error instanceof Error ? error.message : String(error);
     throw new PermissionsExtensionError(500, `Failed to write ${filePath}: ${message}`);
   }
