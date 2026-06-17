@@ -1,5 +1,23 @@
+#!/usr/bin/env python3
+"""Generate the code-derived agent capability matrix doc.
+
+Usage:
+    uv run python scripts/make_agent_capabilities_doc.py            # regenerate the doc in place
+    uv run python scripts/make_agent_capabilities_doc.py --check     # exit non-zero if the doc is stale
+
+Writes ``libs/mngr/docs/concepts/agent_capabilities.md``: a matrix of which agent
+types implement which capabilities, derived from the agent classes and their plugins.
+The capability *mixins* (``CliBackedAgentMixin``, ``HasSessionAdoptionMixin``, etc.)
+live in ``imbue.mngr.interfaces.agent`` because agent classes inherit them at runtime;
+this generator is dev-only tooling and intentionally lives in ``scripts/`` rather than
+the shipped ``mngr`` wheel (nothing in production imports it).
+"""
+
+import argparse
+import sys
 from collections.abc import Sequence
 from enum import auto
+from pathlib import Path
 from typing import Final
 from typing import assert_never
 
@@ -10,6 +28,9 @@ from pydantic import model_validator
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.agents.agent_registry import load_agents_from_plugins
+from imbue.mngr.agents.agent_registry import reset_agent_registry
+from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import list_registered_agent_class_types
 from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
@@ -24,6 +45,9 @@ from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
+from imbue.mngr.plugins import hookspecs
+from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.providers.registry import reset_backend_registry
 
 # The key that an agent_field_generators hookimpl uses for the waiting-reason field;
 # a plugin that exposes a *different* field (e.g. kanpan's `muted`) does not count.
@@ -392,10 +416,31 @@ def build_agent_class_infos(
     return tuple(infos)
 
 
+def build_loaded_plugin_manager() -> pluggy.PluginManager:
+    """Build a plugin manager with every installed mngr plugin loaded.
+
+    Mirrors the safe construction the test fixture uses: load all entry points so the
+    matrix reflects the full agent set, but register only the local backend so the
+    docker/modal SDKs are never exercised. Resets the agent/backend/provider registries
+    first so a fresh, complete view is built regardless of prior global state.
+    """
+    reset_backend_registry()
+    reset_agent_registry()
+    reset_provider_instances()
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    pm.load_setuptools_entrypoints("mngr")
+    # Only register the local backend, not modal/docker, so this does not depend on
+    # Modal credentials or a Docker daemon. Also loads provider configs.
+    load_local_backend_only(pm)
+    load_agents_from_plugins(pm)
+    return pm
+
+
 _GENERATED_DOC_HEADER: Final[str] = """# Agent capabilities
 
 <!-- GENERATED FILE -- do not edit by hand.
-     Regenerate with `just regenerate-agent-capabilities-doc` (see `mngr.agents.agent_capabilities`). -->
+     Regenerate with `just regenerate-agent-capabilities-doc` (see `scripts/make_agent_capabilities_doc.py`). -->
 
 Which agent types implement which capabilities, **derived from the code** (the agent classes
 and their plugins), not maintained by hand. `Y` means present; `-` means applicable but
@@ -413,3 +458,43 @@ def generate_capability_matrix_doc(
     matrix = render_capability_matrix(capabilities, infos)
     description_lines = [f"- **{capability.key}** -- {capability.description}" for capability in capabilities]
     return "\n".join([_GENERATED_DOC_HEADER, matrix, "", "## Capabilities", "", *description_lines, ""])
+
+
+def doc_path() -> Path:
+    """Path to the committed matrix doc, relative to the repo root (scripts/'s parent)."""
+    return Path(__file__).resolve().parents[1] / "libs" / "mngr" / "docs" / "concepts" / "agent_capabilities.md"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit non-zero if the committed doc is stale, instead of rewriting it.",
+    )
+    args = parser.parse_args()
+
+    pm = build_loaded_plugin_manager()
+    infos = build_agent_class_infos(pm)
+    generated = generate_capability_matrix_doc(AGENT_CAPABILITIES, infos)
+    path = doc_path()
+
+    if args.check:
+        current = path.read_text() if path.exists() else ""
+        if current != generated:
+            print(
+                f"{path} is stale relative to the agent capability registry; "
+                "regenerate with `just regenerate-agent-capabilities-doc`.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return
+
+    path.write_text(generated)
+
+
+if __name__ == "__main__":
+    main()

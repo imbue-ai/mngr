@@ -1515,17 +1515,6 @@ class ClaudeCoreAgent(
         """
         return "claude"
 
-    def on_before_provisioning(
-        self,
-        host: OnlineHostInterface,
-        options: CreateAgentOptions,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """No-op for core/headless claude: no pre-provisioning dialog or
-        credential validation. The interactive :class:`ClaudeAgent` subclass
-        overrides this to validate startup dialogs and credentials.
-        """
-
     def get_provision_file_transfers(
         self,
         host: OnlineHostInterface,
