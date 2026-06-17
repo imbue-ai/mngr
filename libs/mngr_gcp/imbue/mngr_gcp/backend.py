@@ -35,9 +35,10 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
+from imbue.mngr_gcp.client import CREATED_AT_METADATA_KEY
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import HOST_ID_METADATA_KEY
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
-from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
@@ -385,9 +386,13 @@ class GcpProvider(OfflineCapableVpsProvider):
             return self.gcp_client.start_instance(instance_id)
 
     def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Return every cached instance labeled ``mngr-host-id=<host_id>`` (GCE label-encoded)."""
-        wanted = f"mngr-host-id={to_gce_label_value(str(host_id))}"
-        return [instance for instance in self._list_instances_cached() if wanted in instance.get("tags", ())]
+        """Return every cached instance whose ``mngr-host-id`` metadata equals ``host_id`` (verbatim)."""
+        wanted = str(host_id)
+        return [
+            instance
+            for instance in self._list_instances_cached()
+            if self._metadata_dict(instance).get(HOST_ID_METADATA_KEY) == wanted
+        ]
 
     # =========================================================================
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
@@ -582,27 +587,19 @@ class GcpProvider(OfflineCapableVpsProvider):
         metadata = instance.get("metadata", {})
         return dict(metadata) if isinstance(metadata, Mapping) else {}
 
-    def _label_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Turn the normalized ``["key=value", ...]`` label list into a dict (split on first ``=``)."""
-        labels: dict[str, str] = {}
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if sep:
-                labels[key] = value
-        return labels
-
     def _host_name_from_instance(self, instance: Mapping[str, Any]) -> HostName:
-        """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id label)."""
-        name = self._metadata_dict(instance).get(HOST_NAME_METADATA_KEY, "")
+        """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id metadata)."""
+        metadata = self._metadata_dict(instance)
+        name = metadata.get(HOST_NAME_METADATA_KEY, "")
         if name.startswith(_HOST_NAME_PREFIX):
             return HostName(name[len(_HOST_NAME_PREFIX) :])
         if name:
             return HostName(name)
-        return HostName(self._label_dict_from_normalized(instance).get("mngr-host-id", "unknown"))
+        return HostName(metadata.get(HOST_ID_METADATA_KEY, "unknown"))
 
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from an instance's labels + metadata, or None."""
-        host_id_str = self._label_dict_from_normalized(instance).get("mngr-host-id")
+        """Build a STOPPED-state DiscoveredHost from an instance's metadata, or None."""
+        host_id_str = self._metadata_dict(instance).get(HOST_ID_METADATA_KEY)
         if host_id_str is None:
             return None
         return DiscoveredHost(
@@ -615,7 +612,7 @@ class GcpProvider(OfflineCapableVpsProvider):
     def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
         """Reconstruct a minimal offline host (STOPPED) for a stopped instance."""
         now = datetime.now(timezone.utc)
-        created_at = self._created_at_from_labels(self._label_dict_from_normalized(instance), host_id) or now
+        created_at = self._created_at_from_metadata(self._metadata_dict(instance), host_id) or now
         certified = CertifiedHostData(
             host_id=str(host_id),
             host_name=str(self._host_name_from_instance(instance)),
@@ -625,22 +622,22 @@ class GcpProvider(OfflineCapableVpsProvider):
         )
         return self._create_offline_host(VpsHostRecord(certified_host_data=certified))
 
-    def _created_at_from_labels(self, labels: Mapping[str, str], host_id: HostId) -> datetime | None:
-        """Parse the ``mngr-created-at`` label (``%Y-%m-%dt%H-%M-%S``, UTC), or None on failure.
+    def _created_at_from_metadata(self, metadata: Mapping[str, str], host_id: HostId) -> datetime | None:
+        """Parse the ``mngr-created-at`` metadata (ISO-8601 UTC), or None on failure.
 
-        ``create_instance`` writes this label in GCE's restricted charset
-        (lowercased ``t`` separator, dashes for time), so reconstruct the UTC
-        datetime from that exact format. A malformed/externally-edited value yields
-        None (the caller falls back to now()).
+        ``create_instance`` writes this verbatim as ``datetime.isoformat()``, so
+        reconstruct the datetime with ``datetime.fromisoformat``. A
+        malformed/externally-edited value yields None (the caller falls back to
+        now()).
         """
-        raw = labels.get("mngr-created-at")
+        raw = metadata.get(CREATED_AT_METADATA_KEY)
         if not raw:
             return None
         try:
-            return datetime.strptime(raw, "%Y-%m-%dt%H-%M-%S").replace(tzinfo=timezone.utc)
+            return datetime.fromisoformat(raw)
         except ValueError as e:
             logger.opt(exception=e).warning(
-                "Malformed mngr-created-at label {!r} on host {}; falling back to now()", raw, host_id
+                "Malformed mngr-created-at metadata {!r} on host {}; falling back to now()", raw, host_id
             )
             return None
 

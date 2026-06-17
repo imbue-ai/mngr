@@ -7,6 +7,8 @@ Each fake records the requests it received and returns canned responses, so the
 tests exercise request-building and response-handling without real API calls.
 """
 
+from datetime import datetime
+
 import pytest
 from google.api_core import exceptions as google_api_exceptions
 from google.auth.credentials import AnonymousCredentials
@@ -16,6 +18,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr_gcp.client import GceInstanceName
 from imbue.mngr_gcp.client import GceLabelValue
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
 from imbue.mngr_gcp.client import _make_instance_name
 from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
@@ -152,9 +155,14 @@ def test_create_instance_builds_expected_resource() -> None:
     assert metadata["enable-oslogin"] == "FALSE"
     assert metadata["block-project-ssh-keys"] == "TRUE"
     assert metadata["ssh-keys"] == "ubuntu:ssh-ed25519 AAAA test"
-    # Labels round-trip the provider/host tags (sanitized) plus created-at.
+    # mngr host identity lives in metadata: host id verbatim and created-at as ISO-8601.
+    assert metadata["mngr-host-id"] == "host-abcdef0123456789abcdef0123456789"
+    assert datetime.fromisoformat(metadata["mngr-created-at"]).tzinfo is not None
+    assert metadata[HOST_NAME_METADATA_KEY] == "mngr-my-agent"
+    # The only mngr label is mngr-provider (sanitized), the server-side discovery filter.
     assert built.labels["mngr-provider"] == "gcp"
-    assert "mngr-created-at" in built.labels
+    assert "mngr-host-id" not in built.labels
+    assert "mngr-created-at" not in built.labels
     # External IP requested by default.
     assert built.network_interfaces[0].access_configs[0].type_ == "ONE_TO_ONE_NAT"
 
@@ -549,7 +557,8 @@ def test_list_instances_filters_and_normalizes() -> None:
     listed = compute_v1.Instance(
         name="mngr-host-1",
         status="RUNNING",
-        labels={"mngr-provider": "gcp", "mngr-host-id": "host-1"},
+        labels={"mngr-provider": "gcp"},
+        metadata=compute_v1.Metadata(items=[compute_v1.Items(key="mngr-host-id", value="host-1")]),
         network_interfaces=[compute_v1.NetworkInterface(access_configs=[compute_v1.AccessConfig(nat_i_p="10.0.0.1")])],
     )
     instances.list_result = [listed]
@@ -561,6 +570,7 @@ def test_list_instances_filters_and_normalizes() -> None:
     assert result[0]["main_ip"] == "10.0.0.1"
     assert result[0]["state"] == "RUNNING"
     assert "mngr-provider=gcp" in result[0]["tags"]
+    assert result[0]["metadata"]["mngr-host-id"] == "host-1"
 
 
 def test_list_instances_translates_api_error() -> None:
