@@ -36,10 +36,3 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `default_region` | `ewr` | Default Vultr region |
 | `default_plan` | `vc2-2c-4gb` | Default Vultr plan |
 | `default_os_id` | 2136 | Default Vultr OS ID (Debian 12 x64) |
-
-## Implementation details
-
-- Uses raw HTTP calls to the Vultr API v2 (`https://api.vultr.com/v2`), no third-party SDK
-- VPS instances are tagged with `mngr-provider=<name>` and `mngr-host-id=<id>` for discovery
-- SSH keys are uploaded to the Vultr SSH key store and referenced by ID during instance creation
-- Discovery works by listing all Vultr instances with matching tags, then SSH-ing to each VPS to read host records from the state volume

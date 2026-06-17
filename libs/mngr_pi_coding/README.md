@@ -27,24 +27,13 @@ plugin shares into each agent).
 
 ## What you get
 
-- **Per-agent isolation.** Each agent gets its own pi config dir via
-  `PI_CODING_AGENT_DIR` (`$MNGR_AGENT_STATE_DIR/plugin/pi_coding/`), so settings,
-  sessions, and state never collide. Your `~/.pi/agent/` `auth.json`, `settings.json`,
-  and resource dirs (`skills`, `prompts`, `extensions`, `themes`, `agents`) are
-  shared in (symlinked locally, copied to remote hosts). `auth.json` is symlinked,
-  so a `/login` or token refresh in any agent propagates to the rest. (`agents`
-  carries subagent definitions, so an installed subagent extension works under
-  mngr -- pi ships no built-in subagents.)
-- **RUNNING vs WAITING.** `mngr list` shows whether the agent is mid-turn or idle,
-  and stays correct when the agent runs a nested `pi` via its bash tool.
-- **Transcripts.** `mngr transcript my-agent` renders the conversation. A raw pi
-  message stream is also captured under the agent state dir.
+- **Per-agent isolation.** Each agent gets its own pi config dir, so settings,
+  sessions, and state never collide. Your `~/.pi/agent/` auth and settings are
+  shared in, so a `/login` or token refresh in any agent propagates to the rest.
+- **RUNNING vs WAITING.** `mngr list` shows whether the agent is mid-turn or idle.
+- **Transcripts.** `mngr transcript my-agent` renders the conversation.
 - **Resume.** `mngr stop` then `mngr start` continues the same pi session with full
   context.
-
-These are powered by a small mngr-owned pi extension that the plugin provisions and
-loads with `pi -e`; pi has no shell-hook surface, so its TypeScript extension API is
-the lever for lifecycle, readiness, and transcript signalling.
 
 ## Configuration
 

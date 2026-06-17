@@ -96,9 +96,7 @@ Every other `claude` flag is forwarded verbatim to the spawned agent.
 
 ## Alternatives
 
-1. `robinhood` is Claude-specific.
-  For a better way of doing the same thing that is generic across agents, just use [mngr](../../README.md) directly: `mngr create --message "some prompt"` will create an agent and send a prompt to it. You can use `mngr transcript` to see the outputs, or `mngr wait` to wait for it to finish.
-2. Use `claude` with an API key
+`robinhood` is Claude-specific. For a generic alternative across agents, use [mngr](https://github.com/imbue-ai/mngr) directly: `mngr create --message "some prompt"` creates an agent and sends it a prompt; use `mngr transcript` to see the output or `mngr wait` to wait for it to finish.
 
 # mngr-backed Agent SDK (experimental)
 
@@ -133,48 +131,12 @@ Supported control surfaces and how they map onto mngr:
 
 ## Limitations
 
-Documented limitations (real-SDK-only):
-
-- `fork_session` raises `AgentSdkNotImplementedError`. claude's `--fork-session` does not assign a
-  new session id when driven interactively over an adopted, resumed session (the forked turn is
-  written under the source id), so a faithful fork cannot be produced on this transport.
+- `fork_session` raises `AgentSdkNotImplementedError`: claude does not assign a new session id when
+  forking over an adopted, resumed interactive session, so a faithful fork cannot be produced on
+  this transport.
 - The agent is not hermetic from the host's claude config -- it must load real settings to
   authenticate -- whereas the real SDK with `setting_sources=[]` is hermetic.
-- Lots more, see: [here](./docs/sdk_divergences.md)
 
-Why so many limitations?
-
-Honestly the Claude Agent SDK is kind of a mess, 
-and I don't have a particular reason to make it work perfectly.
-There will always be some trade-offs--you'll have to decide how, exactly, to make them for your own use case. 
-Consider this implementation more of an example of how you could do it, or a starting point, rather than a finished product.
-
-Instead of using the proprietary Claude Agent SDK interface, you should try using [mngr](../../README.md) instead--
-its API is considerably cleaner, and it abstracts over a variety of different coding agents already.
-
-## Running the live SDK tests
-
-This project contains an opt-in, live integration suite (`imbue/mngr_robinhood/test_sdk_*.py`)
-that verifies the documented `query()` and `ClaudeSDKClient` interfaces of the Claude Agent SDK
-end-to-end against the real API. The tests are clean-room: they import only documented public
-names from `claude_agent_sdk` and assert the documented behavior.
-
-The suite is parametrized by the `sdk` fixture over **two targets**: `real_sdk` (the real
-`claude_agent_sdk` package, run via `claude --print`) and `mngr_sdk` (this module, which drives an
-interactive `claude` agent in tmux). Every test runs against both unless it exercises a surface the
-mngr transport cannot provide (currently only `fork_session`), which is
-gated to `real_sdk` via the `requires_native_sdk` fixture. The mngr target therefore needs a local
-`claude` CLI and `tmux` on PATH. Use `-k mngr_sdk` / `-k real_sdk` to run a single target.
-
-These tests make real, paid API calls, so they are **excluded from every CI run** (via the
-`sdk_live` marker, which is filtered out in `offload-modal.toml`) and only run when explicitly
-opted in. Each test runs the agent in an isolated temp directory.
-
-To run them, export a first-party `ANTHROPIC_API_KEY` and set `RUN_SDK_LIVE_TESTS=1`:
-
-```bash
-set -a; source .env; set +a   # exports ANTHROPIC_API_KEY from a local .env
-just test-sdk-live
-```
-
-If `RUN_SDK_LIVE_TESTS=1` and `ANTHROPIC_API_KEY` are not both set, the suite is skipped.
+This is best treated as an example or starting point rather than a finished product; the surface has
+trade-offs you'll have to make for your own use case. For a cleaner API that abstracts over many
+coding agents, prefer [mngr](https://github.com/imbue-ai/mngr) directly.

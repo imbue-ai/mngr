@@ -6,32 +6,15 @@ A plugin for [mngr](https://github.com/imbue-ai/mngr) that adds the `mngr tutor`
 
 ## How it works
 
-The tutor presents a menu of lessons, each with ordered steps. For each step:
-
-1. Read the instructions in the tutor terminal
-2. Run the suggested commands in your other terminal
-3. The tutor automatically detects when the step is complete and advances
-
-Completion is detected by monitoring agent state, filesystem changes, and tmux sessions -- no manual confirmation needed.
+The tutor presents a menu of lessons, each with ordered steps. Read the instructions in the tutor terminal, run the suggested commands in your other terminal, and the tutor automatically detects when each step is complete and advances -- no manual confirmation needed.
 
 ## Lessons
 
 ### Basic Local Agent
 
-Learn to create, use, and manage your first agent locally:
+Learn to create, use, and manage your first agent locally: create an agent with `mngr create`, send commands via `mngr message`, stop and restart it, and destroy it when finished.
 
-- Create an agent with `mngr create`
-- Send commands via `mngr message`
-- Stop and restart the agent
-- Destroy the agent when finished
-
-### Remote Agents on Modal (WIP)
-
-Learn to launch and manage agents on Modal's cloud infrastructure:
-
-- Create a remote agent with `--in modal`
-- Work with the remote agent
-- Stop, restart, and destroy
+A lesson on remote agents on Modal (`--in modal`) is in progress and not yet available.
 
 ## Tips
 
