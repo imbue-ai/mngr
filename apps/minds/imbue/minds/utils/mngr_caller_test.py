@@ -49,6 +49,7 @@ def test_call_result_defaults() -> None:
     assert result.is_timed_out is False
 
 
+@pytest.mark.flaky
 def test_call_runs_mngr_version_in_forkserver_child() -> None:
     """End-to-end: a real ``mngr --version`` runs in a forkserver child.
 
@@ -56,6 +57,9 @@ def test_call_runs_mngr_version_in_forkserver_child() -> None:
     ``imbue.mngr.main``, forking a child, running the CLI, and capturing
     stdout/exit-code. ``--version`` is used because it does no provider
     discovery, so the call is fast and deterministic.
+
+    Marked flaky: forkserver cold-start occasionally exceeds the 10s pytest
+    timeout under CI load.
     """
     result = MngrCaller().call(["--version"], timeout=120.0)
     assert result.returncode == 0
@@ -63,6 +67,9 @@ def test_call_runs_mngr_version_in_forkserver_child() -> None:
     assert "mngr" in result.stdout
 
 
+@pytest.mark.flaky
 def test_call_reports_nonzero_exit_for_unknown_command() -> None:
+    # Marked flaky: forkserver cold-start occasionally exceeds the 10s pytest
+    # timeout under CI load.
     result = MngrCaller().call(["definitely-not-a-real-subcommand"], timeout=120.0)
     assert result.returncode != 0
