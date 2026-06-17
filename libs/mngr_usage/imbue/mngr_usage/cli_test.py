@@ -24,8 +24,9 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr_usage.api import aggregate_events_to_snapshots
+from imbue.mngr_usage.api import aggregate_process_cumulative
 from imbue.mngr_usage.api import parse_events_from_content
+from imbue.mngr_usage.api import parse_usage_events
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _flatten_primary_for_template
 from imbue.mngr_usage.cli import _format_cost_line
@@ -35,12 +36,39 @@ from imbue.mngr_usage.cli import _format_reset_phrase
 from imbue.mngr_usage.cli import _format_session_detail_line
 from imbue.mngr_usage.cli import _parse_optional_duration
 from imbue.mngr_usage.cli import _session_mode_tag
+from imbue.mngr_usage.cli import _write_source_section
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import CostMode
+from imbue.mngr_usage.data_types import CostProvenance
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
+
+
+def aggregate_events_to_snapshots(
+    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> list[UsageSnapshot]:
+    """Test helper: build a snapshot per source via the process-cumulative strategy.
+
+    These rendering tests all use the Claude source, whose production aggregation
+    is ``aggregate_process_cumulative`` (also the dispatcher's fallback). Calling
+    it directly keeps the rendering assertions focused; the reader-hook dispatch
+    itself is covered by the per-plugin hookimpl tests and the integration tests
+    in this file that invoke the CLI with a real plugin manager.
+    """
+    snapshots: list[UsageSnapshot] = []
+    for source_name, agents_events in events_by_source.items():
+        parsed_by_agent = {
+            agent_id: parse_usage_events(events, source_name) for agent_id, events in agents_events.items()
+        }
+        snapshot = aggregate_process_cumulative(source_name, parsed_by_agent, since_seconds=since_seconds, now=now)
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return snapshots
 
 
 def _write_event(events_file: Path, event: dict[str, Any]) -> None:
@@ -188,6 +216,44 @@ def test_format_cost_line_multi_session_shape_uses_since_suffix() -> None:
     assert line == "api cost: $5.43 across 3 sessions in last 1d"
 
 
+def _estimated_subscription_snapshot(provenance: CostProvenance) -> UsageSnapshot:
+    return UsageSnapshot(
+        source_name="codex",
+        updated_at=1000,
+        windows={},
+        sessions=(
+            SessionCostRecord(
+                session_id="sub-token-session",
+                cost=CostSnapshot(total_cost_usd=0.30),
+                cost_mode=CostMode.SUBSCRIPTION,
+                cost_provenance=provenance,
+                first_event_at=950,
+                last_event_at=1000,
+            ),
+        ),
+        since_seconds=86400,
+    )
+
+
+def test_subscription_cost_line_flags_estimated_dollars(capsys: pytest.CaptureFixture[str]) -> None:
+    """A token-derived (ESTIMATED) subscription cost renders ``(imputed, estimated)``;
+    a harness-REPORTED one keeps plain ``(imputed)``. Mirrors the api line's
+    ``(estimated)`` flag and the JSON/CEL ``is_estimated`` surface."""
+    estimated_model = _build_render_model(
+        _estimated_subscription_snapshot(CostProvenance.ESTIMATED), stale_after=300, now=1000
+    )
+    _write_source_section(estimated_model, now=1000, header="[codex]", detail=False)
+    assert "subscription cost (imputed, estimated): $0.30" in capsys.readouterr().out
+
+    reported_model = _build_render_model(
+        _estimated_subscription_snapshot(CostProvenance.REPORTED), stale_after=300, now=1000
+    )
+    _write_source_section(reported_model, now=1000, header="[codex]", detail=False)
+    reported_out = capsys.readouterr().out
+    assert "subscription cost (imputed): $0.30" in reported_out
+    assert "estimated" not in reported_out
+
+
 def test_session_mode_tag_maps_each_variant() -> None:
     """``_session_mode_tag`` exhaustively maps every ``CostMode`` to its
     short ``--detail`` tag. The mapping is part of the user-visible contract:
@@ -237,8 +303,9 @@ def test_format_session_detail_line_renders_tag_truncated_id_and_age() -> None:
 
 
 def test_parse_events_from_content_returns_all_valid_lines() -> None:
-    """Every well-formed JSON line is returned. A truncated trailing line is
-    skipped with a warning rather than failing the whole parse."""
+    """Every well-formed JSON line is parsed into a typed ``UsageEvent``. A
+    truncated trailing line is skipped with a warning rather than failing the
+    whole parse."""
     content = (
         json.dumps(_make_event("2026-05-08T10:00:00.000000000Z"))
         + "\n"
@@ -248,8 +315,10 @@ def test_parse_events_from_content_returns_all_valid_lines() -> None:
     )
     events = parse_events_from_content(content, "test")
     assert len(events) == 2
-    assert events[0]["timestamp"] == "2026-05-08T10:00:00.000000000Z"
-    assert events[1]["timestamp"] == "2026-05-08T11:00:00.000000000Z"
+    # Both well-formed lines parse into typed events, in file order, with the
+    # ISO timestamps converted to Unix seconds.
+    assert events[0].timestamp_unix == int(datetime(2026, 5, 8, 10, 0, tzinfo=timezone.utc).timestamp())
+    assert events[1].timestamp_unix == int(datetime(2026, 5, 8, 11, 0, tzinfo=timezone.utc).timestamp())
 
 
 def test_parse_events_from_content_returns_empty_for_empty_or_garbage() -> None:
