@@ -195,3 +195,24 @@ def test_send_message_raises_when_ready_indicator_never_appears() -> None:
         # production 30s default; the message is irrelevant since we never paste.
         wait_for_tui_ready(agent, agent.tmux_target, agent.get_tui_ready_indicator(), timeout_seconds=0.2)
     assert agent.steps == []
+
+
+def test_send_message_runs_preflight_before_readiness_wait() -> None:
+    """A blocking preflight condition must surface immediately, not hang on readiness.
+
+    A blocking dialog occupies the pane, so the ready indicator never appears
+    while it is up. If the readiness wait ran before preflight, send_message
+    would block for the full readiness timeout instead of raising. Preflight
+    must run first: here the pane lacks the indicator, yet the preflight error
+    is raised promptly (not a "Timeout waiting for TUI" readiness error).
+    """
+
+    class _PreflightRaisingAgent(_RecordingTuiAgent):
+        def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+            self.steps.append("preflight")
+            raise SendMessageError(str(self.name), "blocking dialog")
+
+    agent = _PreflightRaisingAgent.model_construct(name=AgentName("probe"), pane_content="", steps=[])
+    with pytest.raises(SendMessageError, match="blocking dialog"):
+        agent.send_message("hello")
+    assert agent.steps == ["preflight"]

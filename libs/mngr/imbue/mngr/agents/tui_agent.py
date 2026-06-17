@@ -73,16 +73,18 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
         """Send a message via paste-detection + the subclass's Enter strategy.
 
         Acquires an exclusive file lock to prevent concurrent sends from
-        interleaving tmux input. Waits for the TUI to be ready before pasting --
-        this covers every send path (initial message on create, resume message,
-        and any later send), so keystrokes are never delivered while a resumed
-        transcript is still replaying. Then runs ``_preflight_send_message`` --
+        interleaving tmux input. Runs ``_preflight_send_message`` first --
         errors from preflight indicate a condition that won't resolve by
-        resending (e.g., a blocking dialog).
+        resending (e.g., a blocking dialog), and a blocking dialog must be
+        surfaced rather than waited on (the ready indicator never appears while
+        a dialog occupies the pane). Then waits for the TUI to be ready before
+        pasting -- this covers every send path (initial message on create,
+        resume message, and any later send), so keystrokes are never delivered
+        while a resumed transcript is still replaying.
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
-            wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
             self._preflight_send_message(self.tmux_target)
+            wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
             self._send_tmux_literal_keys(self.tmux_target, message)
             wait_for_paste_visible(self, self.tmux_target, message)
             self._send_enter_and_validate(self.tmux_target)
