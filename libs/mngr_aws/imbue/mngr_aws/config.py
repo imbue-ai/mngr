@@ -89,14 +89,11 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     )
     default_region: str = Field(
         default="us-east-1",
-        description="AWS region for new instances (e.g., 'us-east-1').",
+        description="Default AWS region.",
     )
     default_instance_type: str = Field(
         default="t3.small",
-        description=(
-            "EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM). "
-            "Surfaced as the `--aws-instance-type=` build arg."
-        ),
+        description=("EC2 instance type. Surfaced as the `--aws-instance-type=` build arg."),
     )
     default_ami_id: str = Field(
         default="",

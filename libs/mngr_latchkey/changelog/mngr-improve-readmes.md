@@ -1,1 +1,1 @@
-Trimmed the README substantially for concision: removed the deep gateway HTTP-extension reference and the Python embedding API section (both remain documented in the module docstrings and `.mjs` header comments that ship in the wheel), keeping the CLI, settings, logs, and a concise permissions reference.
+Reorganized the README: high-level user info (CLI, wiring an agent, settings, logs, permissions overview) is up top, and the deeper detail (the full gateway HTTP-extension reference and the Python embedding API) now lives in a clearly-marked Reference section below.

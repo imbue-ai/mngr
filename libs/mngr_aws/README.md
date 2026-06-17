@@ -82,8 +82,8 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
-| `default_region` | `us-east-1` | AWS region for new instances (e.g., 'us-east-1'). |
-| `default_instance_type` | `t3.small` | EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM). Surfaced as the `--aws-instance-type=` build arg. |
+| `default_region` | `us-east-1` | Default AWS region. |
+| `default_instance_type` | `t3.small` | EC2 instance type. Surfaced as the `--aws-instance-type=` build arg. |
 | `default_ami_id` | `""` | Explicit AMI override; takes precedence over default_ami_by_region. When empty, default_ami_by_region is consulted for the chosen region. |
 | `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMI IDs, used when default_ami_id is empty. These ship no GPU / NVIDIA drivers; supply your own AMI via default_ami_id / --aws-ami for GPU workloads. |
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. Default is auto-create with name 'mngr-aws'. The auto-create path consults allowed_ssh_cidrs. |

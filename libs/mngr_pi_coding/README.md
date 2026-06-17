@@ -56,7 +56,7 @@ Tunables on the `pi-coding` agent type:
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Setting | Default | Description |
 |---|---|---|
-| `command` | `pi` | The pi command to run. |
+| `command` | `pi` | Command to run the pi coding agent. |
 | `sync_auth` | `true` | Share ~/.pi/agent/auth.json into the per-agent config dir. |
 | `sync_home_settings` | `true` | Share settings.json and resource dirs from ~/.pi/agent/ into the per-agent config dir. |
 | `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present. |

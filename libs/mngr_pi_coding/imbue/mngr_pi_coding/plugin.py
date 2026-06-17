@@ -180,7 +180,7 @@ class PiCodingAgentConfig(AgentTypeConfig):
 
     command: CommandString = Field(
         default=CommandString("pi"),
-        description="The pi command to run.",
+        description="Command to run the pi coding agent.",
     )
     sync_home_settings: bool = Field(
         default=True,
