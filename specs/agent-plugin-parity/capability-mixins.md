@@ -42,10 +42,11 @@ mixins, and a cell is `n/a` exactly when the scope excludes the kind -- so `n/a`
 
 This reverses the original binary design, and the reversal is deliberate. Once the matrix grew
 to cover non-standard kinds -- the headless variants and the bare `command` / `headless_command`
-runners -- some capabilities became genuinely inapplicable to a *whole kind*: a pane-scraping
-streaming snapshot on a headless agent, or a CLI install / version / usage concern on a bare
-shell command. Marking those `n/a` is more honest than `-` (which would imply "could have it,
-just doesn't"), and because the kind is itself a code-detectable fact, it stays fully derived.
+runners -- some capabilities became genuinely inapplicable to a *whole kind*: non-interactive
+`headless_output` on an interactive agent, live-session `session_resume` on a headless agent, or
+a CLI install / version / usage concern on a bare shell command. Marking those `n/a` is more
+honest than `-` (which would imply "could have it, just doesn't"), and because the kind is itself
+a code-detectable fact, it stays fully derived.
 
 `n/a` is for *kind*-level inapplicability only. An *instance*-level gap is still handled
 honestly without it: pi has no tool-approval gate, but rather than marking permissions `n/a`,
@@ -56,30 +57,11 @@ What pi genuinely lacks -- a per-resource allow/deny/ask policy -- is an honest 
 
 ### The capabilities
 
-| Capability | Has it today | Wired today as |
-|---|---|---|
-| Raw transcript | all five | class mixin (`HasTranscriptMixin`) |
-| Common transcript | all five | class mixin (`HasCommonTranscriptMixin`) |
-| Session preservation on destroy | all five | `on_destroy` override + config flag |
-| Headless output | (headless variants) | class mixin (`HeadlessAgentMixin`) |
-| Streaming headless output | (headless variants) | class mixin (`StreamingHeadlessAgentMixin`) |
-| Streaming snapshot (live TUI view) | claude | config + provisioned watcher script |
-| Unattended operation (auto-allow in-run tool prompts) | all five (pi degenerately) | auto-allow config |
-| Per-resource permission policy (allow/deny/ask) | antigravity, opencode, codex | config / `config_overrides` / `sandbox_mode` |
-| Auto-install (install the binary if missing) | claude, pi | `check_installation` + installer/npm |
-| Version management (pin vs auto-update) | claude, codex | claude `version` pin; codex `update_policy` |
-| Deploy / scheduling contributions | claude | **pluggy hookimpl on the plugin module** |
-| Field generators (`waiting_reason`) | claude, codex, opencode | **pluggy hookimpl on the plugin module** |
-| Usage tracking (token/cost emission) | claude, opencode, pi, codex | **sibling `mngr_<harness>_usage` plugin (hookimpls)** |
-
-The "Has it today" column was **corrected against the code** (this is
-exactly the drift the matrix is meant to kill): the earlier draft wrongly listed claude under
-per-resource policy (it is blanket-hooks only), opencode under install management (it has
-none), and pi under `waiting_reason` (it has none yet -- pi's degenerate single-value generator
-is still to be added). "Install/version management" was one lumped row hiding three independent
-axes; it is now split into **auto-install** (get the binary present: claude, pi) and **version
-management** (control which version runs -- claude pins against its own auto-update, codex
-runs an update policy). The generated matrix is the source of truth; this table is illustrative.
+The live, per-agent matrix and the one-line description of each capability are the **generated**
+doc `libs/mngr/docs/concepts/agent_capabilities.md` (regenerate with
+`just regenerate-agent-capabilities-doc`, i.e. `scripts/make_agent_capabilities_doc.py`); that
+doc is the source of truth. This section keeps only the design reasoning behind a few of the
+rows that is not obvious from the matrix itself.
 
 The crucial split: **Unattended operation** is "can complete a whole run with no human." Its
 *start* dialogs are already handled by the universal mngr-owned-dialogs requirement (which
@@ -246,8 +228,12 @@ it added rather than left as a gap. The one non-trivial part is per-CLI: each CL
 command differs (claude's installer script, pi's npm, codex's `codex update`/standalone, an
 opencode install script, and agy's `curl -fsSL https://antigravity.google/cli/install.sh | bash`
 -- which drops the `agy` binary into `~/.local/bin/`), so "toss it in" still means sourcing each
-command. Version management (pin vs auto-update) stays a *distinguishing* capability
-(`HasVersionManagementMixin`: claude, codex), since not every CLI exposes version control.
+command. All real agents install through the shared `ensure_cli_installed` helper (claude no
+longer carries a bespoke install block). Version management (pin vs auto-update) stays a
+*distinguishing* capability (`HasVersionManagementMixin`: claude, codex), since not every CLI
+exposes version control; it is a functional contract -- `reconcile_installed_version` enforces
+the agent's version intent against the already-present binary (claude verifies its pin, codex
+runs its update policy), not just a descriptive label.
 
 ## Discoverability: making "you should implement this" obvious
 
@@ -270,17 +256,20 @@ all.
 
 A single function renders `AGENT_CAPABILITIES` x registered agents into a markdown matrix.
 It is written to its **own generated doc**, not embedded in this spec -- generated content
-does not belong inside a hand-authored `specs/` document. The natural home is
+does not belong inside a hand-authored `specs/` document. Its home is
 `libs/mngr/docs/concepts/agent_capabilities.md`, alongside the existing `agent_types.md` /
-`idle_detection.md` / `plugins.md`. A pre-commit step regenerates it (mirroring the existing
-"Regenerate CLI markdown docs" hook) and a test fails if it is stale, so the file is always
-current. The parity spec drops its hand-maintained "Current state matrix" section and instead
-*links* to the generated doc; the rich per-cell *mechanism* prose in the dimension sections
-stays in the parity spec.
+`idle_detection.md` / `plugins.md`. `scripts/make_agent_capabilities_doc.py` regenerates it
+(`just regenerate-agent-capabilities-doc`) and a drift-guard test
+(`test_capability_matrix_doc_is_current`), plus the script's `--check` mode, fail if it is
+stale. Unlike the CLI docs there is **no** pre-commit/pre-push hook regenerating it -- the
+matrix changes rarely, so the CI drift-guard test is the safety net. The parity spec drops its
+hand-maintained "Current state matrix" section and instead *links* to the generated doc; the
+rich per-cell *mechanism* prose in the dimension sections stays in the parity spec.
 
-## Driving the e2e harness from the registry
+## Driving the e2e harness from the registry (open follow-up)
 
-The same registry that generates the matrix should also drive end-to-end coverage: for each
+The registry, the generated matrix, and its drift guard have shipped; this is the remaining
+follow-up. The same registry that generates the matrix should also drive end-to-end coverage: for each
 registered agent, the e2e harness **walks the capabilities that agent declares and exercises
 each one** against a real running agent. The registry already knows agent x capability
 membership, so it is the natural parametrization -- a new agent automatically gets walked
@@ -318,57 +307,13 @@ mngr-owned start dialogs (interactive: pulled into mngr prompts; unattended: def
 transcript *mechanism*, process name, workspace path quirks. These remain dimension sections
 in the parity spec, because their content is how-not-whether.
 
-## Implementation plan -- core phases done
-
-1. **(done)** `scripts/make_agent_capabilities_doc.py`: `AgentCapability`, `AgentClassInfo`, the
-   registry, and the matrix renderer, with class-mixin / field-generator / plugin-hookimpl /
-   usage-source detection. Unit-tested. (Dev tooling in `scripts/`, not shipped in the wheel.)
-2. **(done)** The live `build_agent_class_infos(plugin_manager)` builder, the generated matrix
-   doc (`libs/mngr/docs/concepts/agent_capabilities.md`), and the drift-guard test
-   (`just regenerate-agent-capabilities-doc`).
-3. **(done)** The capability mixins, wired across the plugins, routing existing behavior
-   through each contract method: streaming snapshot -> claude(+subtypes); session preservation
-   -> all five; unattended operation -> all five (pi degenerate, rejects explicit-off);
-   per-resource policy -> agy/opencode/codex; version management -> claude/codex; pi's
-   single-value `waiting_reason`; module-level `deploy_contributions` + `usage_tracking`
-   (detected by owning-plugin entry-point name); and **auto-install** as a base capability (`HasAutoInstallMixin`
-   + shared `ensure_cli_installed`) added to agy/opencode/codex, pi routed through the helper,
-   claude keeping its version-aware flow. One changelog entry per touched project.
-4. **(done)** Matrix presentation and the `n/a` state: a fixed column order with the bare
-   command runners last (and a guard that raises if a registered agent type is neither ordered
-   nor explicitly excluded, so none is silently dropped); the `headless_output` row pinned last;
-   and the code-derived `scope` model with its `CapabilityScope` enum and the positive
-   `CliBackedAgentMixin` kind marker, so `raw`/`common` transcript, install, version, usage,
-   permission, and `session_resume` are `n/a` for the bare command runners, `waiting_reason` is
-   `n/a` for headless/command, and `headless_output` is `n/a` off the headless agents. The TUI
-   streaming snapshot and headless incremental output were unified into one `live_output` row via
-   a shared `SupportsLiveOutputMixin` marker. `session_resume` (claude's `--adopt-session` /
-   `--from` carry-forward) was added via `HasSessionAdoptionMixin`. `GenericCommandAgentMixin` was
-   removed in favour of the positive marker; a minimal `CommandAgent` survives only to declare
-   unattended-by-construction. Also wired `is_unattended_enabled()` through each agent's
-   auto-allow apply-site so the contract method is the single source of truth (behavior-preserving).
-5. **(follow-up PR)** The registry-driven **release** harness: walk each agent's declared
-   capabilities and run a real `exercise_fn` per capability against a live agent (the
-   behavioral check detection cannot give). Detection itself is already covered in CI by the
-   drift guard + the builder integration test, so a CI-cheap "coverage forcing" test over prose
-   pointers was deliberately *not* shipped -- it would force a sentence, not a test. The real
-   forcing function (a capability cannot ship without an `exercise_fn`) lands with the harness.
-
-Verified opencode and agy auto-install end-to-end on real Modal hosts (which ship without the
-CLIs): both printed "<cli> installed successfully" during provision.
-
-The matrix was **corrected against the code** throughout (the drift this system kills): per-
-resource policy is agy/opencode/codex (not claude -- blanket hooks only); field generators are
-claude/codex/opencode (+ pi's degenerate one); install split into auto-install (all real
-agents) and version management (claude/codex); `mngr_kanpan` is not an agent type so it is no
-matrix column.
-
 ## Non-goals / open questions
 
 - Not refactoring module-level hookimpl capabilities onto the agent class (rejected in
   review as churn without honesty gain; pluggy detection is the source of truth for those).
-- Whether the drift guard is a plain test or a ratchet -- ratchets fit "a count that only
-  decreases," which doesn't match an equality check, so a plain test is the likely fit.
+- Resolved: the drift guard is a plain equality test (`test_capability_matrix_doc_is_current`),
+  not a ratchet -- ratchets fit "a count that only decreases," which doesn't match an equality
+  check.
 - `offline_agent_field_generators` is unused by every plugin today; included as a detectable
   capability only if/when one implements it.
 - **`n/a` is code-derived, never hand-declared.** The original design forbade `n/a` entirely;
