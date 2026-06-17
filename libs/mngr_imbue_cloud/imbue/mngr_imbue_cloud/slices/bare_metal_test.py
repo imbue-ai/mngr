@@ -19,6 +19,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_budget_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
@@ -279,3 +280,17 @@ def test_compute_orphan_slice_instance_names_empty_when_all_tracked() -> None:
     box = {"mngr-slice-aaa", "mngr-slice-bbb"}
     tracked = {"mngr-slice-aaa", "mngr-slice-bbb", "mngr-slice-ccc"}
     assert compute_orphan_slice_instance_names(box, tracked) == set()
+
+
+def test_compute_orphan_slice_disk_names_returns_untracked_slice_disks() -> None:
+    # On-box data disks not present in the DB (and only slice-prefixed ones) are orphans.
+    box = {"mngr-slice-aaa-data", "mngr-slice-bbb-data"}
+    tracked = {"mngr-slice-aaa-data"}
+    assert compute_orphan_slice_disk_names(box, tracked) == {"mngr-slice-bbb-data"}
+
+
+def test_compute_orphan_slice_disk_names_ignores_non_slice_disks() -> None:
+    # A non-slice lima disk on the box must never be considered an orphan to reap.
+    box = {"some-other-disk", "mngr-slice-bbb-data"}
+    tracked: set[str] = set()
+    assert compute_orphan_slice_disk_names(box, tracked) == {"mngr-slice-bbb-data"}

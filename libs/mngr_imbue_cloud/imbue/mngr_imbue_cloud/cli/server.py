@@ -66,6 +66,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
@@ -78,6 +79,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_disk_names_for_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_instance_names_for_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
@@ -732,15 +734,18 @@ def _kill_bake_worker_processes(grace_seconds: float = 5.0) -> None:
             pass
 
 
-def _reap_orphan_slice_vms(*, server: BareMetalServer, private_key_path: Path, database_url: str) -> None:
-    """Delete slice VMs on the box that have no pool_hosts row (orphans from killed bakes).
+def _reap_orphan_slice_resources(*, server: BareMetalServer, private_key_path: Path, database_url: str) -> None:
+    """Delete slice VMs AND data disks on the box that have no pool_hosts row (orphans from failed bakes).
 
-    Reconciles the box's lima instances against the DB: any ``mngr-slice-`` VM with
-    no row (any status) is an orphan -- typically a ``mngr create`` killed by its own
-    timeout after carving the VM but before the row insert, so the provider's rollback
-    never ran. Best-effort: logs and continues on any error so it never fails the bake.
-    Assumes no other bake invocation is concurrently mid-carve against this box (an
-    in-flight VM not yet inserted would otherwise look orphaned).
+    Reconciles the box's lima instances and disks against the DB: any ``mngr-slice-``
+    resource with no row (any status) is an orphan -- a ``mngr create`` killed by its own
+    timeout after carving but before the row insert (the provider's rollback never ran),
+    or a disk left behind when a rollback ``limactl delete`` could not unlock it (so the
+    VM is gone but its disk leaked, permanently holding the box slot). Disks are reconciled
+    independently of instances so a disk that outlived its VM is still reaped. Best-effort:
+    logs and continues on any error so it never fails the bake. Assumes no other bake
+    invocation is concurrently mid-carve against this box (an in-flight resource not yet
+    inserted would otherwise look orphaned).
     """
     ssh_user = server.lima_service_user or "limahost"
     client = LimaSliceVpsClient(
@@ -748,31 +753,65 @@ def _reap_orphan_slice_vms(*, server: BareMetalServer, private_key_path: Path, d
         box_ssh_user=ssh_user,
         private_key_path=str(private_key_path),
     )
+
+    # Reap orphan VM instances.
     try:
         box_instance_names = client.list_instance_names()
     except (MngrError, OSError) as exc:
         logger.warning("Orphan reap skipped: could not list slice VMs on {}: {}", server.public_address, exc)
+        box_instance_names = None
+    if box_instance_names is not None:
+        conn = psycopg2.connect(database_url)
+        try:
+            tracked_instance_names = fetch_slice_instance_names_for_server(conn, server.id)
+        finally:
+            conn.close()
+        instance_orphans = compute_orphan_slice_instance_names(box_instance_names, tracked_instance_names)
+        if not instance_orphans:
+            logger.info("Orphan reap: no untracked slice VMs on {}", server.public_address)
+        else:
+            logger.info(
+                "Orphan reap: deleting {} untracked slice VM(s) on {}: {}",
+                len(instance_orphans),
+                server.public_address,
+                sorted(instance_orphans),
+            )
+            for instance_name in sorted(instance_orphans):
+                try:
+                    client.destroy_instance(VpsInstanceId(instance_name))
+                except (MngrError, OSError) as exc:
+                    logger.warning(
+                        "Orphan reap: failed to delete VM {} on {}: {}", instance_name, server.public_address, exc
+                    )
+
+    # Reap orphan data disks (a disk can outlive its instance when the rollback delete
+    # could not unlock it). Done after the VM reap so a just-deleted VM's disk -- which
+    # destroy_instance already removes -- is no longer present to look orphaned.
+    try:
+        box_disk_names = client.list_disk_names()
+    except (MngrError, OSError) as exc:
+        logger.warning("Orphan disk reap skipped: could not list slice disks on {}: {}", server.public_address, exc)
         return
     conn = psycopg2.connect(database_url)
     try:
-        tracked_instance_names = fetch_slice_instance_names_for_server(conn, server.id)
+        tracked_disk_names = fetch_slice_disk_names_for_server(conn, server.id)
     finally:
         conn.close()
-    orphans = compute_orphan_slice_instance_names(box_instance_names, tracked_instance_names)
-    if not orphans:
-        logger.info("Orphan reap: no untracked slice VMs on {}", server.public_address)
+    disk_orphans = compute_orphan_slice_disk_names(box_disk_names, tracked_disk_names)
+    if not disk_orphans:
+        logger.info("Orphan reap: no untracked slice disks on {}", server.public_address)
         return
     logger.info(
-        "Orphan reap: deleting {} untracked slice VM(s) on {}: {}",
-        len(orphans),
+        "Orphan reap: deleting {} untracked slice disk(s) on {}: {}",
+        len(disk_orphans),
         server.public_address,
-        sorted(orphans),
+        sorted(disk_orphans),
     )
-    for instance_name in sorted(orphans):
+    for disk_name in sorted(disk_orphans):
         try:
-            client.destroy_instance(VpsInstanceId(instance_name))
+            client.destroy_disk(disk_name)
         except (MngrError, OSError) as exc:
-            logger.warning("Orphan reap: failed to delete {} on {}: {}", instance_name, server.public_address, exc)
+            logger.warning("Orphan reap: failed to delete disk {} on {}: {}", disk_name, server.public_address, exc)
 
 
 def allocate_slices(
@@ -930,7 +969,7 @@ def allocate_slices(
             # join -- an individual-create timeout (already a 'failed' outcome by now)
             # is cleaned here; the except above handles a top-level kill. Restore the
             # signal handlers last so the reap itself isn't interrupted.
-            _reap_orphan_slice_vms(server=server, private_key_path=private_key_path, database_url=database_url)
+            _reap_orphan_slice_resources(server=server, private_key_path=private_key_path, database_url=database_url)
             if is_main_thread:
                 signal.signal(signal.SIGTERM, previous_sigterm)
                 signal.signal(signal.SIGINT, previous_sigint)

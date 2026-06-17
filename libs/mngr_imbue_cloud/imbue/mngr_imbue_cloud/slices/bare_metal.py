@@ -206,6 +206,19 @@ def slice_lima_disk_name(host_id: HostId) -> str:
 
 
 @pure
+def _orphan_slice_resource_names(
+    box_names: AbstractSet[str],
+    tracked_names: AbstractSet[str],
+) -> set[str]:
+    """Slice-owned lima resource names on the box (``mngr-slice-`` prefix) with no pool DB row.
+
+    Shared by the instance and disk reconciliation: filter to slice-owned names so we
+    never touch an unrelated lima resource, then subtract the tracked set.
+    """
+    return {name for name in box_names if name.startswith(SLICE_LIMA_INSTANCE_PREFIX) and name not in tracked_names}
+
+
+@pure
 def compute_orphan_slice_instance_names(
     box_instance_names: AbstractSet[str],
     tracked_instance_names: AbstractSet[str],
@@ -220,11 +233,23 @@ def compute_orphan_slice_instance_names(
     is concurrently mid-carve against the same box (an in-flight VM not yet inserted
     would otherwise look like an orphan).
     """
-    return {
-        name
-        for name in box_instance_names
-        if name.startswith(SLICE_LIMA_INSTANCE_PREFIX) and name not in tracked_instance_names
-    }
+    return _orphan_slice_resource_names(box_instance_names, tracked_instance_names)
+
+
+@pure
+def compute_orphan_slice_disk_names(
+    box_disk_names: AbstractSet[str],
+    tracked_disk_names: AbstractSet[str],
+) -> set[str]:
+    """Slice data disks present on the box but absent from the pool DB -- safe to reap.
+
+    The disk analogue of :func:`compute_orphan_slice_instance_names`. Reaped separately
+    because a disk can outlive its instance: if a failed carve's rollback ``limactl
+    delete`` errors for a non-absent reason (e.g. the data disk is locked), it raises
+    before deleting the disk, leaving the disk behind even though the VM is gone -- and
+    a leaked disk permanently holds the box slot until reclaimed.
+    """
+    return _orphan_slice_resource_names(box_disk_names, tracked_disk_names)
 
 
 @pure

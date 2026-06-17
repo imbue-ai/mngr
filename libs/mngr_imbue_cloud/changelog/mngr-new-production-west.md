@@ -17,3 +17,9 @@ base image under the lima user's `~/.cache` but left `~/.cache` itself root-owne
 so `limactl` (run as the lima user) could not create `~/.cache/lima`. Prep now
 creates and chowns the cache dir chain to the lima user (and repairs an
 already-root-owned `~/.cache` when re-run on an existing box).
+
+The post-bake orphan reap now also reaps leaked lima **data disks**, not just VM
+instances. A failed carve whose rollback `limactl delete` could not unlock the
+disk leaves the disk behind (the VM is gone but the disk keeps holding the box
+slot); the reap now reconciles the box's disks against the pool DB and force-deletes
+(unlocking first) any slice disk with no row.
