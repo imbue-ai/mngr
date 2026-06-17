@@ -49,7 +49,6 @@ def test_call_result_defaults() -> None:
     assert result.is_timed_out is False
 
 
-@pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_call_runs_mngr_version_in_forkserver_child() -> None:
     """End-to-end: a real ``mngr --version`` runs in a forkserver child.
@@ -73,7 +72,6 @@ def test_call_runs_mngr_version_in_forkserver_child() -> None:
     assert "mngr" in result.stdout
 
 
-@pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_call_reports_nonzero_exit_for_unknown_command() -> None:
     # Same cold-start exposure as the version test above (forkserver boot +
