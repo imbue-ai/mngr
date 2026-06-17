@@ -31,6 +31,6 @@ The rate-limit reading reflects whichever account rendered most recently, and th
 `sessions[]` stay correct individually, and subscription vs. API-key modes stay
 distinguishable, but two Pro/Max accounts cannot be separated.
 
-This is rare in practice (one user = one Anthropic account). If you run multiple
+If you run multiple
 Claude Code sessions logged into different Pro/Max accounts, treat the aggregated
 `mngr usage` view as ambiguous across accounts.
