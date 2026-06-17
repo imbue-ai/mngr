@@ -16,7 +16,6 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
-from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
@@ -1614,16 +1613,18 @@ def test_copy_cloned_session_falls_back_to_latest_store_without_root_pointer(
     assert conversation_id == "conv-clone-latest"
 
 
-def test_copy_cloned_session_raises_when_source_has_no_store(
-    antigravity_agent: AntigravityAgent, tmp_path: Path
+def test_copy_cloned_session_warns_and_returns_none_when_source_has_no_store(
+    antigravity_agent: AntigravityAgent, tmp_path: Path, log_warnings: list[str]
 ) -> None:
-    """A source agent with no conversations store is a failed clone adoption, not a fresh start."""
+    """A source agent with no conversations store warns and starts fresh (``--from`` carry is a bonus)."""
     source_state = tmp_path / "empty_source_state"
     source_state.mkdir()
     source_location = HostLocation(host=antigravity_agent.host, path=source_state)
 
-    with pytest.raises(AgentStartError, match="no agy conversation store"):
-        antigravity_agent._copy_cloned_session(antigravity_agent.host, source_location)
+    conversation_id = antigravity_agent._copy_cloned_session(antigravity_agent.host, source_location)
+
+    assert conversation_id is None
+    assert any("no agy conversation store" in msg for msg in log_warnings)
     assert not antigravity_agent._get_root_conversation_file_path().exists()
 
 

@@ -2404,7 +2404,7 @@ class ClaudeAgent(
         host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
         host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
 
-    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
         """Rewire the rsynced plugin/ so ``claude --resume`` finds the source's session.
 
         After ``_transfer_source_plugin_data`` rsyncs the source's
@@ -2418,9 +2418,10 @@ class ClaudeAgent(
         forward, renames the project subdir to the destination's encoded
         work_dir, and returns the discovered session id (the caller resumes it).
 
-        Raises :class:`AgentStartError` when the clone has nothing to resume --
-        no session JSONL at the source, or the project subdir can't be rekeyed
-        to the destination's encoded work_dir.
+        A ``--from`` clone is a workspace clone; carrying the source's session
+        forward is a bonus, so a source with no resumable session JSONL warns and
+        returns ``None`` (the caller then resumes the last ``--adopt`` instead, or
+        starts fresh).
 
         Session id comes from the JSONL filename, not the source's
         ``claude_session_id`` file: ``claude -p`` ignores ``--session-id``
@@ -2448,13 +2449,17 @@ class ClaudeAgent(
             timeout_seconds=5.0,
         )
         if not (latest_on_source.success and latest_on_source.stdout.strip()):
-            # A ``--from`` clone is meant to resume the source's conversation, so
-            # nothing to resume (no session, or the ``ls`` failed) is a hard error.
-            raise AgentStartError(
-                str(self.name),
-                f"Clone adopt: no session JSONL found at source {source_projects_dir} "
-                f"(ls success={latest_on_source.success}, stderr={latest_on_source.stderr.strip()!r})",
+            # A ``--from`` clone is a workspace clone; carrying the source's session
+            # forward is a bonus, so nothing to resume (no session, or the ``ls``
+            # failed) is not fatal -- warn and let the caller fall back.
+            logger.warning(
+                "Clone adopt: no session JSONL found at source {} (ls success={}, stderr={!r}); "
+                "not resuming the clone's conversation.",
+                source_projects_dir,
+                latest_on_source.success,
+                latest_on_source.stderr.strip(),
             )
+            return None
         latest_path = Path(latest_on_source.stdout.strip())
         source_project_name = latest_path.parent.name
         adopted_session_id = latest_path.stem

@@ -23,7 +23,6 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -1198,23 +1197,48 @@ def test_adopt_cloned_session_transfers_store_and_rebinds(codex_agent: CodexAgen
     assert codex_agent._get_root_session_file_path().read_text() == _SESSION_ID
 
 
-def test_adopt_cloned_session_raises_when_source_has_no_store(codex_agent: CodexAgent, tmp_path: Path) -> None:
+def test_adopt_cloned_session_warns_when_source_has_no_store(
+    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
+) -> None:
     source_state_dir = tmp_path / "source_agent_state"
     source_state_dir.mkdir()
     source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
-    with pytest.raises(AgentStartError, match="no codex session store"):
-        codex_agent._copy_cloned_codex_session(codex_agent.host, source_location)
+    assert codex_agent._copy_cloned_codex_session(codex_agent.host, source_location) is None
+    assert any("no codex session store" in m for m in log_warnings)
     assert not codex_agent._get_root_session_file_path().exists()
 
 
-@pytest.mark.rsync
-def test_adopt_cloned_session_raises_when_store_has_no_rollout(codex_agent: CodexAgent, tmp_path: Path) -> None:
+def test_adopt_session_from_clone_with_no_session_warns_and_starts_fresh(
+    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """Integration: ``--from`` a sessionless source warns and starts fresh -- it does NOT raise.
+
+    Exercises the full public adopt path (``adopt_session`` -> the shared ``adopt_sessions``
+    orchestrator -> ``copy_clone``) against a real local host, pinning that a ``--from`` clone
+    whose source has no resumable session is a warning, not a hard error (unlike an explicit
+    ``--adopt`` of an unknown id, which raises).
+    """
+    source_state_dir = tmp_path / "sessionless_source"
+    source_state_dir.mkdir()
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("codex"),
+        source_agent_state_location=HostLocation(host=codex_agent.host, path=source_state_dir),
+    )
+    # Must not raise: a --from workspace clone with no session is tolerated.
+    codex_agent.adopt_session(codex_agent.host, options, codex_agent.mngr_ctx)
+    assert any("no codex session store" in m for m in log_warnings)
+    # No resume pointer -> the agent will start a fresh session on launch.
+    assert not codex_agent._get_root_session_file_path().exists()
+
+
+def test_adopt_cloned_session_warns_when_store_has_no_rollout(
+    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
+) -> None:
     source_state_dir = tmp_path / "source_agent_state"
-    # The store dir exists (so transfer succeeds) but holds no rollout file.
     (source_state_dir / "plugin" / "codex" / "home" / "sessions").mkdir(parents=True)
     source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
-    with pytest.raises(AgentStartError, match="no rollout found"):
-        codex_agent._copy_cloned_codex_session(codex_agent.host, source_location)
+    assert codex_agent._copy_cloned_codex_session(codex_agent.host, source_location) is None
+    assert any("no rollout found" in m for m in log_warnings)
     assert not codex_agent._get_root_session_file_path().exists()
 
 

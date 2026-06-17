@@ -945,7 +945,7 @@ class PiCodingAgent(
         self._rebind_adopted_session(host, adopted_file)
         return str(adopted_file)
 
-    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
         """Transfer the source agent's pi session into a ``--from`` clone and return its file path.
 
         A generic ``--from`` clone copies the source *workspace* but not the source
@@ -956,20 +956,20 @@ class PiCodingAgent(
         agent's store, and rebinds the transferred copy of that session to this
         agent's work_dir.
 
-        Raises ``AgentStartError`` if the source has no pi session store, or a store
-        with no resumable session JSONL: a ``--from`` clone of a pi agent is asked
-        for specifically to resume that agent's conversation, so silently starting
-        fresh would hide a real failure (e.g. a source that never started a session).
+        Warns and returns ``None`` if the source has no pi session store, or a store
+        with no resumable session JSONL: a ``--from`` clone carries the source's
+        workspace, and resuming its conversation is a bonus -- a source that never
+        started a session simply starts fresh rather than failing the clone.
         """
         store_relpath = Path(_PI_SESSIONS_DIR_RELPATH)
         source_store = source_location.path / store_relpath
         source_host = source_location.host
         if not source_host.path_exists(source_store):
-            raise AgentStartError(
-                str(self.name),
-                f"Clone adopt: no pi session store at source {source_store}; "
-                "the source agent has no pi conversation to resume.",
+            logger.warning(
+                "Clone adopt: no pi session store at source {}; starting the clone without a resumed session.",
+                source_store,
             )
+            return None
         # Choose on the source, where the store holds only the source agent's own
         # sessions -- the destination store may already contain --adopt sessions.
         latest_on_source = source_host.execute_idempotent_command(
@@ -977,12 +977,14 @@ class PiCodingAgent(
             timeout_seconds=5.0,
         )
         if not (latest_on_source.success and latest_on_source.stdout.strip()):
-            raise AgentStartError(
-                str(self.name),
-                f"Clone adopt: source pi session store {source_store} has no session JSONL "
-                f"(ls success={latest_on_source.success}, stderr={latest_on_source.stderr.strip()!r}); "
-                "the source agent has no pi conversation to resume.",
+            logger.warning(
+                "Clone adopt: source pi session store {} has no session JSONL "
+                "(ls success={}, stderr={!r}); starting the clone without a resumed session.",
+                source_store,
+                latest_on_source.success,
+                latest_on_source.stderr.strip(),
             )
+            return None
         latest_relative = Path(latest_on_source.stdout.strip()).relative_to(source_store)
 
         transfer_cloned_agent_session_store(host, self._get_agent_dir(), source_location, store_relpath)

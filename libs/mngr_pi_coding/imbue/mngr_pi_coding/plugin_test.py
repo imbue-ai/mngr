@@ -20,7 +20,6 @@ from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentInstallationError
-from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
@@ -819,8 +818,10 @@ def test_adopt_from_clone_with_explicit_resumes_clone(local_provider: LocalProvi
     assert _read_resume_pointer(agent) == str(resumed)
 
 
-def test_adopt_from_clone_no_store_raises(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """A ``--from`` clone whose source has no pi session store raises AgentStartError."""
+def test_adopt_from_clone_no_store_warns(
+    local_provider: LocalProviderInstance, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """A ``--from`` clone whose source has no pi session store warns and resumes nothing."""
     agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     # Source state dir exists but has no plugin/pi_coding/sessions store.
     source_state_dir = tmp_path / "source-agent-state"
@@ -828,12 +829,16 @@ def test_adopt_from_clone_no_store_raises(local_provider: LocalProviderInstance,
     source_location = HostLocation(host=agent.host, path=source_state_dir)
     options = _make_options(source_agent_state_location=source_location)
 
-    with pytest.raises(AgentStartError, match="no pi session store"):
-        agent.adopt_session(agent.host, options, agent.mngr_ctx)
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    assert any("no pi session store" in message for message in log_warnings)
+    assert not (agent._get_agent_dir() / _SESSION_FILE_NAME).exists()
 
 
-def test_adopt_from_clone_empty_store_raises(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """A ``--from`` clone whose source store has no session JSONL raises AgentStartError."""
+def test_adopt_from_clone_empty_store_warns(
+    local_provider: LocalProviderInstance, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """A ``--from`` clone whose source store has no session JSONL warns and resumes nothing."""
     agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     source_state_dir = tmp_path / "source-agent-state"
     # The store dir exists but holds no .jsonl session.
@@ -841,8 +846,10 @@ def test_adopt_from_clone_empty_store_raises(local_provider: LocalProviderInstan
     source_location = HostLocation(host=agent.host, path=source_state_dir)
     options = _make_options(source_agent_state_location=source_location)
 
-    with pytest.raises(AgentStartError, match="no session JSONL"):
-        agent.adopt_session(agent.host, options, agent.mngr_ctx)
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    assert any("no session JSONL" in message for message in log_warnings)
+    assert not (agent._get_agent_dir() / _SESSION_FILE_NAME).exists()
 
 
 # =============================================================================

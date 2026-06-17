@@ -122,7 +122,6 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
@@ -735,7 +734,7 @@ class AntigravityAgent(
         logger.info("Adopted agy conversation: {}", conversation_id)
         return conversation_id
 
-    def _copy_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
+    def _copy_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
         """Transfer a ``--from <agent>`` clone's conversation store and return its resume id.
 
         A generic clone copies the source *workspace* but not the source agent's *state dir*,
@@ -748,25 +747,27 @@ class AntigravityAgent(
 
         The conversation to resume is the source's root conversation (its
         ``ROOT_CONVERSATION_FILENAME``); if that pointer is absent or its store did not come
-        across, the most-recent transferred ``<id>.db`` is used. Raises
-        :class:`AgentStartError` when the clone has nothing to resume (no store, or a store
-        with no usable conversation id) -- a ``--from`` that can't carry the source's
-        conversation forward is a failed adoption, not a silent fresh start.
+        across, the most-recent transferred ``<id>.db`` is used. Returns ``None`` (after
+        warning) when the clone has nothing to resume (no store, or a store with no usable
+        conversation id) -- ``--from`` is fundamentally a workspace clone, so carrying the
+        source's conversation forward is a bonus, not a requirement; the caller starts fresh.
         """
         transferred = transfer_cloned_agent_session_store(
             host, self._get_agent_dir(), source_location, _AGENT_CONVERSATIONS_RELPATH
         )
         if not transferred:
-            raise AgentStartError(
-                self.name,
-                f"Clone adopt: source agent {source_location.path} has no agy conversation store to resume.",
+            logger.warning(
+                "Clone adopt: source agent {} has no agy conversation store to resume; starting fresh.",
+                source_location.path,
             )
+            return None
         conversation_id = self._pick_cloned_conversation_id(host, source_location)
         if conversation_id is None:
-            raise AgentStartError(
-                self.name,
-                f"Clone adopt: transferred agy store from {source_location.path} has no resumable conversation.",
+            logger.warning(
+                "Clone adopt: transferred agy store from {} has no resumable conversation; starting fresh.",
+                source_location.path,
             )
+            return None
         logger.info("Adopted cloned agy conversation: {}", conversation_id)
         return conversation_id
 

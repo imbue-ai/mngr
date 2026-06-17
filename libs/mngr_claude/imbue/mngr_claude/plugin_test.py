@@ -3920,8 +3920,8 @@ def _run_clone_adoption(agent: ClaudeAgent, host: OnlineHostInterface, source_di
 
     Mirrors production: rsync the source plugin/, then run ``adopt_session`` with the
     clone location so ``_adopt_cloned_session`` rekeys the subdir and the resume step
-    finalizes (writes ``claude_session_id``). Raises ``AgentStartError`` when the clone
-    has nothing to resume.
+    finalizes (writes ``claude_session_id``). Warns and adopts nothing when the clone
+    has no resumable session.
     """
     location = HostLocation(host=host, path=source_dir)
     agent._transfer_source_plugin_data(location)
@@ -3969,12 +3969,16 @@ def test_clone_adoption_copies_plugin_dir(
     assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / source_project_subdir).exists()
 
 
-def test_clone_adoption_raises_when_no_plugin_dir(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+def test_clone_adoption_warns_when_no_plugin_dir(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
     """The rsync step is a no-op when the source has no plugin/ dir, so the
-    subsequent adopt step finds no session JSONL. A ``--from`` clone is meant
-    to resume the source's conversation, so that is a hard ``AgentStartError``.
+    subsequent adopt step finds no session JSONL. A ``--from`` clone is a
+    workspace clone (carrying the session forward is a bonus), so that warns
+    and adopts nothing rather than raising -- no ``claude_session_id`` is written.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
@@ -3984,8 +3988,10 @@ def test_clone_adoption_raises_when_no_plugin_dir(
     source_dir = tmp_path / "source_agent_state"
     source_dir.mkdir()
 
-    with pytest.raises(AgentStartError, match="no session JSONL found at source"):
-        _run_clone_adoption(agent, host, source_dir)
+    _run_clone_adoption(agent, host, source_dir)
+
+    assert any("no session JSONL found at source" in message for message in log_warnings), log_warnings
+    assert not (dest_dir / "claude_session_id").exists()
 
 
 @pytest.mark.rsync

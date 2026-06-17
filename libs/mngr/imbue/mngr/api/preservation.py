@@ -184,26 +184,32 @@ def adopt_sessions(
     source_location: HostLocation | None,
     *,
     copy_explicit: Callable[[str], str],
-    copy_clone: Callable[[HostLocation], str],
+    copy_clone: Callable[[HostLocation], str | None],
     resume: Callable[[str], None],
 ) -> None:
     """Copy every ``--adopt`` session (and the ``--from`` clone) into the new agent, then resume one.
 
     Each ``--adopt`` value is copied in via ``copy_explicit`` (which rebinds it to the new work
-    dir and returns its resumable id); a ``--from`` clone is additionally copied via ``copy_clone``
-    (same, but raising if the source has no resumable session). The session actually resumed --
-    via ``resume``, which writes the agent's resume pointer -- is the clone's when ``--from`` is
-    given, otherwise the last ``--adopt`` value; the rest are left available for the agent's own
-    session switcher. With neither option set, nothing is adopted (fresh start).
+    dir and returns its resumable id); a ``--from`` clone is additionally copied via ``copy_clone``.
+    The two differ on a *missing* session, by design:
 
-    ``--adopt`` and ``--from`` are no longer mutually exclusive: every named session plus the
-    clone is made available, and the clone is the one resumed.
+    - ``--adopt`` names a session explicitly, so an unknown/unusable id is a hard error
+      (``copy_explicit`` raises ``UserInputError``).
+    - ``--from`` is fundamentally a workspace clone; carrying the session forward is a bonus, so a
+      source with no resumable session is a warning, not an error -- ``copy_clone`` returns ``None``.
+
+    The session actually resumed (via ``resume``) is the clone's when ``--from`` yielded one,
+    otherwise the last ``--adopt`` value; the rest stay available in the agent's session switcher.
+    So ``--adopt A --from X`` resumes X's session, but if X has none it warns and still resumes A.
+    With nothing resumable, the agent starts fresh. ``--adopt`` and ``--from`` may be combined.
     """
     resume_id: str | None = None
     for adopt_arg in adopt_session:
         resume_id = copy_explicit(adopt_arg)
     if source_location is not None:
-        resume_id = copy_clone(source_location)
+        cloned_id = copy_clone(source_location)
+        if cloned_id is not None:
+            resume_id = cloned_id
     if resume_id is not None:
         resume(resume_id)
 
