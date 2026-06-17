@@ -887,6 +887,14 @@ bake-slice-prod region tag count="1" *extra_args:
         --from-tag "{{tag}}" \
         {{extra_args}}
 
+# Add a paid user to the activated minds env. Resolves the connector URL (from the
+# env's client.toml) and the paid-list admin key (from the tier's Vault) automatically,
+# so this is a one-shot. Activate first: eval "$(uv run minds env activate <name>)" and
+# `vault login`. Use `minds paid remove`/`list` for the other operations.
+#   just add-paid-email someone@example.com
+add-paid-email email:
+    uv run minds paid add "{{email}}"
+
 # List pool_hosts rows for the activated minds env (read-only).
 list-pool-hosts:
     uv run minds pool list
