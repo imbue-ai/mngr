@@ -33,6 +33,6 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | Field | Default | Description |
 |-------|---------|-------------|
 | `api_key` | `None` (falls back to `VULTR_API_KEY` env var) | Vultr API key |
-| `default_region` | `ewr` | Default Vultr region |
-| `default_plan` | `vc2-2c-4gb` | Default Vultr plan |
-| `default_os_id` | 2136 | Default Vultr OS ID (Debian 12 x64) |
+| `default_region` | `ewr` | Default Vultr region (e.g., 'ewr' for New Jersey) |
+| `default_plan` | `vc2-2c-4gb` | Default Vultr plan (e.g., 'vc2-2c-4gb' for 2 CPU, 4GB RAM) |
+| `default_os_id` | 2136 | Default Vultr OS ID (2136 = Debian 12 x64) |

@@ -58,10 +58,10 @@ Tunables on the `pi-coding` agent type:
 | `command` | `pi` | The pi command to run. |
 | `sync_auth` | `true` | Share `~/.pi/agent/auth.json` into the per-agent dir. |
 | `sync_home_settings` | `true` | Share `settings.json` and resource dirs into the per-agent dir. |
-| `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). |
-| `resume_session` | `true` | Resume this agent's pi session on start, so stop/start keeps context. |
-| `emit_common_transcript` | `true` | Emit the transcript `mngr transcript` reads. |
+| `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present. |
+| `resume_session` | `true` | Resume this agent's pi session on start, so stop/start keeps context. Safe on first start (pi starts fresh when there is no recorded session yet). |
+| `emit_common_transcript` | `true` | Emit the transcript `mngr transcript` reads. The raw pi transcript is always captured; this gates only the common-envelope conversion. |
 | `emit_raw_transcript` | `true` | Capture the raw pi message stream. |
-| `auto_dismiss_dialogs` | `false` | Trust the workspace without prompting (suppress pi's "Trust project folder?" dialog). Also implied by `mngr create --yes`. |
+| `auto_dismiss_dialogs` | `false` | Trust the workspace without prompting, suppressing pi's "Trust project folder?" dialog. Also implied by `mngr create --yes`. When False and the source repo is not already trusted, mngr prompts interactively and refuses to run non-interactively. |
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md) for more details.

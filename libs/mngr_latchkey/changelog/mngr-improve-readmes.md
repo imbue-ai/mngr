@@ -1,1 +1,1 @@
-Trimmed the README to user-relevant content (removed internal gateway/API machinery and implementation details) and tightened it substantially for concision.
+Trimmed the README substantially for concision: removed the deep gateway HTTP-extension reference and the Python embedding API section (both remain documented in the module docstrings and `.mjs` header comments that ship in the wheel), keeping the CLI, settings, logs, and a concise permissions reference.

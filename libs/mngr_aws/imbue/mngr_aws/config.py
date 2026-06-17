@@ -89,24 +89,26 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     )
     default_region: str = Field(
         default="us-east-1",
-        description="Default AWS region (e.g., 'us-east-1').",
+        description="AWS region for new instances (e.g., 'us-east-1').",
     )
     default_instance_type: str = Field(
         default="t3.small",
         description=(
-            "Default EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM). "
-            "Threaded through the shared `plan` slot in the parsed-build-args struct; "
-            "AWS surfaces it to users as `--aws-instance-type=` rather than `--aws-plan=` "
-            "because that's what the AWS docs and console call it."
+            "EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM). "
+            "Surfaced as the `--aws-instance-type=` build arg."
         ),
     )
     default_ami_id: str = Field(
         default="",
-        description="Default AMI ID. When empty, default_ami_by_region is consulted for the chosen region.",
+        description="Explicit AMI override; takes precedence over default_ami_by_region. When empty, default_ami_by_region is consulted for the chosen region.",
     )
     default_ami_by_region: dict[str, str] = Field(
         default_factory=lambda: dict(DEFAULT_AMI_BY_REGION),
-        description="Per-region default AMI IDs. Used when default_ami_id is empty.",
+        description=(
+            "Per-region default AMI IDs, used when default_ami_id is empty. These ship no "
+            "GPU / NVIDIA drivers; supply your own AMI via default_ami_id / --aws-ami for "
+            "GPU workloads."
+        ),
     )
     security_group: SecurityGroupSpec = Field(
         default_factory=AutoCreateSecurityGroup,
@@ -156,13 +158,9 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     terminate_on_shutdown: bool = Field(
         default=False,
         description=(
-            "Sets EC2 InstanceInitiatedShutdownBehavior. False (default) -> 'stop': an OS "
-            "shutdown -- whether the idle watcher powering the host off, or the "
-            "auto_shutdown_seconds time cap -- STOPS the instance, so it is resumable via "
-            "`mngr start` with its EBS volume intact (the Modal-like idle-pause; an abandoned "
-            "stopped instance costs only EBS until reaped by `mngr destroy` or GC). True -> "
-            "'terminate': an OS shutdown TERMINATES the instance (ephemeral, self-cleaning -- "
-            "used by the release tests so a leaked instance auto-destroys at the time cap)."
+            "EC2 shutdown behavior (InstanceInitiatedShutdownBehavior) on an OS shutdown. "
+            "False keeps the instance stoppable and resumable via `mngr start` (EBS preserved); "
+            "True terminates it (ephemeral / self-cleaning)."
         ),
     )
 

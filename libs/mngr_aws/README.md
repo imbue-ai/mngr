@@ -81,8 +81,8 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `default_region` | `us-east-1` | AWS region for new instances. |
-| `default_instance_type` | `t3.small` | EC2 instance type. Surfaced as the `--aws-instance-type=` build arg. |
+| `default_region` | `us-east-1` | AWS region for new instances (e.g., `us-east-1`). |
+| `default_instance_type` | `t3.small` | EC2 instance type (e.g., `t3.small` for 2 vCPU, 2GB RAM). Surfaced as the `--aws-instance-type=` build arg. |
 | `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
 | `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. These ship no GPU / NVIDIA drivers; supply your own AMI via `default_ami_id` / `--aws-ami` for GPU workloads. |
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |

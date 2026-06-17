@@ -110,7 +110,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `project_id` | gcloud/ADC default | GCP project ID (a plain identifier, not a credential). |
+| `project_id` | gcloud/ADC default | GCP project ID (a plain identifier, not a credential). When left empty, taken from Application Default Credentials (the active `gcloud config set project` or `GOOGLE_CLOUD_PROJECT`); set it explicitly to pin a specific project. |
 | `default_region` | derived from zone | GCE region. Used only to validate the resolved zone; set it to catch a mismatched `default_zone` typo. |
 | `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal). |
 | `default_machine_type` | `e2-small` | GCE machine type. |
@@ -121,10 +121,10 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `subnetwork` | `None` | Optional explicit subnetwork (required for custom-mode VPCs). |
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Defaults open to the internet; warned at prepare/create time. Set `()` for no ingress. |
 | `firewall_target_tag` | `mngr-ssh` | Network tag bound to the firewall rule; every instance is tagged with it. |
-| `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. |
+| `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. Required for the current mngr-from-developer-laptop SSH model; set to `False` and run mngr from an in-VPC bastion for a more secure deployment. |
 | `service_account_email` | `None` | Optional service account attached to launched instances. |
 | `service_account_scopes` | `("https://www.googleapis.com/auth/cloud-platform",)` | OAuth scopes for the attached service account (only used when `service_account_email` is set). |
-| `auto_shutdown_seconds` | `None` | When set, the VM self-deletes after N seconds. Useful for ephemeral test / scratch hosts. |
+| `auto_shutdown_seconds` | `None` | When set, the VM halts itself (`shutdown -P`) after about this many seconds. A hard max-lifetime cap, useful for ephemeral test / scratch hosts. |
 
 ## Required IAM permissions
 

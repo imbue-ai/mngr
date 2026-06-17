@@ -7,11 +7,17 @@ Resource guards catch two classes of bugs:
 - **Missing marks**: a test calls an external resource (a CLI binary or Python SDK) without the corresponding `@pytest.mark.<resource>`. The guard fails the test with a clear message.
 - **Superfluous marks**: a test carries a resource mark but never actually invokes the resource. The guard fails the test so the mark doesn't rot.
 
-Together these keep `pytest -m <resource>` a reliable selector for exactly the tests that touch a given resource.
+These two checks together enforce a single design invariant: **for any (test, guarded resource) pair, there is exactly one correct mark state.** A test that exercises the resource (directly or via a tagged fixture in its closure) must carry the mark; a test that doesn't must not. Allowing a test to pass both with and without the mark would defeat the point of the system, since `pytest -m <resource>` would no longer reliably select every test that needs the resource. Every rule that follows is in service of this invariant.
 
 ## How it works
 
-For each guarded resource, a guard intercepts use of that resource during a test (CLI binaries are shadowed on `PATH`; Python SDKs are patched at a chokepoint method). If a test uses the resource without the mark, or carries the mark without using the resource, the guard fails it. You only interact with the registration helpers and the marks below.
+There are two guard mechanisms, covering CLI binaries and Python SDKs respectively.
+
+**Binary guards** create wrapper scripts that shadow the real binary on `PATH`. During a test, the wrapper checks environment variables to decide whether the test is allowed to use the binary. If not, it records a tracking file and exits 127. If yes, it records a tracking file and delegates to the real binary.
+
+**SDK guards** monkeypatch a chokepoint in a Python SDK. The monkeypatched function calls `enforce_sdk_guard()`, which checks the same environment variables and either raises `ResourceGuardViolation` or records a tracking file.
+
+Both mechanisms use per-test tracking files so the `makereport` hook can detect violations even when the test swallows errors or handles non-zero exit codes.
 
 ## Basic usage
 

@@ -137,6 +137,12 @@ Supported control surfaces and how they map onto mngr:
 - The agent is not hermetic from the host's claude config -- it must load real settings to
   authenticate -- whereas the real SDK with `setting_sources=[]` is hermetic.
 
-This is best treated as an example or starting point rather than a finished product; the surface has
-trade-offs you'll have to make for your own use case. For a cleaner API that abstracts over many
-coding agents, prefer [mngr](https://github.com/imbue-ai/mngr) directly.
+Why so many limitations?
+
+Honestly the Claude Agent SDK is kind of a mess,
+and I don't have a particular reason to make it work perfectly.
+There will always be some trade-offs--you'll have to decide how, exactly, to make them for your own use case.
+Consider this implementation more of an example of how you could do it, or a starting point, rather than a finished product.
+
+Instead of using the proprietary Claude Agent SDK interface, you should try using [mngr](https://github.com/imbue-ai/mngr) instead--
+its API is considerably cleaner, and it abstracts over a variety of different coding agents already.

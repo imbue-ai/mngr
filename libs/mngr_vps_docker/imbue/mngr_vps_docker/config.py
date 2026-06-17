@@ -17,15 +17,15 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
     )
     default_image: str = Field(
         default="debian:bookworm-slim",
-        description="Default Docker image for containers",
+        description="Default Docker image",
     )
     default_idle_timeout: int = Field(
         default=800,
-        description="Default idle timeout in seconds",
+        description="Idle timeout in seconds",
     )
     default_idle_mode: IdleMode = Field(
         default=IdleMode.IO,
-        description="Default idle detection mode",
+        description="Idle detection mode",
     )
     default_activity_sources: tuple[ActivitySource, ...] = Field(
         default_factory=lambda: tuple(ActivitySource),
@@ -33,27 +33,27 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
     )
     ssh_connect_timeout: float = Field(
         default=60.0,
-        description="Timeout for SSH connections in seconds",
+        description="SSH connection timeout in seconds",
     )
     instance_boot_timeout: float = Field(
         default=300.0,
-        description="Timeout for the cloud instance to become reachable after provisioning, in seconds",
+        description="Timeout for the cloud instance to become reachable, in seconds",
     )
     docker_install_timeout: float = Field(
         default=300.0,
-        description="Timeout for Docker installation on the VPS in seconds",
+        description="Docker installation timeout in seconds",
     )
     container_ssh_port: int = Field(
         default=2222,
-        description="Port for sshd inside the Docker container (mapped to VPS localhost only)",
+        description="Container sshd port exposed on VPS",
     )
     default_region: str = Field(
         default="ewr",
-        description="Default cloud region. Provider subclasses override the default value.",
+        description="Default cloud region (provider subclasses override the default)",
     )
     default_start_args: tuple[str, ...] = Field(
         default=(),
-        description="Default docker run arguments applied to all containers",
+        description="Default `docker run` arguments",
     )
     auto_shutdown_seconds: int | None = Field(
         default=None,

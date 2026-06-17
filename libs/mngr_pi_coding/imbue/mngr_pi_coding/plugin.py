@@ -180,46 +180,44 @@ class PiCodingAgentConfig(AgentTypeConfig):
 
     command: CommandString = Field(
         default=CommandString("pi"),
-        description="Command to run the pi coding agent",
+        description="The pi command to run.",
     )
     sync_home_settings: bool = Field(
         default=True,
-        description="Whether to sync settings from ~/.pi/agent/ to the per-agent config dir",
+        description="Share settings.json and resource dirs from ~/.pi/agent/ into the per-agent config dir.",
     )
     sync_auth: bool = Field(
         default=True,
-        description="Whether to sync the auth.json from ~/.pi/agent/ to the per-agent config dir",
+        description="Share ~/.pi/agent/auth.json into the per-agent config dir.",
     )
     check_installation: bool = Field(
         default=True,
-        description="Check if pi is installed (if False, assumes it is already present)",
+        description="Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present.",
     )
     resume_session: bool = Field(
         default=True,
         description=(
-            "Resume this agent's pi session on start (via `pi --session <recorded file>`), so "
-            "`mngr stop` then `mngr start` keeps conversation context. Safe on first start "
-            "(pi starts fresh when there is no recorded session yet)."
+            "Resume this agent's pi session on start, so stop/start keeps context. Safe on first "
+            "start (pi starts fresh when there is no recorded session yet)."
         ),
     )
     emit_common_transcript: bool = Field(
         default=True,
         description=(
-            "Emit the agent-agnostic common transcript that `mngr transcript` reads. The raw "
-            "pi transcript is always captured; this gates only the common-envelope conversion."
+            "Emit the transcript `mngr transcript` reads. The raw pi transcript is always "
+            "captured; this gates only the common-envelope conversion."
         ),
     )
     emit_raw_transcript: bool = Field(
         default=True,
-        description="Capture the raw pi message stream under logs/<type>_transcript/events.jsonl.",
+        description="Capture the raw pi message stream.",
     )
     auto_dismiss_dialogs: bool = Field(
         default=False,
         description=(
-            "Trust the agent's workspace for pi without prompting, suppressing pi's "
-            "'Trust project folder?' dialog (which would otherwise block the first message). "
-            "Also implied by `mngr create --yes`. When False and the source repo is not already "
-            "trusted, mngr prompts interactively and refuses to run non-interactively."
+            "Trust the workspace without prompting, suppressing pi's 'Trust project folder?' "
+            "dialog. Also implied by `mngr create --yes`. When False and the source repo is not "
+            "already trusted, mngr prompts interactively and refuses to run non-interactively."
         ),
     )
     preserve_on_destroy: bool = Field(

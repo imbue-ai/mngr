@@ -97,43 +97,40 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     project_id: str = Field(
         default="",
         description=(
-            "GCP project ID for new instances. A plain identifier, not a credential (ADC supplies "
-            "the actual credentials). When left empty, the project is taken from Application Default "
-            "Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env "
-            "var); set it explicitly to pin a specific project."
+            "GCP project ID (a plain identifier, not a credential). When left empty, the project is "
+            "taken from Application Default Credentials (the active 'gcloud config set project' or the "
+            "GOOGLE_CLOUD_PROJECT env var); set it explicitly to pin a specific project."
         ),
     )
     default_region: str | None = Field(
         default=None,
         description=(
-            "Default GCE region (e.g., 'us-west1'). Used only to validate the resolved zone. When "
-            "unset, the region is derived from the resolved zone, so it never needs to be set "
-            "explicitly; set it to assert a region and catch a mismatched default_zone typo."
+            "GCE region (e.g., 'us-west1'). Used only to validate the resolved zone; when unset, "
+            "derived from the resolved zone. Set it to catch a mismatched default_zone typo."
         ),
     )
     default_zone: str | None = Field(
         default=None,
         description=(
-            "Default GCE zone (GCE VMs are zonal, e.g. 'us-west1-a'). When unset, the zone is taken "
-            "from the active 'gcloud config get compute/zone' if the gcloud CLI is available, "
-            "otherwise it falls back to 'us-west1-a'; set it explicitly to pin a zone. Must lie in "
-            "default_region when both are set explicitly."
+            "Zone for new instances (GCE VMs are zonal, e.g. 'us-west1-a'). When unset, taken from "
+            "the active 'gcloud config get compute/zone' if available, otherwise 'us-west1-a'. Must "
+            "lie in default_region when both are set explicitly."
         ),
     )
     default_machine_type: str = Field(
         default="e2-small",
-        description="Default GCE machine type (e.g., 'e2-small' for ~2 vCPU, 2GB RAM).",
+        description="GCE machine type (e.g., 'e2-small' for ~2 vCPU, 2GB RAM).",
     )
     default_source_image: str = Field(
         default=DEFAULT_GCE_IMAGE,
         description=(
-            "GCE VM boot-disk image (not the base ``default_image``, which is the Docker container "
-            "image). Global family string (no per-region map). Defaults to Debian 12."
+            "GCE VM boot-disk image (distinct from the base default_image, the Docker container "
+            "image run inside the VM)."
         ),
     )
     boot_disk_size_gb: int = Field(
         default=30,
-        description="Size of the boot persistent disk in GB.",
+        description="Boot disk size in GB.",
     )
     boot_disk_type: str = Field(
         default="pd-balanced",
@@ -141,20 +138,19 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     )
     network: str = Field(
         default="default",
-        description="VPC network name for the instance NIC and the firewall rule `mngr gcp prepare` creates.",
+        description="VPC network for the instance NIC and firewall rule.",
     )
     subnetwork: str | None = Field(
         default=None,
-        description="Subnetwork name. Required for custom-mode VPCs; None lets GCE pick for auto-mode networks.",
+        description="Optional explicit subnetwork (required for custom-mode VPCs); None lets GCE pick for auto-mode networks.",
     )
     allowed_ssh_cidrs: tuple[str, ...] = Field(
         default=("0.0.0.0/0",),
         description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the firewall rule "
-            "`mngr gcp prepare` creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ['203.0.113.4/32'] to "
-            "restrict to your own IP, or [] for no ingress (no firewall rule is created and the "
-            "instance is unreachable from outside its VPC). A warning is logged when the effective "
-            "range is 0.0.0.0/0 or empty."
+            "Inbound CIDRs for tcp/22 and tcp/<container_ssh_port>. Default ('0.0.0.0/0',) opens to "
+            "the internet (a warning is logged at prepare/create time); use e.g. ['203.0.113.4/32'] "
+            "to restrict to your own IP, or () for no ingress (no firewall rule is created and the "
+            "instance is unreachable from outside its VPC)."
         ),
     )
     firewall_name: str = Field(
@@ -163,26 +159,21 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     )
     firewall_target_tag: str = Field(
         default="mngr-ssh",
-        description=(
-            "Network tag bound to the firewall rule `mngr gcp prepare` creates. Every instance is tagged with it so "
-            "the rule targets only mngr-managed VMs (GCE firewalls are network-scoped + tag-targeted, "
-            "not per-instance like an EC2 security group)."
-        ),
+        description="Network tag bound to the firewall rule; every instance is tagged with it.",
     )
     associate_external_ip: bool = Field(
         default=True,
         description=(
-            "Assign an ephemeral external IPv4 address to the instance. Required for the current "
-            "mngr-from-developer-laptop SSH access model. For a more secure deployment, set to False "
+            "Assign an ephemeral external IPv4 to instances. Required for the current "
+            "mngr-from-developer-laptop SSH access model; for a more secure deployment, set to False "
             "and run mngr from a bastion inside the VPC."
         ),
     )
     service_account_email: str | None = Field(
         default=None,
         description=(
-            "Optional service account email attached to launched instances. A plain identifier. When "
-            "None, the field is omitted from the create request, so GCE applies its normal default "
-            "for an unspecified service account."
+            "Optional service account email attached to launched instances. When None, GCE applies "
+            "its normal default for an unspecified service account."
         ),
     )
     service_account_scopes: tuple[str, ...] = Field(
