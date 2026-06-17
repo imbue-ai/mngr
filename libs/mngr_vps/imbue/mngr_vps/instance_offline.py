@@ -3,16 +3,20 @@ import shlex
 from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
@@ -34,6 +38,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
@@ -834,16 +839,34 @@ class OfflineCapableVpsProvider(VpsProvider):
             return self._offline_agent_dicts_for(host_id)
 
 
+class HostDirSyncInstallPlan(FrozenModel):
+    """The cloud-specific pieces a host_dir sync install needs, computed once per install.
+
+    The provider resolves these (the on-box sync-CLI install command, the host_dir
+    sync ``.service`` body, and the bucket sync-target URI for the log line); the
+    shared ``BucketHostDirBackend.install_sync`` skeleton then writes them to the
+    outer via the identical systemd sequence. A provider returns ``None`` instead of
+    a plan to skip the install entirely (e.g. Azure when the managed identity the
+    sync would authenticate as is absent).
+    """
+
+    install_command: str = Field(description="Best-effort on-box install of the sync CLI (awscli / azcopy)")
+    sync_command: str = Field(description="The ``aws s3 sync`` / ``azcopy sync`` command the oneshot runs")
+    service_unit: str = Field(description="The oneshot host_dir-sync ``.service`` body")
+    sync_target_uri: str = Field(description="The bucket sync-target URI, for the install log line")
+
+
 class BucketHostDirBackend(HostDirBackend):
     """Shared offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
 
     Selected only when offline host_dir is on and the state bucket exists, so
     ``bucket`` is always present and no method re-tests it. Holds a back-reference
     to the provider for the SSH-to-outer / path plumbing the sync needs. The
-    offline-read (``volume`` / ``volume_reference``) and final-sync-before-pause
-    flow live here once; subclasses supply only the cloud-specific pieces
-    (identity provisioning, the sync-daemon install, the missing-identity probe)
-    and three small hooks (unit name, stop-action word, bucket error type).
+    offline-read (``volume`` / ``volume_reference``), final-sync-before-pause, and
+    sync-daemon install (the systemd ``.service``/``.timer`` write sequence) flows
+    live here once; subclasses supply only the cloud-specific pieces (identity
+    provisioning, the per-install plan, the missing-identity probe) and the small
+    hooks (unit name, stop-action word, bucket error type).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -861,6 +884,44 @@ class BucketHostDirBackend(HostDirBackend):
     def _pause_action(self) -> str:
         """The pause verb for log context: ``stop`` (AWS/EC2) or ``deallocate`` (Azure)."""
         ...
+
+    @abstractmethod
+    def _cloud_label(self) -> str:
+        """Short cloud name for install log spans/lines (``AWS`` / ``Azure``)."""
+        ...
+
+    @abstractmethod
+    def _build_install_plan(self, host_id: HostId) -> HostDirSyncInstallPlan | None:
+        """Resolve the cloud-specific install pieces, or ``None`` to skip the install.
+
+        Returns ``None`` (after logging) when the install cannot proceed -- e.g.
+        Azure when the bucket-write managed identity the sync authenticates as is
+        absent, so installing the daemon would only 403.
+        """
+        ...
+
+    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
+        plan = self._build_install_plan(host_id)
+        if plan is None:
+            return
+        sync_script = build_host_dir_sync_script(plan.sync_command)
+        timer_unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
+        unit_name = self._sync_unit_name()
+        with log_span(f"Installing {self._cloud_label()} host_dir sync daemon"):
+            with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
+                outer.execute_idempotent_command(plan.install_command, timeout_seconds=300.0)
+                outer.write_text_file(Path(HOST_DIR_SYNC_SCRIPT_PATH), sync_script)
+                outer.execute_idempotent_command(f"chmod +x {HOST_DIR_SYNC_SCRIPT_PATH}")
+                outer.write_text_file(Path(f"/etc/systemd/system/{unit_name}.service"), plan.service_unit)
+                outer.write_text_file(Path(f"/etc/systemd/system/{unit_name}.timer"), timer_unit)
+                outer.execute_idempotent_command("systemctl daemon-reload")
+                outer.execute_idempotent_command(f"systemctl enable --now {unit_name}.timer")
+        logger.info(
+            "{} host_dir sync daemon installed for host {} (target {})",
+            self._cloud_label(),
+            host_id,
+            plan.sync_target_uri,
+        )
 
     def volume_reference(self, host_id: HostId) -> HostVolume | None:
         return HostVolume(volume=self.bucket.volume_for_host(host_id))
@@ -962,6 +1023,25 @@ class KeyValueMirrorVpsProvider(OfflineCapableVpsProvider):
             for instance in self._list_instances_cached()
             if self._offline_kv_map(instance).get(self._host_id_key()) == wanted
         ]
+
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return the SSH-reachable public IPs of this provider's instances.
+
+        Every cloud (AWS/GCP/Azure) provider reaches this point with resolvable
+        credentials: ``build_provider_instance`` raises ``ProviderUnavailableError``
+        when the session/subscription/credentials cannot be resolved, so the live
+        listing is always available here. A stopped EC2/GCE instance loses its
+        ephemeral IP and is naturally excluded by the non-empty ``main_ip`` check; a
+        *deallocated* Azure VM keeps its Static IP, so it is still listed and then
+        fails fast over the bounded SSH connect timeout before being reconstructed
+        offline -- this keeps discovery uniform (no power-state-specific branch).
+        """
+        vps_ips: list[str] = []
+        for instance in self._list_instances_cached():
+            main_ip = instance.get("main_ip", "")
+            if main_ip:
+                vps_ips.append(main_ip)
+        return vps_ips
 
     def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
         """Render one agent field as a mirror-value string, or ``None`` if absent/empty.
@@ -1129,13 +1209,52 @@ class TagMirrorVpsProvider(KeyValueMirrorVpsProvider):
 
     @property
     @abstractmethod
+    def _state_bucket(self) -> StateBucket | None:
+        """The object-storage state bucket when it actually exists, else None (use the tag mirror).
+
+        A ``@cached_property`` on the concrete providers, so the existence probe
+        (S3 ``bucket_exists`` / Azure account+container) runs at most once. The
+        probe itself is cloud-specific and stays per-provider; this base only
+        consumes the result.
+        """
+        ...
+
+    @abstractmethod
+    def _bucket_error_type(self) -> type[MngrError]:
+        """The bucket's operation-failure exception type (``S3StateBucketError`` / ``BlobStateBucketError``)."""
+        ...
+
+    @abstractmethod
+    def _bucket_label(self) -> str:
+        """Human-readable bucket name for logs (``S3 state bucket`` / ``Azure state bucket``)."""
+        ...
+
+    @cached_property
     def _state_store(self) -> HostStateStore:
-        """The external host/agent-record mirror: the object-storage bucket when present, else the tag store.
+        """The external host/agent-record mirror: the bucket when present, else the tag store.
 
         Selecting one store here lets the offline read/write paths below stop
-        branching on bucket-vs-tags. Implemented as a cached property by the
-        concrete providers (the bucket-existence probe runs at most once).
+        branching on bucket-vs-tags. The bucket-existence probe is amortized via
+        ``_state_bucket`` (cached on the concrete provider), so this runs it once.
         """
+        bucket = self._state_bucket
+        if bucket is not None:
+            return BucketHostStateStore(
+                bucket=bucket,
+                bucket_error_type=self._bucket_error_type(),
+                bucket_label=self._bucket_label(),
+                fallback=TagHostStateStore(provider=self),
+            )
+        return TagHostStateStore(provider=self)
+
+    @abstractmethod
+    def _remove_instance_tags(self, instance: Mapping[str, Any], keys: Sequence[str]) -> None:
+        """Remove the given tag keys from this provider's instance (EC2 / Azure VM tag API). Idempotent."""
+        ...
+
+    @abstractmethod
+    def _persist_agent_to_tags(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        """Mirror one agent record into the instance's per-field ``mngr-*`` tags (no-bucket fallback)."""
         ...
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
@@ -1212,3 +1331,41 @@ class TagMirrorVpsProvider(KeyValueMirrorVpsProvider):
         if instance is None:
             return None
         return self._host_record_from_instance(instance)
+
+
+class TagHostStateStore(HostStateStore):
+    """Tag-backed host-state mirror: the instance's own ``mngr-*`` tags are the store (no-bucket fallback).
+
+    Shared by AWS (EC2 tags) and Azure (VM tags). Compact (256-char per value, and
+    on EC2 a 50-tag-per-instance ceiling) and keyed off the live instance, so the
+    host record / agent records are reconstructed from the instance's tags. All tag
+    I/O is delegated to the owning ``TagMirrorVpsProvider``, which resolves
+    instances from its cached listing; the only cloud-specific step (the tag-removal
+    API call) goes through the provider's ``_remove_instance_tags`` hook.
+    """
+
+    provider: TagMirrorVpsProvider
+
+    def persist_host_record(self, record: VpsHostRecord) -> None:
+        # The instance's own create/stop tags carry the host record; nothing extra to write.
+        pass
+
+    def delete_host_state(self, host_id: HostId) -> None:
+        # Destroying the instance drops its tags, so there is no separate state to delete.
+        pass
+
+    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        self.provider._persist_agent_to_tags(host_id, agent_id, agent_data)
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return
+        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in AGENT_TAG_FIELDS]
+        self.provider._remove_instance_tags(instance, keys)
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        return self.provider._agent_dicts_from_tags(host_id)
+
+    def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
+        return self.provider._host_record_from_instance_tags(host_id)

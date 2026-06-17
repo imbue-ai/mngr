@@ -12,6 +12,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import TypeVar
 from typing import assert_never
 
 from loguru import logger
@@ -119,6 +120,8 @@ from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
 from imbue.mngr_vps.primitives import VPS_SSH_KEY_NAME
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.vps_client import VpsClientInterface
+
+ParsedVpsBuildOptionsT = TypeVar("ParsedVpsBuildOptionsT", bound=ParsedVpsBuildOptions)
 
 
 class _VpsDiscoveryData(FrozenModel):
@@ -797,6 +800,24 @@ class VpsProvider(BaseProviderInstance):
                 remove_volume(outer, volume_name)
             except (HostConnectionError, MngrError) as e:
                 logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
+
+    def _require_parsed(
+        self, parsed: ParsedVpsBuildOptions, expected_cls: type[ParsedVpsBuildOptionsT]
+    ) -> ParsedVpsBuildOptionsT:
+        """Narrow ``parsed`` to the provider's expected build-options subclass, or raise uniformly.
+
+        Each provider's ``_create_vps_instance`` override needs the concrete
+        per-provider build options (e.g. ``ParsedAwsBuildOptions``) so its extra
+        knobs are statically visible. ``_parse_build_args`` always returns that
+        shape, so a mismatch indicates the parser hook returned the wrong type.
+        """
+        if isinstance(parsed, expected_cls):
+            return parsed
+        raise MngrError(
+            f"{type(self).__name__}._create_vps_instance expected {expected_cls.__name__}, "
+            f"got {type(parsed).__name__}. This indicates the parser hook returned a mismatched "
+            f"shape; _parse_build_args must return {expected_cls.__name__}."
+        )
 
     def _create_vps_instance(
         self,
