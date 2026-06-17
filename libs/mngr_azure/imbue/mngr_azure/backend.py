@@ -780,10 +780,10 @@ class AzureProvider(TagMirrorVpsDockerProvider):
 
         Like ``get_volume_reference_for_host`` but additionally confirms the host's
         ``host_dir/`` prefix actually has blobs (a cheap prefix list). When the
-        prefix is empty, runs the missing-identity diagnostic (Decision 7) -- a
-        clear WARNING pointing at re-running ``mngr azure prepare`` if the VM has
-        no attached user-assigned identity -- and returns None (callers treat None
-        as "not available"). This never raises. Mirrors
+        prefix is empty, runs the missing-identity diagnostic -- a clear WARNING
+        pointing at re-running ``mngr azure prepare`` if the VM has no attached
+        user-assigned identity -- and returns None (callers treat None as "not
+        available"). This never raises. Mirrors
         ``AwsProvider.get_volume_for_host``.
         """
         reference = self.get_volume_reference_for_host(host)
@@ -807,9 +807,9 @@ class AzureProvider(TagMirrorVpsDockerProvider):
     def _warn_if_host_dir_identity_missing(self, host_id: HostId) -> None:
         """Warn (non-fatally) when an empty host_dir prefix is explained by a missing managed identity.
 
-        Detects the Decision-7 case directly from cloud state: when the host's VM
-        has no attached user-assigned managed identity, the on-box sync daemon
-        could never push host_dir, which is why the prefix is empty. Points the user
+        Detects the missing-identity case directly from cloud state: when the
+        host's VM has no attached user-assigned managed identity, the on-box sync
+        daemon could never push host_dir, which is why the prefix is empty. Points the user
         at re-running ``mngr azure prepare`` (and recreating the host so it picks up
         the identity). Best-effort: any probe failure is swallowed (this is purely
         advisory). Mirrors ``AwsProvider._warn_if_host_dir_identity_missing``.

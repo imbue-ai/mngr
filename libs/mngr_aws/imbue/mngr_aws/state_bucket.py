@@ -22,7 +22,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_vps_docker import state_keys
 
-# Trust policy + inline policy name for the per-bucket host identity (Decision 3).
+# Trust policy + inline policy name for the per-bucket host identity.
 # The trust policy lets EC2 assume the role; the inline policy grants ONLY the
 # object actions the on-box sync daemon needs (Put/Get/Delete) scoped to this
 # bucket's ``hosts/*`` prefix, plus ``s3:ListBucket`` on the bucket (required by
@@ -305,9 +305,9 @@ class S3StateHostIdentity(MutableModel):
 
     The role is assumable by EC2 and carries a least-privilege inline policy
     scoped to the state bucket's ``hosts/*`` prefix. Provisioned by
-    ``mngr aws prepare`` (Decision 3) and attached at host create so the on-box
-    sync daemon can write via IMDS credentials. Reads never need this identity --
-    they use the operator's credentials.
+    ``mngr aws prepare`` and attached at host create so the on-box sync daemon
+    can write via IMDS credentials. Reads never need this identity -- they use
+    the operator's credentials.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

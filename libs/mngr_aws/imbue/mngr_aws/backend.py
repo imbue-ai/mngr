@@ -615,9 +615,9 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         Like ``get_volume_reference_for_host`` but additionally confirms the
         host's ``host_dir/`` prefix actually has objects (a cheap ``list`` with
         ``MaxKeys=1``). When the prefix is empty, runs the missing-identity
-        diagnostic (Decision 7) -- a clear WARNING pointing at re-running
-        ``mngr aws prepare`` if the instance has no attached IAM profile -- and
-        returns None (callers treat None as "not available"). This never raises.
+        diagnostic -- a clear WARNING pointing at re-running ``mngr aws prepare``
+        if the instance has no attached IAM profile -- and returns None (callers
+        treat None as "not available"). This never raises.
         """
         reference = self.get_volume_reference_for_host(host)
         if reference is None:
@@ -640,10 +640,10 @@ class AwsProvider(TagMirrorVpsDockerProvider):
     def _warn_if_host_dir_identity_missing(self, host_id: HostId) -> None:
         """Warn (non-fatally) when an empty host_dir prefix is explained by a missing IAM identity.
 
-        Detects the Decision-7 case directly from cloud state: when the host's
-        instance has no attached IAM instance profile, the on-box sync daemon
-        could never push host_dir, which is why the prefix is empty. Points the
-        user at re-running ``mngr aws prepare`` (and recreating the host so it
+        Detects the missing-identity case directly from cloud state: when the
+        host's instance has no attached IAM instance profile, the on-box sync
+        daemon could never push host_dir, which is why the prefix is empty. Points
+        the user at re-running ``mngr aws prepare`` (and recreating the host so it
         picks up the profile). Best-effort: any probe failure is swallowed (this
         is purely advisory).
         """
