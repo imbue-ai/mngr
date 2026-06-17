@@ -28,7 +28,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_operator_result
-from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
@@ -199,15 +198,8 @@ def _output_prepare_result(
         "created": result.was_created,
     }
 
-    def _human() -> None:
-        write_human_line(
-            "Prepared GCP firewall rule {} (tag {}) in project {}",
-            firewall_name,
-            result.target_tag,
-            project_id,
-        )
-
-    emit_operator_result("prepared", data, output_format, _human)
+    human_lines = [f"Prepared GCP firewall rule {firewall_name} (tag {result.target_tag}) in project {project_id}"]
+    emit_operator_result("prepared", data, output_format, human_lines)
 
 
 def _output_cleanup_result(
@@ -228,13 +220,11 @@ def _output_cleanup_result(
         "deleted": deleted_firewall is not None,
     }
 
-    def _human() -> None:
-        if deleted_firewall is None:
-            write_human_line("Nothing to clean up: no firewall rule {} in project {}.", firewall_name, project_id)
-        else:
-            write_human_line("Cleaned up GCP firewall rule {} in project {}", deleted_firewall, project_id)
-
-    emit_operator_result("cleaned_up", data, output_format, _human)
+    if deleted_firewall is None:
+        human_lines = [f"Nothing to clean up: no firewall rule {firewall_name} in project {project_id}."]
+    else:
+        human_lines = [f"Cleaned up GCP firewall rule {deleted_firewall} in project {project_id}"]
+    emit_operator_result("cleaned_up", data, output_format, human_lines)
 
 
 @click.group(name="gcp")

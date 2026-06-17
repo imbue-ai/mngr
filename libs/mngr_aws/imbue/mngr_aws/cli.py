@@ -26,7 +26,6 @@ from loguru import logger
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_operator_result
-from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
@@ -355,19 +354,13 @@ def _output_prepare_result(
         "host_identity_name": host_identity_name,
     }
 
-    def _human() -> None:
-        write_human_line("Prepared AWS security group {} in region {}", result.security_group_id, region)
-        if state_bucket_name is not None:
-            write_human_line(
-                "{} S3 state bucket {} in region {}",
-                "Created" if was_bucket_created else "Reused existing",
-                state_bucket_name,
-                region,
-            )
-        if host_identity_name is not None:
-            write_human_line("Provisioned host-dir IAM identity {}", host_identity_name)
-
-    emit_operator_result("prepared", data, output_format, _human)
+    human_lines = [f"Prepared AWS security group {result.security_group_id} in region {region}"]
+    if state_bucket_name is not None:
+        verb = "Created" if was_bucket_created else "Reused existing"
+        human_lines.append(f"{verb} S3 state bucket {state_bucket_name} in region {region}")
+    if host_identity_name is not None:
+        human_lines.append(f"Provisioned host-dir IAM identity {host_identity_name}")
+    emit_operator_result("prepared", data, output_format, human_lines)
 
 
 def _output_cleanup_result(
@@ -393,17 +386,15 @@ def _output_cleanup_result(
         "host_identity_deleted": deleted_host_identity_name,
     }
 
-    def _human() -> None:
-        if deleted_sg_id is None:
-            write_human_line("Nothing to clean up: no mngr-managed security group in region {}.", region)
-        else:
-            write_human_line("Cleaned up AWS security group {} in region {}", deleted_sg_id, region)
-        if deleted_bucket_name is not None:
-            write_human_line("Deleted S3 state bucket {} in region {}", deleted_bucket_name, region)
-        if deleted_host_identity_name is not None:
-            write_human_line("Deleted host-dir IAM identity {}", deleted_host_identity_name)
-
-    emit_operator_result("cleaned_up", data, output_format, _human)
+    if deleted_sg_id is None:
+        human_lines = [f"Nothing to clean up: no mngr-managed security group in region {region}."]
+    else:
+        human_lines = [f"Cleaned up AWS security group {deleted_sg_id} in region {region}"]
+    if deleted_bucket_name is not None:
+        human_lines.append(f"Deleted S3 state bucket {deleted_bucket_name} in region {region}")
+    if deleted_host_identity_name is not None:
+        human_lines.append(f"Deleted host-dir IAM identity {deleted_host_identity_name}")
+    emit_operator_result("cleaned_up", data, output_format, human_lines)
 
 
 @click.group(name="aws")

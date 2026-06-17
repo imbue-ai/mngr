@@ -1,7 +1,6 @@
 import json
 import string
 import sys
-from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
@@ -149,15 +148,15 @@ def emit_operator_result(
     event_name: str,
     data: Mapping[str, Any],
     output_format: OutputFormat,
-    write_human: Callable[[], None],
+    human_lines: Sequence[str],
 ) -> None:
     """Emit an operator-command result (e.g. provider ``prepare`` / ``cleanup``) in the requested format.
 
     Centralizes the format dispatch the provider operator commands share: JSON
     writes ``data`` as one object, JSONL emits a ``<event_name>`` event carrying
-    ``data``, and HUMAN delegates to ``write_human`` (the provider writes its own
-    result lines). Each provider still owns its ``data`` dict and human wording --
-    only the format switch lives here.
+    ``data``, and HUMAN writes each already-formatted line in ``human_lines``.
+    Each provider still owns its ``data`` dict and its human wording (the caller
+    builds ``human_lines``) -- only the format switch lives here.
     """
     match output_format:
         case OutputFormat.JSON:
@@ -165,7 +164,8 @@ def emit_operator_result(
         case OutputFormat.JSONL:
             emit_event(event_name, data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
-            write_human()
+            for line in human_lines:
+                write_human_line(line)
         case _ as unreachable:
             assert_never(unreachable)
 
