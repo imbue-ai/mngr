@@ -18,7 +18,7 @@
   is_stale disables the picker controls when the workspace's provider's last
   discovery poll errored -- writes against an unreachable host would not be
   observable until provider recovery.
-  palette is the {name: hex} map of pickable swatches (12 entries).
+  palette is the {name: hex} map of pickable swatches (10 entries).
 #}
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
@@ -70,7 +70,7 @@
 </script>
 {% endset %}
 <Base title={{ "Settings: " ~ ws_name }}
-      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased"
+      body_class="bg-white text-zinc-900 font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>
     <div id="workspace-settings" data-agent-id="{{ agent_id }}" data-is-stale="{{ 'true' if is_stale else 'false' }}">

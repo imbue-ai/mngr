@@ -49,6 +49,7 @@ from imbue.mngr_imbue_cloud.bake.pool_bake import wait_for_deferred_install
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
+from imbue.mngr_imbue_cloud.cli.server import DEFAULT_SLICE_BAKE_CONCURRENCY
 from imbue.mngr_imbue_cloud.cli.server import allocate_slices
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_ovh.client import build_ovh_client
@@ -506,6 +507,17 @@ def _create_single_pool_host(
     help="[slice only] Report placement + per-slice sizing; do not bake.",
 )
 @click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=DEFAULT_SLICE_BAKE_CONCURRENCY,
+    show_default=True,
+    help=(
+        "[slice only] Max slices baked at once; the rest queue and start as slots free. "
+        "Bounds box CPU/IO/network contention so each `mngr create` stays under its timeout."
+    ),
+)
+@click.option(
     "--skip-deferred-install-wait",
     "is_deferred_install_wait_skipped",
     is_flag=True,
@@ -532,6 +544,7 @@ def pool_create(
     mngr_source: str | None,
     is_recycle_enabled: bool,
     is_dry_run: bool,
+    max_concurrency: int,
     is_deferred_install_wait_skipped: bool,
 ) -> None:
     """Create pre-provisioned pool hosts on the chosen backend (OVH VPS or bare-metal slice).
@@ -592,6 +605,7 @@ def pool_create(
                     database_url=resolved_database_url,
                     is_dry_run=is_dry_run,
                     is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+                    max_concurrency=max_concurrency,
                 )
             else:
                 # The ovh_vps branch above already rejected a missing key; assert it
