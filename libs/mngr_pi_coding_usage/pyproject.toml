@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr-pi-coding-usage"
-version = "0.1.1"
+version = "0.1.0"
 description = "pi usage data provider for `mngr usage` (reader + writer gate; the per-message writer lives in mngr_pi_coding's lifecycle extension)"
 readme = "README.md"
 requires-python = ">=3.12"
