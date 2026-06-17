@@ -574,7 +574,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     # RG cascade. The RG delete would reap it anyway, but the explicit delete keeps
     # cleanup well-defined when the identity outlives a partial prior cleanup.
     deleted_host_identity_name = _perform_host_identity_cleanup(_build_host_identity(base, client))
-    # _perform_cleanup raises AzureProviderError when a VM still exists, and
+    # _perform_cleanup raises ManagedResourcesExistError when a VM still exists, and
     # delete_managed_resource_group raises VpsApiError when the group lacks the
     # managed-by=mngr tag. Both are MngrErrors, so they render as clean CLI
     # messages; let them propagate with their specific type.
