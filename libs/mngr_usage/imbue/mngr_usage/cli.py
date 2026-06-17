@@ -41,6 +41,7 @@ from imbue.mngr_usage.api import window_render_dict
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
+from imbue.mngr_usage.data_types import TokenSnapshot
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
@@ -77,7 +78,7 @@ class UsageCliOptions(CommonCliOptions, AgentFilterCliOptions):
     'log more' with 'show more'.
     """
 
-    max_age: str | None
+    stale_after: str | None
     since: str | None
     detail: bool
     provider: tuple[str, ...]
@@ -178,7 +179,7 @@ def _format_cost_line(
     Caller contract: only invoke when there's at least one session of
     this mode (``session_count >= 1``), so ``latest_event_at`` is always
     a real timestamp -- the freshest session's last event for this mode.
-    ``UsageSnapshot`` enforces this pairing by construction (the
+    ``_UsageRenderModel`` enforces this pairing by construction (its
     per-mode ``latest_*_event_at`` property is ``int | None`` and is
     ``None`` iff the mode has zero sessions); callers in
     ``_write_source_section`` gate on the timestamp being present.
@@ -341,6 +342,22 @@ class _UsageRenderModel(FrozenModel):
         return self.snapshot.api_cost
 
     @property
+    def subscription_tokens(self) -> TokenSnapshot:
+        return self.snapshot.subscription_tokens
+
+    @property
+    def api_tokens(self) -> TokenSnapshot:
+        return self.snapshot.api_tokens
+
+    @property
+    def is_subscription_cost_estimated(self) -> bool:
+        return self.snapshot.is_subscription_cost_estimated
+
+    @property
+    def is_api_cost_estimated(self) -> bool:
+        return self.snapshot.is_api_cost_estimated
+
+    @property
     def since_seconds(self) -> int:
         return self.snapshot.since_seconds
 
@@ -374,11 +391,11 @@ class _UsageRenderModel(FrozenModel):
         return apis[0].last_event_at if apis else None
 
 
-def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _UsageRenderModel:
+def _build_render_model(snapshot: UsageSnapshot, stale_after: int, now: int) -> _UsageRenderModel:
     """Assemble the renderable view for a snapshot.
 
     Two staleness causes, tracked separately so the warning text matches:
-    - ``is_age_stale``: snapshot updated_at is older than max_age (no fresh
+    - ``is_age_stale``: snapshot updated_at is older than stale_after (no fresh
       event in a while).
     - ``has_past_reset``: any populated window's resets_at is in the past
       (the limit refreshed; cached used_percentage is from the prior window).
@@ -387,7 +404,7 @@ def _build_render_model(snapshot: UsageSnapshot, max_age: int, now: int) -> _Usa
     return _UsageRenderModel(
         snapshot=snapshot,
         now=now,
-        is_age_stale=(now - snapshot.updated_at) > max_age,
+        is_age_stale=(now - snapshot.updated_at) > stale_after,
         has_past_reset=any(snap.resets_at is not None and snap.resets_at < now for snap in snapshot.windows.values()),
     )
 
@@ -416,8 +433,16 @@ def _render_one_source_for_json(model: _UsageRenderModel, now: int, detail: bool
         "session_count": model.session_count,
         "subscription_session_count": model.subscription_session_count,
         "api_session_count": model.api_session_count,
-        "subscription_cost": model.subscription_cost.model_dump(),
-        "api_cost": model.api_cost.model_dump(),
+        "subscription_cost": {
+            **model.subscription_cost.model_dump(),
+            "is_estimated": model.is_subscription_cost_estimated,
+        },
+        "subscription_tokens": model.subscription_tokens.model_dump(),
+        "api_cost": {
+            **model.api_cost.model_dump(),
+            "is_estimated": model.is_api_cost_estimated,
+        },
+        "api_tokens": model.api_tokens.model_dump(),
     }
     if detail:
         out["sessions"] = [session_render_dict(s, now) for s in model.sessions]
@@ -505,7 +530,10 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     if sub_latest is not None:
         subscription_line = _format_cost_line(
             mode_label="subscription cost",
-            mode_suffix=" (imputed)",
+            # "imputed" already marks it informational; add "estimated" when the
+            # dollars were token-derived rather than harness-reported (mirrors the
+            # api line and the JSON/CEL is_estimated flag).
+            mode_suffix=" (imputed, estimated)" if model.is_subscription_cost_estimated else " (imputed)",
             aggregate_cost=model.subscription_cost,
             session_count=model.subscription_session_count,
             since_seconds=model.since_seconds,
@@ -519,7 +547,8 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     if api_latest is not None:
         api_line = _format_cost_line(
             mode_label="api cost",
-            mode_suffix="",
+            # Flag token-derived dollars so a reader doesn't read an estimate as billed.
+            mode_suffix=" (estimated)" if model.is_api_cost_estimated else "",
             aggregate_cost=model.api_cost,
             session_count=model.api_session_count,
             since_seconds=model.since_seconds,
@@ -677,19 +706,15 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
 
 
 @click.group(name="usage", invoke_without_command=True)
-@click.option(
-    "--max-age",
+@optgroup.group("Display")
+@optgroup.option(
+    "--stale-after",
     default=None,
-    help="Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config.",
+    help="Warn when the snapshot file is older than this (e.g. '300', '5m', '2h'). Display warning "
+    "only -- it does not change which events are aggregated (use --since for that). Default: from "
+    "plugin config.",
 )
-@click.option(
-    "--since",
-    default=None,
-    help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
-    "last event is older are dropped from `sessions[]` and from the per-mode aggregates "
-    "(`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h).",
-)
-@click.option(
+@optgroup.option(
     "--detail",
     is_flag=True,
     default=False,
@@ -698,19 +723,26 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown "
     "for terseness; the per-mode cost lines and window lines are unchanged.",
 )
-@click.option(
+@add_agent_filter_options
+@optgroup.option(
+    "--provider",
+    multiple=True,
+    help="Show only agents from the given provider(s) (repeatable, e.g. --provider local)",
+)
+@optgroup.option(
+    "--since",
+    default=None,
+    help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
+    "last event is older are dropped from `sessions[]` and from the per-mode aggregates "
+    "(`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h).",
+)
+@optgroup.option(
     "--preserved/--no-preserved",
     default=True,
     show_default=True,
     help="Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). "
     "On by default so destroyed agents' spend still counts; pass --no-preserved to show only "
     "live agents. Preserved agents honor the same --provider/--project/--local/label filters.",
-)
-@add_agent_filter_options
-@optgroup.option(
-    "--provider",
-    multiple=True,
-    help="Show only agents from the given provider(s) (repeatable, e.g. --provider local)",
 )
 @add_common_options
 @click.pass_context
@@ -740,8 +772,10 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     )
     plugin_config = mngr_ctx.get_plugin_config("usage", UsagePluginConfig)
 
-    max_age_override = _parse_optional_duration(opts.max_age)
-    effective_max_age = max_age_override if max_age_override is not None else plugin_config.max_age_seconds
+    stale_after_override = _parse_optional_duration(opts.stale_after)
+    effective_stale_after = (
+        stale_after_override if stale_after_override is not None else plugin_config.stale_after_seconds
+    )
     since_override = _parse_optional_duration(opts.since)
     effective_since = since_override if since_override is not None else plugin_config.since_seconds
 
@@ -761,7 +795,7 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
     # One render model per source (already collapsed in the aggregation pipeline),
     # sorted freshest-first. Tiebreak by source_name so the order is stable in tests.
     snapshots_with_models = sorted(
-        ((s, _build_render_model(s, effective_max_age, now)) for s in snapshots),
+        ((s, _build_render_model(s, effective_stale_after, now)) for s in snapshots),
         key=lambda sm: (sm[0].updated_at, sm[0].source_name),
         reverse=True,
     )
@@ -778,7 +812,7 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="usage",
     one_line_description="Show rolling-window usage / quota data from agent statusline events",
-    synopsis="mngr usage [OPTIONS] [COMMAND]",
+    synopsis="mngr usage [--stale-after DURATION] [--detail] [--since DURATION] [--no-preserved] [COMMAND]",
     description="""Reports rolling-window usage / quota data captured by an agent's
 statusline.
 
@@ -817,7 +851,7 @@ Per-source aggregation:
         ("Local agents only", "mngr usage --local"),
         ("Specific providers", "mngr usage --provider local --provider modal"),
         ("Aggregate cost across the last week", "mngr usage --since 7d"),
-        ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --max-age 60"),
+        ("Treat the snapshot as stale after 60s (warning only)", "mngr usage --stale-after 60"),
         ("Per-session breakdown (human + JSON, mode-tagged)", "mngr usage --detail"),
         ("Machine-readable output", "mngr usage --format json"),
         (
@@ -949,6 +983,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
         result = wait_for_usage(
             poll_fn=lambda: gather_usage_snapshots(
                 mngr_ctx,
+                now=int(time.time()),
                 include_filters=include_filters,
                 exclude_filters=exclude_filters,
                 provider_names=provider_names,
@@ -958,6 +993,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
             until_filters=until_programs,
             timeout_seconds=timeout_seconds,
             interval_seconds=interval_seconds,
+            now_fn=lambda: int(time.time()),
         )
     except KeyboardInterrupt:
         logger.debug("Received keyboard interrupt")

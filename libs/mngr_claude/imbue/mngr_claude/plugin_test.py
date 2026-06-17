@@ -32,8 +32,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
@@ -54,6 +54,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
@@ -72,7 +73,6 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
-from imbue.mngr_claude.plugin import WaitingReason
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
@@ -971,7 +971,29 @@ def test_agent_field_generators_returns_correct_structure() -> None:
 def test_agent_field_generators_waiting_reason_returns_permissions(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """waiting_reason returns PERMISSIONS when permissions_waiting file exists."""
+    """waiting_reason returns PERMISSIONS when blocked mid-turn (active present and
+    permissions_waiting present)."""
+    result = agent_field_generators()
+    assert result is not None
+    _, generators = result
+    waiting_reason = generators["waiting_reason"]
+
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "active").touch()
+    (agent_dir / "permissions_waiting").touch()
+
+    assert waiting_reason(agent, host) == WaitingReason.PERMISSIONS
+
+
+def test_agent_field_generators_waiting_reason_ignores_stranded_permissions_marker(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A stranded permissions_waiting marker (active absent -> turn over) reports
+    END_OF_TURN, not PERMISSIONS: the PERMISSIONS verdict is gated on the active
+    marker so a marker that outlived its turn cannot mislabel an idle agent."""
     result = agent_field_generators()
     assert result is not None
     _, generators = result
@@ -983,7 +1005,7 @@ def test_agent_field_generators_waiting_reason_returns_permissions(
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "permissions_waiting").touch()
 
-    assert waiting_reason(agent, host) == WaitingReason.PERMISSIONS
+    assert waiting_reason(agent, host) == WaitingReason.END_OF_TURN
 
 
 def test_agent_field_generators_waiting_reason_returns_end_of_turn(
@@ -3477,12 +3499,14 @@ def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext
     assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
 
 
-def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should pass when --adopt-session is used with a claude agent."""
+def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should pass when --adopt-session names a resolvable session with a claude agent."""
+    session_file = tmp_path / "abc123.jsonl"
+    session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("some-id",)},
+            plugin_data={"adopt_session": (str(session_file),)},
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3505,7 +3529,7 @@ def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrConte
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext) -> None:
+def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should accept a config-defined subtype whose parent_type
     chain reaches claude (e.g. a ``write-plus`` template), not just the literal
     ``claude`` type name. This is the centralized "is a claude agent" check via
@@ -3521,10 +3545,12 @@ def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext)
     mngr_ctx = temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, config_with_subtype),
     )
+    session_file = tmp_path / "abc123.jsonl"
+    session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=subtype,
-            plugin_data={"adopt_session": ("some-id",)},
+            plugin_data={"adopt_session": (str(session_file),)},
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3553,6 +3579,29 @@ def test_on_before_create_rejects_adopt_session_with_clone_source(
     )
     with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should raise UserInputError when an --adopt-session ID does not resolve.
+
+    Validating here -- before any host or worktree is created, and outside the provisioning
+    ConcurrencyGroup -- means a bad session ID surfaces as a clean, fail-fast user error
+    rather than being wrapped in a ConcurrencyExceptionGroup and reported mid-provisioning
+    as an "Unexpected error".
+    """
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            plugin_data={"adopt_session": ("nonexistent-session",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    # Pin config-dir resolution to the isolated test HOME (~/.claude) so the search is
+    # deterministic even when CLAUDE_CONFIG_DIR is set (e.g. inside an mngr agent).
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        with pytest.raises(UserInputError, match="Session nonexistent-session not found"):
+            on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 # =============================================================================
@@ -3709,6 +3758,92 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
     expected_project_name = encode_claude_project_dir_name(agent.work_dir)
     dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
     assert (dest_project_dir / "abc123-def456.jsonl").exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_preserved_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A session ID is resolvable against a destroyed agent's preserved session files."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Mirror the on-disk layout that preserve_sessions_on_destroy produces:
+    # <local_host_dir>/preserved/<name>--<id>/plugin/claude/anthropic/projects/<encoded>/<sid>.jsonl
+    local_host_dir = Path(temp_mngr_ctx.config.default_host_dir).expanduser()
+    preserved_project_dir = (
+        local_host_dir
+        / "preserved"
+        / "old-agent--00000000-0000-0000-0000-000000000001"
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "projects"
+        / "encoded-source-project"
+    )
+    preserved_project_dir.mkdir(parents=True)
+    target_session_id = "preserved-session-id"
+    (preserved_project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": (target_session_id,)},
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_session_file = (
+        agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
+    )
+    assert dest_session_file.exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A session ID is resolvable against another live local mngr agent's per-agent config dir."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Another live agent's session lives under its per-agent state dir:
+    # <local_host_dir>/agents/<other-id>/plugin/claude/anthropic/projects/<encoded>/<sid>.jsonl
+    local_host_dir = Path(temp_mngr_ctx.config.default_host_dir).expanduser()
+    other_agent_project_dir = (
+        local_host_dir
+        / "agents"
+        / "11111111-1111-1111-1111-111111111111"
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "projects"
+        / "encoded-source-project"
+    )
+    other_agent_project_dir.mkdir(parents=True)
+    target_session_id = "live-mngr-session-id"
+    (other_agent_project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": (target_session_id,)},
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_session_file = (
+        agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
+    )
+    assert dest_session_file.exists()
 
 
 # =============================================================================

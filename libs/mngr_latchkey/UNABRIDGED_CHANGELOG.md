@@ -4,6 +4,51 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+`mngr latchkey forward` now has a structured, rotated, timestamped log, reusing the standard mngr/minds JSONL logging rather than the previous unrotated, untimestamped files.
+
+- The supervisor now writes its structured log to `<latchkey_directory>/mngr_latchkey/events.jsonl` (one flat JSON object per line with a nanosecond timestamp, size-rotated with rotated copies pruned). Read this when you need to observe timing.
+
+- The shared `latchkey gateway` subprocess's output is now routed through loguru (each line at DEBUG, prefixed with `[latchkey gateway]`) into that same structured log, so it is timestamped and rotated like the rest of the logs instead of accumulating in the separate, unrotated `latchkey_gateway.log`. That separate file is no longer written.
+
+- The detached supervisor is now spawned with `--quiet`, so its raw `latchkey_forward.log` capture file no longer accumulates console output in steady state (everything goes to the structured `events.jsonl`). The raw file stays effectively empty and only ever captures rare startup-failure output (Click errors or a pre-logging traceback), which is exactly when you want it. Its fd is handed straight to the detached process, so it cannot be rotated mid-write -- keeping it near-empty is what bounds it.
+
+## 2026-06-12
+
+Fixed file-sharing permission grants for paths containing spaces or non-ASCII characters (e.g. an agent-requested or user-selected directory like `My Documents`). The per-file permission pattern is now built from the same WHATWG-URL-normalized (percent-encoded) form that the gateway matches incoming requests against, so a path with a space (`%20`) or accented letter now matches instead of silently never granting access.
+
+File-sharing permission requests now accept paths that use `~` / `~/...` notation for the current user's home directory; the gateway expands them to an absolute path (the same root the WebDAV home mount is served from) before storing the grant. `~user` notation for another user's home is rejected with a clear error.
+
+Fixed the gateway permissions extension so that services whose catalog lists no specific permissions (e.g. Linear) now surface the catch-all `any` permission. `GET /permissions/available/<service>` injects `any` as the first available permission for every scope, and `POST /permission-requests` accepts a `predefined` request naming `any` under any known scope. Previously such services appeared to have no permissions an agent could request.
+
+## 2026-06-11
+
+Hardened how the VPS-resident latchkey gateway receives its secrets. The encryption key and gateway listen password are no longer interpolated into the gateway start command (where they could surface in process listings or command logs). Instead they are written to short-lived 0600 files on the VPS that the start script reads into the gateway's environment and deletes immediately. This keeps the secrets out of process argv and logs, and -- importantly -- avoids leaving the encryption key on the VPS disk next to the encrypted credential store it decrypts. These temp files now also use random, non-descriptive names so they do not advertise which secret each one holds to anyone able to list the directory.
+
+Decoupled per-agent latchkey gateway setup so a failure to reverse-tunnel the desktop-side gateway into an agent's container no longer prevents that agent's VPS-resident gateway from being provisioned (and vice versa). The two reachability paths are independent, so each is now attempted with its own error handling.
+
+Coalesced VPS-resident gateway provisioning per outer host: when several agents share one outer host (VPS/container), only one provisioning pass runs at a time instead of multiple agents racing concurrent, redundant passes against the same host's gateway, tunnel, and credential/permission files.
+
+Stopped re-provisioning an already-provisioned outer host on every discovery cycle. The discovery stream re-emits the full agent set continuously; previously each emission re-ran the full (expensive, idempotent) VPS gateway provisioning, flooding the log and the network with redundant SSH work. Each host is now provisioned at most once per supervisor lifetime (a failed pass still retries, and a supervisor restart re-provisions); ongoing credential/permission sync continues to be handled by the remote-state watcher.
+
+The VPS-resident latchkey gateway now starts with the same shared password the
+local desktop gateway uses. The desktop-derived gateway password (a pure
+function of the shared Latchkey encryption key, as produced by
+`Latchkey.derive_gateway_password`) is injected into the remote gateway as
+`LATCHKEY_GATEWAY_LISTEN_PASSWORD`, matching the `LATCHKEY_GATEWAY_PASSWORD`
+agents already present. Previously the remote gateway started without any
+listen password, so it did not enforce the same authentication as the local
+gateway.
+
+Remote VPS gateways now receive only the latchkey credentials a host's permissions actually grant, instead of the full desktop credential store.
+
+When syncing credentials to a remote VPS, mngr resolves the canonical services a host has been granted (mapping its permissions-rule scopes back to service names via the bundled `services.json` catalog, accessed through the new `services_catalog` module), drops any whose credentials are not actually stored (checked with `latchkey services info --offline`), and re-encrypts a host-scoped subset with the same encryption key via `latchkey auth re-encrypt --services`. The encryption key is unchanged, so the gateway's derived password and the agents' permissions-override JWTs keep validating. When nothing is left to ship (a deny-all host, or every granted service lacks stored credentials) the remote store is cleared instead. This limits the blast radius of a VPS compromise to the credentials the agent was actually permitted to use.
+
+The `services_catalog` module also now owns the dialog-facing catalog (`ServicesCatalog` / `ServicePermissionInfo`), previously in the desktop client. It reads the bundled `services.json` directly rather than over HTTP, so the gateway's `permissions` extension no longer serves the bare `GET /permissions/available` collection endpoint (the per-service `GET /permissions/available/<service>` endpoint that agents use is unchanged).
+
+Replaced a direct RuntimeError raise in the discovery stream consumer with a dedicated DiscoveryStreamError.
+
 ## 2026-06-09
 
 Regenerated the latchkey `services.json` permission catalog from detent 1.5.0.

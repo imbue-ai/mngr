@@ -1,0 +1,132 @@
+"""Release test: full end-to-end codex agent flow against the real ``codex`` CLI.
+
+Drives the real ``mngr`` CLI through the shared agent release lifecycle (create ->
+WAITING -> message -> transcript -> stop/start resume -> destroy). The arc and
+assertions live in ``imbue.mngr.agents.agent_release_testing``; this file supplies
+codex's plumbing via an :class:`AgentReleaseProfile`.
+
+codex's only real specifics over the other ports: a throwaway ``CODEX_HOME`` seeded
+with a copy of the user's real ``~/.codex/auth.json`` (so it authenticates without
+touching the real config), and running the real installed ``mngr``/``codex`` binaries
+(put on ``PATH``) rather than the checkout's. Host-dir and tmux-server isolation come
+for free from the autouse ``setup_test_mngr_env`` fixture, same as every other test.
+
+It is a ``release`` test (not run in CI) and requires the ``codex`` binary plus a
+logged-in ``~/.codex/auth.json``; skipped otherwise. The model is pinned to a
+ChatGPT-account-safe slug because codex's default ``*-codex`` model is rejected for
+ChatGPT-account logins (see the lib README).
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from collections.abc import Sequence
+from pathlib import Path
+
+import pytest
+
+from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
+from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.utils.testing import get_subprocess_test_env
+from imbue.mngr.utils.testing import init_git_repo
+
+# Resolved at import time, before the autouse ``setup_test_mngr_env`` fixture redirects
+# $HOME / mutates PATH: the real home (auth source) and the real codex / mngr binaries.
+_REAL_HOME = Path.home()
+_CODEX_BIN = shutil.which("codex") or next(
+    (
+        candidate
+        for candidate in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex", str(_REAL_HOME / ".local/bin/codex"))
+        if Path(candidate).exists()
+    ),
+    None,
+)
+_MNGR_BIN = shutil.which("mngr")
+_REAL_AUTH = _REAL_HOME / ".codex" / "auth.json"
+_REAL_MODELS_CACHE = _REAL_HOME / ".codex" / "models_cache.json"
+
+# ChatGPT-account-safe model. codex's compiled default is a ``*-codex`` slug a ChatGPT
+# login rejects with a 400. Update if this account's available models change.
+_CODEX_MODEL = "gpt-5.5"
+
+# Disable the remote-provider backends for every command: a purely local agent test,
+# and leaving them on makes mngr probe Modal/Docker. ``-S`` is a per-command option, so
+# it is injected right after the subcommand.
+_PROVIDER_SETTINGS: tuple[str, ...] = (
+    "-S",
+    "providers.modal.is_enabled=false",
+    "-S",
+    "providers.docker.is_enabled=false",
+)
+
+
+class _CodexReleaseProfile(AgentReleaseProfile):
+    agent_type = "codex"
+    common_transcript_subdir = "codex"
+    # codex's send_message blocks until the agent reads RUNNING (its UserPromptSubmit hook
+    # fires a tmux wait-for signal *after* setting the marker), so the marker is reliably
+    # present once a message returns -- observe it. codex's turn does not force a tool call
+    # and it does not report token usage in the common envelope.
+    observes_running_marker = True
+    forces_tool_call = False
+    asserts_usage = False
+    native_session_preserved_relpaths = ("plugin/codex/home/sessions",)
+
+    def unavailable_reason(self) -> str | None:
+        if _CODEX_BIN is None or _MNGR_BIN is None or not _REAL_AUTH.exists():
+            return "codex CLI not installed, mngr not on PATH, or ~/.codex/auth.json missing (not logged in)"
+        return None
+
+    def setup(self, tmp_path: Path) -> AgentReleaseContext:
+        assert _CODEX_BIN is not None and _MNGR_BIN is not None
+        # Inherits the autouse fixture's isolated MNGR_HOST_DIR, redirected $HOME, and private
+        # tmux server (via copied os.environ); we only add codex's auth home and the real bins.
+        env = get_subprocess_test_env(root_name="mngr-codex-release-test")
+
+        user_codex_home = tmp_path / "user_codex"
+        user_codex_home.mkdir()
+        shutil.copy2(_REAL_AUTH, user_codex_home / "auth.json")
+        (user_codex_home / "auth.json").chmod(0o600)
+        if _REAL_MODELS_CACHE.exists():
+            # Avoids codex's "model metadata not found" degradation on a fresh home.
+            shutil.copy2(_REAL_MODELS_CACHE, user_codex_home / "models_cache.json")
+        env["CODEX_HOME"] = str(user_codex_home)
+
+        # Put the real codex + mngr binaries on PATH (the autouse fixture redirects HOME).
+        # Append, don't prepend: the resource guard prepends its tmux wrapper dir to PATH to
+        # track tmux use, and prepending the real bin dir (which also holds the real tmux)
+        # would shadow that wrapper and trip the guard's "marked tmux but never invoked" check.
+        extra_path = os.pathsep.join({str(Path(_CODEX_BIN).parent), str(Path(_MNGR_BIN).parent)})
+        env["PATH"] = env.get("PATH", "") + os.pathsep + extra_path
+
+        repo = tmp_path / "repo"
+        init_git_repo(repo)
+        return AgentReleaseContext(env=env, workspace=repo, host_dir=Path(env["MNGR_HOST_DIR"]))
+
+    def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
+        # No --source: codex takes its source/work dir from the mngr cwd (the repo).
+        return ["-S", f"agent_types.codex.model={_CODEX_MODEL}"]
+
+    def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
+        assert _MNGR_BIN is not None
+        # The real mngr binary (resolved before the HOME redirect), run from the repo, with
+        # the provider-disabling -S flags injected right after the subcommand.
+        return subprocess.run(
+            [_MNGR_BIN, args[0], *_PROVIDER_SETTINGS, *args[1:]],
+            env=dict(ctx.env),
+            cwd=str(ctx.workspace),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_full_lifecycle(tmp_path: Path) -> None:
+    run_agent_release_lifecycle(_CodexReleaseProfile(), tmp_path)

@@ -6,6 +6,7 @@ from typing import Any
 from typing import cast
 
 import pytest
+from paramiko import SSHException
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
 
@@ -14,6 +15,8 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import _is_transient_ssh_error
+from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
@@ -32,6 +35,61 @@ def test_outer_host_satisfies_outer_host_interface(temp_mngr_ctx: MngrContext) -
         mngr_ctx=temp_mngr_ctx,
     )
     assert isinstance(outer, OuterHostInterface)
+
+
+def test_ensure_connected_wraps_paramiko_value_error(temp_mngr_ctx: MngrContext) -> None:
+    """paramiko's bare ValueError on connect is surfaced as a structured HostConnectionError.
+
+    A malformed or half-written ``.pub`` next to the private key makes paramiko's
+    per-connection certificate probe raise ``ValueError: Not enough fields for
+    public blob``. It must become a ``MngrError`` so best-effort callers (e.g.
+    host discovery) treat it as a per-host connection failure rather than letting
+    it abort the whole operation.
+    """
+
+    class _ConnectFailingHost:
+        name = "fake-host"
+        connector_cls = PyinfraHost
+        connected = False
+
+        def connect(self, raise_exceptions: bool = False) -> None:
+            raise ValueError("Not enough fields for public blob")
+
+    connector = PyinfraConnector(cast(PyinfraHost, _ConnectFailingHost()))
+    outer = OuterHost(id=HostId.generate(), connector=connector, mngr_ctx=temp_mngr_ctx)
+
+    with pytest.raises(HostConnectionError, match="Not enough fields for public blob"):
+        outer._ensure_connected()
+
+
+def test_prepend_env_exports_none_or_empty_is_unchanged() -> None:
+    """No env vars -> the command is returned untouched."""
+    assert _prepend_env_exports("docker build .", None) == "docker build ."
+    assert _prepend_env_exports("docker build .", {}) == "docker build ."
+
+
+def test_prepend_env_exports_uses_export_so_var_survives_compound_command() -> None:
+    """Env vars must be ``export``ed, not bare ``KEY=VAL`` prefixed.
+
+    A bare ``KEY=VAL command`` prefix only applies to the single simple command
+    it precedes, so for a compound command like ``install && depot build`` the
+    var would be gone by the time ``depot build`` runs. ``export KEY=VAL &&``
+    sets it in the shell environment for the whole chain.
+    """
+    compound = "test -x /root/.depot/bin/depot || curl x | sh && /root/.depot/bin/depot build"
+    result = _prepend_env_exports(compound, {"DEPOT_TOKEN": "depot_secret"})
+    # The export must come first and chain into the whole command with &&, so
+    # the var is in scope for the trailing ``depot build`` after the ``&&``/``||``.
+    # (shlex.quote leaves the safe KEY=VAL unquoted.)
+    assert result == "export DEPOT_TOKEN=depot_secret && " + compound
+    # Must not use a bare ``KEY=VAL`` assignment prefix.
+    assert not result.startswith("DEPOT_TOKEN=")
+
+
+def test_prepend_env_exports_quotes_values_with_shell_metacharacters() -> None:
+    """Values containing shell metacharacters are shlex-quoted so they can't break out."""
+    result = _prepend_env_exports("run", {"TOK": "a b;rm -rf /"})
+    assert result == "export 'TOK=a b;rm -rf /' && run"
 
 
 def test_outer_host_local_is_local(temp_mngr_ctx: MngrContext) -> None:
@@ -382,3 +440,30 @@ def test_ensure_connected_classifies_unrelated_connect_errors_as_connection_erro
     # the concrete type to confirm we did NOT promote a generic connectivity
     # failure to a trust failure.
     assert not isinstance(excinfo.value, HostAuthenticationError)
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        (OSError("Socket is closed"), True),
+        (OSError("No such file or directory"), False),
+        (SSHException("SSH session not active"), True),
+        (EOFError(), True),
+        (TimeoutError("Timed out reading output"), True),
+        (ValueError("not transient"), False),
+    ],
+    ids=["socket-closed", "other-os-error", "ssh-exception", "eof-error", "timeout-error", "non-os-error"],
+)
+def test_is_transient_ssh_error_classifies_timeout_as_transient(exception: BaseException, expected: bool) -> None:
+    """Regression: ``TimeoutError`` from pyinfra's ``read_output_buffers`` must be classified transient.
+
+    pyinfra raises a bare ``TimeoutError`` (Python builtin) when an SSH
+    command's response doesn't arrive within the per-command read
+    timeout -- for example, when the remote sshd is reloaded mid-read
+    during cloud-init. Without TimeoutError in the transient set, the
+    retry loop didn't fire and the exception propagated all the way out
+    of host creation. ``TimeoutError`` is an ``OSError`` subclass on
+    Python 3, so the classifier's ordering matters: the TimeoutError
+    branch must precede the narrow "Socket is closed" OSError check.
+    """
+    assert _is_transient_ssh_error(exception) is expected

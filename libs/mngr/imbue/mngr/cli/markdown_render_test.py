@@ -69,3 +69,25 @@ def test_no_link_base_leaves_links_alone() -> None:
     """Without a link_base, relative links are rendered as-is (no rewriting)."""
     hrefs = _emitted_link_hrefs(markdown_to_ansi("[Other](other.md)", 100))
     assert hrefs == {"other.md"}
+
+
+def _visible_lines(ansi: str) -> list[str]:
+    """Strip ANSI escape sequences, returning the visible text of each non-blank line."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", re.sub(r"\x1b\]8;[^\x1b]*\x1b\\", "", ansi))
+    return [line for line in plain.splitlines() if line.strip()]
+
+
+def test_indent_left_pads_every_line() -> None:
+    """A positive indent left-pads every rendered line by that many spaces."""
+    output = markdown_to_ansi("First paragraph.\n\nSecond paragraph.", 70, indent=7)
+    lines = _visible_lines(output)
+    assert lines, "expected rendered content"
+    assert all(line.startswith("       ") for line in lines)
+    assert "First paragraph." in output
+    assert "Second paragraph." in output
+
+
+def test_no_indent_does_not_pad() -> None:
+    """The default indent of zero leaves text flush against the left margin."""
+    output = markdown_to_ansi("Flush left.", 70)
+    assert _visible_lines(output)[0].startswith("Flush left.")

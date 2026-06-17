@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.4] - 2026-06-16
+
+## [v0.1.3] - 2026-06-15
+
+## [v0.1.2] - 2026-06-13
+
 ### Added
 
 - Added: `mngr usage` and `mngr usage wait` now preserve and read back usage from destroyed agents. When an agent (or its whole host) is destroyed, its `events/<source>/usage` directories (plus its `data.json`, for filtering) are copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/` before the state directory is deleted — the same place `mngr_claude` preserves session files. For remote agents the files are pulled to the local machine so they survive host destruction. By default `mngr usage` (and `mngr usage wait`) fold preserved usage back into their output so destroyed agents' spend still counts toward cost totals and rate-limit windows; preserved agents honor the same `--provider` / `--project` / `--local` / label / CEL filters as live agents (evaluated against their preserved `data.json`). A new `preserve_on_destroy` usage-plugin config option (default `true`) controls preservation; pass `--no-preserved` to consider only live agents.

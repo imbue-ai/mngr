@@ -1,10 +1,10 @@
+from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.mngr.config.data_types import MngrContext
@@ -14,7 +14,9 @@ from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import parse_vps_build_args
 from imbue.mngr_vultr import hookimpl
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.config import VultrProviderConfig
@@ -35,18 +37,29 @@ class VultrProvider(VpsDockerProvider):
     vultr_client: VultrVpsClient = Field(frozen=True, description="Vultr API client")
     vultr_config: VultrProviderConfig = Field(frozen=True, description="Vultr-specific configuration")
 
-    _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
+    def _fetch_provider_instances(self) -> list[dict[str, Any]]:
+        """List every Vultr instance in the account.
 
-    def reset_caches(self) -> None:
-        super().reset_caches()
-        self._instances_cache = None
+        Vultr's API has a ``tag`` filter but Vultr stores tags as flat
+        ``"key=value"`` strings, so an exact-match filter doesn't compose with
+        our ``mngr-provider=<name>`` convention the same way AWS's
+        ``tag:mngr-provider`` filter does. List everything and let the shared
+        discovery flow filter by SSH-reachability + state-container presence.
+        """
+        return self.vultr_client.list_instances()
 
-    def _list_instances_cached(self) -> list[dict[str, Any]]:
-        """List Vultr instances, caching the result for the duration of the command."""
-        if self._instances_cache is not None:
-            return self._instances_cache
-        self._instances_cache = self.vultr_client.list_instances()
-        return self._instances_cache
+    def _credentials_configured(self) -> bool:
+        return bool(self.vultr_client.api_key.get_secret_value())
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        """Parse Vultr-prefixed build args (--vultr-region, --vultr-plan, --git-depth)."""
+        return parse_vps_build_args(
+            build_args,
+            provider_prefix="vultr",
+            default_region=self.vultr_config.default_region,
+            default_plan=self.vultr_config.default_plan,
+            plan_arg_name="plan",
+        )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return public IPs of Vultr instances tagged with this provider's name.
@@ -55,7 +68,7 @@ class VultrProvider(VpsDockerProvider):
         return values are strings to satisfy the base-class contract,
         which accepts either IPs or hostnames.
         """
-        if not self.vultr_client.api_key.get_secret_value():
+        if not self._credentials_configured():
             logger.warning("Vultr API key not configured, skipping VPS discovery")
             return []
         provider_tag = f"mngr-provider={self.name}"
@@ -88,14 +101,13 @@ class VultrProviderBackend(ProviderBackendInterface):
     @staticmethod
     def get_build_args_help() -> str:
         return (
-            "VPS-specific args (consumed by provider, not passed to docker):\n"
-            "  --vps-region=REGION  Vultr region (default: ewr)\n"
-            "  --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)\n"
-            "  --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)\n"
-            "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
+            "Vultr-specific args (consumed by provider, not passed to docker):\n"
+            "  --vultr-region=REGION  Vultr region (default: ewr)\n"
+            "  --vultr-plan=PLAN      Vultr plan (default: vc2-2c-4gb)\n"
+            "  --git-depth=N          Shallow-clone build context to depth N before upload\n"
             "\n"
             "All other build args are passed to 'docker build' on the VPS.\n"
-            "Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .\n"
+            "Example: -b --vultr-plan=vc2-2c-4gb -b --file=Dockerfile -b .\n"
         )
 
     @staticmethod
@@ -107,15 +119,7 @@ class VultrProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Build a Vultr provider instance.
-
-        ``is_for_host_creation`` is ignored: the Vultr backend has no one-time
-        bootstrap resources to gate on (compare the Modal backend, which uses
-        this flag to authorize creating a missing per-user env).
-        """
-        del is_for_host_creation
         if not isinstance(config, VultrProviderConfig):
             raise MngrError(f"Expected VultrProviderConfig, got {type(config).__name__}")
 
@@ -126,7 +130,7 @@ class VultrProviderBackend(ProviderBackendInterface):
             # The provider will be discoverable but discovery operations will
             # return empty results and log a warning when the API is called.
             api_key = ""
-        vultr_client = VultrVpsClient(api_key=SecretStr(api_key))
+        vultr_client = VultrVpsClient(api_key=SecretStr(api_key), os_id=config.default_os_id)
 
         return VultrProvider(
             name=name,

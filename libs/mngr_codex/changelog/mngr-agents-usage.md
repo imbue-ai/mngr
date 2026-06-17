@@ -1,0 +1,7 @@
+The codex background-tasks supervisor now also launches an optional usage writer (`codex_usage.sh`) when it's present in the agent's `commands/` dir -- installed by the new `imbue-mngr-codex-usage` package -- and restarts it if it dies, alongside the existing raw/common transcript watchers. No change for agents without the usage plugin installed.
+
+The common-transcript converter's rollout-to-common conversion logic now lives in a standalone `common_transcript_convert.py` (provisioned alongside `common_transcript.sh` and invoked by it) rather than an inline `python3` heredoc, so it is type-checked, linted, and unit-tested directly. Malformed rollout lines and unreadable existing-output lines are dropped silently.
+
+codex now flushes the common transcript at turn end. When the root turn finishes and no subagents are in flight (the agent goes WAITING), the Stop / SubagentStop hooks run one synchronous `--single-pass` conversion, so a consumer harvesting the final message on the WAITING signal no longer races the 5s converter daemon -- matching claude and antigravity. The converter takes the shared convert lock around its read-modify-write so this flush and the background daemon cannot produce duplicate events.
+
+The common-transcript watcher no longer echoes converter errors to the agent's pane: a genuine conversion error is recorded in the structured log only, instead of also being written to the watcher's stderr.

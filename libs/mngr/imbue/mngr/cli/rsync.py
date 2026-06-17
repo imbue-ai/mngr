@@ -15,7 +15,6 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.cli.output_helpers import output_rsync_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -69,10 +68,15 @@ def _resolve_endpoint(
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
         return online_host, _user_path_to_str(parsed.path, parsed.has_trailing_path_slash)
 
+    # Scope to the target's provider/agent so an unrelated down provider isn't queried.
+    provider_names: tuple[str, ...] | None = None
+    if parsed.host is not None and parsed.host.provider is not None:
+        provider_names = (str(parsed.host.provider),)
+    agent_identifiers = (str(parsed.agent),) if parsed.agent is not None else None
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
-        agent_identifiers=None,
+        provider_names=provider_names,
+        agent_identifiers=agent_identifiers,
         include_destroyed=False,
         reset_caches=False,
     )
@@ -123,7 +127,7 @@ def _resolve_endpoint(
 @add_common_options
 @click.pass_context
 def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
-    mngr_ctx, output_opts, opts = setup_command_context(
+    mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="rsync",
         command_class=RsyncCliOptions,
@@ -153,7 +157,7 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
 
     uncommitted_changes_mode = UncommittedChangesMode(opts.uncommitted_changes.upper())
 
-    result = rsync(
+    rsync(
         source_host=source_host,
         source_path=source_path_str,
         destination_host=destination_host,
@@ -161,9 +165,8 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
         extra_args=opts.rsync_args,
         uncommitted_changes=uncommitted_changes_mode,
         cg=mngr_ctx.concurrency_group,
+        run_in_terminal=True,
     )
-
-    output_rsync_result(result, output_opts.output_format)
 
 
 # Register as ``mngr rsync`` (click's default name is the function name)

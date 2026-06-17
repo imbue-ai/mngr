@@ -93,6 +93,32 @@ def test_schedule_add_rejects_unsupported_provider(
     assert "not supported for schedules" in result.output
 
 
+def test_schedule_add_rejects_timezone_for_local_provider(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --timezone is rejected for the local provider (modal-only option)."""
+    result = cli_runner.invoke(
+        schedule,
+        [
+            "add",
+            "--command",
+            "create",
+            "--args",
+            "--reuse",
+            "--schedule",
+            "0 2 * * *",
+            "--provider",
+            "local",
+            "--timezone",
+            "America/Los_Angeles",
+        ],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "only supported for the modal provider" in result.output
+
+
 def test_schedule_update_raises_not_implemented(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -514,6 +540,10 @@ def test_schedule_run_local_nonexistent_trigger(
     assert "No local schedule record found" in result.output
 
 
+# Executing the deployed trigger's run.sh shells out (it tries `mngr create`), whose
+# subprocess startup is slow and variable under CI load and intermittently exceeds the
+# default 10s pytest-timeout. Bump the timeout to absorb the rare slow run.
+@pytest.mark.timeout(30)
 def test_schedule_run_local_deployed_trigger(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

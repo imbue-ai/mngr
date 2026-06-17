@@ -181,6 +181,7 @@ def render_landing_page(
     agent_accents: dict[str, str] | None = None,
     shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
     mind_liveness_by_agent_id: dict[str, str] | None = None,
+    agent_providers: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -231,6 +232,7 @@ def render_landing_page(
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
         shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
         mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
+        agent_providers=agent_providers or {},
     )
 
 
@@ -242,7 +244,7 @@ _FALLBACK_HOST_NAME: Final[str] = "assistant"
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
-FALLBACK_BRANCH: Final[str] = "v0.3.0"
+FALLBACK_BRANCH: Final[str] = "minds-v0.3.1"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an

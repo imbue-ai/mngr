@@ -30,7 +30,6 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # 2 = wait_for_cloud_init poll loop and rsync-retry backoff in instance.py.
     rc.check_time_sleep(_DIR, snapshot(2))
 
 
@@ -50,8 +49,6 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # 9 = 8 existing + 1 in _build_agent_details_from_raw for resilient listing
-    # (skip malformed agent data rather than crash the list command)
     rc.check_broad_exception_catch(_DIR, snapshot(7))
 
 

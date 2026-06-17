@@ -32,6 +32,14 @@ GRACE_PERIOD="${HOOK_GRACE_PERIOD:-3}"      # seconds before first check
 POLL_INTERVAL="${HOOK_POLL_INTERVAL:-1}"    # seconds between polls
 MAX_WAIT="${HOOK_MAX_WAIT:-120}"            # max seconds to wait for other hooks
 
+# Lock-acquire timeout (seconds) handed to the transcript flush in mark_inactive.
+# The flush's only potentially-slow step is waiting for the converter lock, so
+# this bounds how long mark_inactive can block. The signal handler uses a short
+# bound so SIGTERM/SIGINT exit promptly; every other path can afford the normal
+# bound (which matches the converter's own default).
+FLUSH_LOCK_TIMEOUT_NORMAL="${HOOK_FLUSH_LOCK_TIMEOUT:-30}"
+FLUSH_LOCK_TIMEOUT_SIGNAL="${HOOK_FLUSH_LOCK_TIMEOUT_SIGNAL:-2}"
+
 # Session guard: exit early if not a managed session
 [ -z "${MAIN_CLAUDE_SESSION_ID:-}" ] && exit 0
 
@@ -113,8 +121,22 @@ get_other_stop_hooks() {
 
 # --- Mark agent as inactive and emit activity event ---
 # $1 (optional): reason for marking inactive (e.g. "signal:SIGTERM")
+# $2 (optional): lock-acquire timeout (seconds) for the transcript flush
+#                (default FLUSH_LOCK_TIMEOUT_NORMAL)
 mark_inactive() {
     local reason="${1:-}"
+    local flush_lock_timeout="${2:-$FLUSH_LOCK_TIMEOUT_NORMAL}"
+    # Flush the transcript pipeline before clearing the marker (see the comment
+    # above the lib source below). This lives in mark_inactive -- not
+    # run_post_completion -- so it runs on EVERY turn-end path, including the
+    # no-/proc fast path and the SIGTERM/SIGINT handler, both of which clear the
+    # marker without going through run_post_completion. Best-effort and guarded
+    # so a missing lib or flush failure can never strand the turn-end signal.
+    # The lock-acquire timeout bounds how long the flush can block; the signal
+    # handler passes a short value so interrupts exit promptly.
+    if command -v mngr_common_transcript_flush >/dev/null 2>&1; then
+        mngr_common_transcript_flush "$flush_lock_timeout"
+    fi
     rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
     mkdir -p "$MNGR_HOST_DIR/events/mngr/activity"
     local extra=""
@@ -154,6 +176,23 @@ upload_autofix_issues() {
     uv run modal volume put "${volume_name}" "$issues_file" "/${nested_path}/autofix.json" --force 2>/dev/null || true
 }
 
+# --- Source the shared common-transcript helpers (provides the flush) ---
+# The raw streamer (1s poll) and common-transcript converter (5s poll) lag
+# behind Claude's session JSONL. mark_inactive clears the `active` marker, which
+# is the turn-end signal `mngr wait --state WAITING` reads -- and consumers that
+# harvest the final assistant message from the common transcript on that signal
+# (e.g. Catalyst's mngr_runner) would otherwise race the converter.
+# mngr_common_transcript_flush (defined in the shared lib) forces one synchronous
+# pass of each converter, in pipeline order, so the common transcript reflects
+# the final message before the marker is cleared (see the shared library header).
+# mark_inactive calls it on every turn-end path. Sourced defensively: the lib is
+# provisioned by Host._ensure_shared_shell_libs, but a missing lib must never
+# strand the turn-end signal.
+if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh" ]; then
+    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_common_transcript_lib.sh
+    source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+fi
+
 # --- Post-completion actions (run after all other stop hooks finish) ---
 run_post_completion() {
     # Only run post-completion if the orchestrator succeeded.
@@ -172,7 +211,7 @@ run_post_completion() {
 on_signal() {
     local sig="$1"
     echo "wait_for_stop_hook: received SIG${sig}, marking inactive" >&2
-    mark_inactive "signal:SIG${sig}"
+    mark_inactive "signal:SIG${sig}" "$FLUSH_LOCK_TIMEOUT_SIGNAL"
     exit 0
 }
 

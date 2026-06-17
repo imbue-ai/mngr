@@ -6,19 +6,43 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.4] - 2026-06-16
+
+### Changed
+
+- Changed: `mngr latchkey forward` now writes a structured, rotated, timestamped JSONL log at `<latchkey_directory>/mngr_latchkey/events.jsonl` — including the shared `latchkey gateway` subprocess output, routed through loguru at DEBUG with a `[latchkey gateway]` prefix — replacing the unrotated `latchkey_gateway.log`. The detached supervisor now spawns with `--quiet` so its raw `latchkey_forward.log` capture stays near-empty in steady state.
+
+## [v0.1.3] - 2026-06-15
+
+## [v0.1.2] - 2026-06-13
+
 ### Added
 
 - Added: Notion (MCP) support in the latchkey permission catalog, exposing Notion's hosted MCP endpoint with its grantable permissions.
 - Added: File-sharing approvals can now honor a path edited by the user in the approval dialog. The override is re-validated with the same traversal rules used at request creation, and cannot escalate read-only access to read-write.
+- Added: `services_catalog` module owns the dialog-facing catalog (`ServicesCatalog` / `ServicePermissionInfo`), previously in the desktop client. It reads bundled `services.json` directly rather than over HTTP, so the gateway's `permissions` extension no longer serves the bare `GET /permissions/available` collection endpoint (the per-service `GET /permissions/available/<service>` endpoint that agents use is unchanged).
 
 ### Changed
 
-- Changed: VPS-resident latchkey gateway is now launched with `LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`. The remote gateway runs on a synced copy of the user's credentials, so disabling refresh there prevents it from racing the desktop-side latchkey to rotate the same OAuth refresh token (which would exhaust the user's token and invalidate the desktop's credentials). The desktop-side latchkey remains the single owner of credential refresh.
+- Changed: VPS-resident latchkey gateway is now launched with `LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`, so it no longer races the desktop-side latchkey (the single owner of credential refresh) to rotate the same OAuth refresh token. The remote gateway runs on a synced copy of the user's credentials.
 - Changed: Refreshed Slack `slack-read-all` / `slack-write-all` descriptions to match detent's updated wording.
+- Changed: VPS-resident latchkey gateway now enforces the same shared `LATCHKEY_GATEWAY_LISTEN_PASSWORD` the local desktop gateway uses (derived from the shared Latchkey encryption key). Previously the remote gateway started without any listen password, so it did not enforce the same authentication.
+- Changed: Remote VPS gateways now receive only the latchkey credentials a host's permissions actually grant -- mngr re-encrypts a host-scoped subset via `latchkey auth re-encrypt --services` (encryption key unchanged, so derived passwords and permissions-override JWTs keep validating), limiting the blast radius of a VPS compromise. When nothing is left to ship (deny-all host, or no stored credentials for any granted service) the remote store is cleared instead.
+- Changed: Per-agent latchkey gateway setup is decoupled -- a failure to reverse-tunnel the desktop-side gateway into an agent's container no longer prevents the VPS-resident gateway from being provisioned (or vice versa); each reachability path now runs with its own error handling.
+- Changed: VPS-resident gateway provisioning is coalesced per outer host: when several agents share one outer host (VPS/container), only one provisioning pass runs at a time instead of multiple agents racing concurrent, redundant passes.
+- Changed: Discovery cycle no longer re-provisions an already-provisioned outer host on every emission (the stream re-emits the full agent set continuously, which was flooding logs and the network with redundant SSH work). Each host is provisioned at most once per supervisor lifetime; a failed pass still retries, and a supervisor restart re-provisions. Ongoing credential/permission sync is handled by the remote-state watcher.
+- Changed: Replaced a direct RuntimeError raise in the discovery stream consumer with a dedicated `DiscoveryStreamError`.
 
 ### Fixed
 
 - Fixed: File-sharing requests are now validated against the Minds WebDAV mount roots (the user's home directory and the system temp directory) at request-creation time and at approve time for a user-edited path override. A grant for any path outside those roots was previously inert (the WebDAV server has no provider for it and answers 404); rejecting it up front gives the agent a clear "must be within a shared root" error instead of an approve-then-404 dead end. Matching mirrors the WebDAV share-prefix matching (case-insensitive, lexical, no symlink resolution or existence check).
+- Fixed: File-sharing permission grants for paths with spaces or non-ASCII characters (e.g. `My Documents`) now match incoming requests. The per-file permission pattern is now built from the same WHATWG-URL-normalized (percent-encoded) form the gateway matches incoming requests against, so a path with a space (`%20`) or accented letter actually matches instead of silently never granting access.
+- Fixed: File-sharing permission requests accept `~` / `~/...` for the current user's home directory; the gateway expands them to an absolute path before storing the grant. `~user` for another user is rejected with a clear error.
+- Fixed: Gateway permissions extension now surfaces the catch-all `any` permission for services whose catalog lists no specific permissions (e.g. Linear). `GET /permissions/available/<service>` injects `any` first; `POST /permission-requests` accepts a `predefined` request naming `any` under any known scope.
+
+### Security
+
+- Security: VPS gateway secrets (encryption key, listen password) are now written to short-lived 0600 random-named files on the VPS that the start script reads into the gateway's environment and deletes immediately, instead of being interpolated into the gateway start command (where they could surface in process listings and command logs). Avoids leaving the encryption key on the VPS disk next to the encrypted credential store it decrypts.
 
 ## [v0.1.1] - 2026-06-08
 

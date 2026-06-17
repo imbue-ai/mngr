@@ -4,6 +4,25 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+## Internal: `_provision_vps` signature follows the shared base
+
+- `OvhProvider._provision_vps` now accepts the `vps_public_key` parameter that the shared `VpsDockerProvider.create_host` threads in (so it no longer re-reads the provider SSH keypair from disk inside the base implementation). OVH installs the SSH public key via its rebuild API rather than the base cloud-init path, so the parameter is accepted and ignored. No behavioral change for OVH.
+
+- The OVH release tests write a `settings.toml` that disables every other remote provider so the create-host preflight does not trip resolving their credentials. With the new `gcp` provider now registered as a remote backend, it is added to that disable-set. No behavioral change for OVH.
+
+## 2026-06-12
+
+## AWS provider support: shared VPS-Docker base changes
+
+- `is_for_host_creation` flag removed; replaced with the default-no-op `bootstrap_for_host_creation` hook on `ProviderBackendInterface`. The OVH backend's `del`-of-`is_for_host_creation` is removed; no behavior change.
+- `get_build_args_help()` no longer carries the stale "OS image is set via default_image_name..." block — that line described the removed `--vps-os=` shared build arg, not current OVH behavior.
+- `OvhVpsClient` picks up the shared `wait_for_instance_active` interface change (now a default method on `VpsClientInterface`).
+- **Per-host build args renamed**: `--vps-datacenter=` is now `--ovh-datacenter=` (`--ovh-region=` is accepted as an alias). `--vps-plan=` is now `--ovh-plan=`. The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared.
+- `vps_boot_timeout` config field renamed to `instance_boot_timeout` (matches the base-config rename).
+- **OVH release-test fix**: the two `TestOvhProviderLifecycle` `mngr create` invocations now pass `--type claude`, matching the Vultr and AWS release tests. Previously they relied on a configured default agent type, which is never present in the isolated test HOME, so the lifecycle tests failed immediately with "No agent type provided" and could not exercise a real OVH VPS create/exec/destroy cycle.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 60% to 75% to match the coverage CI already measures (~79%).

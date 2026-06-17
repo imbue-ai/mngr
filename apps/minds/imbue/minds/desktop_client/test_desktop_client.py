@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
+from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -1442,20 +1444,99 @@ def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> N
     (destroying_dir / "pid").write_text(str(os.getpid()))
     (destroying_dir / "output.log").write_text("destroy in flight...\n")
 
-    ids = _destroying_agent_ids(paths, (agent_id,))
+    # The pid is alive, so the record is RUNNING regardless of host state; an
+    # empty resolver is enough to drive the helper.
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    ids = _destroying_agent_ids(paths, backend_resolver)
     assert ids == [str(agent_id)]
 
 
 def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
     """The test-server helper builds a minimal app without WorkspacePaths;
     the helper must tolerate that without raising."""
-    assert _destroying_agent_ids(None, ()) == []
+    assert _destroying_agent_ids(None, StaticBackendResolver(url_by_agent_and_service={})) == []
+
+
+def _write_dead_destroy_dir(paths: WorkspacePaths, agent_id: AgentId, host_id: HostId) -> None:
+    """Create a destroying/<agent_id>/ dir whose wrapper pid is already dead.
+
+    Spawns and reaps a trivial child so its pid is reliably not alive, then
+    writes the same three files ``start_destroy`` would (pid, host_id, log).
+    """
+    dir_path = paths.data_dir / "destroying" / str(agent_id)
+    dir_path.mkdir(parents=True)
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    (dir_path / "pid").write_text(f"{proc.pid}\n")
+    (dir_path / "host_id").write_text(f"{host_id}\n")
+    (dir_path / "output.log").write_text("done\n")
+
+
+def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path) -> None:
+    """A finished destroy whose host is gone is DONE: disassociated + record deleted.
+
+    This is the Fix for the silent-orphan bug -- finalization (disassociation)
+    happens only once the host is actually gone, not synchronously on click.
+    """
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    _write_dead_destroy_dir(paths, agent_id, HostId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_workspace("user-1", str(agent_id))
+    # Resolver knows no active agents and reports no host state -> the host is
+    # gone -> the destroy is DONE.
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+
+    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store)
+
+    assert marker == {}
+    assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
+    assert session_store.get_account_for_workspace(str(agent_id)) is None
+
+
+def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path: Path) -> None:
+    """A finished destroy whose host is still up is FAILED: kept + stays associated.
+
+    The workspace must remain visible and owned so the user can retry, instead
+    of vanishing while its host keeps running (and billing).
+    """
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    _write_dead_destroy_dir(paths, agent_id, HostId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_workspace("user-1", str(agent_id))
+    # Resolver still lists the workspace agent as active -> host still up -> FAILED.
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
+
+    marker = _resolve_destroying_for_landing(paths, backend_resolver, session_store)
+
+    assert marker == {str(agent_id): "failed"}
+    assert (paths.data_dir / "destroying" / str(agent_id)).exists()
+    assert session_store.get_account_for_workspace(str(agent_id)) is not None
+
+
+class _AllAgentsKnownStaticResolver(StaticBackendResolver):
+    """Reports every queried agent as a known, host-resolvable agent.
+
+    The inbox display filters out requests whose agent can't be resolved
+    to a host (see ``_displayable_pending_requests``). These tests cover
+    the running-workspace case where every agent resolves, so the resolver
+    claims to know any agent it's asked about.
+    """
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
 
 
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
-    assert _build_requests_payload(None) == {"count": 0, "request_ids": []}
-    assert _build_requests_payload(RequestInbox()) == {"count": 0, "request_ids": []}
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    assert _build_requests_payload(None, resolver) == {"count": 0, "request_ids": []}
+    assert _build_requests_payload(RequestInbox(), resolver) == {"count": 0, "request_ids": []}
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1464,7 +1545,8 @@ def test_build_requests_payload_carries_pending_ids() -> None:
     event = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="post updates"
     )
-    payload = _build_requests_payload(RequestInbox().add_request(event))
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    payload = _build_requests_payload(RequestInbox().add_request(event), resolver)
     assert payload == {"count": 1, "request_ids": [str(event.event_id)]}
 
 
@@ -1494,8 +1576,9 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
         )
     ).add_request(request_b)
 
-    payload_a = _build_requests_payload(inbox_with_a)
-    payload_b = _build_requests_payload(inbox_with_b)
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    payload_a = _build_requests_payload(inbox_with_a, resolver)
+    payload_b = _build_requests_payload(inbox_with_b, resolver)
     assert payload_a["count"] == payload_b["count"] == 1
     assert payload_a != payload_b
     assert payload_b["request_ids"] == [str(request_b.event_id)]
@@ -1658,7 +1741,10 @@ def _build_inbox_test_app(
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     session_store = make_session_store_for_test(tmp_path)
     minds_config = MindsConfig(data_dir=tmp_path)
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    # The inbox display hides requests whose agent can't be resolved to a
+    # host; these tests exercise the running-workspace case, so use a
+    # resolver that treats every agent as known.
+    backend_resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,

@@ -68,8 +68,8 @@ from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import delete_destroying
 from imbue.minds.desktop_client.destroying import list_destroying
-from imbue.minds.desktop_client.destroying import lookup_host_id
 from imbue.minds.desktop_client.destroying import read_destroying
+from imbue.minds.desktop_client.destroying import read_host_id
 from imbue.minds.desktop_client.destroying import read_log_chunk
 from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
@@ -85,9 +85,11 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.onboarding import OnboardingAnswers
 from imbue.minds.desktop_client.onboarding import OnboardingApplier
+from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
@@ -95,6 +97,7 @@ from imbue.minds.desktop_client.region_preference import default_region_for_prov
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.region_preference import resolve_default_region
 from imbue.minds.desktop_client.region_preference import start_geo_detection
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -155,6 +158,7 @@ from imbue.minds.primitives import ServiceName
 from imbue.minds.primitives import UserDataPreference
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -481,7 +485,8 @@ def _handle_landing_page(
 
     all_agent_ids = backend_resolver.list_active_workspace_ids()
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
-    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, all_agent_ids)
+    landing_session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
 
     if all_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
@@ -490,14 +495,18 @@ def _handle_landing_page(
             telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
         agent_names: dict[str, str] = {}
         agent_accents: dict[str, str] = {}
+        agent_providers: dict[str, str] = {}
         for aid in all_agent_ids:
+            info = backend_resolver.get_agent_display_info(aid)
             ws_name = backend_resolver.get_workspace_name(aid)
             if ws_name:
                 agent_names[str(aid)] = ws_name
             else:
-                info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
             agent_accents[str(aid)] = _resolved_workspace_color(backend_resolver, aid)
+            # Collapse the per-region / per-account provider instance name to a
+            # single friendly compute-provider label (e.g. aws-us-west-2 -> AWS).
+            agent_providers[str(aid)] = friendly_provider_label(info.provider_name if info else None)
         shutdown_capable_agent_ids = get_shutdown_capable_workspace_agent_ids(backend_resolver)
         mind_liveness_by_agent_id = {
             aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
@@ -511,6 +520,7 @@ def _handle_landing_page(
             agent_accents=agent_accents,
             shutdown_capable_agent_ids=shutdown_capable_agent_ids,
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
+            agent_providers=agent_providers,
         )
         return HTMLResponse(content=html)
 
@@ -572,13 +582,15 @@ def _handle_post_login_redirect(
 def _region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
     """Map a compute launch mode to its region-config provider key, or None if region-less.
 
-    Only ``IMBUE_CLOUD`` and ``CLOUD`` (Vultr) place a host in a chosen region;
-    ``DOCKER`` / ``LIMA`` run locally and have no region.
+    Only ``IMBUE_CLOUD``, ``VULTR``, and ``AWS`` place a host in a chosen
+    region; ``DOCKER`` / ``LIMA`` run locally and have no region.
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY
-    if launch_mode is LaunchMode.CLOUD:
+    if launch_mode is LaunchMode.VULTR:
         return VULTR_PROVIDER_KEY
+    if launch_mode is LaunchMode.AWS:
+        return AWS_PROVIDER_KEY
     return None
 
 
@@ -603,14 +615,16 @@ def _build_region_form_context(
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
     """Build the per-launch-mode region options + pre-selected default for the create form.
 
-    Keyed by ``LaunchMode`` *value* (``IMBUE_CLOUD`` / ``CLOUD``) so the form JS
-    can look options up directly by the compute-provider dropdown's value.
+    Keyed by ``LaunchMode`` *value* (``IMBUE_CLOUD`` / ``VULTR`` / ``AWS``) so
+    the form JS can look options up directly by the compute-provider dropdown's
+    value.
     """
     options_by_launch_mode: dict[str, list[str]] = {}
     selected_by_launch_mode: dict[str, str] = {}
     for launch_mode, provider_key in (
         (LaunchMode.IMBUE_CLOUD, IMBUE_CLOUD_PROVIDER_KEY),
-        (LaunchMode.CLOUD, VULTR_PROVIDER_KEY),
+        (LaunchMode.VULTR, VULTR_PROVIDER_KEY),
+        (LaunchMode.AWS, AWS_PROVIDER_KEY),
     ):
         options_by_launch_mode[launch_mode.value] = list(known_regions_for_provider(provider_key))
         selected_by_launch_mode[launch_mode.value] = _default_region_for_provider_with_config(
@@ -1589,14 +1603,18 @@ async def _handle_creation_logs_sse(
 
 def _resolve_destroying_for_landing(
     paths: WorkspacePaths | None,
-    all_agent_ids: tuple[AgentId, ...],
+    backend_resolver: BackendResolverInterface,
+    session_store: MultiAccountSessionStore | None,
 ) -> dict[str, str]:
-    """Walk ``<paths.data_dir>/destroying/``, delete DONE records, return marker map.
+    """Walk ``<paths.data_dir>/destroying/``, finalize DONE records, return marker map.
 
     Returns ``{agent_id_str: "running" | "failed"}`` for any in-flight or
-    failed destroy whose agent_id is currently known to the resolver. DONE
-    records (pid dead AND agent missing from the resolver) are deleted on
-    the spot so the row vanishes naturally on the next refresh.
+    failed destroy. A destroy is DONE only once the whole *host* is gone (not
+    just the workspace agent -- see :func:`_host_still_active`); on DONE we
+    disassociate the workspace from its account and delete the record, so the
+    row vanishes on the next refresh. A FAILED destroy stays associated and
+    visible so the user can retry rather than being left with an invisible,
+    still-running host.
 
     Returns an empty dict (and does no work) when ``paths`` is None --
     that path is exercised by tests that build a minimal app without
@@ -1604,20 +1622,66 @@ def _resolve_destroying_for_landing(
     """
     if paths is None:
         return {}
-    in_resolver = frozenset(all_agent_ids)
-    records = list_destroying(paths, in_resolver)
+    records = list_destroying(paths, lambda aid: _host_still_active(backend_resolver, paths, aid))
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
-            delete_destroying(agent_id, paths)
+            _finalize_destroyed_workspace(agent_id, paths, session_store)
             continue
         marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
     return marker
 
 
-def _agent_in_resolver(request: Request, agent_id: AgentId) -> bool:
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    return agent_id in backend_resolver.list_active_workspace_ids()
+def _finalize_destroyed_workspace(
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    session_store: MultiAccountSessionStore | None,
+) -> None:
+    """Disassociate a fully-destroyed workspace from its account, then delete its record.
+
+    Runs only once the host is confirmed gone (DONE). Disassociating here --
+    rather than synchronously when the user clicks destroy -- means a failed or
+    partial teardown keeps the workspace visible instead of hiding a host that
+    is still running.
+    """
+    if session_store is not None:
+        account = session_store.get_account_for_workspace(str(agent_id))
+        if account is not None:
+            session_store.disassociate_workspace(str(account.user_id), str(agent_id))
+    delete_destroying(agent_id, paths)
+
+
+def _host_still_active(
+    backend_resolver: BackendResolverInterface,
+    paths: WorkspacePaths | None,
+    agent_id: AgentId,
+) -> bool:
+    """Whether the workspace's host is still up (not just the workspace agent).
+
+    True if the workspace agent is still in ``list_active_workspace_ids()`` OR
+    its recorded host has not yet reached ``DESTROYED``. A detached destroy is
+    only DONE once this is False -- otherwise a destroy that tore down only the
+    workspace agent while ``system-services`` kept the host alive would falsely
+    read as DONE. See ``destroying.read_destroying``.
+    """
+    if agent_id in backend_resolver.list_active_workspace_ids():
+        return True
+    if paths is None:
+        return False
+    host_id = read_host_id(agent_id, paths)
+    if host_id is None:
+        return False
+    state = backend_resolver.get_host_state(host_id)
+    return state is not None and state is not HostState.DESTROYED
+
+
+def _is_host_still_active(request: Request, agent_id: AgentId) -> bool:
+    """Request-scoped wrapper around :func:`_host_still_active`."""
+    return _host_still_active(
+        request.app.state.backend_resolver,
+        request.app.state.api_v1_paths,
+        agent_id,
+    )
 
 
 async def _handle_destroy_agent_api(
@@ -1627,13 +1691,23 @@ async def _handle_destroy_agent_api(
 ) -> Response:
     """POST /api/destroy-agent/<agent_id>: spawn a detached destroy.
 
+    Resolves the workspace's host id from the in-memory backend resolver (host
+    id is immutable and already known for any workspace the user can see), then
+    spawns a detached destroy that tears down the *whole host*. Refuses with 409
+    if the host id can't be resolved -- rather than half-destroying or hiding a
+    host that is still running.
+
+    The workspace is *not* disassociated here: that happens only once the host
+    is confirmed gone (see :func:`_finalize_destroyed_workspace`), so a failed
+    teardown stays visible and retryable instead of becoming an invisible,
+    still-billing orphan.
+
     Idempotent: if a destroy is already running for this agent, returns
     200 with the existing record's status. Otherwise spawns the
     detached subprocess and returns 202.
 
-    Always returns ``redirect_url: "/"`` so the settings-page JS can
-    immediately navigate to the landing page (where the destroying
-    marker is already visible).
+    Returns ``redirect_url: "/"`` on success so the settings-page JS can
+    navigate to the landing page (where the destroying marker is visible).
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
@@ -1643,19 +1717,10 @@ async def _handle_destroy_agent_api(
         return Response(status_code=501, content='{"error": "Destroy not configured"}', media_type="application/json")
 
     parsed_id = AgentId(agent_id)
-
-    # Disassociate the workspace from the session store synchronously.
-    # Tokens live in the plugin's session store; minds only owns the
-    # workspace<->account mapping, which we want broken before mngr
-    # destroy returns regardless of whether the destroy succeeds.
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    if session_store:
-        account = session_store.get_account_for_workspace(agent_id)
-        if account:
-            session_store.disassociate_workspace(str(account.user_id), agent_id)
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
 
     # Idempotent: short-circuit if a destroy is already running.
-    existing = read_destroying(parsed_id, paths, agent_in_resolver=_agent_in_resolver(request, parsed_id))
+    existing = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(request, parsed_id))
     if existing is not None and existing.status == DestroyingStatus.RUNNING:
         return Response(
             status_code=200,
@@ -1663,7 +1728,19 @@ async def _handle_destroy_agent_api(
             media_type="application/json",
         )
 
-    host_id = lookup_host_id(parsed_id)
+    # Resolve the immutable host id from discovery; a minds workspace teardown
+    # is a host teardown, and there is no safe single-agent fallback. If we
+    # can't determine the host, refuse rather than risk a partial destroy.
+    host_id = _resolve_host_id(backend_resolver, parsed_id)
+    if host_id is None:
+        logger.warning("Refusing to destroy {}: could not resolve its host id from discovery", agent_id)
+        return Response(
+            status_code=409,
+            content=json.dumps(
+                {"error": "Could not determine the workspace's host yet. Please wait a moment and try again."}
+            ),
+            media_type="application/json",
+        )
     start_destroy(parsed_id, paths, host_id)
 
     return Response(
@@ -1685,7 +1762,7 @@ def _handle_destroying_status_api(
     if paths is None:
         return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     parsed_id = AgentId(agent_id)
-    record = read_destroying(parsed_id, paths, agent_in_resolver=_agent_in_resolver(request, parsed_id))
+    record = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(request, parsed_id))
     if record is None:
         return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     return Response(
@@ -1694,7 +1771,7 @@ def _handle_destroying_status_api(
                 "agent_id": agent_id,
                 "pid": record.pid,
                 "pid_alive": record.pid_alive,
-                "agent_in_resolver": record.agent_in_resolver,
+                "is_host_still_active": record.is_host_still_active,
                 "status": str(record.status).lower(),
             }
         ),
@@ -1764,8 +1841,9 @@ def _handle_destroying_page(
     if paths is None:
         return Response(status_code=404, content="No record")
     parsed_id = AgentId(agent_id)
-    in_resolver = parsed_id in backend_resolver.list_active_workspace_ids()
-    record = read_destroying(parsed_id, paths, agent_in_resolver=in_resolver)
+    record = read_destroying(
+        parsed_id, paths, is_host_still_active=_host_still_active(backend_resolver, paths, parsed_id)
+    )
     if record is None:
         return Response(status_code=404, content="No record")
     workspace_name = backend_resolver.get_workspace_name(parsed_id)
@@ -2095,6 +2173,18 @@ def _handle_dev_styleguide() -> Response:
     return HTMLResponse(content=render_dev_styleguide_page())
 
 
+# How often the chrome-events stream re-asserts the current non-HEALTHY
+# system-interface statuses, on top of the one-shot connect-time snapshot and
+# the per-transition pushes. This is a self-healing backstop: a chrome renderer
+# that lost its in-memory health state (e.g. a reloaded webview whose one-shot
+# ``system_interface_status`` was never replayed) re-learns a still-stuck
+# workspace within this interval and can finally redirect to the recovery page,
+# even though the tracker emitted no fresh transition. Re-asserting ``stuck`` is
+# idempotent client-side (the recovery-redirect lock prevents re-navigation), so
+# the only cost is one tiny event per non-healthy agent per interval.
+_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS: Final[float] = 15.0
+
+
 async def _handle_chrome_events(
     request: Request,
     auth_store: AuthStoreDep,
@@ -2149,7 +2239,7 @@ async def _handle_chrome_events(
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             paths: WorkspacePaths | None = request.app.state.api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_active_workspace_ids())
+            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
             has_accounts = bool(session_store and session_store.list_accounts())
             yield "data: {}\n\n".format(
                 json.dumps(
@@ -2166,7 +2256,7 @@ async def _handle_chrome_events(
             last_providers_data = _build_providers_state_payload(backend_resolver)
             yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = request.app.state.request_inbox
-            last_requests_payload = _build_requests_payload(inbox)
+            last_requests_payload = _build_requests_payload(inbox, backend_resolver)
             # ``auto_open`` is bundled with the requests payload (rather than
             # its own SSE event) so the Electron shell sees both atomically
             # when deciding whether to auto-open the panel.
@@ -2181,6 +2271,9 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(
                         json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
+            # Anchor the periodic re-assert clock to the connect-time snapshot
+            # just sent, so the first backstop re-assert is a full interval out.
+            last_status_reassert = time.monotonic()
 
             # Wait for changes and push updates until client disconnects.
             #
@@ -2201,15 +2294,23 @@ async def _handle_chrome_events(
             #
             # Clearing at the bottom of the loop instead would lose the
             # wakeup for any producer that fires between the drain and the
-            # bottom-of-loop clear, leaving the queued item idle for up to
-            # 30s -- a UX regression for health-state transitions like
-            # RESTARTING -> HEALTHY.
+            # bottom-of-loop clear, leaving the queued item idle until the
+            # next idle-wake timeout -- a UX regression for health-state
+            # transitions like RESTARTING -> HEALTHY.
             shutdown_event: threading.Event = request.app.state.shutdown_event
             connected = not await request.is_disconnected()
             while connected and not shutdown_event.is_set():
-                # Wait for a change signal or timeout (timeout for disconnect checks).
+                # Wait for a change signal or timeout. The timeout bounds both
+                # disconnect-detection latency and -- since the periodic status
+                # backstop below only runs on a loop wake -- the worst-case
+                # re-assert cadence on an otherwise-idle connection. Cap it at
+                # the re-assert interval so a steadily-stuck workspace really is
+                # re-asserted on that cadence rather than being stretched to a
+                # longer idle-wake period.
                 try:
-                    await asyncio.wait_for(change_event.wait(), timeout=30.0)
+                    await asyncio.wait_for(
+                        change_event.wait(), timeout=_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                    )
                 except TimeoutError:
                     pass
                 # Clear BEFORE draining so any producer firing between drain
@@ -2233,12 +2334,31 @@ async def _handle_chrome_events(
                     aid_str, status = health_queue.get_nowait()
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
+                # Periodic backstop: re-assert the current non-HEALTHY statuses
+                # even when no transition fired this tick. The tracker only
+                # *transitions* on edges (HEALTHY <-> STUCK/RESTARTING/...), so a
+                # workspace that is steadily STUCK emits nothing after its one
+                # initial edge. A renderer that lost that one-shot event (e.g. a
+                # reloaded chrome webview) would otherwise never re-learn it and
+                # never redirect to the recovery page. Re-asserting is idempotent
+                # client-side (the recovery-redirect lock prevents re-navigation).
+                now = time.monotonic()
+                if (
+                    tracker is not None
+                    and now - last_status_reassert >= _SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                ):
+                    last_status_reassert = now
+                    for aid, status in tracker.snapshot_all().items():
+                        yield "data: {}\n\n".format(
+                            json.dumps(_system_interface_status_payload(tracker, str(aid), status))
+                        )
+
                 # Each workspace entry carries its mind liveness (derived from
                 # discovery host state + any optimistic override), so a liveness
                 # change makes ``current_data`` differ and pushes a ``workspaces``
                 # update below -- no separate liveness channel needed.
                 current_data = _build_workspace_list(backend_resolver, session_store)
-                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_active_workspace_ids())
+                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
                 if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
@@ -2258,7 +2378,7 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
 
                 inbox = request.app.state.request_inbox
-                current_requests_payload = _build_requests_payload(inbox)
+                current_requests_payload = _build_requests_payload(inbox, backend_resolver)
                 # Diff the full payload (count + ordered pending ids), not just
                 # the count, so a change to the pending *set* at constant size
                 # still pushes an update and the panel refreshes.
@@ -2370,7 +2490,7 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     }
 
 
-def _destroying_agent_ids(paths: WorkspacePaths | None, known_workspace_ids: tuple[AgentId, ...]) -> list[str]:
+def _destroying_agent_ids(paths: WorkspacePaths | None, backend_resolver: BackendResolverInterface) -> list[str]:
     """Return the agent ids currently in any in-flight / failed destroy state.
 
     Pure read of the on-disk ``destroying/`` dir; never deletes records (the
@@ -2382,8 +2502,7 @@ def _destroying_agent_ids(paths: WorkspacePaths | None, known_workspace_ids: tup
     """
     if paths is None:
         return []
-    in_resolver = frozenset(known_workspace_ids)
-    records = list_destroying(paths, in_resolver)
+    records = list_destroying(paths, lambda aid: _host_still_active(backend_resolver, paths, aid))
     return [str(agent_id) for agent_id, record in records.items() if record.status != DestroyingStatus.DONE]
 
 
@@ -2446,7 +2565,31 @@ def _build_workspace_list(
     return workspaces
 
 
-def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
+def _displayable_pending_requests(
+    inbox: RequestInbox | None,
+    backend_resolver: BackendResolverInterface,
+) -> list[RequestEvent]:
+    """Pending requests whose originating agent's host is currently resolvable.
+
+    A permission request filed by an agent on a since-stopped workspace
+    lingers in the inbox after that workspace disappears from discovery
+    (the request file survives on the gateway). With no live agent to
+    resolve, the inbox can only fall back to raw agent ids, which render
+    as meaningless 16-char hex in the UI. Rather than show those, we hide
+    a request whenever ``get_agent_display_info`` can't resolve its agent
+    -- the same signal every other display path uses to map an agent to a
+    host/workspace. The request itself is untouched on the gateway, so it
+    reappears if the workspace comes back (or once a freshly-arrived
+    request's host is discovered).
+    """
+    pending = inbox.get_pending_requests() if inbox else []
+    return [req for req in pending if backend_resolver.get_agent_display_info(AgentId(req.agent_id)) is not None]
+
+
+def _build_requests_payload(
+    inbox: RequestInbox | None,
+    backend_resolver: BackendResolverInterface,
+) -> dict[str, Any]:
     """Build the content-based requests payload pushed over the chrome SSE.
 
     The chrome's live request UI (badge, panel refresh, auto-open) must react
@@ -2459,8 +2602,12 @@ def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
     ids (in a deterministic order) alongside the count. Consumers diff
     ``request_ids`` to decide whether to refresh the panel and which ids are
     newly arrived (for auto-open); the count remains for the badge.
+
+    Requests whose host can't be resolved are excluded (see
+    :func:`_displayable_pending_requests`) so the badge count and the
+    rendered cards stay in agreement.
     """
-    pending = inbox.get_pending_requests() if inbox else []
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     request_ids = [str(req.event_id) for req in pending]
     return {"count": len(request_ids), "request_ids": request_ids}
 
@@ -3478,8 +3625,8 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
     most-recent-first.
     """
     inbox: RequestInbox | None = request.app.state.request_inbox
-    pending = inbox.get_pending_requests() if inbox else []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
     # Map ws_name -> "homepage agent id" so the card accent matches the
     # color the homepage tile and the titlebar use for that workspace
@@ -3554,14 +3701,19 @@ def _resolve_inbox_selection(
     inbox: RequestInbox | None = request.app.state.request_inbox
     if inbox is None:
         return "", ""
-    pending = inbox.get_pending_requests()
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     if not pending:
         return "", ""
 
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    # Only requests in the displayable set are selectable: a request whose
+    # host can't be resolved is hidden from the list, so honoring a stale
+    # ``selected_id`` that points at one would render the same
+    # agent-id-only detail we're hiding the card to avoid.
+    displayable_by_id = {str(req.event_id): req for req in pending}
     target = None
     if selected_id:
-        candidate = inbox.get_request_by_id(selected_id)
+        candidate = displayable_by_id.get(selected_id)
         if candidate is not None and not inbox.is_request_resolved(selected_id):
             target = candidate
     if target is None and selected_id:
@@ -4182,7 +4334,10 @@ def create_desktop_client(
         onboarding_applier = OnboardingApplier(
             agent_creator=agent_creator,
             paths=agent_creator.paths,
-            message_sender=MngrMessageSender(mngr_binary=mngr_binary),
+            message_sender=MngrMessageSender(
+                mngr_caller=get_default_mngr_caller(),
+                concurrency_group=agent_creator.root_concurrency_group,
+            ),
             root_concurrency_group=agent_creator.root_concurrency_group,
             mngr_binary=mngr_binary,
         )
