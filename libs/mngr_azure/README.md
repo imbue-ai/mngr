@@ -109,5 +109,3 @@ mngr destroy my-agent
 ## Limitations
 
 - No host snapshot workflow: restore from a fresh `mngr create` rather than rehydrating a killed host.
-- Spot VMs (`--azure-spot`) are evicted on capacity pressure and deleted (not stopped) on eviction.
-- `auto_shutdown_seconds` is a coarse time cap that does an OS-level shutdown; on its own this leaves the VM "Stopped (not deallocated)" and still billing for compute (Azure has no native "delete after N minutes"). To actually halt compute billing, use `mngr stop` or rely on idle self-deallocate.
