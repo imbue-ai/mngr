@@ -391,8 +391,10 @@ Presents a two-phase TUI for selecting plugins to install.
 Phase 1 shows agent types and providers (BASIC tier). Tools detected
 on your system are pre-selected.
 
-Phase 2 shows optional extras, filtered to only include extras related
-to the agent types you selected. Recommended extras are pre-selected.
+Phase 2 shows optional extras unlocked by phase 1 -- extras related to
+the agent types you selected, plus per-agent usage providers when you
+have both the agent plugin and the base usage plugin. Recommended extras
+are pre-selected.
 
 Use Space to toggle selections, Enter to confirm, and q or Ctrl+C
 to cancel.

@@ -40,6 +40,11 @@
 
 set -euo pipefail
 
+# Directory this script was installed into; the converter module is installed
+# alongside it (in the agent's commands/ dir in production, in resources/ under
+# test), so resolve it relative to ourselves.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
 INPUT_FILE="$AGENT_DATA_DIR/logs/codex_transcript/events.jsonl"
 OUTPUT_FILE="$AGENT_DATA_DIR/events/codex/common_transcript/events.jsonl"
@@ -51,213 +56,41 @@ _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/common_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
+# Shared common-transcript primitives: the convert lock that serializes this
+# converter's read-modify-write against the turn-end --single-pass flush (see
+# the library header for why duplicates would result without it).
+# shellcheck source=mngr_common_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+
 convert_new_events() {
     if [ ! -f "$INPUT_FILE" ]; then
         log_debug "Input file not found: $INPUT_FILE"
         return
     fi
 
+    if ! mngr_common_transcript_acquire_lock; then
+        log_warn "could not acquire convert lock; skipping pass"
+        return
+    fi
+
     local convert_stderr
     convert_stderr=$(mktemp)
+    # The converter prints the count of appended events to stdout; capture it
+    # here so it never reaches this watcher's stdout (which would surface in the
+    # agent's pane). Genuine errors go to stderr.
     local result
-    result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" python3 << 'CONVERT_SCRIPT' 2>"$convert_stderr" || true
-import json
-import os
-import sys
+    result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" \
+        python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
-_MAX_INPUT_PREVIEW_LENGTH = 200
-_MAX_OUTPUT_LENGTH = 2000
-_SOURCE = "codex/common_transcript"
-
-
-def _truncate(text, limit):
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "..."
-
-
-def _join_content_text(content, item_type):
-    """Join the .text of payload.content[] items whose type matches item_type."""
-    if not isinstance(content, list):
-        return ""
-    parts = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") != item_type:
-            continue
-        text = item.get("text")
-        if isinstance(text, str):
-            parts.append(text)
-    return "".join(parts)
-
-
-def _stringify_output(output):
-    """Render function_call_output.output, which is a string OR a content array."""
-    if isinstance(output, str):
-        return output
-    # An array of content items: join the text of each, falling back to a JSON
-    # dump of any item that doesn't carry a plain .text field.
-    if isinstance(output, list):
-        parts = []
-        for item in output:
-            if isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-            else:
-                parts.append(json.dumps(item, separators=(",", ":")))
-        return "".join(parts)
-    # Anything else (a bare object/number): render it as JSON so nothing is lost.
-    return json.dumps(output, separators=(",", ":"))
-
-
-def _load_existing_ids(output_file):
-    ids = set()
-    if not os.path.isfile(output_file):
-        return ids
-    with open(output_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ids.add(json.loads(line)["event_id"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-    return ids
-
-
-def convert():
-    input_file = os.environ["_INPUT_FILE"]
-    output_file = os.environ["_OUTPUT_FILE"]
-    existing_ids = _load_existing_ids(output_file)
-    if not os.path.isfile(input_file):
-        print("0")
-        return
-
-    new_events = []
-    # Pending function calls awaiting their output, keyed by call_id. Each value
-    # carries the synthetic tool_call_id, the tool name, and the input preview.
-    pending_call_by_id = {}
-
-    with open(input_file) as f:
-        for line_index, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
-
-            # Ignore event_msg entirely (display duplicates of response_items).
-            if raw.get("type") != "response_item":
-                continue
-            payload = raw.get("payload")
-            if not isinstance(payload, dict):
-                continue
-
-            timestamp = raw.get("timestamp", "")
-            payload_type = payload.get("type")
-
-            if payload_type == "message" and payload.get("role") == "user":
-                event_id = f"line-{line_index}-user"
-                if event_id in existing_ids:
-                    continue
-                text = _join_content_text(payload.get("content"), "input_text")
-                # An empty user message carries no signal -> drop it.
-                if not text:
-                    continue
-                new_events.append((timestamp, line_index, {
-                    "timestamp": timestamp,
-                    "type": "user_message",
-                    "event_id": event_id,
-                    "source": _SOURCE,
-                    "role": "user",
-                    "content": text,
-                }))
-
-            elif payload_type == "message" and payload.get("role") == "assistant":
-                event_id = f"line-{line_index}-assistant"
-                if event_id in existing_ids:
-                    continue
-                text = _join_content_text(payload.get("content"), "output_text")
-                new_events.append((timestamp, line_index, {
-                    "timestamp": timestamp,
-                    "type": "assistant_message",
-                    "event_id": event_id,
-                    "source": _SOURCE,
-                    "role": "assistant",
-                    "model": None,
-                    "text": text,
-                    "tool_calls": [],
-                    "stop_reason": None,
-                    "usage": None,
-                }))
-
-            elif payload_type == "function_call":
-                call_id = payload.get("call_id")
-                if not isinstance(call_id, str) or not call_id:
-                    continue
-                name = payload.get("name", "")
-                arguments = payload.get("arguments", "")
-                if not isinstance(arguments, str):
-                    arguments = json.dumps(arguments, separators=(",", ":"))
-                tool_call_id = f"line-{line_index}-tc"
-                pending_call_by_id[call_id] = {
-                    "tool_call_id": tool_call_id,
-                    "tool_name": name if isinstance(name, str) else "",
-                    "input_preview": _truncate(arguments, _MAX_INPUT_PREVIEW_LENGTH),
-                }
-
-            elif payload_type == "function_call_output":
-                call_id = payload.get("call_id")
-                pending = pending_call_by_id.pop(call_id, None) if isinstance(call_id, str) else None
-                # A function_call_output with no matching function_call has
-                # nothing to pair with -> drop it.
-                if pending is None:
-                    continue
-                event_id = f"line-{line_index}-tool_result"
-                if event_id in existing_ids:
-                    continue
-                output = _truncate(_stringify_output(payload.get("output", "")), _MAX_OUTPUT_LENGTH)
-                new_events.append((timestamp, line_index, {
-                    "timestamp": timestamp,
-                    "type": "tool_result",
-                    "event_id": event_id,
-                    "source": _SOURCE,
-                    "tool_call_id": pending["tool_call_id"],
-                    "tool_name": pending["tool_name"],
-                    "output": output,
-                    "is_error": False,
-                }))
-
-    if not new_events:
-        print("0")
-        return
-
-    # Stable order: by line index (the append-only stream order), which also
-    # keeps tool_results after their originating call.
-    new_events.sort(key=lambda triple: triple[1])
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "a") as f:
-        for _, _, event in new_events:
-            f.write(json.dumps(event, separators=(",", ":")) + "\n")
-
-    print(str(len(new_events)))
-
-
-convert()
-CONVERT_SCRIPT
-)
+    # The read-modify-write is done; drop the lock before the (lock-free)
+    # logging below so a concurrent pass can proceed immediately.
+    mngr_common_transcript_release_lock
 
     if [ -s "$convert_stderr" ]; then
-        # Forward the heredoc Python's stderr to both the structured log
-        # (via log_warn) and the process's stderr -- the latter is what tests
-        # and operators read when something has gone wrong with conversion.
+        # A genuine converter error is logged (to events/logs/common_transcript)
+        # but never echoed to this watcher's stdout/stderr -- that would surface
+        # in the agent's pane.
         log_warn "convert error: $(cat "$convert_stderr")"
-        cat "$convert_stderr" >&2
     fi
     rm -f "$convert_stderr"
 

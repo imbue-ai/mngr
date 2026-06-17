@@ -4,8 +4,7 @@ from typing import Any
 import click
 from click_option_group import optgroup
 
-from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import resolve_host_location_address
+from imbue.mngr.api.find import resolve_host_location
 from imbue.mngr.api.git import git_pull
 from imbue.mngr.api.git import git_push
 from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
@@ -68,24 +67,7 @@ def _resolve_remote_endpoint(
             "for local-only operations"
         )
 
-    # Scope to the target's provider/agent so an unrelated down provider isn't queried.
-    provider_names: tuple[str, ...] | None = None
-    if parsed.host is not None and parsed.host.provider is not None:
-        provider_names = (str(parsed.host.provider),)
-    agent_identifiers = (str(parsed.agent),) if parsed.agent is not None else None
-    agents_by_host, _ = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=provider_names,
-        agent_identifiers=agent_identifiers,
-        include_destroyed=False,
-        reset_caches=False,
-    )
-    resolved = resolve_host_location_address(
-        parsed,
-        agents_by_host,
-        mngr_ctx,
-        is_start_desired=is_start_desired,
-    )
+    resolved = resolve_host_location(parsed, mngr_ctx, is_start_desired=is_start_desired)
     return resolved.location
 
 

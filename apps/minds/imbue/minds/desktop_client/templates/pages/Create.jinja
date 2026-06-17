@@ -47,9 +47,10 @@
       // content-relay-preload validates + forwards to main + main
       // forwards to this bundle's chrome view as
       // ``freeform_accent_preview``, which sets the CSS variables
-      // directly. Naturally cleared by the next navigation event
-      // (submit -> ``current-workspace-changed`` repaints from the new
-      // workspace; cancel -> last-workspace fallback repaints).
+      // directly. main drops this override when the window leaves
+      // ``/create`` -- submit repaints from the new workspace, abandon
+      // repaints to the neutral chrome (see hasFreeformAccentPreview in
+      // electron/main.js).
       if (typeof hex !== 'string') return;
       var fg = window.mindsAccent && window.mindsAccent.pickForegroundForHex
         ? window.mindsAccent.pickForegroundForHex(hex)

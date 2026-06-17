@@ -4,6 +4,24 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-16
+
+### Added
+
+- Added: Root-level wiring for the new `azure` provider plugin — `--cov=imbue.mngr_azure` in pytest coverage, `azure` registered in `scripts/make_cli_docs.py` `SECONDARY_COMMANDS` (so `mngr azure` gets a generated doc page alongside `aws` / `gcp`), and an `azure` create template in `.mngr/settings.toml` that builds the project Dockerfile on the VM (so azure agents get `gh` and the full mngr toolchain). `[providers.azure] builder = "DEPOT"` builds on depot's cached remote builders (requires `DEPOT_TOKEN` at create time).
+- Added: Design specs — `specs/agent-usage-plugins/spec.md` (extending `mngr usage` to OpenCode, pi, and Codex), `specs/aws-ec2-stop-start-lifecycle/` (Modal-like idle-paused-but-resumable lifecycle for AWS agents via native EC2 stop/start; phases 1, 2, and 4 marked implemented), and `specs/cleanup-error-aggregation.md` (`mngr stop`/`destroy`/`cleanup` aggregate and classify failures with cause-specific exit codes).
+- Added: Documented the install-wizard surfacing of the usage plugins in `specs/agent-usage-plugins/spec.md` and recorded the antigravity gap in `specs/agent-plugin-parity/spec.md` (new "Usage tracking plugin" row).
+
+### Changed
+
+- Changed: Synced the root design specs to the removed VPS-client snapshot surface and `list_ssh_keys` (`specs/vps-docker-provider/`, `specs/ovh-vps-provider/`, `specs/azure-provider/concise.md`, `specs/aws-ec2-stop-start-lifecycle/spec.md`).
+- Changed: Extended the local-scratch `.gitignore` convention to Python and text files — `**/*.local.py` and `**/*.local.txt` are now ignored, mirroring the existing `**/*.local.md` and `**/*.local.sh` patterns. Lets one-off validation harnesses and probe scripts stay untracked and survive the stop hook's working-tree cleanup.
+- Changed: `justfile`'s `sync-vendor-mngr` recipe realigned with the current release flow — its comment now tells you to position the mngr checkout at the **verified release SHA** (not blindly `main`, which can drift past it), points at `apps/minds/docs/release.md`, and no longer hardcodes a personal FCT path: the FCT checkout path comes from the positional arg, else `FCT_DIR` read from a gitignored minds-scoped `apps/minds/.env` (template: committed `apps/minds/.env.example`), else `$FCT_DIR` in your shell.
+
+### Fixed
+
+- Fixed: `minds-launch-to-msg.yml` now resolves and renders the ref name **and** the resolved commit instead of a tag-object SHA. The Slack notification and step summaries previously resolved `commit_sha` / `template_ref` with `git ls-remote refs/tags/<tag>` (no peel), so a run against an **annotated** tag (e.g. `minds-v0.3.1`) displayed the tag-*object* SHA — a SHA you can't `git checkout`. The `check_should_run` compute step now peels annotated tags (`^{}`), so no step surfaces a tag-object SHA anymore.
+
 ## 2026-06-15
 
 ### Added
