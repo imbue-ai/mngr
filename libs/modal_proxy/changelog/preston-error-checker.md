@@ -1,0 +1,1 @@
+Marked `test_deploy_retries_on_locked_app_then_succeeds` flaky and raised its per-test timeout above the 10s global budget. The locked-app retry path spawns the fake modal subprocess twice, which occasionally overran 10s when offload sandboxes were heavily contended; the extra headroom plus flaky retry stops the spurious timeout. No product behavior change.

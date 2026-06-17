@@ -341,6 +341,13 @@ def _write_fake_modal(bin_dir: Path, counter_file: Path, *, fail_times: int, err
     script.chmod(0o755)
 
 
+# Flaky under heavy CI load: the locked-app retry path spawns the (fake) modal
+# subprocess twice, and the two spawns plus retry handling occasionally exceed the
+# 10s global timeout when offload sandboxes are contended. Raise the per-test
+# timeout (the retry cannot be shortened without weakening what the test checks)
+# and mark flaky so offload also retries.
+@pytest.mark.timeout(30)
+@pytest.mark.flaky
 def test_deploy_retries_on_locked_app_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = tmp_path / "bin"
     counter = tmp_path / "count"
