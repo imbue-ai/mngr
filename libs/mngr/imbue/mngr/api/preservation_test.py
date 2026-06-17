@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
 from imbue.mngr.api.preservation import dispatch_session_adoption
@@ -430,3 +431,56 @@ def test_dispatch_session_adoption_no_op_when_neither_source() -> None:
     dispatch_session_adoption((), None, on_explicit=explicit.append, on_clone=clone.append)
     assert explicit == []
     assert clone == []
+
+
+def test_adopt_sessions_copies_all_explicit_and_resumes_the_last() -> None:
+    copied: list[str] = []
+    resumed: list[str] = []
+
+    def copy_explicit(arg: str) -> str:
+        copied.append(arg)
+        return f"id:{arg}"
+
+    def copy_clone(_location: HostLocation) -> str:
+        raise AssertionError("copy_clone must not run without a --from source")
+
+    adopt_sessions(("a", "b", "c"), None, copy_explicit=copy_explicit, copy_clone=copy_clone, resume=resumed.append)
+    # Every named session is copied; the last is the one resumed.
+    assert copied == ["a", "b", "c"]
+    assert resumed == ["id:c"]
+
+
+def test_adopt_sessions_clone_is_resumed_over_explicit(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    location = HostLocation(host=host, path=tmp_path)
+    copied: list[str] = []
+    cloned: list[HostLocation] = []
+    resumed: list[str] = []
+
+    def copy_explicit(arg: str) -> str:
+        copied.append(arg)
+        return f"id:{arg}"
+
+    def copy_clone(loc: HostLocation) -> str:
+        cloned.append(loc)
+        return "clone-id"
+
+    adopt_sessions(("a", "b"), location, copy_explicit=copy_explicit, copy_clone=copy_clone, resume=resumed.append)
+    # All --adopt sessions are still copied, but the clone is the one resumed.
+    assert copied == ["a", "b"]
+    assert cloned == [location]
+    assert resumed == ["clone-id"]
+
+
+def test_adopt_sessions_no_op_when_neither() -> None:
+    def fail_explicit(_arg: str) -> str:
+        raise AssertionError("copy_explicit must not run")
+
+    def fail_clone(_location: HostLocation) -> str:
+        raise AssertionError("copy_clone must not run")
+
+    def fail_resume(_session_id: str) -> None:
+        raise AssertionError("resume must not run")
+
+    adopt_sessions((), None, copy_explicit=fail_explicit, copy_clone=fail_clone, resume=fail_resume)

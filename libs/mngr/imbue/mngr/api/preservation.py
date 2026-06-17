@@ -143,10 +143,11 @@ def run_adopt_session_preflight(
     # therefore means the create is for a *different* adoption-capable agent -- whose own hook
     # validates these ids -- not a silent drop. The assert keeps that invariant loud (rather than a
     # silent no-op) if the core gate is ever bypassed or its capability check drifts out of sync.
-    assert issubclass(resolved.agent_class, HasSessionAdoptionMixin), (
-        f"--adopt reached the {agent_class.__name__} preflight for non-adoption type {agent_type!r}; "
-        "_validate_session_adoption should have rejected it first"
-    )
+    if not issubclass(resolved.agent_class, HasSessionAdoptionMixin):
+        raise AssertionError(
+            f"--adopt reached the {agent_class.__name__} preflight for non-adoption type {agent_type!r}; "
+            "_validate_session_adoption should have rejected it first"
+        )
     if not issubclass(resolved.agent_class, agent_class):
         return
     for session_arg in adopt_session:
@@ -200,6 +201,35 @@ def dispatch_session_adoption(
     else:
         # Neither --adopt nor --from: the agent starts a fresh session (nothing to do).
         return
+
+
+def adopt_sessions(
+    adopt_session: tuple[str, ...],
+    source_location: HostLocation | None,
+    *,
+    copy_explicit: Callable[[str], str],
+    copy_clone: Callable[[HostLocation], str],
+    resume: Callable[[str], None],
+) -> None:
+    """Copy every ``--adopt`` session (and the ``--from`` clone) into the new agent, then resume one.
+
+    Each ``--adopt`` value is copied in via ``copy_explicit`` (which rebinds it to the new work
+    dir and returns its resumable id); a ``--from`` clone is additionally copied via ``copy_clone``
+    (same, but raising if the source has no resumable session). The session actually resumed --
+    via ``resume``, which writes the agent's resume pointer -- is the clone's when ``--from`` is
+    given, otherwise the last ``--adopt`` value; the rest are left available for the agent's own
+    session switcher. With neither option set, nothing is adopted (fresh start).
+
+    ``--adopt`` and ``--from`` are no longer mutually exclusive: every named session plus the
+    clone is made available, and the clone is the one resumed.
+    """
+    resume_id: str | None = None
+    for adopt_arg in adopt_session:
+        resume_id = copy_explicit(adopt_arg)
+    if source_location is not None:
+        resume_id = copy_clone(source_location)
+    if resume_id is not None:
+        resume(resume_id)
 
 
 def transfer_cloned_agent_session_store(
