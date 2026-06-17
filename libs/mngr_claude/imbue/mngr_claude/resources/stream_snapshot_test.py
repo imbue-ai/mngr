@@ -381,7 +381,7 @@ def test_read_last_complete_assistant_id_oversized_final_line_falls_back(tmp_pat
     transcript = tmp_path / "events.jsonl"
     oversized = "z" * (stream_snapshot._TRANSCRIPT_TAIL_READ_BYTES * 3)
     transcript.write_text(
-        '{"type": "user", "uuid": "u1"}\n' f'{{"type": "assistant", "uuid": "a_huge", "content": "{oversized}"}}\n',
+        f'{{"type": "user", "uuid": "u1"}}\n{{"type": "assistant", "uuid": "a_huge", "content": "{oversized}"}}\n',
         encoding="utf-8",
     )
     assert stream_snapshot._read_last_complete_assistant_id(transcript) == "a_huge"
