@@ -7,18 +7,24 @@ arc and assertions live in ``imbue.mngr.agents.agent_release_testing``; this fil
 supplies claude's plumbing via an :class:`AgentReleaseProfile`.
 
 claude exercises the richest end of the shared lifecycle: it observes the RUNNING
-marker (its UserPromptSubmit hook touches the ``active`` marker), forces a bash tool
-call (so the transcript carries a tool_result), and reports token usage in the common
-envelope -- the capability flags below turn those shared assertions on.
+marker (its UserPromptSubmit hook touches the ``active`` marker; observing it is a
+universal harness requirement), forces a bash tool call (so the transcript carries a
+tool_result), and reports token usage in the common envelope. Only ``forces_tool_call``
+and ``asserts_usage`` remain per-profile capability flags.
 
 claude's only real specifics over the sibling ports:
 
-* Auth/dialog seeding. ``setup_claude_trust_config_for_subprocess`` writes a
-  ``~/.claude.json`` (into the autouse fixture's temp HOME) that dismisses the
-  onboarding/effort/permissions dialogs and pre-approves the ``ANTHROPIC_API_KEY``
-  (so claude doesn't block on its custom-key dialog). Per-work-dir trust is then
-  added automatically by ``mngr create --yes`` (auto-approve), which covers both the
-  seed worktree and the fresh adoption worktree.
+* Repo-local ``.gitignore``. claude's preflight refuses to write hooks to
+  ``.claude/settings.local.json`` unless the repository's *own* ``.gitignore``
+  excludes it (a global rule is rejected, since remote hosts lack it).
+  ``_init_claude_workspace`` seeds that rule for both the seed worktree and the fresh
+  adoption worktree; the sibling ports don't need this.
+
+* Auth/dialog dismissal. ``mngr create --yes`` (auto-approve) dismisses claude's
+  first-run dialogs (onboarding/effort) and trusts the work dir in the per-agent
+  ``~/.claude.json``, and the plugin's ``approve_api_key_for_claude`` pre-approves the
+  ``ANTHROPIC_API_KEY`` so claude doesn't block on its custom-key dialog. Both cover the
+  seed worktree and the fresh adoption worktree, so the test needs no seeded config.
 
 * Post-``--`` args. ``--dangerously-skip-permissions`` lets the forced bash tool call
   run without a permission pause, ``--pass-env ANTHROPIC_API_KEY`` carries the key to the
@@ -48,10 +54,10 @@ import pytest
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
-from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 
 # claude's native resumable session store, relative to the agent state dir: the
 # per-agent Claude config dir's session JSONLs (see ``_AGENT_CLAUDE_PROJECTS_RELPATH``
@@ -110,12 +116,11 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
         return None
 
     def setup(self, tmp_path: Path) -> AgentReleaseContext:
-        # Seed ~/.claude.json (in the autouse fixture's temp HOME) with the dialog
-        # dismissals + ANTHROPIC_API_KEY approval claude needs to start non-interactively.
-        # Per-work-dir trust is added automatically by ``mngr create --yes``. This also
-        # returns a subprocess env carrying the redirected HOME and the isolated
+        # ``mngr create --yes`` dismisses claude's first-run dialogs and trusts the work dir,
+        # and the plugin's ``approve_api_key_for_claude`` pre-approves the key, so no seeded
+        # ~/.claude.json is needed. The env carries the redirected HOME and the isolated
         # MNGR_HOST_DIR / tmux server from the autouse fixture.
-        env = setup_claude_trust_config_for_subprocess(trusted_paths=[], root_name="mngr-claude-release-test")
+        env = get_subprocess_test_env(root_name="mngr-claude-release-test")
 
         # Disable the remote providers for every command: a purely local agent test, and
         # leaving them on makes mngr probe Modal/Docker (and rejects the autouse test prefix).
