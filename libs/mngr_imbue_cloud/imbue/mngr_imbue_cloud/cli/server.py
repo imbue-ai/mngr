@@ -66,12 +66,12 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
-from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
@@ -778,6 +778,7 @@ def _reap_orphan_slice_vms(*, server: BareMetalServer, private_key_path: Path, d
 def allocate_slices(
     *,
     count: int,
+    server_id: str,
     lease_attributes: dict[str, Any],
     region: str,
     workspace_dir: Path,
@@ -787,10 +788,10 @@ def allocate_slices(
     is_deferred_install_wait_skipped: bool,
     max_concurrency: int,
 ) -> None:
-    """Bake ``count`` slices onto a single ready bare-metal server and insert their pool rows.
+    """Bake ``count`` slices onto the explicitly chosen bare-metal server and insert their pool rows.
 
-    The slice backend of ``admin pool create``. Picks the ready server with the
-    most free slots (one server per invocation: a server's per-slice vCPU/RAM/disk
+    The slice backend of ``admin pool create``. Bakes onto the operator-named
+    ``server_id`` (one server per invocation: a server's per-slice vCPU/RAM/disk
     are fixed by its registration, so a batch is homogeneous), vendors this branch's
     mngr into the FCT workspace once, then bakes the slices concurrently -- at most
     ``max_concurrency`` at a time (the rest queue) so the box isn't over-contended,
@@ -815,16 +816,19 @@ def allocate_slices(
         capacities = fetch_server_capacities(conn)
     finally:
         conn.close()
-    # One server per batch (homogeneous sizing): pick the ready box with the most
-    # free slots and require it to hold the whole batch. Server selection is NOT
-    # filtered by ``region`` today (single-fleet assumption); multi-region fleet
-    # filtering is future work.
-    chosen = choose_server_for_new_slice(capacities)
+    # One explicitly-chosen server per batch (homogeneous sizing): the operator names the box via
+    # ``--server-id``; we never auto-select. Require it to be ready and to hold the whole batch.
+    chosen = find_server_capacity_by_id(capacities, BareMetalServerDbId(server_id))
     server = chosen.server
+    if str(server.status) != SERVER_STATUS_READY:
+        raise click.UsageError(
+            f"server {server.id} is '{server.status}', not '{SERVER_STATUS_READY}'; "
+            "finish `admin server await-delivery` + `setup` before baking slices on it"
+        )
     if chosen.free_slots < count:
         raise click.UsageError(
             f"server {server.id} has only {chosen.free_slots} free slot(s); cannot bake {count} "
-            "(allocate on one server per invocation -- run again to use another server)"
+            "(allocate on one server per invocation -- run again, or choose another --server-id)"
         )
     sizing = compute_server_slice_sizing(server)
 
@@ -1155,6 +1159,16 @@ def _wait_for_ssh_ready(server_address: str, ssh_user: str, private_key_path: Pa
     show_default=True,
     help="CPU overcommit factor recorded for slice sizing on this box.",
 )
+@click.option(
+    "--option",
+    "option_codes",
+    multiple=True,
+    help=(
+        "Explicit planCode for a mandatory option family that offers more than one choice (e.g. "
+        "bandwidth, vrack). Repeatable. Required when the plan offers a real choice -- run once without "
+        "it and the error lists each family's offers + monthly prices so you can re-run with --option."
+    ),
+)
 @click.option("--yes", is_flag=True, default=False, help="Skip the interactive confirmation and place the order.")
 @click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
 def order(
@@ -1164,6 +1178,7 @@ def order(
     storage: str,
     memory_per_slice_gb: int,
     cpu_overcommit: float,
+    option_codes: tuple[str, ...],
     yes: bool,
     database_url: str | None,
 ) -> None:
@@ -1171,7 +1186,8 @@ def order(
 
     Builds + assigns the eco cart, shows the real OVH price preview for confirmation, places the order, and
     inserts a bare_metal_servers row (specs derived from the catalog). Then run ``await-delivery`` + ``setup``.
-    Needs OVH_* credentials and the pool DSN.
+    Any mandatory option family with more than one offer (e.g. bandwidth, vrack) must be chosen explicitly
+    via ``--option``; needs OVH_* credentials and the pool DSN.
     """
     config = _require_ovh_config()
     client = build_ovh_client(config)
@@ -1185,7 +1201,12 @@ def order(
         )
 
     cart_id, preview, _option_codes = build_and_assign_eco_cart(
-        client, plan_code=plan_code, datacenter=region, memory_gb=memory_gb, storage_short=storage
+        client,
+        plan_code=plan_code,
+        datacenter=region,
+        memory_gb=memory_gb,
+        storage_short=storage,
+        explicit_option_codes=option_codes,
     )
     write_human_line(
         f"About to order {plan_code} in {region}: {memory_gb}GB RAM, {storage}, {cpu_cores}c/{cpu_threads}t, "

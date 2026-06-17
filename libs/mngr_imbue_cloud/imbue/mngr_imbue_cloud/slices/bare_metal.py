@@ -9,6 +9,7 @@ from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
+from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_DELIVERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_FAILED
@@ -312,16 +313,19 @@ def compute_capacity(server: BareMetalServer, used_slots: int) -> BareMetalServe
 
 
 @pure
-def choose_server_for_new_slice(capacities: Sequence[BareMetalServerCapacity]) -> BareMetalServerCapacity:
-    """Pick the ready server with the most free slots to bake the next slice onto.
+def find_server_capacity_by_id(
+    capacities: Sequence[BareMetalServerCapacity], server_id: BareMetalServerDbId
+) -> BareMetalServerCapacity:
+    """Return the capacity row for the explicitly chosen ``server_id``.
 
-    Raises ``SliceCapacityError`` if no ready server has any free slots.
+    Slice baking targets one operator-named box per invocation (its per-slice sizing is fixed at
+    registration), rather than auto-selecting a server. Raises ``SliceCapacityError`` if no server in
+    ``capacities`` has that id -- the readiness + free-slot checks are the caller's, so the error can
+    name the count it needed.
     """
-    eligible = [
-        capacity
-        for capacity in capacities
-        if str(capacity.server.status) == SERVER_STATUS_READY and capacity.free_slots > 0
-    ]
-    if not eligible:
-        raise SliceCapacityError("no ready bare-metal server has free slots; order or install more capacity")
-    return max(eligible, key=lambda capacity: capacity.free_slots)
+    for capacity in capacities:
+        if capacity.server.id == server_id:
+            return capacity
+    raise SliceCapacityError(
+        f"no bare-metal server with id {server_id}; run `mngr imbue_cloud admin server list` to see the fleet"
+    )

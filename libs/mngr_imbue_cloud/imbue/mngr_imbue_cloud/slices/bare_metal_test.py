@@ -18,7 +18,6 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
-from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_budget_gib
@@ -26,6 +25,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import is_valid_status_transition
 from imbue.mngr_imbue_cloud.slices.bare_metal import next_server_status
 from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
@@ -33,10 +33,14 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 
 
-def _server(status: str, slot_count: int = 8) -> BareMetalServer:
+def _server(
+    status: str,
+    slot_count: int = 8,
+    server_id: str = "11111111-1111-1111-1111-111111111111",
+) -> BareMetalServer:
     now = datetime.now(timezone.utc)
     return BareMetalServer(
-        id=BareMetalServerDbId("11111111-1111-1111-1111-111111111111"),
+        id=BareMetalServerDbId(server_id),
         plan_code="24rise02-v1-us",
         region="vin",
         slot_count=slot_count,
@@ -242,18 +246,19 @@ def test_compute_capacity_rejects_negative_used() -> None:
         compute_capacity(_server(SERVER_STATUS_READY), used_slots=-1)
 
 
-def test_choose_server_for_new_slice_picks_most_free_ready_server() -> None:
-    nearly_full = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=7)
-    roomy = compute_capacity(_server(SERVER_STATUS_READY, slot_count=16), used_slots=2)
-    chosen = choose_server_for_new_slice([nearly_full, roomy])
+def test_find_server_capacity_by_id_returns_the_matching_server() -> None:
+    target_id = BareMetalServerDbId("22222222-2222-2222-2222-222222222222")
+    other = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=1)
+    target = compute_capacity(_server(SERVER_STATUS_READY, slot_count=16, server_id=str(target_id)), used_slots=2)
+    chosen = find_server_capacity_by_id([other, target], target_id)
+    assert chosen.server.id == target_id
     assert chosen.free_slots == 14
 
 
-def test_choose_server_for_new_slice_ignores_non_ready_and_full_servers() -> None:
-    installing = compute_capacity(_server(SERVER_STATUS_INSTALLING, slot_count=16), used_slots=0)
-    full_ready = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=8)
+def test_find_server_capacity_by_id_raises_when_absent() -> None:
+    only = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=0)
     with pytest.raises(SliceCapacityError):
-        choose_server_for_new_slice([installing, full_ready])
+        find_server_capacity_by_id([only], BareMetalServerDbId("99999999-9999-9999-9999-999999999999"))
 
 
 def test_compute_orphan_slice_instance_names_returns_untracked_slice_vms() -> None:

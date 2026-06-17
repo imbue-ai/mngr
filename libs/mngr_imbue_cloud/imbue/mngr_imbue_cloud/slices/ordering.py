@@ -10,6 +10,7 @@ client-driven steps are exercised live against a real order.
 from collections import defaultdict
 from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from decimal import Decimal
 from typing import Any
 from typing import Final
@@ -71,29 +72,39 @@ def _eco_option_monthly_price(option: Mapping[str, Any]) -> Decimal | None:
 
 
 @pure
-def _pick_cheapest_mandatory_option_code(family: str, family_options: Sequence[Mapping[str, Any]]) -> str:
-    """Pick the single cheapest offer (by month-to-month price) for a multi-offer mandatory family.
+def _format_eco_offers(family_options: Sequence[Mapping[str, Any]]) -> str:
+    """Render a family's offers as ``planCode ($X/mo)`` entries (cheapest first) for an error message."""
+    described: list[tuple[Decimal, str]] = []
+    for option in family_options:
+        price = _eco_option_monthly_price(option)
+        price_text = f"${price}/mo" if price is not None else "price n/a"
+        sort_key = price if price is not None else Decimal("Infinity")
+        described.append((sort_key, f"{option['planCode']} ({price_text})"))
+    return ", ".join(text for _sort_key, text in sorted(described, key=lambda item: item[0]))
 
-    OVH groups the included baseline and its paid upgrades in the same mandatory family (e.g. bandwidth:
-    the free 1Gbps baseline plus a paid 2Gbps upgrade). The pricing table prices every plan at its
-    cheapest mandatory options, so auto-picking the cheapest here reproduces exactly what was quoted.
-    Raises ``BareMetalConfigError`` if any offer lacks a comparable price or if the cheapest is tied
-    (so we never silently guess which of two equally-priced upgrades was intended).
+
+@pure
+def _resolve_explicit_option_for_family(
+    family: str,
+    family_options: Sequence[Mapping[str, Any]],
+    explicit_option_codes: AbstractSet[str],
+) -> str:
+    """Resolve the chosen planCode for one multi-offer mandatory family from the operator's explicit choices.
+
+    Requires exactly one of the family's offers to appear in ``explicit_option_codes`` -- we never pick
+    among real alternatives on the operator's behalf. Raises ``BareMetalConfigError`` (listing the offers
+    and their monthly prices) when none or more than one of the family's offers was selected.
     """
-    priced = [(str(option["planCode"]), _eco_option_monthly_price(option)) for option in family_options]
-    if any(price is None for _code, price in priced):
+    family_codes = {str(option["planCode"]) for option in family_options}
+    selected = sorted(family_codes & explicit_option_codes)
+    if len(selected) == 1:
+        return selected[0]
+    if not selected:
         raise BareMetalConfigError(
-            f"cannot auto-pick the {family} option: offers {sorted(code for code, _p in priced)} "
-            "lack comparable monthly prices"
+            f"plan offers multiple {family} options; choose one with --option. "
+            f"Offered: {_format_eco_offers(family_options)}"
         )
-    cheapest_price = min(price for _code, price in priced if price is not None)
-    cheapest_codes = sorted(code for code, price in priced if price == cheapest_price)
-    if len(cheapest_codes) != 1:
-        raise BareMetalConfigError(
-            f"cannot auto-pick the {family} option: {cheapest_codes} tie at the cheapest monthly price; "
-            "none is unambiguously the included baseline"
-        )
-    return cheapest_codes[0]
+    raise BareMetalConfigError(f"choose exactly one --option for the {family} family, got {selected}")
 
 
 @pure
@@ -101,15 +112,17 @@ def select_eco_option_codes(
     eco_options: Sequence[Mapping[str, Any]],
     memory_gb: int,
     storage_short: str,
+    explicit_option_codes: Sequence[str],
 ) -> list[str]:
     """Choose the eco cart option planCodes: the requested memory + storage, plus every other mandatory family.
 
     ``eco_options`` is the ``GET /order/cart/{id}/eco/options`` payload (each item has ``family``,
     ``planCode``, ``mandatory``, and ``prices``). Memory is matched by parsed GB; storage by the
-    availability short code (prefix). Every *other* family OVH flags mandatory (e.g. bandwidth, vrack)
-    is auto-picked: a single-offer family takes its only offer, and a multi-offer family takes its
-    cheapest month-to-month offer (the included baseline -- the same config the pricing table quotes).
-    Optional families are skipped. Raises ``BareMetalConfigError`` if a required choice can't be resolved.
+    availability short code (prefix). Every *other* mandatory family (e.g. bandwidth, vrack) is resolved
+    explicitly: a single-offer family takes its only offer, but a multi-offer family requires the operator
+    to name the chosen offer in ``explicit_option_codes`` (the ``--option`` flag) -- we never pick among
+    real alternatives automatically. Optional families are skipped. Raises ``BareMetalConfigError`` if a
+    required choice is missing/ambiguous or an explicit code is not an available mandatory option.
     """
     options_by_family: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     is_family_mandatory: dict[str, bool] = {}
@@ -136,20 +149,32 @@ def select_eco_option_codes(
             f"storage {storage_short!r} not offered for this plan; offered: {sorted(_codes_for('storage'))}"
         )
 
-    # Auto-pick every other mandatory family (e.g. bandwidth, and vrack on the plans that include it):
-    # the only offer when there is one, else the cheapest offer. Optional families are skipped.
+    # Resolve every other mandatory family (e.g. bandwidth, and vrack on the plans that include it): the
+    # only offer when there is one, else the explicit --option the operator named. Optional families are
+    # skipped. Track which explicit codes we consume so stray/typo'd ones are rejected, not silently ignored.
+    explicit_set = set(explicit_option_codes)
+    consumed_explicit_codes: set[str] = set()
     chosen = [memory_code, storage_code]
-    auto_pick_families = sorted(
+    auto_resolve_families = sorted(
         family
         for family, is_mandatory in is_family_mandatory.items()
         if is_mandatory and family not in _USER_SELECTED_OPTION_FAMILIES
     )
-    for family in auto_pick_families:
+    for family in auto_resolve_families:
         family_options = options_by_family.get(family, [])
         if len(family_options) == 1:
             chosen.append(str(family_options[0]["planCode"]))
         else:
-            chosen.append(_pick_cheapest_mandatory_option_code(family, family_options))
+            picked = _resolve_explicit_option_for_family(family, family_options, explicit_set)
+            chosen.append(picked)
+            consumed_explicit_codes.add(picked)
+
+    unknown_codes = sorted(explicit_set - consumed_explicit_codes - set(chosen))
+    if unknown_codes:
+        raise BareMetalConfigError(
+            f"--option value(s) {unknown_codes} are not a multi-offer mandatory option for this plan "
+            "(memory/storage use --memory-gb/--storage; single-offer families are auto-selected)"
+        )
     return chosen
 
 
@@ -221,12 +246,14 @@ def build_and_assign_eco_cart(
     datacenter: str,
     memory_gb: int,
     storage_short: str,
+    explicit_option_codes: Sequence[str],
 ) -> tuple[str, dict[str, Any], list[str]]:
     """Build a single-server eco cart, assign it, and return (cart_id, checkout_preview, option_codes).
 
     Assigning attaches the cart to the account but does NOT place the order (only ``POST checkout`` does),
     so the returned preview can be shown for confirmation. The caller must then either ``checkout_eco_cart``
-    or ``delete_cart_quietly``.
+    or ``delete_cart_quietly``. ``explicit_option_codes`` names the chosen offer for each multi-offer
+    mandatory option family (see :func:`select_eco_option_codes`).
     """
     with log_span("Building OVH eco cart for plan={} datacenter={}", plan_code, datacenter):
         cart_id = str(client.call_api("POST", "/order/cart", ovhSubsidiary=client.subsidiary).get("cartId", ""))
@@ -255,7 +282,7 @@ def build_and_assign_eco_cart(
         # call_api sends kwargs as the request body, so a GET's query params must go in the path.
         options_path = f"/order/cart/{cart_id}/eco/options?{urlencode({'planCode': plan_code})}"
         eco_options = client.call_api("GET", options_path)
-        option_codes = select_eco_option_codes(eco_options, memory_gb, storage_short)
+        option_codes = select_eco_option_codes(eco_options, memory_gb, storage_short, explicit_option_codes)
         for option_code in option_codes:
             client.call_api(
                 "POST",
