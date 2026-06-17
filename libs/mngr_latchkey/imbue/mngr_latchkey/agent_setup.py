@@ -444,12 +444,13 @@ def finalize_host_permissions(
     link_opaque_permissions_to_host(latchkey.plugin_data_dir, opaque_permissions_path, host_id)
 
 
-def recover_missing_host_permissions(
+def recover_host_permissions_for_agent(
     latchkey: Latchkey,
     host_id: HostId,
+    agent_id: AgentId,
     opaque_permissions_path: Path,
 ) -> bool:
-    """Repair a host whose canonical ``latchkey_permissions.json`` is missing.
+    """Repair a host's permissions file (and re-register ``agent_id``) when needed.
 
     A best-effort safety net for the rare case where an agent is live and
     able to file permission requests (its gateway JWT resolves to the
@@ -461,6 +462,19 @@ def recover_missing_host_permissions(
     the agent would not see grants written there because its JWT still
     points at the standalone opaque handle.
 
+    Two repairs happen here:
+
+    1. If the canonical permissions file is missing, it is materialized
+       from the opaque handle (moving the deny-all baseline into the
+       canonical path and swinging the handle to a symlink pointing at
+       it, via :func:`finalize_host_permissions`).
+    2. ``agent_id`` is (idempotently) registered for the host via
+       :func:`register_agent_for_host`. This always runs -- even when the
+       file already existed -- to close the gap where the discovery-time
+       auto-register saw this agent while the host file was missing: it
+       skips (and de-dups) such agents, so they would otherwise never get
+       added to the host's ``minds-api-proxy`` allowlist.
+
     ``opaque_permissions_path`` is the path the agent's
     permissions-override JWT resolves to; minds reads it from the
     gateway-streamed permission request's ``target`` field. It must live
@@ -468,43 +482,48 @@ def recover_missing_host_permissions(
     function is willing to move from / symlink), otherwise
     :class:`LatchkeyStoreError` is raised.
 
-    Returns ``True`` if a repair was performed, ``False`` if the canonical
-    file already existed (the common case -- a cheap no-op check on the
-    hot path).
+    Returns ``True`` if the canonical file had to be materialized,
+    ``False`` if it already existed (the common case -- a cheap check on
+    the hot path). The return value reflects only the file repair;
+    registration is idempotent and runs in both cases.
 
     Raises:
         LatchkeyStoreError: if ``opaque_permissions_path`` is outside the
-            opaque permissions directory, or the underlying link / write
-            fails.
+            opaque permissions directory, or the underlying link / write /
+            registration fails.
     """
     plugin_data_dir = latchkey.plugin_data_dir
     host_path = permissions_path_for_host(plugin_data_dir, host_id)
     # ``is_file`` follows symlinks, so a finalized opaque->host symlink whose
-    # target exists also counts as "already present" and needs no repair.
-    if host_path.is_file():
-        return False
+    # target exists also counts as "already present" and needs no file repair.
+    did_repair = False
+    if not host_path.is_file():
+        opaque_root = opaque_permissions_dir(plugin_data_dir)
+        if opaque_permissions_path.parent != opaque_root:
+            raise LatchkeyStoreError(
+                f"Refusing to recover host {host_id} permissions from {opaque_permissions_path}: "
+                f"it is not under the opaque permissions directory {opaque_root}."
+            )
+        is_standalone_handle = opaque_permissions_path.is_file() and not opaque_permissions_path.is_symlink()
+        if is_standalone_handle:
+            # The common recovery: the opaque handle is the deny-all baseline
+            # written at agent-creation time. ``finalize_host_permissions`` moves
+            # those baseline rules to the canonical host path and swings the
+            # opaque handle to a symlink pointing at it, so subsequent grants the
+            # UI writes to the canonical path are visible to the agent.
+            finalize_host_permissions(latchkey, opaque_permissions_path, host_id)
+        else:
+            # The opaque handle is missing or is a (dangling) symlink -- both are
+            # unexpected for a request the gateway just accepted, but in either
+            # case materializing the baseline at the canonical path is the safe
+            # repair: a dangling opaque symlink already points here (so it starts
+            # resolving once the file exists), and a missing handle at least lets
+            # future grants land somewhere real.
+            save_permissions(host_path, _AGENT_BASELINE_PERMISSIONS)
+        did_repair = True
 
-    opaque_root = opaque_permissions_dir(plugin_data_dir)
-    if opaque_permissions_path.parent != opaque_root:
-        raise LatchkeyStoreError(
-            f"Refusing to recover host {host_id} permissions from {opaque_permissions_path}: "
-            f"it is not under the opaque permissions directory {opaque_root}."
-        )
-
-    is_standalone_handle = opaque_permissions_path.is_file() and not opaque_permissions_path.is_symlink()
-    if is_standalone_handle:
-        # The common recovery: the opaque handle is the deny-all baseline
-        # written at agent-creation time. ``finalize_host_permissions`` moves
-        # those baseline rules to the canonical host path and swings the
-        # opaque handle to a symlink pointing at it, so subsequent grants the
-        # UI writes to the canonical path are visible to the agent.
-        finalize_host_permissions(latchkey, opaque_permissions_path, host_id)
-    else:
-        # The opaque handle is missing or is a (dangling) symlink -- both are
-        # unexpected for a request the gateway just accepted, but in either
-        # case materializing the baseline at the canonical path is the safe
-        # repair: a dangling opaque symlink already points here (so it starts
-        # resolving once the file exists), and a missing handle at least lets
-        # future grants land somewhere real.
-        save_permissions(host_path, _AGENT_BASELINE_PERMISSIONS)
-    return True
+    # Always ensure the requesting agent is in the host's allowlist. This is a
+    # no-op when it already is, and repairs the auto-register de-dup gap when
+    # it is not.
+    register_agent_for_host(plugin_data_dir, host_id, agent_id)
+    return did_repair

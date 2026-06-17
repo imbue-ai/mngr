@@ -7,7 +7,6 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from imbue.imbue_common.model_update import to_update
-
 from imbue.minds.cli.run import _StreamedPermissionRequestHandler
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
@@ -176,6 +175,8 @@ def test_streamed_permission_handler_recovers_missing_host_permissions(tmp_path:
     assert canonical.is_file()
     assert setup.opaque_permissions_path.is_symlink()
     assert setup.opaque_permissions_path.resolve() == canonical.resolve()
+    # The requesting agent was registered into the host's allowlist.
+    assert str(agent_id) in canonical.read_text()
     # The request was still surfaced to the inbox.
     inbox = app.state.request_inbox
     assert isinstance(inbox, RequestInbox)

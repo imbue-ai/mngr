@@ -79,7 +79,7 @@ from imbue.minds.utils.output import emit_event
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
-from imbue.mngr_latchkey.agent_setup import recover_missing_host_permissions
+from imbue.mngr_latchkey.agent_setup import recover_host_permissions_for_agent
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -596,22 +596,25 @@ class _StreamedPermissionRequestHandler(FrozenModel):
 
         The streamed request carries ``permissions_target_path`` -- the
         agent's opaque permissions handle (what its gateway JWT resolves
-        to). When the canonical host-keyed permissions file does not yet
-        exist, :func:`recover_missing_host_permissions` swings that handle
-        into the canonical path so grants written by the approval flow are
-        visible to the agent. No-op when the target is absent (non-latchkey
-        request) or the host is not yet known to discovery.
+        to). :func:`recover_host_permissions_for_agent` swings that handle
+        into the canonical host path when the latter is missing (so grants
+        written by the approval flow are visible to the agent) and
+        idempotently re-registers the agent in the host's allowlist. No-op
+        when the target is absent (non-latchkey request) or the host is
+        not yet known to discovery.
         """
         target = event.permissions_target_path
         if target is None:
             return
-        host_id = self._resolve_host_id(AgentId(event.agent_id))
+        agent_id = AgentId(event.agent_id)
+        host_id = self._resolve_host_id(agent_id)
         if host_id is None:
             return
         try:
-            did_recover = recover_missing_host_permissions(
+            did_recover = recover_host_permissions_for_agent(
                 latchkey=self.latchkey,
                 host_id=host_id,
+                agent_id=agent_id,
                 opaque_permissions_path=Path(target),
             )
         except LatchkeyStoreError as e:
