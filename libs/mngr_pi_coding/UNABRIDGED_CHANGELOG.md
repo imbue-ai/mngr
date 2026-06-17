@@ -4,6 +4,20 @@ Full, unedited changelog entries for the `mngr_pi_coding` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+The pi lifecycle extension now also writes per-message usage events (cost + tokens) for `mngr usage`, gated on a `pi_emit_usage` marker that the new `imbue-mngr-pi-coding-usage` package provisions. pi reports cost client-side, so each assistant `message_end` appends a `cost_snapshot` (reported cost, tokens, provider-qualified model) to `events/pi-coding/usage/events.jsonl`. Inert unless the gate marker is present, so behavior is unchanged for agents without the usage plugin installed.
+
+pi-coding agents now preserve their transcripts on destroy, matching the claude plugin.
+
+- New `preserve_on_destroy` config option (default `true`): before a pi-coding agent's state directory is deleted on destroy, its raw and common transcripts and the recorded session-file pointer are copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`, mirroring the agent's state-directory layout. For remote agents the files are pulled to the local machine so they survive host destruction. Set to `false` to discard transcript data on destroy.
+
+- Works for both online destroys and offline host destruction (where the agent state is read off the host's persisted volume).
+
+- The pi-coding release lifecycle test now asserts the transcripts are actually preserved on destroy (previously destroy was bare cleanup), extending the shared end-to-end coverage to this plugin.
+
+- pi's native resumable session store (`plugin/pi_coding/sessions`) is now also preserved on destroy, so the conversation content itself survives -- previously only the recorded session-file pointer was kept, which dangled once the store was deleted. The credential `auth.json` is a path-separate sibling of the store and is excluded.
+
 ## 2026-06-12
 
 Added the `pi` alias for the `pi-coding` agent type. `mngr create my-agent pi` is now equivalent to `mngr create my-agent pi-coding`.

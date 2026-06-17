@@ -29,8 +29,12 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
     Subclasses declare:
 
     * ``TUI_READY_INDICATOR`` -- a stable substring that appears in the pane
-      once the TUI is rendered and ready to accept input. Polled at startup
-      by ``wait_for_ready_signal``.
+      once the TUI is rendered and ready to accept input, on BOTH a fresh
+      start and a resume (and ideally stays visible while the TUI is
+      processing). Polled by ``send_message`` before pasting, and at startup
+      by ``wait_for_ready_signal``. A startup-only banner is unsuitable: it
+      does not render when resuming a saved session, so prefer the input
+      prompt glyph over a welcome banner.
     * ``_send_enter_and_validate`` -- how to submit a message and confirm it
       landed. Pick one of the strategies in ``tui_utils``:
       ``send_enter_via_tmux_wait_for_hook`` (for agents whose TUI fires a
@@ -71,10 +75,16 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         Acquires an exclusive file lock to prevent concurrent sends from
         interleaving tmux input. Runs ``_preflight_send_message`` first --
         errors from preflight indicate a condition that won't resolve by
-        resending (e.g., a blocking dialog).
+        resending (e.g., a blocking dialog), and a blocking dialog must be
+        surfaced rather than waited on (the ready indicator never appears while
+        a dialog occupies the pane). Then waits for the TUI to be ready before
+        pasting -- this covers every send path (initial message on create,
+        resume message, and any later send), so keystrokes are never delivered
+        while a resumed transcript is still replaying.
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._preflight_send_message(self.tmux_target)
+            wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
             self._send_tmux_literal_keys(self.tmux_target, message)
             wait_for_paste_visible(self, self.tmux_target, message)
             self._send_enter_and_validate(self.tmux_target)
@@ -82,7 +92,14 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
-        """Run the start action; on creation, also wait for the TUI ready banner."""
+        """Run the start action; on creation, also wait for the TUI ready indicator.
+
+        ``send_message`` independently waits for readiness, so this create-path
+        wait only matters for agents created without an initial message (where
+        ``send_message`` is never called). When a message follows, the readiness
+        check in ``send_message`` is a no-op because the indicator is already
+        present, so there is no awkward double-wait.
+        """
         super().wait_for_ready_signal(is_creating, start_action, timeout)
         if is_creating:
             wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())

@@ -42,7 +42,7 @@ def test_prevent_time_sleep() -> None:
     # report no active tasks while OVH still rejects `/rebuild` with the same
     # "running tasks" error, so the POST itself is retried with a sleep
     # between attempts. Same no-push-mechanism justification.
-    rc.check_time_sleep(_DIR, snapshot(11))
+    rc.check_time_sleep(_DIR, snapshot(10))
 
 
 def test_prevent_global_keyword() -> None:
@@ -211,7 +211,7 @@ def test_prevent_monkeypatch_setattr() -> None:
 
 
 def test_prevent_test_container_classes() -> None:
-    rc.check_test_container_classes(_DIR, snapshot(8))
+    rc.check_test_container_classes(_DIR, snapshot(7))
 
 
 def test_prevent_pytest_mark_integration() -> None:

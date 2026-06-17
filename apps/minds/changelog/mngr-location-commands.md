@@ -1,0 +1,1 @@
+- Mark the two forkserver-based `MngrCaller` end-to-end tests as `@pytest.mark.flaky` so offload retries them: forkserver cold-start can exceed the 10s pytest timeout under CI load.

@@ -2,7 +2,7 @@
 
 AWS provider backend plugin for mngr. Runs agents in Docker containers on Amazon EC2 instances.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults and the IAM permission set may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, IAM profile, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, and `auto_shutdown_seconds` before pointing this at production resources.
 
 See `mngr_vps_docker` for the base architecture and shared infrastructure.
 
@@ -96,8 +96,9 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |
-| `iam_instance_profile` | `None` | IAM instance profile name. |
-| `auto_shutdown_seconds` | `None` | When set, cloud-init schedules `shutdown -P` so the OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts, with a floor of 1 minute). Combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance. A hard max-lifetime cap, distinct from the activity-based `default_idle_timeout`. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
+| `iam_instance_profile` | `None` | Optional IAM instance profile name attached to launched instances. |
+| `terminate_on_shutdown` | `false` | EC2 `InstanceInitiatedShutdownBehavior` on an OS shutdown. `false` → `stop` (resumable via `mngr start`, EBS preserved); `true` → `terminate` (ephemeral / self-cleaning). |
+| `auto_shutdown_seconds` | `None` | When set, cloud-init schedules `shutdown -P` so the OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts, with a floor of 1 minute). Whether that stops or terminates the instance is governed by `terminate_on_shutdown` (default `stop`, i.e. resumable). A hard max-lifetime cap, distinct from the activity-based `default_idle_timeout`. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
 ## One-time setup: `mngr aws prepare`
 
@@ -117,7 +118,7 @@ It is **read-only-first**: it issues a `DescribeSecurityGroups` call, and when t
 - `ec2:CreateSecurityGroup` (only when the group does not exist)
 - `ec2:AuthorizeSecurityGroupIngress` (only when a required ingress rule is missing)
 
-After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG-mutating permissions. This split lets you give devs restricted creds while keeping the privileged setup behind an admin one-shot.
+After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG-mutating permissions. This split lets you give devs restricted creds while keeping the privileged SG setup behind an admin one-shot.
 
 ## Teardown: `mngr aws cleanup`
 
@@ -127,7 +128,7 @@ After `prepare` succeeds, the per-host `mngr create` path only needs the regular
 mngr aws cleanup --region us-east-1
 ```
 
-It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group is already gone. It needs `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
+It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group is already gone. It needs only `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
 
 ## Required IAM permissions
 
@@ -135,10 +136,14 @@ For `mngr create --provider aws` (per-host path):
 
 ```
 ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
+ec2:StopInstances, ec2:StartInstances,
+ec2:CreateTags, ec2:DeleteTags,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
 ec2:DescribeImages
 ```
+
+No `iam:*` actions are required by default (no instance profile is attached); `iam:PassRole` is only needed if you set the optional `iam_instance_profile`.
 
 For `mngr aws prepare` (one-time admin setup; in addition to the above for convenience):
 
@@ -152,7 +157,7 @@ For `mngr aws cleanup` (teardown; in addition to the per-host path's `DescribeIn
 ec2:DeleteSecurityGroup
 ```
 
-Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separate `CreateTags` call. EBS volumes are tagged the same way (no extra permission needed). Stop/start operate on the container inside the instance (Docker over SSH), not on the EC2 instance itself, so `ec2:StopInstances` / `ec2:StartInstances` are not needed. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
+Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. After launch, `ec2:CreateTags`/`ec2:DeleteTags` mirror per-agent metadata onto the instance (tags keyed `mngr-agent-<id>`) so a stopped host still lists its agents and resolves by name (see the offline-discovery note below). `ec2:StopInstances`/`ec2:StartInstances` back `mngr stop --stop-host` / `mngr start`, so a paused agent costs only EBS storage. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
 
 ## Implementation details
 
@@ -160,7 +165,10 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - EC2 instances are tagged with `mngr-provider=<name>`, `mngr-host-id=<id>`, and `mngr-created-at=<iso8601>` for discovery and cleanup-tracking.
 - SSH key auth: each host gets a per-host EC2 KeyPair via `ImportKeyPair`, deleted on `destroy_host`.
 - Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
-- Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
+- Instance shutdown behavior (`InstanceInitiatedShutdownBehavior`) is set from the `terminate_on_shutdown` config field: `stop` by default (an OS shutdown — the idle watcher or the `auto_shutdown_seconds` time cap — stops the instance, leaving it resumable with its EBS volume intact) or `terminate` when `terminate_on_shutdown = true` (an OS shutdown terminates the instance, so a self-halted host is garbage-collected automatically). This is independent of `mngr stop --stop-host`, which uses the `StopInstances` API (not an OS halt) and always leaves the instance recoverable.
+- **Stop/resume** (`mngr stop --stop-host` / `mngr start`): the provider overrides `stop_host`/`start_host` to stop and start the EC2 instance via the API, preserving the root EBS volume across the stop. A stopped instance loses its public IPv4, so `start_host` reads the fresh IP, rewrites `vps_ip` in the host record, and re-points known_hosts before restarting the container. For a stable address across stops, see the Elastic IP item under "Future improvements".
+- **Self-stopping idle watcher**: an idle agent stops its own EC2 instance (so a paused agent costs only EBS), reusing the in-container activity watcher. A container cannot power off its host, so on idle the in-container `shutdown.sh` *signals* by touching a sentinel file (`stop-instance-requested`) on the shared host volume rather than killing the container. At host finalization the provider installs (on the outer host) a systemd path unit (`mngr-aws-idle-watcher.path`) that watches the outer-filesystem location of that sentinel; when it appears, a paired oneshot service powers the host off with `shutdown -P now`. EC2 then applies the instance's `InstanceInitiatedShutdownBehavior` (`stop`, the default — resumable — or `terminate`; see `terminate_on_shutdown`) to decide whether the poweroff stops or terminates the instance. **No IAM role or awscli is involved** — the watcher never calls the EC2 API. The install is best-effort: if the unit setup fails, finalization logs a warning and proceeds with no auto-stop (manual `mngr stop --stop-host` still works). `mngr start` resumes a self-stopped host exactly as it resumes a `mngr stop --stop-host` host (the self-stop service removes the sentinel before powering off so a resumed instance isn't immediately re-stopped).
+- **Offline discovery of stopped hosts**: a stopped instance has no public IP, so it falls out of the SSH-based discovery the base provider uses. To keep paused hosts visible in `mngr list` and resolvable for `mngr start`, agent records are mirrored into EC2 tags (written via `persist_agent_data`) and `AwsProvider` reconstructs stopped hosts + their agents from tags in `discover_hosts_and_agents` / `to_offline_host`. Each agent is stored as up to three per-field tags keyed `mngr-agent-<id>-name` / `-type` / `-labels` (the id lives in the key; `name`/`type` raw, `labels` as compact JSON), so `labels` gets the full 256-char value budget and an offline `mngr label` on a stopped host round-trips. A field whose value still overflows 256 chars (realistically only `labels`) is dropped with a warning rather than a silent no-op. EC2 caps a resource at 50 tags; when a host has so many agents that mirroring another would exceed that, `persist_agent_data` raises a `NotImplementedError` (which the CLI turns into an "open an issue" prompt) rather than failing obscurely. An S3-backed store for many-agent hosts (and full agent records) is the planned fix.
 - The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host`; run `mngr aws cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists).
 - **No snapshot workflow**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider has no host snapshot workflow today. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are intentionally unwired -- they raise `VpsDockerError` with an actionable "EBS snapshot support is not implemented in mngr_aws" message rather than running real EBS API calls that nothing else consumes. Restore from a fresh `mngr create` instead.
 - **Spot capacity via `--aws-spot`**: opt-in (presence-only build arg). When set, the instance launches with `InstanceMarketOptions={"MarketType": "spot"}` and is billed at the spot rate. AWS may reclaim the instance with ~2 minutes' notice; mngr does not currently surface the spot-interruption signal, so the host is terminated cold from mngr's perspective (cloud-init's auto-shutdown safety net still fires correctly). Use for cheap experimental agents, not for long-running production-shaped workloads.
@@ -179,7 +187,7 @@ Three layers of damage control limit leaks from killed-mid-run tests:
 
 1. Every test's `finally` calls `mngr destroy --force`.
 2. A `pytest_sessionfinish` hook in `imbue/mngr_aws/conftest.py` scans for any test-tagged EC2 instance older than 1 hour at session end, force-terminates leaks, and fails the session.
-3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.aws] auto_shutdown_seconds = 3600`. This propagates to cloud-init as `shutdown -P +60` on every test instance; combined with `InstanceInitiatedShutdownBehavior=terminate`, the instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs.
+3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.aws] auto_shutdown_seconds = 3600` and `terminate_on_shutdown = true`. This propagates to cloud-init as `shutdown -P +60` on every test instance; combined with `InstanceInitiatedShutdownBehavior=terminate` (from `terminate_on_shutdown = true`), the instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs. (The one resumable-idle-stop test overrides `terminate_on_shutdown = false` so its idle poweroff stops, not terminates, the instance — it relies on the session-end leak scanner to reap any leak.)
 
 Production code enforces this: `AwsProvider._validate_provider_args_for_create` refuses to launch an EC2 instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_seconds` is configured (positive). Mirrors the pattern used by `mngr_modal.backend._create_environment`. Independently, `AwsVpsClient.create_instance` tags every pytest-launched instance with `mngr-pytest-launched=true` (constant `AWS_PYTEST_LAUNCHED_TAG`); the conftest session-end scanner filters on that tag, so leaked test instances are found regardless of the agent / host name shape.
 
