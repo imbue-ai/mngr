@@ -6,6 +6,19 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: agy (antigravity) agents now preserve transcripts (raw + common) and conversation-id history on destroy, mirroring the claude plugin. New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. agy's native resumable conversation store (`plugin/antigravity/home/.gemini/antigravity-cli/conversations/`) is preserved too, so the agent can be resumed or adopted. Known limitation: on macOS the store is encrypted by the login-keychain "Antigravity Safe Storage" key, so a macOS-created store is not portable to another machine or user.
+
+### Changed
+
+- Changed: Common-transcript converter's event-conversion logic moved out of the inline `python3` heredoc into a standalone `common_transcript_convert.py` (provisioned alongside `common_transcript.sh`), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, non-string USER_INPUT content, and CODE_ACTION records with non-string content are dropped silently rather than crashing the converter.
+- Changed: Common-transcript watcher no longer echoes converter errors to the agent's pane — a genuine conversion error is recorded in the structured log only.
+
+### Fixed
+
+- Fixed: Stale `queue_log_path_template=None` kwarg in the antigravity submission path's call to `send_enter_via_tmux_wait_for_hook`; the parameter was removed upstream. agy supplies no acceptance marker so behavior is unchanged, but the plugin now type-checks against the current `tui_utils` signature.
+
 ## [v0.1.6] - 2026-06-16
 
 ### Changed

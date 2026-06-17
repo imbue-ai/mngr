@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Common-transcript converter's event-conversion logic moved out of the inline `python3` heredoc in `common_transcript.sh` into a standalone `common_transcript_convert.py` (provisioned alongside the shell script), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, and transcript lines whose `message` is `null` are dropped silently rather than aborting the conversion run.
+- Changed: Common-transcript watcher no longer echoes converter errors to the agent's pane — a genuine conversion error is recorded in the structured log only.
+- Changed: Session-preservation-on-destroy now uses the shared `preserve_agent_state` / `preserve_host_agents_on_destroy` helpers in mngr core instead of an inline copy. The preserved file set, the `preserve_sessions_on_destroy` config option, and the online/offline behavior are unchanged. The offline host-destroy path now also filters discovered agents by agent type.
+
+### Fixed
+
+- Fixed: Synchronous transcript flush at turn end now runs on every turn-end path — not just `wait_for_stop_hook.sh`'s `run_post_completion`, which is skipped on the no-`/proc` fast path (macOS / local agents) and on the SIGTERM/SIGINT handler. The flush moved into `mark_inactive`, which every path calls before clearing the `active` marker, so a WAITING-signal consumer can no longer outrun the converter on those paths. The flush's lock-acquire wait is bounded per call (2s for SIGTERM/SIGINT, 30s for normal turn-end) via the portable `MNGR_CONVERT_LOCK_TIMEOUT` rather than `timeout(1)` (macOS lacks it).
+
 ## [v0.2.15] - 2026-06-16
 
 ### Changed

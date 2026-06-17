@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Vultr release-test settings now also disable the `azure` provider (`[providers.azure] is_enabled = false`), mirroring the existing modal/gcp/aws/ovh disables, so `mngr list` inside the Vultr lifecycle tests no longer exits non-zero when Azure credentials aren't resolvable.
+
+### Removed
+
+- Removed: Dead `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` stubs from `VultrVpsClient`, matching the removal of those abstract methods from the shared `VpsClientInterface`.
+
 ## [v0.1.8] - 2026-06-16
 
 ## [v0.1.7] - 2026-06-15
