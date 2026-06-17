@@ -4,6 +4,28 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+The common-transcript converter's event-conversion logic moved out of an inline `python3` heredoc in `common_transcript.sh` into a standalone `common_transcript_convert.py` (provisioned alongside the shell script), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, and transcript lines whose `message` is `null` (rather than an object) are dropped silently rather than aborting the conversion run.
+
+The common-transcript watcher no longer echoes converter errors to the agent's pane: a genuine conversion error is recorded in the structured log only, instead of also being written to the watcher's stderr.
+
+Internal refactor (no behavior change): the claude plugin's session-preservation-on-destroy now uses the shared `preserve_agent_state` / `preserve_host_agents_on_destroy` helpers in mngr core instead of its own inline copy. The preserved file set, the `preserve_sessions_on_destroy` config option, and the online/offline behavior are unchanged. The offline host-destroy path now also filters discovered agents by agent type.
+
+Fixed: the synchronous transcript flush at turn end (which keeps a WAITING-signal consumer
+from outrunning the common-transcript converter) now runs on *every* turn-end path.
+Previously it lived in `wait_for_stop_hook.sh`'s `run_post_completion`, which is skipped on
+the no-`/proc` fast path (macOS / local agents, where the Claude-ancestor PID lookup fails)
+and on the SIGTERM/SIGINT handler -- so on those paths the marker was cleared without
+flushing and the converter race remained. The flush now lives in `mark_inactive`, which
+every path calls before clearing the `active` marker.
+
+The flush's lock-acquire wait -- its only potentially-slow step -- is now bounded by an
+explicit per-call timeout, so the SIGTERM/SIGINT handler can't block on it: interrupts cap
+the wait at 2s (`HOOK_FLUSH_LOCK_TIMEOUT_SIGNAL`) while normal turn-end paths use 30s
+(`HOOK_FLUSH_LOCK_TIMEOUT`). The bound is a portable `MNGR_CONVERT_LOCK_TIMEOUT` handed to
+each converter pass rather than a `timeout(1)` wrapper, which macOS lacks.
+
 ## 2026-06-15
 
 Hardened the turn-end signal so consumers that read the common transcript on the WAITING

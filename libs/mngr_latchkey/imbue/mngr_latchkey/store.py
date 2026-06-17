@@ -376,19 +376,46 @@ def link_opaque_permissions_to_host(
             # First creation for this host_id: promote the baseline to
             # the canonical location.
             os.replace(opaque_path, host_path)
-        # Recreate ``opaque_path`` as a symlink. ``os.replace`` requires
-        # both paths to exist on the same filesystem, but that is
-        # guaranteed here: opaque_path and host_path both live under
-        # ``data_dir``.
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {host_path}: {e}") from e
+    point_opaque_handle_at_host(data_dir, opaque_path, host_id)
+    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
+
+
+def point_opaque_handle_at_host(
+    data_dir: Path,
+    opaque_path: Path,
+    host_id: HostId,
+) -> None:
+    """(Re)create ``opaque_path`` as a symlink to the host's canonical permissions file.
+
+    Unlike :func:`link_opaque_permissions_to_host`, this moves nothing: it
+    only ensures the opaque handle is a symlink pointing at
+    ``permissions_path_for_host``. Use it when the canonical file already
+    exists (or was materialized directly) and the handle needs to point at
+    it -- e.g. when recovering an agent whose opaque handle went missing.
+
+    Idempotent: an existing handle (regular file, wrong-target symlink, or
+    already-correct symlink) is atomically replaced by a fresh symlink. The
+    target is *absolute* so moving the symlink later doesn't break it.
+
+    Raises ``LatchkeyStoreError`` if the symlink cannot be (re)created.
+    """
+    host_path = permissions_path_for_host(data_dir, host_id)
+    try:
+        opaque_path.parent.mkdir(parents=True, exist_ok=True)
         absolute_target = host_path.resolve()
+        # ``os.replace`` requires both paths on the same filesystem, which is
+        # guaranteed here: the temp link and the handle both live under
+        # ``data_dir``.
         tmp_link = opaque_path.with_name(opaque_path.name + ".linktmp")
         if tmp_link.exists() or tmp_link.is_symlink():
             tmp_link.unlink()
         tmp_link.symlink_to(absolute_target)
         os.replace(tmp_link, opaque_path)
     except OSError as e:
-        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {host_path}: {e}") from e
-    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
+        raise LatchkeyStoreError(f"Failed to point opaque permissions handle {opaque_path} at {host_path}: {e}") from e
+    logger.debug("Pointed opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
 
 
 def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:

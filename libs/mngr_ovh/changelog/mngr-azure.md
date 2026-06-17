@@ -1,7 +1,0 @@
-## OVH provider
-
-- `mngr ovh list` now reads its defaults from the user's `[providers.<name>]` settings.toml block (selected with `--provider`, default `ovh`), matching `mngr aws prepare` / `mngr gcp prepare` / `mngr azure prepare`. Previously it built `OvhProviderConfig()` with class defaults unconditionally, so it always talked to the default endpoint / subsidiary (`ovh-us` / `US`) regardless of what the user pinned -- a user who configured a non-default `endpoint` / `ovh_subsidiary` in their provider block (e.g. `ovh-eu`) and ran `mngr ovh list` would inspect a different account than the runtime `mngr create --provider <name>` path uses. Credentials still fall back to env / `~/.ovh.conf` when the block leaves them unset. A warning is logged if the named `--provider` block exists but is not an OVH backend.
-
-- `mngr ovh list` groups its OVH-specific options (`--provider`, `--all`) under a "Provider" option group, so `--help` and the generated docs list them ahead of the shared common options instead of below them.
-
-- The OVH release-test settings now also disable the `azure` provider (`[providers.azure] is_enabled = false`), mirroring the existing gcp/aws/vultr disables. Without it, `mngr list` inside the OVH lifecycle tests would enumerate the newly-added azure provider and exit non-zero when Azure credentials weren't resolvable in that subprocess, failing the OVH tests for a non-OVH reason.

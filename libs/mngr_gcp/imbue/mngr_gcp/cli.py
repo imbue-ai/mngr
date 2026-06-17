@@ -27,6 +27,7 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.output_helpers import OperatorResultPart
 from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -191,15 +192,19 @@ def _output_prepare_result(
     ``prepared`` event. The structured forms carry ``created`` so a caller can
     tell a first-run create from an idempotent no-op.
     """
-    data = {
-        "firewall_name": firewall_name,
-        "target_tag": result.target_tag,
-        "project_id": project_id,
-        "created": result.was_created,
-    }
-
-    human_lines = [f"Prepared GCP firewall rule {firewall_name} (tag {result.target_tag}) in project {project_id}"]
-    emit_operator_result("prepared", data, output_format, human_lines)
+    emit_operator_result(
+        "prepared",
+        [
+            OperatorResultPart.shown(
+                f"Prepared GCP firewall rule {firewall_name} (tag {result.target_tag}) in project {project_id}",
+                firewall_name=firewall_name,
+                target_tag=result.target_tag,
+                project_id=project_id,
+                created=result.was_created,
+            ),
+        ],
+        output_format,
+    )
 
 
 def _output_cleanup_result(
@@ -214,17 +219,20 @@ def _output_cleanup_result(
     ``cleaned_up`` event. ``deleted`` is False when the rule was already absent
     (idempotent no-op).
     """
-    data = {
-        "firewall_name": firewall_name,
-        "project_id": project_id,
-        "deleted": deleted_firewall is not None,
-    }
-
-    if deleted_firewall is None:
-        human_lines = [f"Nothing to clean up: no firewall rule {firewall_name} in project {project_id}."]
-    else:
-        human_lines = [f"Cleaned up GCP firewall rule {deleted_firewall} in project {project_id}"]
-    emit_operator_result("cleaned_up", data, output_format, human_lines)
+    emit_operator_result(
+        "cleaned_up",
+        [
+            OperatorResultPart.shown(
+                f"Cleaned up GCP firewall rule {deleted_firewall} in project {project_id}"
+                if deleted_firewall is not None
+                else f"Nothing to clean up: no firewall rule {firewall_name} in project {project_id}.",
+                firewall_name=firewall_name,
+                project_id=project_id,
+                deleted=deleted_firewall is not None,
+            ),
+        ],
+        output_format,
+    )
 
 
 @click.group(name="gcp")

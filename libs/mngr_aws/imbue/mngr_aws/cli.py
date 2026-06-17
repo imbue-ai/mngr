@@ -25,6 +25,7 @@ from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.output_helpers import OperatorResultPart
 from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -345,22 +346,30 @@ def _output_prepare_result(
     provisioned) so a caller can tell a first-run create from an idempotent
     no-op.
     """
-    data = {
-        "security_group_id": result.security_group_id,
-        "region": region,
-        "created": result.was_created,
-        "state_bucket_name": state_bucket_name,
-        "state_bucket_created": was_bucket_created,
-        "host_identity_name": host_identity_name,
-    }
-
-    human_lines = [f"Prepared AWS security group {result.security_group_id} in region {region}"]
-    if state_bucket_name is not None:
-        verb = "Created" if was_bucket_created else "Reused existing"
-        human_lines.append(f"{verb} S3 state bucket {state_bucket_name} in region {region}")
-    if host_identity_name is not None:
-        human_lines.append(f"Provisioned host-dir IAM identity {host_identity_name}")
-    emit_operator_result("prepared", data, output_format, human_lines)
+    bucket_verb = "Created" if was_bucket_created else "Reused existing"
+    emit_operator_result(
+        "prepared",
+        [
+            OperatorResultPart.shown(
+                f"Prepared AWS security group {result.security_group_id} in region {region}",
+                security_group_id=result.security_group_id,
+                region=region,
+                created=result.was_created,
+            ),
+            OperatorResultPart.shown_if(
+                state_bucket_name,
+                f"{bucket_verb} S3 state bucket {state_bucket_name} in region {region}",
+                state_bucket_name=state_bucket_name,
+                state_bucket_created=was_bucket_created,
+            ),
+            OperatorResultPart.shown_if(
+                host_identity_name,
+                f"Provisioned host-dir IAM identity {host_identity_name}",
+                host_identity_name=host_identity_name,
+            ),
+        ],
+        output_format,
+    )
 
 
 def _output_cleanup_result(
@@ -378,23 +387,30 @@ def _output_cleanup_result(
     None when no bucket existed / setup was skipped); ``host_identity_deleted``
     carries the deleted IAM identity name (or None when none existed).
     """
-    data = {
-        "security_group_id": deleted_sg_id,
-        "region": region,
-        "deleted": deleted_sg_id is not None,
-        "state_bucket_deleted": deleted_bucket_name,
-        "host_identity_deleted": deleted_host_identity_name,
-    }
-
-    if deleted_sg_id is None:
-        human_lines = [f"Nothing to clean up: no mngr-managed security group in region {region}."]
-    else:
-        human_lines = [f"Cleaned up AWS security group {deleted_sg_id} in region {region}"]
-    if deleted_bucket_name is not None:
-        human_lines.append(f"Deleted S3 state bucket {deleted_bucket_name} in region {region}")
-    if deleted_host_identity_name is not None:
-        human_lines.append(f"Deleted host-dir IAM identity {deleted_host_identity_name}")
-    emit_operator_result("cleaned_up", data, output_format, human_lines)
+    emit_operator_result(
+        "cleaned_up",
+        [
+            OperatorResultPart.shown(
+                f"Cleaned up AWS security group {deleted_sg_id} in region {region}"
+                if deleted_sg_id is not None
+                else f"Nothing to clean up: no mngr-managed security group in region {region}.",
+                security_group_id=deleted_sg_id,
+                region=region,
+                deleted=deleted_sg_id is not None,
+            ),
+            OperatorResultPart.shown_if(
+                deleted_bucket_name,
+                f"Deleted S3 state bucket {deleted_bucket_name} in region {region}",
+                state_bucket_deleted=deleted_bucket_name,
+            ),
+            OperatorResultPart.shown_if(
+                deleted_host_identity_name,
+                f"Deleted host-dir IAM identity {deleted_host_identity_name}",
+                host_identity_deleted=deleted_host_identity_name,
+            ),
+        ],
+        output_format,
+    )
 
 
 @click.group(name="aws")
