@@ -9,6 +9,23 @@
   // Workspace links (``/goto/<agent>/``) target the plugin, not minds.
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
+  // Which workspace's accent (if any) a same-origin minds content path
+  // belongs to. Recognises the workspace-scoped backend routes
+  // (settings / sharing / destroying / recovery) plus ``/goto/<id>/``,
+  // and returns null for every general screen so the bar paints the
+  // neutral chrome there. Browser-mode mirror of
+  // ``parseAccentSourceAgentId`` in electron/main.js (path-only -- the
+  // poll reads ``location.pathname``; cross-origin workspace subdomains
+  // throw before this is reached, which the poll's try/catch swallows).
+  function accentSourceFromPath(pathname) {
+    if (!pathname) return null;
+    var m =
+      pathname.match(/^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i) ||
+      pathname.match(/^\/destroying\/(agent-[a-f0-9]+)(?:\/|$)/i) ||
+      pathname.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
+    return m ? m[1] : null;
+  }
+
   // -- Per-agent accent color ------------------------------------------------
   //
   // Each SSE ``workspaces`` payload carries a per-workspace ``accent``
@@ -108,9 +125,12 @@
   //   --titlebar-fg       an RGB triple ("0 0 0" | "255 255 255") for the
   //                       contrasting foreground; titlebar-* utility classes
   //                       compose this with per-element alpha for hierarchy
-  // Cleared back to defaults (dark bar, white foreground) when there's no
-  // active workspace, so a sign-out / workspace-delete / freshly-launched
-  // app renders the default zinc-900 chrome.
+  // Cleared back to the neutral chrome (pure-white bar via the Chrome.jinja
+  // fallback, dark "0 0 0" foreground via the tokens.css fallback) on any
+  // non-workspace minds screen -- so a sign-out / workspace-delete /
+  // freshly-launched app, and plain navigation to Home / Create / accounts,
+  // all render the neutral white chrome. (Light-mode default; dark-mode
+  // pure black is a deferred follow-up.)
   //
   // ``currentTitleAgentId`` tracks the workspace ACTUALLY DISPLAYED in this
   // window's content view -- it gates ``maybeRedirectToRecovery`` so a stuck
@@ -129,13 +149,13 @@
   // painted by ``renderWorkspaces`` on the next tick.
   var accentByAgentId = {};
   // Tracks the agentId whose accent the chrome *wants* painted, regardless
-  // of whether the SSE cache has caught up yet. Bootstrap and the
-  // ``onLastWorkspaceAgentIdChanged`` path both set this even when the SSE
+  // of whether the SSE cache has caught up yet. The ``onAccentChanged`` path
+  // (and, in browser mode, the URL poll) sets this even when the SSE
   // workspaces payload hasn't arrived yet (cold start, freshly-created
   // workspace); the next ``workspaces`` tick replays the paint with the
   // now-populated cache. Independent of ``currentTitleAgentId`` so the
-  // accent-only call paths (bootstrap / last-workspace IPC) can update
-  // the titlebar without claiming to represent the displayed workspace.
+  // accent path can update the titlebar without claiming to represent the
+  // displayed workspace.
   var lastRequestedAccentAgentId = null;
   function rememberWorkspaceAccents(workspaces) {
     if (!workspaces) return;
@@ -282,63 +302,23 @@
     // that doesn't match /goto/<id>/, which would prevent the recovery-page
     // redirect from firing for the current agent.
     //
-    // Distinct from the persisted "last opened workspace" accent (below):
-    // ``onCurrentWorkspaceChanged`` carries null whenever the content view is
-    // on a non-workspace URL (Home, sign-in, ...) so it can't be used as the
-    // titlebar accent source. We track both -- the current workspace drives
-    // the recovery-page redirect lock, the last-opened workspace drives the
-    // accent color.
+    // ``onCurrentWorkspaceChanged`` is NARROW: it carries the agent id only
+    // while the content view is ACTUALLY displaying that workspace, and null on
+    // every other screen (including the workspace's own settings / sharing
+    // screens). It drives the recovery-redirect lock ONLY -- not the accent.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
-      // Authoritative for what THIS window is displaying: drive both the
-      // recovery-redirect lock and the accent off the same event.
       setDisplayedWorkspaceAgentId(agentId || null);
-      if (agentId) {
-        // Real workspace navigation -- apply the accent immediately. Main
-        // also persists this id so it survives a restart; we don't need to
-        // push it back over IPC here.
-        applyTitleAccent(agentId);
-        return;
-      }
-      // Non-workspace URL (Home, sign-in, accounts, ...): the bar should
-      // track the persisted last-opened workspace, which main may have
-      // *already cleared* by the time we get here (sign-out, deletion of
-      // the displayed workspace). Re-query rather than relying on the
-      // ``onLastWorkspaceAgentIdChanged`` broadcast: that broadcast's
-      // gate (``if (currentTitleAgentId) return;``) blocks the clear in
-      // any flow where the broadcast arrives BEFORE this null
-      // ``current-workspace-changed``, which is the case on sign-out (the
-      // two events come from different async streams and aren't ordered).
-      // The deletion path explicitly orders the IPC, but pulling the
-      // stored value here covers both paths uniformly.
-      window.minds.getLastWorkspaceAgentId().then(function (storedId) {
-        // A subsequent workspace open may have set ``currentTitleAgentId``
-        // while this IPC was in flight; let that win.
-        if (currentTitleAgentId) return;
-        applyTitleAccent(storedId || null);
-      });
     });
-    // Bootstrap: paint the accent on chrome page load using the persisted
-    // last-opened workspace, before any other IPC fires.
-    window.minds.getLastWorkspaceAgentId().then(function (agentId) {
-      if (agentId && !currentTitleAgentId) applyTitleAccent(agentId);
-    });
-    // Main pushes the new value on workspace-delete / sign-out / any other
-    // update so the bar tracks the source of truth even when this renderer
-    // wasn't the one that triggered the change.
-    //
-    // Scope: ``updateBundleLastWorkspaceAgentId`` in main sends this event
-    // only to THIS window's chrome view, so it never carries another
-    // window's state. The gate on ``currentTitleAgentId`` exists for a
-    // different reason: when the displayed workspace is deleted or the
-    // user signs out, main fires this with ``null`` *before* the
-    // content view's redirect to ``/`` has had a chance to emit
-    // ``current-workspace-changed: null``. The gate keeps the accent
-    // visible across that brief window so the bar doesn't flash to the
-    // default zinc-900 before the proper ``current-workspace-changed:
-    // null`` branch above re-queries ``getLastWorkspaceAgentId`` and
-    // applies the (now-null) value cleanly.
-    window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {
-      if (currentTitleAgentId) return;
+    // The titlebar accent is a pure function of the current screen, pushed by
+    // main on every navigation: the workspace id on any workspace-scoped screen
+    // (the workspace itself plus its settings / sharing / destroying / recovery
+    // screens) and null on a general screen, where the neutral chrome takes
+    // over. Apply it unconditionally -- main is the single source of truth, so
+    // there is nothing to remember, re-query, or gate here. Main also re-pushes
+    // the current value when this chrome view (re)loads (via
+    // ``primeViewWithCachedChromeState``), so a fresh / rebuilt view paints the
+    // right accent without a bootstrap round-trip.
+    window.minds.onAccentChanged(function (agentId) {
       applyTitleAccent(agentId || null);
     });
   } else {
@@ -356,7 +336,13 @@
         // handleChromeEvent -> renderWorkspaces.
         var workspaceChanged = currentTitleAgentId !== derivedAgentId;
         setDisplayedWorkspaceAgentId(derivedAgentId);
-        applyTitleAccent(derivedAgentId);
+        // The titlebar accent tracks a WIDER set than the displayed
+        // workspace: the workspace-scoped minds screens (settings,
+        // sharing, ...) keep the workspace's color even though they're
+        // not the workspace itself, while every general screen (Home,
+        // Create, accounts, ...) resolves to null and paints the neutral
+        // chrome. Mirrors ``parseAccentSourceAgentId`` in electron/main.js.
+        applyTitleAccent(accentSourceFromPath(loc));
         if (workspaceChanged) renderWorkspaces(lastWorkspaces);
       } catch (e) {}
     }, 500);
@@ -492,10 +478,11 @@
         // drop the SSE replay target so a background ``workspaces``
         // tick (a liveness flip or rename in any workspace) doesn't
         // repaint the previous workspace's accent over the preview
-        // while the user is still on the create form. The next
-        // navigation event (``current-workspace-changed`` for the new
-        // workspace on submit, or the last-workspace re-query on
-        // cancel) re-establishes the regular accent path.
+        // while the user is still on the create form. main drops this
+        // override when the window leaves ``/create``: it force-sends an
+        // ``accent-changed`` (the new workspace on submit, or null ->
+        // neutral chrome on abandon) even when the accent value didn't
+        // change -- see ``hasFreeformAccentPreview`` in electron/main.js.
         if (data.accent) {
           lastRequestedAccentAgentId = null;
           document.documentElement.style.setProperty('--workspace-accent', data.accent);
@@ -520,11 +507,13 @@
         // in this window. Main has already validated the agent-id +
         // hex shape and only fires this for the *sending bundle's*
         // chrome view, so a stray sender can't paint someone else's
-        // titlebar. Do not gate this on ``lastRequestedAccentAgentId``:
-        // /workspace/<id>/settings doesn't fire
-        // ``current-workspace-changed``, so the persisted last-workspace
-        // id may point at a different workspace than the one whose
-        // settings page is open.
+        // titlebar. Paint unconditionally rather than gating on
+        // ``lastRequestedAccentAgentId``: even though /workspace/<id>/settings
+        // is itself an accent source (main already pushed this agent id over
+        // ``accent-changed``), this optimistic event carries the JUST-PICKED
+        // hex, which the ``accentByAgentId`` cache won't hold until the
+        // settings POST -> mngr label -> SSE round-trip lands -- so we update
+        // the cache entry here and repaint immediately.
         if (data.agent_id && data.accent) {
           accentByAgentId[data.agent_id] = {
             accent: data.accent,
@@ -540,15 +529,17 @@
         renderWorkspaces(lastWorkspaces);
         // Replay the most recent ``applyTitleAccent`` call now that the
         // cache has fresh data. Catches two cases:
-        //   1. Cold start: bootstrap set ``lastRequestedAccentAgentId``
-        //      before any SSE tick; this tick fills the cache and paints.
+        //   1. Cold start / freshly-created workspace: the ``accent-changed``
+        //      IPC (or, in browser mode, the URL poll) set
+        //      ``lastRequestedAccentAgentId`` before any SSE tick populated the
+        //      cache; this tick fills the cache and paints.
         //   2. Settings-page color save: the settings POST updated the
         //      resolver snapshot which triggered this tick; the cached
         //      hex is now the newly-picked one, so the chrome repaints.
-        // Independent of ``currentTitleAgentId`` because the settings
-        // page (and ``lastWorkspace``-driven Home views) don't update
-        // it -- the persisted last-opened workspace is what drives the
-        // accent.
+        // Independent of ``currentTitleAgentId`` because the accent source
+        // (a workspace-scoped screen, which includes settings / sharing) is
+        // wider than the displayed workspace -- the accent rides
+        // ``lastRequestedAccentAgentId``, not the recovery-redirect lock.
         if (lastRequestedAccentAgentId) applyTitleAccent(lastRequestedAccentAgentId);
       }
       if (data.type === 'auth_status') updateAuthUI(data);

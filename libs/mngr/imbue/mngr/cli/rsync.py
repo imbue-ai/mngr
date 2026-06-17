@@ -4,10 +4,7 @@ from typing import Any
 import click
 from click_option_group import optgroup
 
-from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.find import resolve_host_location_address
-from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.find import resolve_host_location
 from imbue.mngr.api.rsync import RsyncEndpointError
 from imbue.mngr.api.rsync import rsync
 from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
@@ -20,10 +17,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import HostLocationAddress
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import UncommittedChangesMode
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
 class RsyncCliOptions(CommonCliOptions):
@@ -60,32 +54,7 @@ def _resolve_endpoint(
     -- that's rsync's "copy contents into destination" shorthand, which is almost
     always what the user wants when they referred to an agent/host by name only.
     """
-    if parsed.agent is None and parsed.host is None:
-        if parsed.path is None:
-            raise UserInputError("Endpoint must include an agent, a host, or a path")
-        provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return online_host, _user_path_to_str(parsed.path, parsed.has_trailing_path_slash)
-
-    # Scope to the target's provider/agent so an unrelated down provider isn't queried.
-    provider_names: tuple[str, ...] | None = None
-    if parsed.host is not None and parsed.host.provider is not None:
-        provider_names = (str(parsed.host.provider),)
-    agent_identifiers = (str(parsed.agent),) if parsed.agent is not None else None
-    agents_by_host, _ = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=provider_names,
-        agent_identifiers=agent_identifiers,
-        include_destroyed=False,
-        reset_caches=False,
-    )
-    resolved = resolve_host_location_address(
-        parsed,
-        agents_by_host,
-        mngr_ctx,
-        is_start_desired=is_start_desired,
-    )
+    resolved = resolve_host_location(parsed, mngr_ctx, is_start_desired=is_start_desired)
     if parsed.path is None:
         # mngr-generated path (the agent/host workdir): suffix with ``/`` so
         # rsync copies contents into destination.

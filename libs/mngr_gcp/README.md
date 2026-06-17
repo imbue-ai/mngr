@@ -102,6 +102,8 @@ mngr destroy my-agent
 
 GCE VMs are zonal, so the placement knob is `--gcp-zone=` (e.g. `us-west1-b`), not a region. When `default_region` is set explicitly, the chosen zone must belong to it; otherwise the region is derived from the zone.
 
+`mngr stop` stops the agent's container and the GCE VM, so a paused agent costs only disk storage — compute billing ends and the boot disk (with all state) persists. `mngr start` resumes it, rebinding to the fresh ephemeral external IP. An idle agent self-stops the same way. A stopped VM still appears in `mngr list` and resolves by name. `mngr destroy` deletes the VM.
+
 ## GCP-specific configuration
 
 These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
@@ -142,14 +144,14 @@ compute.instances.list, compute.firewalls.delete
 
 ```
 compute.instances.create, compute.instances.delete, compute.instances.get,
-compute.instances.list, compute.firewalls.get,
-compute.zoneOperations.get
+compute.instances.list, compute.instances.stop, compute.instances.start,
+compute.firewalls.get, compute.zoneOperations.get
 ```
 
 If `service_account_email` is set, the caller also needs `iam.serviceAccounts.actAs` on that service account.
 
 ## Limitations
 
-- `mngr stop` / `mngr start` operate on the agent's Docker container, not the GCE VM: the VM keeps running and billing while an agent is stopped. VM-level pause is not yet implemented for GCP.
 - No host snapshot workflow: restore from a fresh `mngr create` rather than rehydrating a killed host.
+- A stopped VM releases its ephemeral external IP and gets a fresh one on resume (mngr rebinds known_hosts automatically); there is no stable static-IP option yet.
 - Spot VMs (`--gcp-spot`) can be preempted by GCE at any time with ~30s notice and are deleted (not stopped) on preemption. Use for ephemeral / experimental agents.

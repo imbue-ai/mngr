@@ -98,7 +98,8 @@ The gateway exposes three extensions on its listen port:
 
 - `permissions` -- read and edit a detent permissions file (`GET`/`POST`/
   `DELETE /permissions/rules`), and browse the available service/permission
-  catalog (`GET /permissions/available`).
+  catalog (`GET /permissions/available`). A `POST` creates the target file
+  (and any missing parent directories) if it does not yet exist.
 - `permission-requests` -- a pending-request queue. Agents `POST` a
   request when blocked; UIs `GET` the queue (with `?follow=true` to
   stream) and approve or delete it on resolution.

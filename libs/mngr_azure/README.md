@@ -44,7 +44,7 @@ os_disk_type = "StandardSSD_LRS"
 
 ## One-time setup: `mngr azure prepare`
 
-Azure nests every resource in a *resource group*, and a fresh subscription has no default vnet. `mngr azure prepare` does the one-time privileged setup: it registers the required resource providers and creates the resource group, vnet, subnet, and NSG (tagged `managed-by=mngr`). After it succeeds, `mngr create --provider azure` needs only VM/NIC/IP-create permissions, so you can run it with limited credentials.
+Azure nests every resource in a *resource group*, and a fresh subscription has no default vnet. `mngr azure prepare` does the one-time privileged setup: it registers the required resource providers and creates the resource group, vnet, subnet, and NSG (tagged `managed-by=mngr`). It also creates a least-privilege custom role and assigns it per-VM so idle agents can deallocate themselves to halt billing; if you lack permission to assign roles, this step is skipped with a warning and idle self-deallocate is disabled (`mngr stop` still halts billing). After `prepare` succeeds, `mngr create --provider azure` needs only VM/NIC/IP-create permissions, so you can run it with limited credentials.
 
 ```bash
 mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
@@ -65,10 +65,6 @@ The safe inverse of `prepare`. Deletes the mngr-owned resource group (and its vn
 ```bash
 mngr azure cleanup
 ```
-
-### Quota note
-
-New pay-as-you-go subscriptions start with low or zero vCPU quota per region and per VM family. The default `Standard_B2s` is the family most likely to have nonzero quota; if `mngr create` fails with a quota error, request an increase in the Azure portal (Subscriptions → Usage + quotas) or pick a region with available quota (`az vm list-usage --location westus -o table`).
 
 ## Multiple regions
 
@@ -108,10 +104,10 @@ mngr start my-agent
 mngr destroy my-agent
 ```
 
-`mngr stop` / `start` operate on the Docker container inside the VM (the VM keeps running); `mngr destroy` deletes the VM, and the NIC, public IP, and OS disk are reaped automatically. If a `mngr create` fails after the IP/NIC are provisioned but before the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up automatically. A `SkuNotAvailable` error means the chosen VM size has no capacity in the region right now; pick another size with `-b --azure-vm-size=...` or another region.
+`mngr stop` stops the container and then **deallocates** the VM, which halts compute billing (an OS-level shutdown alone only powers it off — "Stopped (not deallocated)" — and keeps billing); the OS disk and all state persist, so a paused agent costs only disk storage. `mngr start` re-allocates it. The static public IP and SSH host keys survive the stop, and a deallocated VM still appears in `mngr list` and resolves by name. An idle agent deallocates its own VM the same way (via its managed identity), so billing stops even if the orchestrating `mngr` process is gone. `mngr destroy` deletes the VM; the NIC, public IP, and OS disk are reaped automatically. If a `mngr create` fails after the IP/NIC are provisioned but before the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up automatically. A `SkuNotAvailable` error means the chosen VM size has no capacity in the region right now; pick another size with `-b --azure-vm-size=...` or another region.
 
 ## Limitations
 
 - No host snapshot workflow: restore from a fresh `mngr create` rather than rehydrating a killed host.
 - Spot VMs (`--azure-spot`) are evicted on capacity pressure and deleted (not stopped) on eviction.
-- `auto_shutdown_seconds` performs an OS-level shutdown, which leaves the VM "Stopped (not deallocated)" and still billing for compute — Azure has no native "delete after N minutes". `mngr destroy` is the way to stop billing.
+- `auto_shutdown_seconds` is a coarse time cap that does an OS-level shutdown; on its own this leaves the VM "Stopped (not deallocated)" and still billing for compute (Azure has no native "delete after N minutes"). To actually halt compute billing, use `mngr stop` or rely on idle self-deallocate.

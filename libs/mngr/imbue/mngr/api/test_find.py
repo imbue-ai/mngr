@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.api.find import ensure_host_started
+from imbue.mngr.api.find import resolve_host_location
 from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -90,6 +91,53 @@ def test_resolve_host_location_address_resolves_host_and_path(
         agents_by_host=agents_by_host,
         mngr_ctx=temp_mngr_ctx,
     )
+
+    assert isinstance(result.location.host, OnlineHostInterface)
+    assert result.location.path == temp_work_dir
+    assert result.agent is None
+
+
+def test_resolve_host_location_with_local_bare_path_skips_discovery(
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A bare-path address resolves to the local host without consulting any provider.
+
+    The address has no agent and no host, so discovery is unnecessary -- the
+    outer helper short-circuits to the local provider.
+    """
+    parsed = HostLocationAddress(path=temp_work_dir)
+
+    result = resolve_host_location(parsed, temp_mngr_ctx)
+
+    assert isinstance(result.location.host, OnlineHostInterface)
+    assert result.location.path == temp_work_dir
+    assert result.agent is None
+
+
+def test_resolve_host_location_raises_when_address_is_empty(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An address with no agent, host, or path is rejected with UserInputError."""
+    parsed = HostLocationAddress()
+
+    with pytest.raises(UserInputError, match="must include an agent, a host, or a path"):
+        resolve_host_location(parsed, temp_mngr_ctx)
+
+
+def test_resolve_host_location_resolves_pinned_local_host(
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A host-pinned address resolves to that host via narrowed discovery."""
+    parsed = HostLocationAddress(
+        host=HostAddress(host=HostName(LOCAL_HOST_NAME), provider=ProviderInstanceName(LOCAL_PROVIDER_NAME)),
+        path=temp_work_dir,
+    )
+
+    result = resolve_host_location(parsed, temp_mngr_ctx)
 
     assert isinstance(result.location.host, OnlineHostInterface)
     assert result.location.path == temp_work_dir
