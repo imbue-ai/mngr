@@ -8,7 +8,7 @@ Added an optional S3 state bucket that holds mngr's control-plane state (the ful
 
 - A stopped host's full `VpsDockerHostRecord` is now reconstructed from the bucket (instead of the lossy tag subset) for `mngr list` / `mngr start` when a bucket is present.
 
-Added a Lima-style offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled` provider config field, mirroring Lima's `is_host_data_volume_exposed`). A stopped instance's `host_dir` is now readable without SSH, so `mngr event` / `mngr transcript` work against a paused host.
+Added an offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled` provider config field). A stopped instance's `host_dir` is now readable without SSH, so `mngr event` / `mngr transcript` work against a paused host.
 
 - When `is_offline_host_dir_enabled` is on, `mngr aws prepare` provisions (best-effort) a least-privilege IAM role + instance profile that lets an instance push its `host_dir` to the bucket. A missing-permission/API failure (or a bucket that could not be set up -- the identity's inline policy is scoped to the bucket, so it is meaningless without one) downgrades to a warning so the security group + bucket prepare still succeed; offline host_dir just won't work until prepare is re-run with sufficient IAM. The inline policy grants only `s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` on the bucket's `hosts/*` prefix and `s3:ListBucket` on the bucket. Set `is_offline_host_dir_enabled = false` in `[providers.<name>]` to skip the identity entirely.
 
