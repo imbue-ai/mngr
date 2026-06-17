@@ -50,10 +50,10 @@ from imbue.mngr_ovh.pending_orders import write_pending_order_marker
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import parse_vps_build_args
 from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
-from imbue.mngr_vps.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps.instance import VpsProvider
-from imbue.mngr_vps.instance import parse_vps_build_args
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 OVH_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("ovh")

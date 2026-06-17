@@ -134,3 +134,5 @@ boundary extraction, the bare realizer's "ignore the record" becomes an explicit
 empty handle, and `start_activity_watcher` no longer takes a `container_name`
 parameter (the realizer reads it from its handle). Internal refactor; no
 user-visible behavior change.
+
+Moved the pure VPS build-arg parsing helpers (`ParsedVpsBuildOptions`, `extract_single_value_arg`, `extract_git_depth`, `extract_presence_flag`, `parse_vps_build_args`, `raise_if_vps_migration_arg`, `raise_if_unknown_provider_arg`) out of `instance.py` into a new `imbue.mngr_vps.build_args` module. Mechanical extraction; no behavior change.

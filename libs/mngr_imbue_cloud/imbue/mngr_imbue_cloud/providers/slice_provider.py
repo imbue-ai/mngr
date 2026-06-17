@@ -27,11 +27,11 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.config import VpsProviderConfig
-from imbue.mngr_vps.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps.instance import VpsProvider
-from imbue.mngr_vps.instance import extract_git_depth
-from imbue.mngr_vps.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 # region/plan are meaningless for a locally-carved lima VM, but the shared

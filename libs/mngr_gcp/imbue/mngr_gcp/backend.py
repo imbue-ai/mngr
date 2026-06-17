@@ -40,14 +40,14 @@ from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_single_value_arg
+from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import OfflineCapableVpsProvider
-from imbue.mngr_vps.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps.instance import extract_git_depth
-from imbue.mngr_vps.instance import extract_presence_flag
-from imbue.mngr_vps.instance import extract_single_value_arg
-from imbue.mngr_vps.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")

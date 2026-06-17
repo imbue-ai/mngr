@@ -58,12 +58,12 @@ from imbue.mngr.providers.listing_utils import SEP_DATA_JSON_END
 from imbue.mngr.providers.listing_utils import SEP_DATA_JSON_START
 from imbue.mngr.providers.listing_utils import SEP_PS_END
 from imbue.mngr.providers.listing_utils import SEP_PS_START
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.container_setup import host_volume_name_for
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store_test import _LocalFakeOuter
 from imbue.mngr_vps.host_store_test import _make_local_connector
-from imbue.mngr_vps.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import _VpsDiscoveryData
 from imbue.mngr_vps.primitives import VpsInstanceId

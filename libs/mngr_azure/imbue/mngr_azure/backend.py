@@ -40,19 +40,19 @@ from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_single_value_arg
+from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import AGENT_TAG_FIELDS
 from imbue.mngr_vps.instance import AGENT_TAG_PREFIX
-from imbue.mngr_vps.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps.instance import TagMirrorVpsProvider
 from imbue.mngr_vps.instance import VpsProvider
-from imbue.mngr_vps.instance import extract_git_depth
-from imbue.mngr_vps.instance import extract_presence_flag
-from imbue.mngr_vps.instance import extract_single_value_arg
-from imbue.mngr_vps.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 
