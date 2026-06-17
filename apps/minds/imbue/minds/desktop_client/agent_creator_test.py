@@ -1026,9 +1026,14 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
 
 
-# Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a
-# recording http-server fixture, which can exceed the default 10s pytest-timeout.
+# Flaky under heavy offload load: the setup spins up fresh ConcurrencyGroups and a
+# recording http-server fixture, so the creation can take longer than the 10s
+# default budget of `_wait_until_finished` (an internal completion assertion -- not
+# the pytest timeout that @pytest.mark.timeout(30) already covers). Give it the same
+# 20s internal budget as the local-compute sibling above, under the 30s pytest
+# timeout, and keep a flaky mark so offload retries if a contended sandbox overruns.
 @pytest.mark.timeout(30)
+@pytest.mark.flaky
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
@@ -1045,14 +1050,17 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
     )
-    _wait_until_finished(creator, creation_id)
+    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
 
     assert cli.create_calls == []
 
 
-# Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout.
+# Same flake as its API_KEY twin above: the creation work can exceed the 10s default
+# budget of `_wait_until_finished` (an internal completion assertion, not the pytest
+# timeout). Use the same 20s internal budget under the 30s pytest timeout, and keep a
+# flaky mark as a retry backstop.
 @pytest.mark.timeout(30)
+@pytest.mark.flaky
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""
@@ -1068,7 +1076,7 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
         launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
-    _wait_until_finished(creator, creation_id)
+    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
 
     assert cli.create_calls == []
 
