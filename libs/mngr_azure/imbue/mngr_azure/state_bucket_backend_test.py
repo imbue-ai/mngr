@@ -23,8 +23,8 @@ from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
 from imbue.mngr_azure.testing import _StubbedBlobStateHostIdentity
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 _ACCOUNT_NAME = "mngrststateacct1234"
 
@@ -105,19 +105,47 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(temp_mngr
         updated_at=datetime.now(timezone.utc),
         stop_reason=HostState.STOPPED.value,
     )
-    record = VpsDockerHostRecord(certified_host_data=certified)
+    record = VpsHostRecord(certified_host_data=certified)
 
     provider._persist_host_record_externally(record)
 
     bucket = provider._state_bucket
     assert bucket is not None
-    assert bucket.read_host_record(host_id) is not None
+    assert bucket.read_host_record_json(host_id) is not None
 
     # to_offline_host first tries the base SSH/volume path (no reachable VM here =>
     # HostNotFoundError), then the override reconstructs the full record from the bucket.
     offline = provider.to_offline_host(host_id)
     assert str(offline.id) == str(host_id)
     assert offline.certified_host_data.host_name == "recovered-host"
+
+
+def test_to_offline_host_falls_back_to_tags_when_bucket_record_absent(temp_mngr_ctx: MngrContext) -> None:
+    """Bucket mode but no host_state.json yet: to_offline_host reconstructs from the VM's own tags.
+
+    Covers the bucket store's tag fallback -- a bucket-mode host created before
+    the bucket existed has no ``host_state.json``, so the offline reconstruction
+    must fall back to the VM tag mirror rather than 404.
+    """
+    provider, compute = _build_bucket_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    # Nothing is written to the bucket for this host, so the bucket read misses
+    # and the tag fallback (reconstruction from the VM's own tags) runs.
+    compute.virtual_machines.list_result = [
+        SimpleNamespace(
+            name="vm-1",
+            tags={
+                "mngr-provider": "azure-test",
+                "mngr-host-id": str(host_id),
+                "mngr-host-name": "mngr-myhost",
+                "mngr-created-at": "2026-01-01T00:00:00+00:00",
+            },
+            instance_view=None,
+        )
+    ]
+    offline = provider.to_offline_host(host_id)
+    assert offline.id == host_id
+    assert str(offline.get_certified_data().host_name) == "myhost"
 
 
 def test_bucket_mode_remove_agent_clears_bucket_record(temp_mngr_ctx: MngrContext) -> None:
@@ -137,7 +165,7 @@ def test_delete_host_externally_removes_bucket_state(temp_mngr_ctx: MngrContext)
     host_id = HostId.generate()
     bucket = provider._state_bucket
     assert bucket is not None
-    bucket.write_host_record(host_id, "{}")
+    bucket.write_host_record_json(host_id, "{}")
     bucket.write_agent_record(host_id, "agent-1", {"id": "agent-1"})
     assert bucket.has_any_host_state() is True
 
@@ -210,7 +238,7 @@ class _IdentityInjectingAzureProvider(AzureProvider):
 def _build_provider_with_identity(
     mngr_ctx: MngrContext,
     *,
-    is_host_dir_synced_to_bucket: bool = True,
+    is_offline_host_dir_enabled: bool = True,
     identity_exists: bool = True,
     compute: FakeComputeClient | None = None,
 ) -> tuple[_IdentityInjectingAzureProvider, FakeComputeClient]:
@@ -219,7 +247,7 @@ def _build_provider_with_identity(
         subscription_id="sub-123",
         auto_shutdown_seconds=3600,
         state_storage_account_name=_ACCOUNT_NAME,
-        is_host_dir_synced_to_bucket=is_host_dir_synced_to_bucket,
+        is_offline_host_dir_enabled=is_offline_host_dir_enabled,
     )
     compute = compute or FakeComputeClient()
     client = _StubbedAzureVpsClient(
@@ -293,11 +321,19 @@ def test_get_volume_for_host_returns_volume_when_objects_present(temp_mngr_ctx: 
 
 
 def test_get_volume_for_host_returns_none_when_prefix_empty(temp_mngr_ctx: MngrContext) -> None:
-    """An empty host_dir prefix yields None (the diagnostic runs, non-fatally)."""
+    """An empty host_dir prefix with no resolvable VM yields None and emits no diagnostic warning.
+
+    Complement of ``..._warns_when_vm_has_no_managed_identity``: when the
+    diagnostic can't find the VM it returns early, so the user must not see the
+    (misleading) 'no managed identity' warning. Together the two pin the
+    empty-prefix matrix (vm-without-identity -> warn; no-vm -> silent).
+    """
     provider, _compute = _build_provider_with_identity(temp_mngr_ctx)
     host_id = HostId.generate()
     # No VM matches the host id, so the diagnostic returns early (no identity probe).
-    assert provider.get_volume_for_host(host_id) is None
+    with capture_log_warnings() as warnings:
+        assert provider.get_volume_for_host(host_id) is None
+    assert not any("no attached user-assigned managed identity" in message for message in warnings)
 
 
 def test_get_volume_for_host_warns_when_vm_has_no_managed_identity(temp_mngr_ctx: MngrContext) -> None:
@@ -316,7 +352,7 @@ def test_get_volume_for_host_warns_when_vm_has_no_managed_identity(temp_mngr_ctx
 
 
 def test_get_volume_reference_is_none_when_feature_disabled(temp_mngr_ctx: MngrContext) -> None:
-    provider, _compute = _build_provider_with_identity(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx, is_offline_host_dir_enabled=False)
     assert provider.get_volume_reference_for_host(HostId.generate()) is None
     assert provider.get_volume_for_host(HostId.generate()) is None
 
@@ -336,6 +372,6 @@ def test_host_dir_sync_identity_resource_id_none_when_identity_absent(temp_mngr_
 
 def test_host_dir_sync_identity_resource_id_none_when_feature_disabled(temp_mngr_ctx: MngrContext) -> None:
     provider, _compute = _build_provider_with_identity(
-        temp_mngr_ctx, is_host_dir_synced_to_bucket=False, identity_exists=True
+        temp_mngr_ctx, is_offline_host_dir_enabled=False, identity_exists=True
     )
     assert provider._host_dir_sync_identity_resource_id() is None

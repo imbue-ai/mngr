@@ -1,13 +1,10 @@
 """Tests for the AwsProvider's S3-state-bucket vs tag agent-data behavior."""
 
-from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
 
 import boto3
-import pytest
 from botocore.stub import Stubber
-from moto import mock_aws
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -22,20 +19,14 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 _BUCKET_NAME = "mngr-state-test-bucket"
 
 
-@pytest.fixture
-def aws_mock() -> Iterator[None]:
-    with mock_aws():
-        yield
-
-
 def _build_bucket_provider(
-    mngr_ctx: MngrContext, is_host_dir_synced_to_bucket: bool = True
+    mngr_ctx: MngrContext, is_offline_host_dir_enabled: bool = True
 ) -> tuple[AwsProvider, Stubber]:
     """Build an AwsProvider configured with an S3 state bucket (moto-backed) + a stubbed EC2.
 
@@ -47,7 +38,7 @@ def _build_bucket_provider(
         default_ami_id="ami-x",
         auto_shutdown_seconds=3600,
         state_bucket_name=_BUCKET_NAME,
-        is_host_dir_synced_to_bucket=is_host_dir_synced_to_bucket,
+        is_offline_host_dir_enabled=is_offline_host_dir_enabled,
     )
     session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
     ec2 = session.client("ec2", region_name="us-east-1")
@@ -116,13 +107,13 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(
         updated_at=datetime.now(timezone.utc),
         stop_reason=HostState.STOPPED.value,
     )
-    record = VpsDockerHostRecord(certified_host_data=certified)
+    record = VpsHostRecord(certified_host_data=certified)
 
     provider._persist_host_record_externally(record)
 
     bucket = provider._state_bucket
     assert bucket is not None
-    assert bucket.read_host_record(host_id) is not None
+    assert bucket.read_host_record_json(host_id) is not None
 
     # to_offline_host first tries the base SSH/volume path: its discovery sweep
     # lists instances (returns none here => HostNotFoundError), then the override
@@ -135,6 +126,48 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(
         stubber.deactivate()
     assert str(offline.id) == str(host_id)
     assert offline.certified_host_data.host_name == "recovered-host"
+
+
+def test_to_offline_host_falls_back_to_tags_when_bucket_record_absent(
+    aws_mock: None, temp_mngr_ctx: MngrContext
+) -> None:
+    """Bucket mode but no host_state.json yet: to_offline_host reconstructs from the instance's own tags.
+
+    Covers the bucket store's tag fallback -- a bucket-mode host created before
+    the bucket existed has no ``host_state.json``, so the offline reconstruction
+    must fall back to the EC2 tag mirror rather than 404.
+    """
+    provider, stubber = _build_bucket_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    # Nothing is written to the bucket for this host, so the bucket read misses
+    # and the tag fallback (reconstruction from the instance's own tags) runs.
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-1",
+                            "State": {"Name": "stopped"},
+                            "Tags": [
+                                {"Key": "mngr-host-id", "Value": str(host_id)},
+                                {"Key": "Name", "Value": "mngr-myhost"},
+                                {"Key": "mngr-created-at", "Value": "2026-01-01T00:00:00+00:00"},
+                            ],
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    stubber.activate()
+    try:
+        offline = provider.to_offline_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert offline.id == host_id
+    assert str(offline.get_certified_data().host_name) == "myhost"
 
 
 def test_bucket_mode_remove_agent_clears_bucket_record(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
@@ -158,7 +191,7 @@ def test_delete_host_externally_removes_bucket_state(aws_mock: None, temp_mngr_c
     host_id = HostId.generate()
     bucket = provider._state_bucket
     assert bucket is not None
-    bucket.write_host_record(host_id, "{}")
+    bucket.write_host_record_json(host_id, "{}")
     bucket.write_agent_record(host_id, "agent-1", {"id": "agent-1"})
     assert bucket.has_any_host_state() is True
 
@@ -215,7 +248,19 @@ def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
             ]
         },
     )
-    stubber.add_response("create_tags", {})
+    # Assert the exact tag write (the Stubber validates expected_params), not just
+    # that some create_tags happened -- this pins the agent record to the tag mirror.
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={
+            "Resources": ["i-1"],
+            "Tags": [
+                {"Key": f"mngr-agent-{agent_id}-name", "Value": "alpha"},
+                {"Key": f"mngr-agent-{agent_id}-type", "Value": "claude"},
+            ],
+        },
+    )
     stubber.activate()
     try:
         provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
@@ -248,7 +293,13 @@ def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(aws_mock: None, te
 
 
 def test_get_volume_for_host_returns_none_when_prefix_empty(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """An empty host_dir prefix yields None (and the diagnostic runs, non-fatally)."""
+    """An empty host_dir prefix with no resolvable instance yields None and emits no diagnostic warning.
+
+    Complement of ``..._warns_when_instance_has_no_iam_profile``: when the
+    diagnostic can't even find the instance it returns early, so the user must not
+    see the (misleading) 'no IAM profile' warning. Together the two pin the
+    empty-prefix matrix (instance-without-profile -> warn; no-instance -> silent).
+    """
     provider, stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     # The diagnostic calls _find_instance_for_host, which lists instances, finds
@@ -258,9 +309,11 @@ def test_get_volume_for_host_returns_none_when_prefix_empty(aws_mock: None, temp
     stubber.add_response("describe_instances", {"Reservations": []})
     stubber.activate()
     try:
-        assert provider.get_volume_for_host(host_id) is None
+        with capture_log_warnings() as warnings:
+            assert provider.get_volume_for_host(host_id) is None
     finally:
         stubber.deactivate()
+    assert not any("no attached IAM instance profile" in message for message in warnings)
 
 
 def test_get_volume_for_host_warns_when_instance_has_no_iam_profile(
@@ -329,7 +382,7 @@ def test_host_dir_sync_instance_profile_none_when_identity_absent(aws_mock: None
 
 def test_host_dir_sync_instance_profile_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
     """No attachment when host_dir sync is disabled, even if the identity exists."""
-    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_offline_host_dir_enabled=False)
     identity = provider._host_identity()
     assert identity is not None
     identity.ensure_host_identity()
@@ -337,7 +390,7 @@ def test_host_dir_sync_instance_profile_none_when_feature_disabled(aws_mock: Non
 
 
 def test_get_volume_reference_is_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """With is_host_dir_synced_to_bucket=False, no offline host_dir volume is returned."""
-    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    """With is_offline_host_dir_enabled=False, no offline host_dir volume is returned."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_offline_host_dir_enabled=False)
     assert provider.get_volume_reference_for_host(HostId.generate()) is None
     assert provider.get_volume_for_host(HostId.generate()) is None

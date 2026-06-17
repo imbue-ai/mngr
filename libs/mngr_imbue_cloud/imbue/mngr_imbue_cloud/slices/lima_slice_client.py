@@ -17,9 +17,9 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_lima_yaml
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Lima "Status" strings (from `limactl list --json`) mapped to VPS statuses.
 _LIMA_STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
@@ -84,7 +84,7 @@ class LimaSliceVpsClient(VpsClientInterface):
     Drives ``limactl`` **over SSH on the box** (as the dedicated lima user, using
     the pool management key), so the whole bake runs from the operator's laptop
     exactly like an OVH VPS bake: this carves the bare VM (the "OS reinstall"
-    equivalent), then the shared ``VpsDockerProvider`` reaches the VM's
+    equivalent), then the shared ``VpsProvider`` reaches the VM's
     box-forwarded ports to build the container. Carving is multi-step (ship YAML
     -> create disk -> start VM), so ``create_instance`` raises like the OVH client
     and ``SliceVpsDockerProvider`` calls :meth:`provision_slice_vm` directly.

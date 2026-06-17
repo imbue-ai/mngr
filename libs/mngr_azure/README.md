@@ -2,9 +2,9 @@
 
 Azure provider backend plugin for mngr. Runs agents in Docker containers on Azure Virtual Machines.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -104,7 +104,7 @@ group it owns (tagged `managed-by=mngr`). It also deletes the state storage
 account; because the VM check above has already passed, any remaining state is
 **orphaned** offline state (from hosts no longer running as VMs), so it
 **refuses** to delete a non-empty account rather than silently dropping records
-you may still want -- pass `--purge-state` to delete the account and its
+you may still want -- pass `--force` to delete the account and its
 remaining state. Idempotent.
 
 ```bash
@@ -137,41 +137,41 @@ network prepare still succeeds, and offline state falls back to the VM-tag
 mirror. Existing deployments that never re-ran the new `prepare` keep working on
 that fallback.
 
-### Offline `host_dir` (Lima-style, on by default)
+### Offline `host_dir` (on by default)
 
 A deallocated VM's `host_dir` is also readable without SSH, so `mngr event` /
-`mngr transcript` work against a stopped agent (matching Lima's
-`is_host_data_volume_exposed`). When `is_host_dir_synced_to_bucket` is on (the
-default) and the state bucket exists, an on-box systemd oneshot + timer daemon
+`mngr transcript` work against a stopped agent. When `is_offline_host_dir_enabled`
+is on (the default) and the state bucket exists, an on-box systemd oneshot + timer daemon
 syncs the VM's `host_dir` to the state container's `hosts/<host_id>/host_dir/`
 prefix every 60s, and once more on `mngr stop` just before the VM deallocates
 (so the offline copy is current). The sync runs `azcopy sync` authenticating as
 the VM's managed identity via MSI (`--auth-mode login`; no storage keys on the
 box), excluding large transient caches (`*.tmp`, `__pycache__`, `node_modules`).
-Set `is_host_dir_synced_to_bucket = false` in `[providers.azure]` to disable it
+Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to disable it
 (offline host metadata still works via the bucket).
 
-The instance-push needs a cloud identity, which `prepare` provisions:
+The instance-push needs a cloud identity, which `prepare` provisions
+**best-effort** when `is_offline_host_dir_enabled` is on (the default):
 
 ```bash
-mngr azure prepare --use-offline-host-dir yes   # fail if the identity can't be created
+mngr azure prepare   # provisions the identity best-effort; warns + continues if permissions are denied
 ```
 
-`--use-offline-host-dir {yes,auto,no}` (default `auto`) provisions a
-**user-assigned managed identity** plus a **`Storage Blob Data Contributor`**
-role assignment scoped to **just the state storage account** (least privilege --
-never the resource group or subscription). `auto` warns and continues on a
-permission failure (the network + bucket prepare still succeed; only offline
-`host_dir` is unavailable); `require` fails the command; `skip` does not attempt
-it. `mngr azure cleanup` deletes the identity. `mngr create` attaches it to the
-VM when the feature is on and the identity exists (an operator-supplied identity
-takes precedence).
+`prepare` provisions a **user-assigned managed identity** plus a **`Storage Blob
+Data Contributor`** role assignment scoped to **just the state storage account**
+(least privilege -- never the resource group or subscription). Any missing-
+permission / API failure downgrades to a **warning** (the network + bucket
+prepare still succeed; only offline `host_dir` is unavailable until `prepare` is
+re-run with sufficient permissions). Set `is_offline_host_dir_enabled = false` in
+`[providers.azure]` to skip the identity entirely. `mngr azure cleanup` deletes
+the identity. `mngr create` attaches it to the VM when the feature is on and the
+identity exists (an operator-supplied identity takes precedence).
 
 Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write`
 + `Microsoft.Authorization/roleAssignments/write` (Owner or User Access
 Administrator). When offline `host_dir` is requested for a host whose VM has no
 attached managed identity, mngr logs a non-fatal diagnostic pointing at
-`mngr azure prepare --use-offline-host-dir yes` rather than returning an empty
+`mngr azure prepare` (with sufficient permissions) rather than returning an empty
 volume.
 
 ### Quota note
@@ -251,7 +251,7 @@ size has no capacity in the region right now; pick another size with
   Azure has no per-key resource. Cloud-init also forwards the key into root's
   `authorized_keys`, so mngr's root SSH works.
 - **Image:** Debian 12 by default (matching the other mngr providers; runs
-  cloud-init with the Azure datasource, so the shared `mngr_vps_docker` bootstrap
+  cloud-init with the Azure datasource, so the shared `mngr_vps` bootstrap
   works unchanged). Configurable via `image_publisher` / `image_offer` /
   `image_sku` / `image_version`.
 - **No snapshot workflow:** the Azure client exposes no managed-disk-snapshot surface (the speculative `create_snapshot` / `list_snapshots` / `delete_snapshot` client methods are not part of `VpsClientInterface`). Restore from a fresh `mngr create` instead.
@@ -272,7 +272,7 @@ size has no capacity in the region right now; pick another size with
   (`virtual_machines.begin_deallocate`) to halt compute billing; `mngr start`
   re-allocates it (`begin_start`). The static public IP and on-disk SSH host keys
   persist, so resume needs no IP/known_hosts fixup. Mirrors `mngr_aws`/`mngr_gcp`;
-  the shared `mngr_vps_docker` base is untouched.
+  the shared `mngr_vps` base is untouched.
 - **Idle self-deallocate (managed identity):** each VM is created with a
   system-assigned managed identity. The in-container idle watcher touches a
   sentinel; a host-side systemd path unit runs a script that uses the VM's IMDS

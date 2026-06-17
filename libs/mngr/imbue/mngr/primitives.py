@@ -238,33 +238,6 @@ class PluginKind(UpperCaseStrEnum):
     PROVIDER = auto()
 
 
-class AutoToggle(UpperCaseStrEnum):
-    """A force-on / best-effort / force-off switch for an optional capability.
-
-    YES requires the capability and fails if it can't be enabled. NO disables
-    it. AUTO (the usual default) enables it when possible but degrades to a
-    warning instead of failing -- the right default for a capability that needs
-    privileges the operator may not have.
-    """
-
-    YES = auto()
-    AUTO = auto()
-    NO = auto()
-
-
-def auto_toggle_choices() -> list[str]:
-    """Lowercase CLI choice strings for :class:`AutoToggle`, in YES/AUTO/NO order."""
-    return [m.value.lower() for m in AutoToggle]
-
-
-# Reusable help suffix describing the three :class:`AutoToggle` values. Compose it
-# after a feature-specific lead-in sentence in a CLI option's ``help``.
-AUTO_TOGGLE_HELP_SUFFIX: Final[str] = (
-    "'yes' requires it (fail if it can't be enabled); 'auto' (default) enables it "
-    "when possible, otherwise warns and continues; 'no' disables it."
-)
-
-
 # === ID Types ===
 
 

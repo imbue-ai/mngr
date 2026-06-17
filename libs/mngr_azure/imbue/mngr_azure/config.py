@@ -14,7 +14,7 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 
 # Storage-account names are globally unique, 3-24 chars, lowercase alphanumeric
 # only (no hyphens). The derived name is ``mngrst<hash>`` where ``<hash>`` is a
@@ -32,7 +32,7 @@ AZURE_MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
 
 # Default marketplace image: Debian 12 (gen2), matching the Debian-12 default of
 # the other mngr providers (aws / gcp / ovh / vultr). Debian's Azure image runs
-# cloud-init with the Azure datasource, so the shared ``mngr_vps_docker``
+# cloud-init with the Azure datasource, so the shared ``mngr_vps``
 # cloud-init flow (Docker install, SSH host-key injection, mngr bootstrap) works
 # unchanged. The four-part publisher/offer/sku/version URN is configurable for
 # users who want a different distro or a custom image; ``test_release_azure``
@@ -117,7 +117,7 @@ def read_az_cli_default_subscription() -> str | None:
     return None
 
 
-class AzureProviderConfig(VpsDockerProviderConfig):
+class AzureProviderConfig(VpsProviderConfig):
     """Configuration for the Azure Virtual Machines VPS Docker provider.
 
     Credentials are deliberately not stored in this config. Azure's
@@ -208,23 +208,17 @@ class AzureProviderConfig(VpsDockerProviderConfig):
     state_storage_account_name: str | None = Field(
         default=None,
         description=(
-            "Name of the storage account holding mngr control-plane state (the full host record and "
-            "per-agent records in a Blob container) so a deallocated VM's state is readable without SSH "
-            "and without the 256-char Azure tag limit. When None, the effective name is derived as "
-            "'mngrst<hash>' from the subscription + resource group (3-24 lowercase alnum). When the "
-            "account+container exist (created by `mngr azure prepare`), the per-agent VM tag mirror is "
-            "dropped in favor of the bucket; without it, mngr falls back to the tag mirror."
+            "Azure Storage account where mngr stores a deallocated VM's state so it is readable "
+            "without starting the VM. When None, named 'mngrst<hash>' (3-24 lowercase alnum). Without "
+            "it, mngr falls back to VM tags, which hold less and cap the number of agents."
         ),
     )
-    is_host_dir_synced_to_bucket: bool = Field(
+    is_offline_host_dir_enabled: bool = Field(
         default=True,
         description=(
-            "Whether the VM syncs its host_dir to the Blob state bucket so it is readable while the VM "
-            "is deallocated (a Lima-style offline host_dir; mirrors Lima's is_host_data_volume_exposed). "
-            "On by default. When on (and a bucket exists), the create path attaches the prepare-provisioned "
-            "user-assigned managed identity, an on-box daemon periodically `azcopy sync`s host_dir "
-            "to hosts/<host_id>/host_dir/, and get_volume_for_host serves offline reads from the bucket. Set "
-            "False to disable the host_dir sync entirely (offline host metadata still works via the bucket)."
+            "When on (default), a deallocated VM's host_dir is readable without starting it, so "
+            "`mngr event` / `mngr transcript` / `mngr file` work against it. `mngr azure prepare` sets "
+            "up the access it needs. Set False to turn it off."
         ),
     )
 

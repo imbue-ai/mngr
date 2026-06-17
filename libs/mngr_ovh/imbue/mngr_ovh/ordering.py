@@ -9,9 +9,9 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.catalog import find_required_field
 from imbue.mngr_ovh.catalog import validate_datacenter
 from imbue.mngr_ovh.client import OvhVpsClient
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 
 class OvhOrderDeliveryTimeoutError(VpsProvisioningError):

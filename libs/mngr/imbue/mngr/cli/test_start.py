@@ -12,7 +12,6 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_start_restart_running_agent(
     cli_runner: CliRunner,
@@ -22,10 +21,8 @@ def test_start_restart_running_agent(
 ) -> None:
     """start --restart on a running agent should stop it and start it fresh.
 
-    Same flaky profile as the stopped-agent variant: sequential tmux
-    agent-lifecycle operations against a tight per-test timeout, so the default
-    10s is too tight on a loaded CI runner. 30s matches the other multi-step CLI
-    lifecycle tests; ``flaky`` still lets offload retry.
+    The timeout is raised because the sequential tmux create/stop/restart
+    operations can exceed the default 10s on a loaded CI runner.
     """
     create_test_agent("restart-running-agent", "sleep 140101")
     session_name = f"{mngr_test_prefix}restart-running-agent"
@@ -43,7 +40,6 @@ def test_start_restart_running_agent(
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_start_restart_stopped_agent(
     cli_runner: CliRunner,
@@ -53,11 +49,8 @@ def test_start_restart_stopped_agent(
 ) -> None:
     """start --restart on a stopped agent should simply start it.
 
-    Marked flaky with a raised timeout: this exercises four sequential tmux
-    agent-lifecycle operations (create, stop, restart, readiness wait), one more
-    than the running-agent variant, so the default 10s per-test timeout is too
-    tight on a loaded CI runner (it timed out there). 30s matches the ceiling used
-    by the other multi-step CLI lifecycle tests; ``flaky`` still lets offload retry.
+    The timeout is raised because the four sequential tmux create/stop/restart/
+    readiness operations can exceed the default 10s on a loaded CI runner.
     """
     create_test_agent("restart-stopped-agent", "sleep 140102")
     session_name = f"{mngr_test_prefix}restart-stopped-agent"

@@ -1,13 +1,13 @@
 """Unit tests for the pure host_dir-sync daemon unit/script body generators."""
 
 from imbue.mngr.primitives import HostId
-from imbue.mngr_azure.backend import HOST_DIR_SYNC_INTERVAL_SECONDS
-from imbue.mngr_azure.backend import HOST_DIR_SYNC_UNIT_NAME
 from imbue.mngr_azure.backend import _build_azcopy_install_command
-from imbue.mngr_azure.backend import _build_host_dir_blob_url
 from imbue.mngr_azure.backend import _build_host_dir_sync_command
 from imbue.mngr_azure.backend import _build_host_dir_sync_service_unit
-from imbue.mngr_azure.backend import _build_host_dir_sync_timer_unit
+from imbue.mngr_azure.state_bucket import host_dir_sync_target_for
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
+from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
 
 _HOST_DIR = "/mnt/mngr-btrfs/abc123/host_dir"
 _BLOB_URL = "https://mngrstabc.blob.core.windows.net/mngr-state/hosts/abc123/host_dir"
@@ -34,7 +34,7 @@ def test_service_unit_is_oneshot_and_authenticates_as_the_managed_identity() -> 
 
 
 def test_timer_unit_fires_at_the_interval() -> None:
-    unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
+    unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
     assert f"OnUnitActiveSec={HOST_DIR_SYNC_INTERVAL_SECONDS}" in unit
     assert f"OnBootSec={HOST_DIR_SYNC_INTERVAL_SECONDS}" in unit
     assert f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service" in unit
@@ -51,5 +51,5 @@ def test_azcopy_install_is_a_guarded_noop() -> None:
 def test_blob_url_matches_host_prefix() -> None:
     host_id = HostId.generate()
     hex_id = host_id.get_uuid().hex
-    url = _build_host_dir_blob_url("mngrstabc", "mngr-state", host_id)
+    url = host_dir_sync_target_for("mngrstabc", "mngr-state", host_id)
     assert url == f"https://mngrstabc.blob.core.windows.net/mngr-state/hosts/{hex_id}/host_dir"

@@ -28,7 +28,6 @@ mngr aws prepare [OPTIONS]
 | `--sg-name` | text | Security group name to create / reuse. Defaults to the provider config's SG name. | None |
 | `--vpc-id` | text | VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise. | None |
 | `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the provider config's allowed_ssh_cidrs. Tighten for production. | None |
-| `--use-offline-host-dir` | choice (`yes` &#x7C; `auto` &#x7C; `no`) | Enable offline host_dir -- reading a stopped host's files via `mngr file` / `mngr event` / `mngr transcript` while the host is powered off. 'yes' requires it (fail if it can't be enabled); 'auto' (default) enables it when possible, otherwise warns and continues; 'no' disables it. | `auto` |
 
 ## Common
 
@@ -62,7 +61,7 @@ mngr aws cleanup [OPTIONS]
 | `--region` | text | AWS region. Defaults to the resolved provider config's default_region. | None |
 | `--sg-name` | text | Security group name to delete. Defaults to the provider config's SG name. | None |
 | `--vpc-id` | text | VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise. | None |
-| `--purge-state` | boolean | Also delete the state bucket when it still holds offline host state left over from hosts that no longer exist as instances (otherwise cleanup refuses to delete a non-empty bucket). | `False` |
+| `--force` | boolean | Also delete the state bucket when it still holds offline host state left over from hosts that no longer exist as instances (otherwise cleanup refuses to delete a non-empty bucket). | `False` |
 
 ## Common
 

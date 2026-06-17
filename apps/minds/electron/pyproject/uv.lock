@@ -766,21 +766,21 @@ version = "0.1.0"
 source = { editable = "../../../../libs/mngr_ovh" }
 dependencies = [
     { name = "imbue-mngr" },
-    { name = "imbue-mngr-vps-docker" },
+    { name = "imbue-mngr-vps" },
     { name = "ovh" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
-    { name = "imbue-mngr-vps-docker", editable = "../../../../libs/mngr_vps_docker" },
+    { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "ovh", specifier = ">=1.2.0" },
 ]
 
 [[package]]
-name = "imbue-mngr-vps-docker"
+name = "imbue-mngr-vps"
 version = "0.1.1"
-source = { editable = "../../../../libs/mngr_vps_docker" }
+source = { editable = "../../../../libs/mngr_vps" }
 dependencies = [
     { name = "imbue-mngr" },
 ]
@@ -914,7 +914,7 @@ dependencies = [
     { name = "imbue-mngr-forward" },
     { name = "imbue-mngr-latchkey" },
     { name = "imbue-mngr-ovh" },
-    { name = "imbue-mngr-vps-docker" },
+    { name = "imbue-mngr-vps" },
     { name = "itsdangerous" },
     { name = "jinja2" },
     { name = "loguru" },
@@ -943,7 +943,7 @@ requires-dist = [
     { name = "imbue-mngr-forward", editable = "../../../../libs/mngr_forward" },
     { name = "imbue-mngr-latchkey", editable = "../../../../libs/mngr_latchkey" },
     { name = "imbue-mngr-ovh", editable = "../../../../libs/mngr_ovh" },
-    { name = "imbue-mngr-vps-docker", editable = "../../../../libs/mngr_vps_docker" },
+    { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "loguru" },

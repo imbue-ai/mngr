@@ -40,11 +40,8 @@ from imbue.mngr.config.loader import resolve_strict_from_env
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.primitives import AUTO_TOGGLE_HELP_SUFFIX
-from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import auto_toggle_choices
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -129,27 +126,6 @@ def add_common_options(command: TDecorated) -> TDecorated:
     command = optgroup.group(COMMON_OPTIONS_GROUP_NAME)(command)
 
     return command
-
-
-def add_use_offline_host_dir_option(command: TDecorated) -> TDecorated:
-    """Add the ``--use-offline-host-dir`` tri-state option to a provider ``prepare`` command.
-
-    Shared by the cloud providers' ``prepare`` commands so the flag name, choices,
-    default, and help text stay identical across providers. Bound to whatever
-    option group is active at decoration time (the providers stack it inside their
-    "Provider" group).
-    """
-    return optgroup.option(
-        "--use-offline-host-dir",
-        "use_offline_host_dir",
-        type=click.Choice(auto_toggle_choices()),
-        default=AutoToggle.AUTO.value.lower(),
-        show_default=True,
-        help=(
-            "Enable offline host_dir -- reading a stopped host's files via `mngr file` / "
-            "`mngr event` / `mngr transcript` while the host is powered off. " + AUTO_TOGGLE_HELP_SUFFIX
-        ),
-    )(command)
 
 
 def setup_command_context(

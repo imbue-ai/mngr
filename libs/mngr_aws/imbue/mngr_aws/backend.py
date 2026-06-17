@@ -15,14 +15,11 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.errors import TagLimitExceededError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -35,29 +32,33 @@ from imbue.mngr_aws.state_bucket import S3StateBucketError
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
 from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
-from imbue.mngr_vps_docker.host_state_store import HostStateStore
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.instance import AGENT_TAG_FIELDS
-from imbue.mngr_vps_docker.instance import AGENT_TAG_PREFIX
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import TagMirrorVpsDockerProvider
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import extract_presence_flag
-from imbue.mngr_vps_docker.instance import extract_single_value_arg
-from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_single_value_arg
+from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
+from imbue.mngr_vps.host_state_store import HostDirBackend
+from imbue.mngr_vps.host_state_store import HostStateStore
+from imbue.mngr_vps.host_state_store import NullHostDirBackend
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.instance_offline import AGENT_TAG_FIELDS
+from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
+from imbue.mngr_vps.instance_offline import BucketHostDirBackend
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
+from imbue.mngr_vps.instance_offline import TagMirrorVpsProvider
+from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
 # EC2 allows 50 (non-``aws:``) tags per resource. When a host has so many agents
-# that mirroring another would exceed this, we surface a NotImplementedError
-# (which the CLI turns into an "open an issue" prompt) rather than failing
-# obscurely -- the S3-backed agent store is the planned fix for many-agent hosts.
+# that mirroring another would exceed this, we surface an actionable
+# TagLimitExceededError pointing at the S3 state bucket (which has no such
+# ceiling) rather than failing obscurely.
 _AWS_MAX_TAGS_PER_INSTANCE: Final[int] = 50
 # EC2 states in which the host OS is down (so the SSH-based sweep can't see the
 # host) but the instance still exists and its agents must be reconstructed from
@@ -67,17 +68,24 @@ _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
 # The host name is mirrored into the EC2 ``Name`` tag (as ``mngr-<host_name>``).
 _HOST_NAME_TAG_KEY: Final[str] = "Name"
 
+# The self-stopping idle watcher (in-container sentinel + host-side systemd
+# ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
+# The AWS oneshot ``.service`` powers the instance off (``shutdown -P now``); EC2
+# then applies the instance's ``InstanceInitiatedShutdownBehavior`` -- ``stop``
+# (resumable idle-pause, the default) or ``terminate`` -- so no IAM role or awscli
+# is needed on the box. See the README "Implementation details".
+
 # Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
-# When ``is_host_dir_synced_to_bucket`` is on and a state bucket is present, the
-# create path attaches the prepare-provisioned IAM instance profile, then
-# installs (over SSH on the outer) a systemd oneshot ``.service`` + ``.timer``
-# pair: every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` the oneshot runs
+# The selected ``_S3HostDirBackend`` owns the install / before-pause sequence; it
+# supplies the ``aws s3 sync`` service body and awscli install. When
+# ``is_offline_host_dir_enabled`` is on and a state bucket is present, the create
+# path attaches the prepare-provisioned IAM instance profile, then the backend installs
+# a systemd oneshot ``.service`` + ``.timer`` pair that runs
 # ``aws s3 sync <host_dir_on_outer>/ s3://<bucket>/hosts/<id>/host_dir/ --delete``
-# using the instance profile's IMDS credentials (no long-lived keys on the box).
-# The same oneshot is also triggered once on graceful stop so the offline copy is
-# current. Offline reads are served from the bucket by the operator's credentials.
-HOST_DIR_SYNC_UNIT_NAME: Final[str] = "mngr-aws-host-dir-sync"
-HOST_DIR_SYNC_INTERVAL_SECONDS: Final[int] = 60
+# every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` using the instance profile's IMDS
+# credentials (no long-lived keys on the box). The same oneshot is also triggered
+# once on graceful stop so the offline copy is current. Offline reads are served
+# from the bucket by the operator's credentials via ``get_volume_for_host``.
 # host_dir can contain large transient build artifacts; exclude the obvious ones
 # so a periodic full-tree sync stays cheap. Conservative -- only mngr-irrelevant
 # caches that never need to be read offline.
@@ -109,24 +117,6 @@ def _build_host_dir_sync_service_unit(host_dir_on_outer: str, sync_target_uri: s
         "[Service]\n"
         "Type=oneshot\n"
         f"ExecStart=/bin/sh -c '{_build_host_dir_sync_command(host_dir_on_outer, sync_target_uri)}'\n"
-    )
-
-
-def _build_host_dir_sync_timer_unit(interval_seconds: int) -> str:
-    """Build the systemd ``.timer`` that fires the host_dir sync every ``interval_seconds``.
-
-    ``OnBootSec`` gives the host a moment to finish bootstrapping before the
-    first sync; ``OnUnitActiveSec`` then repeats at the interval.
-    """
-    return (
-        "[Unit]\n"
-        "Description=Periodically sync this host's host_dir to the mngr S3 state bucket\n"
-        "[Timer]\n"
-        f"OnBootSec={interval_seconds}\n"
-        f"OnUnitActiveSec={interval_seconds}\n"
-        f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service\n"
-        "[Install]\n"
-        "WantedBy=timers.target\n"
     )
 
 
@@ -172,7 +162,7 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AwsProvider(TagMirrorVpsDockerProvider):
+class AwsProvider(TagMirrorVpsProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -180,7 +170,7 @@ class AwsProvider(TagMirrorVpsDockerProvider):
     aws_client: AwsVpsClient = Field(frozen=True, description="EC2 API client")
     aws_config: AwsProviderConfig = Field(frozen=True, description="AWS-specific configuration")
 
-    def _host_name_tag_key(self) -> str:
+    def _host_name_key(self) -> str:
         return _HOST_NAME_TAG_KEY
 
     def _host_identity(self) -> S3StateHostIdentity | None:
@@ -233,9 +223,25 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         bucket = self._state_bucket
         if bucket is not None:
             return BucketHostStateStore(
-                bucket=bucket, bucket_error_type=S3StateBucketError, bucket_label="S3 state bucket"
+                bucket=bucket,
+                bucket_error_type=S3StateBucketError,
+                bucket_label="S3 state bucket",
+                fallback=_Ec2TagHostStateStore(provider=self),
             )
         return _Ec2TagHostStateStore(provider=self)
+
+    @cached_property
+    def _host_dir_backend(self) -> HostDirBackend:
+        """Select the offline host_dir backend once: bucket-backed when enabled + present, else no-op.
+
+        The only place ``is_offline_host_dir_enabled`` and ``_state_bucket``
+        presence are tested together; every host_dir call site dispatches through
+        the selected backend instead of re-deriving the condition.
+        """
+        bucket = self._state_bucket
+        if self.aws_config.is_offline_host_dir_enabled and bucket is not None:
+            return _S3HostDirBackend(provider=self, bucket=bucket)
+        return NullHostDirBackend()
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List EC2 instances tagged with this provider's name."""
@@ -373,37 +379,13 @@ class AwsProvider(TagMirrorVpsDockerProvider):
     def _host_dir_sync_instance_profile(self) -> str | None:
         """Return the prepare-provisioned instance-profile name to attach at create, or None.
 
-        Returns the bucket-write identity's profile only when host_dir sync is on,
-        a state bucket is present, and the identity was actually provisioned by
-        ``mngr aws prepare``. The operator-supplied ``iam_instance_profile`` (set
-        on the client) takes precedence over this in ``create_instance``. Probing
-        identity existence is best-effort: a failure degrades to None (no profile
-        attached -- offline host_dir just won't work) rather than blocking create.
-        Attaching a profile requires the create credentials to hold iam:PassRole.
+        Delegates to the selected host_dir backend (the no-op backend returns None
+        when the feature is off or no bucket exists). The operator-supplied
+        ``iam_instance_profile`` (set on the client) takes precedence over this in
+        ``create_instance``. Attaching a profile requires create credentials to
+        hold iam:PassRole.
         """
-        if not self.aws_config.is_host_dir_synced_to_bucket:
-            return None
-        if self._state_bucket is None:
-            return None
-        identity = self._host_identity()
-        if identity is None:
-            return None
-        try:
-            if not identity.host_identity_exists():
-                logger.warning(
-                    "host_dir sync is on but the bucket-write IAM identity {} does not exist; launching "
-                    "without it (run `mngr aws prepare --use-offline-host-dir yes` to enable offline host_dir)",
-                    identity.identity_name,
-                )
-                return None
-        except S3StateHostIdentityError as e:
-            logger.warning(
-                "Could not check the bucket-write IAM identity {}; launching without it: {}",
-                identity.identity_name,
-                e,
-            )
-            return None
-        return identity.identity_name
+        return self._host_dir_backend.create_identity()
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return public IPs of EC2 instances tagged with this provider's name.
@@ -424,97 +406,37 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         return vps_ips
 
     # =========================================================================
-    # Native EC2 stop/start + idle-watcher hooks (for OfflineCapableVpsDockerProvider)
+    # Native EC2 stop/start (idle-pause + resume) -- the base
+    # OfflineCapableVpsProvider owns the orchestration; here we supply only the
+    # EC2-specific cloud-API hooks.
     # =========================================================================
 
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
-        """Stop the EC2 instance; the EBS root volume and all on-disk state survive."""
         with log_span("Stopping EC2 instance"):
             self.aws_client.stop_instance(instance_id)
 
     def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
-        """Start the EC2 instance and return its fresh public IP (a stop/start reassigns it)."""
         with log_span("Starting EC2 instance"):
             return self.aws_client.start_instance(instance_id)
 
-    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
-        """Idle action: power the host off; EC2 then applies InstanceInitiatedShutdownBehavior."""
-        return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
+    # =========================================================================
+    # Self-stopping idle watcher (in-container sentinel + host-side systemd)
+    # =========================================================================
 
-    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the base idle watcher and, when enabled, the host_dir-to-bucket sync daemon.
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        # EC2 supports stop/start, and the bare idle path self-stops the instance
+        # via InstanceInitiatedShutdownBehavior, so bare placement is supported.
+        return True
 
-        Best-effort per the base contract: a host_dir-sync install failure only costs
-        offline host_dir readability, so it is logged rather than failing create_host.
-        """
-        super()._on_host_finalized(host_id=host_id, vps_ip=vps_ip)
-        try:
-            self._install_host_dir_sync(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            logger.warning(
-                "AWS host_dir sync install failed for host {} ({}); the stopped host's host_dir "
-                "will not be readable offline",
-                host_id,
-                e,
-            )
+    def _provider_instance_kind(self) -> str:
+        return "EC2 instance"
 
-    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Push host_dir to the bucket one final time before the EC2 instance stops."""
-        self._trigger_final_host_dir_sync(host_id, vps_ip)
-
-    def _install_host_dir_sync(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the host-side host_dir-to-bucket sync daemon on the outer host.
-
-        Gated on ``is_host_dir_synced_to_bucket`` AND a state bucket being
-        present (no bucket -> nothing to sync to). Installs awscli (best-effort,
-        apt) and a systemd oneshot ``.service`` + ``.timer`` pair that runs
-        ``aws s3 sync`` every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` using the
-        instance profile's IMDS credentials. Returns early (no-op) when the
-        feature is off or no bucket is configured.
-        """
-        if not self.aws_config.is_host_dir_synced_to_bucket:
-            return
-        bucket = self._state_bucket
-        if bucket is None:
-            logger.debug("No S3 state bucket; skipping host_dir sync install for host {}", host_id)
-            return
-        host_dir_on_outer = self._host_dir_path_on_outer(host_id)
-        sync_target_uri = host_dir_sync_target_for(bucket.bucket_name, host_id)
-        service_unit = _build_host_dir_sync_service_unit(str(host_dir_on_outer), sync_target_uri)
-        timer_unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
-        with log_span("Installing AWS host_dir sync daemon"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                outer.execute_idempotent_command(_build_awscli_install_command(), timeout_seconds=300.0)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
-        logger.info("AWS host_dir sync daemon installed for host {} (target {})", host_id, sync_target_uri)
-
-    def _trigger_final_host_dir_sync(self, host_id: HostId, vps_ip: str) -> None:
-        """Run the host_dir sync once (best-effort) so the offline copy is current before stop.
-
-        Called from ``stop_host`` while the instance is still reachable. Starts
-        the oneshot sync service synchronously (``--wait`` blocks until it
-        finishes). Best-effort: any failure is logged at WARNING and swallowed so
-        a sync hiccup never blocks the stop -- the offline copy is then simply
-        "as of the last periodic sync".
-        """
-        if not self.aws_config.is_host_dir_synced_to_bucket or self._state_bucket is None:
-            return
-        try:
-            with log_span("Triggering final host_dir sync before stop"):
-                with self._make_outer_for_vps_ip(vps_ip) as outer:
-                    outer.execute_idempotent_command(
-                        f"systemctl start --wait {HOST_DIR_SYNC_UNIT_NAME}.service", timeout_seconds=300.0
-                    )
-        except MngrError as e:
-            logger.warning(
-                "Final host_dir sync before stopping host {} failed; the offline copy will be as of "
-                "the last periodic sync: {}",
-                host_id,
-                e,
-            )
+    # The base ``OfflineCapableVpsProvider`` owns the idle-watcher install (the
+    # in-container sentinel ``shutdown.sh``, the host-side systemd ``.path``/
+    # ``.service`` pair, and the bare poweroff). AWS's ``.service`` body is the
+    # default ``shutdown -P now`` (EC2 then applies its
+    # ``InstanceInitiatedShutdownBehavior``), so AWS overrides none of those hooks.
 
     # =========================================================================
     # Offline metadata via EC2 tags (so STOPPED hosts list + resolve by name)
@@ -526,21 +448,25 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         if instance is None:
             logger.warning("No EC2 instance found for host {}; cannot persist agent tags", host_id)
             return
-        set_tags, delete_keys = self._agent_field_tags(agent_id, agent_data, instance)
+        set_tags, delete_keys = self._agent_field_items(agent_id, agent_data, instance)
         try:
             self.aws_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
         except VpsApiError as e:
             # EC2 caps a resource at 50 (non-aws:) tags. Hitting it means the host
-            # has more agents than the tag mirror can hold; surface it as a
-            # NotImplementedError so the CLI offers to open an issue rather than
-            # failing obscurely. Configuring a state bucket (mngr aws prepare)
-            # removes this ceiling entirely.
+            # has more agents than the tag mirror can hold; surface an actionable
+            # TagLimitExceededError pointing at the S3 state bucket, which has no
+            # such ceiling, rather than failing obscurely.
             if "TagLimitExceeded" in str(e):
-                raise NotImplementedError(
-                    f"The AWS host for agent {agent_id!r} has reached EC2's {_AWS_MAX_TAGS_PER_INSTANCE}-tag-per-"
-                    "instance limit, so this agent can't be mirrored to tags for stopped-host listing and "
-                    "resume-by-name. Run `mngr aws prepare` to create an S3 state bucket (which has no such "
-                    "limit), or open an issue at https://github.com/imbue-ai/mngr/issues."
+                raise TagLimitExceededError(
+                    self.name,
+                    limit=_AWS_MAX_TAGS_PER_INSTANCE,
+                    remediation=(
+                        f"The AWS host for agent {agent_id!r} has more agents than EC2 tags can mirror for "
+                        "stopped-host listing and resume-by-name. Run `mngr aws prepare` to create an S3 state "
+                        "bucket (no tag ceiling); the provider uses it automatically once it exists. To pin a "
+                        "specific bucket name first, run "
+                        f"`mngr config set --scope user providers.{self.name}.state_bucket_name <name>`."
+                    ),
                 ) from e
             raise
         if delete_keys:
@@ -557,108 +483,6 @@ class AwsProvider(TagMirrorVpsDockerProvider):
         """
         return instance.get("state") in _HOST_DOWN_STATES
 
-    def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a STOPPED instance's record offline.
-
-        Falls back to the base (SSH/volume-backed) path first; if that can't find
-        the host (because it is stopped and unreachable), reconstruct it from the
-        external store: the *full* ``VpsDockerHostRecord`` when the store has it
-        (S3 ``host_state.json``), otherwise a minimal record rebuilt from the
-        instance's own EC2 tags -- which also covers a bucket-mode host created
-        before the bucket existed (so its ``host_state.json`` is absent). Calls
-        the SSH-only ``VpsDockerProvider`` path directly so the
-        ``OfflineCapableVpsDockerProvider`` tag fallback does not pre-empt the
-        bucket-aware reconstruction below.
-        """
-        try:
-            return VpsDockerProvider.to_offline_host(self, host_id)
-        except HostNotFoundError:
-            record = self._state_store.read_host_record(host_id)
-            # In bucket mode, fall back to the instance's own tags for a host whose
-            # host_state.json is absent (created before the bucket existed). The tag
-            # store already reconstructs from tags, so this fallback is bucket-only.
-            if record is None and self._state_bucket is not None:
-                record = self._host_record_from_instance_tags(host_id)
-            if record is None:
-                raise
-            return self._create_offline_host(record)
-
-    # =========================================================================
-    # Offline host_dir volume (reads via the operator's credentials)
-    # =========================================================================
-
-    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return a bucket-backed host_dir volume *reference* (cheap, no network probe).
-
-        Used by ``make_readable_offline_host`` during discovery, so it must stay
-        cheap: it only builds the scoped ``S3Volume`` (no S3 call) when host_dir
-        sync is on and a state bucket is present. Reads use the operator's
-        credentials, so no instance identity is needed here. Returns None when the
-        feature is off or no bucket is configured.
-        """
-        if not self.aws_config.is_host_dir_synced_to_bucket:
-            return None
-        bucket = self._state_bucket
-        if bucket is None:
-            return None
-        host_id = host.id if isinstance(host, HostInterface) else host
-        return HostVolume(volume=bucket.volume_for_host(host_id))
-
-    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return the bucket-backed host_dir volume, with a light existence probe.
-
-        Like ``get_volume_reference_for_host`` but additionally confirms the
-        host's ``host_dir/`` prefix actually has objects (a cheap ``list`` with
-        ``MaxKeys=1``). When the prefix is empty, runs the missing-identity
-        diagnostic (Decision 7) -- a clear WARNING pointing at
-        ``mngr aws prepare --use-offline-host-dir yes`` if the instance has no
-        attached IAM profile -- and returns None (callers treat None as "not
-        available"). This never raises.
-        """
-        reference = self.get_volume_reference_for_host(host)
-        if reference is None:
-            return None
-        bucket = self._state_bucket
-        if bucket is None:
-            return None
-        host_id = host.id if isinstance(host, HostInterface) else host
-        try:
-            if not bucket.host_dir_prefix_has_objects(host_id):
-                self._warn_if_host_dir_identity_missing(host_id)
-                return None
-        except S3StateBucketError as e:
-            logger.warning(
-                "Could not probe host_dir prefix for host {}; treating volume as unavailable: {}", host_id, e
-            )
-            return None
-        return reference
-
-    def _warn_if_host_dir_identity_missing(self, host_id: HostId) -> None:
-        """Warn (non-fatally) when an empty host_dir prefix is explained by a missing IAM identity.
-
-        Detects the Decision-7 case directly from cloud state: when the host's
-        instance has no attached IAM instance profile, the on-box sync daemon
-        could never push host_dir, which is why the prefix is empty. Points the
-        user at ``mngr aws prepare --use-offline-host-dir yes`` (and recreating
-        the host so it picks up the profile). Best-effort: any probe failure is
-        swallowed (this is purely advisory).
-        """
-        try:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
-                return
-            profile_arn = self.aws_client.get_instance_iam_profile_arn(VpsInstanceId(instance["id"]))
-        except MngrError as e:
-            logger.debug("Could not check IAM profile for host {} while diagnosing empty host_dir: {}", host_id, e)
-            return
-        if profile_arn is None:
-            logger.warning(
-                "Host {}'s instance has no attached IAM instance profile, so its host_dir was never "
-                "pushed to the bucket and is not readable offline. Run `mngr aws prepare "
-                "--use-offline-host-dir yes`, then recreate the host so it picks up the profile.",
-                host_id,
-            )
-
 
 class _Ec2TagHostStateStore(HostStateStore):
     """Tag-backed host-state mirror: the instance's own EC2 tags are the store (no-bucket fallback).
@@ -671,7 +495,7 @@ class _Ec2TagHostStateStore(HostStateStore):
 
     provider: AwsProvider
 
-    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+    def persist_host_record(self, record: VpsHostRecord) -> None:
         # The instance's own create/stop tags carry the host record; nothing extra to write.
         pass
 
@@ -690,13 +514,90 @@ class _Ec2TagHostStateStore(HostStateStore):
         self.provider.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
     def list_agent_records(self, host_id: HostId) -> list[dict]:
-        instance = self.provider._find_instance_for_host(host_id)
-        if instance is None:
-            return []
-        return self.provider._persisted_agent_dicts_from_instance(instance)
+        return self.provider._agent_dicts_from_tags(host_id)
 
-    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+    def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
         return self.provider._host_record_from_instance_tags(host_id)
+
+
+class _S3HostDirBackend(BucketHostDirBackend):
+    """Bucket-backed offline host_dir for AWS: instance-profile + ``aws s3 sync`` to the S3 state bucket.
+
+    Selected only when offline host_dir is on and the state bucket exists, so
+    ``self.bucket`` is always present here and no method re-tests it. The
+    offline-read + final-sync flow is inherited from ``BucketHostDirBackend``;
+    this supplies the AWS-specific identity, sync-daemon install, and probes.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    provider: AwsProvider
+    bucket: S3StateBucket
+    bucket_error_type: type[MngrError] = S3StateBucketError
+
+    def _sync_unit_name(self) -> str:
+        return HOST_DIR_SYNC_UNIT_NAME
+
+    def _pause_action(self) -> str:
+        return "stop"
+
+    def create_identity(self) -> str | None:
+        identity = self.provider._host_identity()
+        if identity is None:
+            return None
+        try:
+            if not identity.host_identity_exists():
+                logger.warning(
+                    "host_dir sync is on but the bucket-write IAM identity {} does not exist; launching "
+                    "without it (re-run `mngr aws prepare` with sufficient IAM to enable offline host_dir)",
+                    identity.identity_name,
+                )
+                return None
+        except S3StateHostIdentityError as e:
+            logger.warning(
+                "Could not check the bucket-write IAM identity {}; launching without it: {}",
+                identity.identity_name,
+                e,
+            )
+            return None
+        return identity.identity_name
+
+    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
+        host_dir_on_outer = self.provider._realizer.host_dir_path_on_outer(host_id)
+        sync_target_uri = host_dir_sync_target_for(self.bucket.bucket_name, host_id)
+        service_unit = _build_host_dir_sync_service_unit(str(host_dir_on_outer), sync_target_uri)
+        timer_unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
+        with log_span("Installing AWS host_dir sync daemon"):
+            with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
+                outer.execute_idempotent_command(_build_awscli_install_command(), timeout_seconds=300.0)
+                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
+                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
+                outer.execute_idempotent_command("systemctl daemon-reload")
+                outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
+        logger.info("AWS host_dir sync daemon installed for host {} (target {})", host_id, sync_target_uri)
+
+    def _warn_if_identity_missing(self, host_id: HostId) -> None:
+        """Warn when an empty host_dir prefix is explained by the instance having no IAM profile.
+
+        Detects the missing-identity case directly from cloud state: an instance
+        with no attached IAM instance profile could never push host_dir, which is
+        why the prefix is empty. Best-effort -- any probe failure is swallowed.
+        """
+        try:
+            instance = self.provider._find_instance_for_host(host_id)
+            if instance is None:
+                return
+            profile_arn = self.provider.aws_client.get_instance_iam_profile_arn(VpsInstanceId(instance["id"]))
+        except MngrError as e:
+            logger.debug("Could not check IAM profile for host {} while diagnosing empty host_dir: {}", host_id, e)
+            return
+        if profile_arn is None:
+            logger.warning(
+                "Host {}'s instance has no attached IAM instance profile, so its host_dir was never "
+                "pushed to the bucket and is not readable offline. Re-run `mngr aws prepare` "
+                "with sufficient IAM, then recreate the host so it picks up the profile.",
+                host_id,
+            )
 
 
 class AwsProviderBackend(ProviderBackendInterface):

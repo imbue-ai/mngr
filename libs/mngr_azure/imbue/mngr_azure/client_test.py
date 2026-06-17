@@ -22,10 +22,10 @@ from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import make_azure_http_error
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 _SUBSCRIPTION = "sub-123"
 _REGION = "westus"
@@ -579,7 +579,7 @@ def test_start_instance_returns_preserved_public_ip_and_records_start() -> None:
 
 
 def test_deallocate_instance_raises_when_the_operation_outlasts_the_timeout() -> None:
-    """A deallocate LRO still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
+    """A deallocate long-running operation still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
     compute = FakeComputeClient()
     compute.virtual_machines.deallocate_completes = False
     client = _make_client(compute=compute)
@@ -588,7 +588,7 @@ def test_deallocate_instance_raises_when_the_operation_outlasts_the_timeout() ->
 
 
 def test_start_instance_raises_when_the_operation_outlasts_the_timeout() -> None:
-    """A start LRO still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
+    """A start long-running operation still in flight at ``timeout_seconds`` raises VpsProvisioningError."""
     compute = FakeComputeClient()
     compute.virtual_machines.start_completes = False
     client = _make_client(compute=compute)

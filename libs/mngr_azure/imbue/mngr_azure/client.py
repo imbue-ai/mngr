@@ -47,11 +47,11 @@ from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_SKU
 from imbue.mngr_azure.config import DEFAULT_IMAGE_VERSION
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Tag key/value that ``create_instance`` adds to every VM launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses this
@@ -873,7 +873,7 @@ class AzureVpsClient(VpsClientInterface):
             return
         logger.info("Deleted Azure VM {} (NIC, public IP and OS disk cascade via delete_option)", instance_id)
 
-    def _await_lro(self, poller: LROPoller[None], timeout_seconds: float, description: str) -> None:
+    def _await_long_running_operation(self, poller: LROPoller[None], timeout_seconds: float, description: str) -> None:
         """Block on an Azure long-running operation up to ``timeout_seconds``.
 
         ``LROPoller.wait(timeout)`` re-raises the operation's own error (translated
@@ -893,8 +893,8 @@ class AzureVpsClient(VpsClientInterface):
         Critically distinct from an OS-level shutdown, which only powers the VM
         off ("Stopped (not deallocated)") and STILL bills compute -- only a
         ``deallocate`` halts compute billing. The OS disk (and all on-disk state)
-        survives, so ``start_instance`` resumes it. The ``begin_deallocate`` LRO is
-        bounded by ``timeout_seconds`` (re-raised as ``VpsProvisioningError`` on
+        survives, so ``start_instance`` resumes it. The ``begin_deallocate``
+        long-running operation is bounded by ``timeout_seconds`` (re-raised as ``VpsProvisioningError`` on
         exceedance, matching the AWS/GCP clients' wait contract). Idempotent.
 
         Widens ``AzureVpsClient`` beyond the shared ``VpsClientInterface`` (which
@@ -902,7 +902,7 @@ class AzureVpsClient(VpsClientInterface):
         """
         with self._translate_azure_errors():
             poller = self._compute().virtual_machines.begin_deallocate(self.resource_group, str(instance_id))
-            self._await_lro(poller, timeout_seconds, f"deallocate VM {instance_id}")
+            self._await_long_running_operation(poller, timeout_seconds, f"deallocate VM {instance_id}")
         logger.info("Deallocated Azure VM {} (compute billing halted; OS disk preserved)", instance_id)
 
     def start_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
@@ -912,14 +912,14 @@ class AzureVpsClient(VpsClientInterface):
         so it is PRESERVED across deallocate/start -- the returned IP equals the
         pre-stop address. (This is why ``AzureProvider.start_host`` needs no
         known_hosts rebind, unlike AWS/GCP whose ephemeral IPs change.) The
-        ``begin_start`` LRO is bounded by ``timeout_seconds`` (re-raised as
+        ``begin_start`` long-running operation is bounded by ``timeout_seconds`` (re-raised as
         ``VpsProvisioningError`` on exceedance). Idempotent.
 
         Azure-only, like ``deallocate_instance`` -- reached via ``self.azure_client``.
         """
         with self._translate_azure_errors():
             poller = self._compute().virtual_machines.begin_start(self.resource_group, str(instance_id))
-            self._await_lro(poller, timeout_seconds, f"start VM {instance_id}")
+            self._await_long_running_operation(poller, timeout_seconds, f"start VM {instance_id}")
         logger.info("Started Azure VM {}", instance_id)
         return self.get_instance_ip(instance_id)
 
@@ -1074,10 +1074,9 @@ class AzureVpsClient(VpsClientInterface):
 
         Reads the VM's ``identity.user_assigned_identities`` map. Used by the
         offline host_dir path to detect a VM that was never granted the
-        bucket-write identity (Decision 7), so it can tell the user to re-run
-        ``mngr azure prepare --use-offline-host-dir yes``. Returns ``[]`` for a
-        nonexistent VM too (no identities to report). Mirrors AWS's
-        ``get_instance_iam_profile_arn``.
+        bucket-write identity, so it can tell the user to re-run
+        ``mngr azure prepare``. Returns ``[]`` for a nonexistent VM too (no
+        identities to report). Mirrors AWS's ``get_instance_iam_profile_arn``.
         """
         try:
             with self._translate_azure_errors():

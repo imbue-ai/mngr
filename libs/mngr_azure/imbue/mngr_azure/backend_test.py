@@ -28,7 +28,7 @@ from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
 class _SubnetStubClient(AzureVpsClient):
@@ -538,10 +538,10 @@ def _normalized_instance(tag_pairs: dict[str, str]) -> dict:
     return {"id": "vm-1", "tags": [f"{k}={v}" for k, v in tag_pairs.items()]}
 
 
-def test_agent_field_tags_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -> None:
     """name/type/labels each map to their own mngr-agent-<id>-<field> tag; the id is in the key."""
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    set_tags, delete_keys = provider._agent_field_tags(
+    set_tags, delete_keys = provider._agent_field_items(
         "agent-1",
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}},
         _normalized_instance({"mngr-host-id": "h"}),
@@ -554,7 +554,7 @@ def test_agent_field_tags_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -
     assert delete_keys == []
 
 
-def test_agent_field_tags_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
     """An agent with absent or empty labels gets no -labels tag."""
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance({})
@@ -562,16 +562,16 @@ def test_agent_field_tags_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None
         {"id": "agent-1", "name": "a1", "type": "command"},
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {}},
     ):
-        set_tags, _ = provider._agent_field_tags("agent-1", agent_data, instance)
+        set_tags, _ = provider._agent_field_items("agent-1", agent_data, instance)
         assert "mngr-agent-agent-1-labels" not in set_tags
 
 
-def test_agent_field_tags_drops_oversized_labels_with_warning(
+def test_agent_field_items_drops_oversized_labels_with_warning(
     temp_mngr_ctx: MngrContext, log_warnings: list[str]
 ) -> None:
     """Labels too large for a 256-char Azure tag are dropped (name/type kept) with a warning."""
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    set_tags, _ = provider._agent_field_tags(
+    set_tags, _ = provider._agent_field_items(
         "agent-1",
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {"k": "x" * 300}},
         _normalized_instance({}),
@@ -580,7 +580,7 @@ def test_agent_field_tags_drops_oversized_labels_with_warning(
     assert any("exceeds the" in w and "labels" in w for w in log_warnings), log_warnings
 
 
-def test_agent_field_tags_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
     """When an update carries empty labels (an explicit removal), the stale -labels tag is deleted."""
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance(
@@ -590,14 +590,14 @@ def test_agent_field_tags_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx
             "mngr-agent-agent-1-labels": '{"env":"prod"}',
         }
     )
-    set_tags, delete_keys = provider._agent_field_tags(
+    set_tags, delete_keys = provider._agent_field_items(
         "agent-1", {"id": "agent-1", "name": "a1", "type": "command", "labels": {}}, instance
     )
     assert "mngr-agent-agent-1-labels" not in set_tags
     assert delete_keys == ["mngr-agent-agent-1-labels"]
 
 
-def test_agent_field_tags_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
     """A partial persist (e.g. only id+type) must NOT delete the agent's existing name/labels tags."""
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance(
@@ -607,7 +607,7 @@ def test_agent_field_tags_preserves_absent_fields_on_partial_update(temp_mngr_ct
             "mngr-agent-agent-1-labels": '{"env":"prod"}',
         }
     )
-    set_tags, delete_keys = provider._agent_field_tags("agent-1", {"id": "agent-1", "type": "claude"}, instance)
+    set_tags, delete_keys = provider._agent_field_items("agent-1", {"id": "agent-1", "type": "claude"}, instance)
     assert set_tags == {"mngr-agent-agent-1-type": "claude"}
     assert delete_keys == []
 
@@ -656,6 +656,22 @@ def test_build_self_deallocate_script_fetches_token_resource_id_and_posts_deallo
     assert script.index("rm -f") < script.index("deallocate?api-version")
     # On a refused deallocate the script logs and exits -- it must NOT poweroff,
     # since an Azure OS shutdown does not halt billing.
+    assert "shutdown" not in script
+    assert "exit 1" in script
+
+
+def test_build_self_deallocate_script_omits_sentinel_removal_for_bare() -> None:
+    """With no sentinel (bare path), the script still deallocates but skips the rm line.
+
+    The bare placement runs this directly as the agent's shutdown.sh -- there is no
+    idle sentinel, so passing None omits the ``rm -f`` line while keeping the ARM
+    deallocate. It still must not fall back to an OS poweroff (which would strand a
+    still-billing Azure VM).
+    """
+    script = _build_self_deallocate_script(None)
+    assert "rm -f" not in script
+    assert "/deallocate?api-version=" in script
+    assert "-X POST" in script
     assert "shutdown" not in script
     assert "exit 1" in script
 

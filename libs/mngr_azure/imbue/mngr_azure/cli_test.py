@@ -9,7 +9,6 @@ from click.testing import CliRunner
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.primitives import AutoToggle
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
@@ -61,33 +60,33 @@ def test_perform_state_bucket_cleanup_deletes_when_empty() -> None:
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
-    assert _perform_state_bucket_cleanup(bucket, purge_state=False) == "mngrststateacct1234"
+    assert _perform_state_bucket_cleanup(bucket, force=False) == "mngrststateacct1234"
     assert backend.deleted_account is True
 
 
 def test_perform_state_bucket_cleanup_noop_when_account_absent() -> None:
     bucket = _stubbed_bucket(FakeBlobStorageBackend())
-    assert _perform_state_bucket_cleanup(bucket, purge_state=False) is None
+    assert _perform_state_bucket_cleanup(bucket, force=False) is None
 
 
 def test_perform_state_bucket_cleanup_refuses_with_host_state() -> None:
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
-    bucket.write_host_record(HostId.generate(), "{}")
+    bucket.write_host_record_json(HostId.generate(), "{}")
     with pytest.raises(AzureProviderError, match="still holds offline host state"):
-        _perform_state_bucket_cleanup(bucket, purge_state=False)
+        _perform_state_bucket_cleanup(bucket, force=False)
     # Refusal deletes nothing.
     assert backend.deleted_account is False
 
 
-def test_perform_state_bucket_cleanup_purge_state_deletes_despite_host_state() -> None:
-    """``--purge-state`` deletes the account (and its leftover state) instead of refusing."""
+def test_perform_state_bucket_cleanup_force_deletes_despite_host_state() -> None:
+    """``--force`` deletes the account (and its leftover state) instead of refusing."""
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
-    bucket.write_host_record(HostId.generate(), "{}")
-    assert _perform_state_bucket_cleanup(bucket, purge_state=True) == "mngrststateacct1234"
+    bucket.write_host_record_json(HostId.generate(), "{}")
+    assert _perform_state_bucket_cleanup(bucket, force=True) == "mngrststateacct1234"
     assert backend.deleted_account is True
 
 
@@ -145,7 +144,7 @@ def test_refuse_cleanup_if_vms_exist_aborts_before_teardown() -> None:
     backend = FakeBlobStorageBackend()
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
-    bucket.write_host_record(HostId.generate(), "{}")
+    bucket.write_host_record_json(HostId.generate(), "{}")
     with pytest.raises(AzureProviderError, match="Refusing to clean up"):
         _refuse_cleanup_if_vms_exist(client)
     # The guard raised before any teardown, so the account and its state survive.
@@ -238,7 +237,7 @@ def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[s
 
 
 # =============================================================================
-# host-dir identity provisioning (prepare --use-offline-host-dir tri-state)
+# host-dir identity provisioning (best-effort, gated on is_offline_host_dir_enabled)
 # =============================================================================
 
 
@@ -256,21 +255,10 @@ def _stubbed_identity(*, exists: bool = False) -> _StubbedBlobStateHostIdentity:
     )
 
 
-def test_provision_host_identity_no_does_nothing() -> None:
+def test_provision_host_identity_creates_identity() -> None:
     identity = _stubbed_identity()
-    assert _provision_host_identity(identity, AutoToggle.NO) is None
-    assert identity.host_identity_exists() is False
-
-
-def test_provision_host_identity_auto_creates_identity() -> None:
-    identity = _stubbed_identity()
-    assert _provision_host_identity(identity, AutoToggle.AUTO) == identity.identity_name
+    assert _provision_host_identity(identity) == identity.identity_name
     assert identity.host_identity_exists() is True
-
-
-def test_provision_host_identity_yes_creates_identity() -> None:
-    identity = _stubbed_identity()
-    assert _provision_host_identity(identity, AutoToggle.YES) == identity.identity_name
 
 
 def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:

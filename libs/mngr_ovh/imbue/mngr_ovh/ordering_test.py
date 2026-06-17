@@ -16,8 +16,8 @@ from imbue.mngr_ovh.ordering import OvhOrderDeliveryTimeoutError
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
 from imbue.mngr_ovh.ordering import try_poll_order_for_delivered_vps
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
 
 
 def _client(call_side_effect: Any) -> OvhVpsClient:

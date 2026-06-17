@@ -122,9 +122,9 @@ from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provide
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
-from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
 
@@ -798,7 +798,7 @@ class ImbueCloudProvider(BaseProviderInstance):
     ) -> AgentDetails | None:
         """Construct one ``AgentDetails`` from the parsed listing output.
 
-        Mirrors ``mngr_vps_docker``'s implementation -- the fields are
+        Mirrors ``mngr_vps``'s implementation -- the fields are
         identical because both providers consume the same shared listing
         script. We pull idle/activity-source metadata off the per-agent
         ``data.json`` that the script captured rather than off a
@@ -995,7 +995,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         - ``fast_mode=prevent`` -- the slow path. Lease any adequately-sized
           available host (resource attributes only; ``repo_branch_or_tag`` /
           ``repo_url`` are dropped), destroy its baked container, and rebuild
-          the host from scratch via the shared ``mngr_vps_docker`` setup path,
+          the host from scratch via the shared ``mngr_vps`` setup path,
           so mngr's standard create pipeline then does full client-side setup.
 
         Two address forms work for both paths:
@@ -1222,7 +1222,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         """Tear down the leased VPS's baked container and rebuild it from the FCT Dockerfile.
 
         Delegates both teardown and rebuild to the single canonical
-        ``mngr_vps_docker`` setup path, run over the root SSH the lease granted.
+        ``mngr_vps`` setup path, run over the root SSH the lease granted.
         The per-host public key is added to the rebuilt container's
         ``authorized_keys`` so the returned ``ImbueCloudHost`` (which uses the
         per-host key) can reach it.
@@ -1233,7 +1233,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         # one. Detected by the lease's container port differing from the standard
         # publish port -- true only for slices (forwarded ports), never OVH VPSes.
         is_slice = lease_result.container_ssh_port != self.config.container_ssh_port
-        delegated_provider: VpsDockerProvider = (
+        delegated_provider: VpsProvider = (
             build_slice_rebuild_provider(
                 name=self.name, config=self.config, mngr_ctx=self.mngr_ctx, lease_result=lease_result
             )
@@ -1458,7 +1458,7 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         Returns None when no container with that label exists. Containers are
         identified by ``com.imbue.mngr.host-id=<host_id>`` (the canonical
-        ``LABEL_HOST_ID`` from ``mngr_vps_docker``).
+        ``LABEL_HOST_ID`` from ``mngr_vps``).
         """
         result = outer.execute_idempotent_command(
             f"docker ps -aq --filter label=com.imbue.mngr.host-id={shlex.quote(str(host_id))} | head -1"

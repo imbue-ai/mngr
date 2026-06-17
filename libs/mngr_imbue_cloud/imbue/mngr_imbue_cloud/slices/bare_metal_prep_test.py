@@ -1,5 +1,5 @@
 from imbue.mngr_imbue_cloud.slices.bare_metal_prep import build_box_prep_script
-from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
+from imbue.mngr_vps.host_setup import PINNED_DOCKER_APT_VERSION
 
 _POOL_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTpoolkey mngr-pool"
 _IMAGE_URL = (

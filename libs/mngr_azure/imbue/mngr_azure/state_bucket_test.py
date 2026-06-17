@@ -61,10 +61,10 @@ def test_ensure_bucket_adds_container_when_account_preexists() -> None:
 def test_host_record_round_trip() -> None:
     bucket, _backend = _make_prepared_bucket()
     host_id = HostId.generate()
-    assert bucket.read_host_record(host_id) is None
+    assert bucket.read_host_record_json(host_id) is None
     record_json = '{"certified_host_data": {"host_id": "x"}}'
-    bucket.write_host_record(host_id, record_json)
-    assert bucket.read_host_record(host_id) == record_json
+    bucket.write_host_record_json(host_id, record_json)
+    assert bucket.read_host_record_json(host_id) == record_json
 
 
 def test_agent_records_round_trip_and_remove() -> None:
@@ -88,11 +88,11 @@ def test_agent_records_round_trip_and_remove() -> None:
 def test_delete_host_state_removes_record_and_agents() -> None:
     bucket, _backend = _make_prepared_bucket()
     host_id = HostId.generate()
-    bucket.write_host_record(host_id, "{}")
+    bucket.write_host_record_json(host_id, "{}")
     bucket.write_agent_record(host_id, "agent-1", {"id": "agent-1"})
     assert bucket.has_any_host_state() is True
     bucket.delete_host_state(host_id)
-    assert bucket.read_host_record(host_id) is None
+    assert bucket.read_host_record_json(host_id) is None
     assert bucket.list_agent_records(host_id) == []
     assert bucket.has_any_host_state() is False
     # Deleting an already-empty host prefix is idempotent.
@@ -104,7 +104,7 @@ def test_has_any_host_state_isolated_per_host() -> None:
     assert bucket.has_any_host_state() is False
     host_a = HostId.generate()
     host_b = HostId.generate()
-    bucket.write_host_record(host_a, "{}")
+    bucket.write_host_record_json(host_a, "{}")
     assert bucket.has_any_host_state() is True
     bucket.delete_host_state(host_b)
     # Deleting an unrelated empty host leaves host_a's state intact.
@@ -114,7 +114,7 @@ def test_has_any_host_state_isolated_per_host() -> None:
 def test_delete_bucket_removes_account_and_state() -> None:
     bucket, backend = _make_prepared_bucket()
     host_id = HostId.generate()
-    bucket.write_host_record(host_id, "{}")
+    bucket.write_host_record_json(host_id, "{}")
     bucket.delete_bucket()
     assert bucket.account_exists() is False
     assert backend.deleted_account is True

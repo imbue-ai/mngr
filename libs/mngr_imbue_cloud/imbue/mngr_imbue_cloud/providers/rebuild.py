@@ -7,21 +7,21 @@ from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
-from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
+from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.instance import MinimalVpsProvider
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 
 
 @pure
-def _build_delegated_vps_config(config: ImbueCloudProviderConfig) -> VpsDockerProviderConfig:
+def _build_delegated_vps_config(config: ImbueCloudProviderConfig) -> VpsProviderConfig:
     """Build the delegated vps_docker config for the slow-path rebuild.
 
     Forwards the runtime knobs (``docker_runtime`` / ``install_gvisor_runtime`` /
     ``default_start_args``) from the imbue_cloud config so the rebuilt container
     runs under the configured runtime with the configured hardening args.
     """
-    return VpsDockerProviderConfig(
+    return VpsProviderConfig(
         backend=ProviderBackendName("vps_docker"),
         host_dir=config.host_dir,
         container_ssh_port=config.container_ssh_port,
@@ -36,7 +36,7 @@ def build_delegated_vps_provider(
     name: ProviderInstanceName,
     config: ImbueCloudProviderConfig,
     mngr_ctx: MngrContext,
-) -> VpsDockerProvider:
+) -> VpsProvider:
     """Construct a vps_docker provider bound to an imbue_cloud instance's keys/config.
 
     It only ever runs ``teardown_container_on_existing_vps`` /
@@ -45,14 +45,14 @@ def build_delegated_vps_provider(
     ``ExternallyManagedVpsClient`` stub that raises on any ordering call.
 
     Forwards the runtime knobs from ``config`` (an ``ImbueCloudProviderConfig``,
-    which extends ``VpsDockerProviderConfig``) so the rebuilt container runs under
+    which extends ``VpsProviderConfig``) so the rebuilt container runs under
     the configured runtime with the configured hardening args -- e.g.
     ``docker_runtime='runsc'`` plus ``--workdir=/`` /
     ``--security-opt=no-new-privileges`` from ``default_start_args``, which minds
     bootstrap writes into the per-account block.
     """
     vps_config = _build_delegated_vps_config(config)
-    return MinimalVpsDockerProvider(
+    return MinimalVpsProvider(
         name=name,
         host_dir=config.host_dir,
         mngr_ctx=mngr_ctx,
