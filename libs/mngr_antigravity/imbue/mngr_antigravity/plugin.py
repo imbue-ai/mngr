@@ -115,6 +115,8 @@ from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -132,7 +134,9 @@ from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
@@ -691,19 +695,29 @@ class AntigravityAgent(
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Adopt the conversation named by ``--adopt-session`` into this newly provisioned agent.
+        """Resume a prior conversation into this newly provisioned agent.
 
-        ``plugin_data["adopt_session"]`` is a tuple (the option is ``multiple=True``); agy
-        resumes a single conversation, so the LAST entry wins. The adopt argument (a
-        conversation id or an absolute path to a conversations store / ``<id>.db`` file) is
-        resolved, the matching store is copied into this agent's antigravity home, and the id
-        is written into the resume pointers (``root_conversation`` / ``CONVERSATION_IDS_FILENAME``);
-        ``assemble_command`` then resumes it via ``agy --conversation``.
+        Two sources, mutually exclusive (the core ``builtin_adopt_session`` gate rejects
+        combining them):
+
+        - ``--adopt-session``: ``plugin_data["adopt_session"]`` is a tuple (the option is
+          ``multiple=True``); agy resumes a single conversation, so the LAST entry wins. The
+          adopt argument (a conversation id or an absolute path to a conversations store /
+          ``<id>.db`` file) is resolved, the matching store is copied into this agent's
+          antigravity home, and the id is written into the resume pointers.
+        - ``--from <agent>``: ``options.source_agent_state_location`` is the cloned source
+          agent's state dir, but a clone does not copy that state dir, so
+          ``_adopt_cloned_session`` transfers just the source's conversation store and resumes
+          its root conversation.
+
+        Either way ``assemble_command`` then resumes the recorded id via ``agy --conversation``.
         """
         adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
-        if not adopt_args:
+        if adopt_args:
+            self._adopt_session(host, adopt_args[-1])
             return
-        self._adopt_session(host, adopt_args[-1])
+        if options.source_agent_state_location is not None:
+            self._adopt_cloned_session(host, options.source_agent_state_location)
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
         """Resolve, copy, and finalize an adopted agy conversation.
@@ -720,6 +734,64 @@ class AntigravityAgent(
             host.copy_directory(host, source_conversations_dir, dest_conversations_dir)
         self._finalize_adopted_session(host, conversation_id)
         logger.info("Adopted agy conversation: {}", conversation_id)
+
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+        """Resume a ``--from <agent>`` clone's source conversation.
+
+        A generic clone copies the source *workspace* but not the source agent's *state dir*,
+        so the source's agy conversation store is transferred into this agent's home via the
+        shared helper (just the ``conversations/`` relpath -- the same one preserved on
+        destroy and scanned by ``_resolve_adopt_session``). agy resumes purely by conversation
+        id and is directory-agnostic, so no cwd rebind is needed (unlike claude, whose
+        sessions are filed by encoded work_dir).
+
+        The conversation to resume is the source's root conversation (its
+        ``ROOT_CONVERSATION_FILENAME``); if that pointer is absent or its store did not come
+        across, the most-recent transferred ``<id>.db`` is used. With nothing to adopt the
+        clone starts a fresh session.
+        """
+        transferred = transfer_cloned_agent_session_store(
+            host, self._get_agent_dir(), source_location, _AGENT_CONVERSATIONS_RELPATH
+        )
+        if not transferred:
+            logger.warning(
+                "Clone adopt: source agent {} has no agy conversation store; cloned agent will start a fresh session",
+                source_location.path,
+            )
+            return
+        conversation_id = self._pick_cloned_conversation_id(host, source_location)
+        if conversation_id is None:
+            logger.warning(
+                "Clone adopt: transferred agy store from {} has no resumable conversation; "
+                "cloned agent will start a fresh session",
+                source_location.path,
+            )
+            return
+        self._finalize_adopted_session(host, conversation_id)
+        logger.info("Adopted cloned agy conversation: {}", conversation_id)
+
+    def _pick_cloned_conversation_id(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
+        """Pick the conversation id to resume from a ``--from`` clone's transferred store.
+
+        Prefers the source agent's recorded root conversation (its
+        ``ROOT_CONVERSATION_FILENAME``, the single source of truth for "the agent's current
+        conversation"). Falls back to the most-recently modified ``<id>.db`` / ``<id>.pb`` in
+        the transferred store when the source has no root pointer (e.g. it never ran a turn).
+        Returns ``None`` when neither yields a usable id.
+        """
+        source_root_file = source_location.path / ROOT_CONVERSATION_FILENAME
+        if source_location.host.path_exists(source_root_file):
+            recorded = source_location.host.read_text_file(source_root_file).strip()
+            if recorded:
+                return recorded
+        dest_conversations_dir = get_antigravity_conversations_dir(self._get_agy_home_dir())
+        globs = " ".join(
+            f"{shlex.quote(str(dest_conversations_dir))}/*{suffix}" for suffix in _CONVERSATION_STORE_SUFFIXES
+        )
+        latest = host.execute_idempotent_command(f"ls -t {globs} 2>/dev/null | head -n1", timeout_seconds=5.0)
+        if latest.success and latest.stdout.strip():
+            return Path(latest.stdout.strip()).stem
+        return None
 
     def _finalize_adopted_session(self, host: OnlineHostInterface, conversation_id: str) -> None:
         """Write the adopted conversation id into the resume pointers.
@@ -1312,6 +1384,29 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     preserve_host_agents_on_destroy(
         host, mngr_ctx, AgentTypeName("antigravity"), _antigravity_items_to_preserve_for_discovered_agent
     )
+
+
+@hookimpl
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+    """Antigravity-specific fail-fast pre-resolution of ``--adopt-session`` conversation ids.
+
+    The agent-agnostic gate (the type must support session adoption; mutual exclusion with
+    cloning via ``--from``) and the ``--adopt-session`` option declaration both live in the
+    core ``builtin_adopt_session`` hookimpl. This runs only for antigravity agents and resolves
+    every named conversation *now* -- before any host or worktree is created -- so a bad or
+    ambiguous id is a clean ``UserInputError`` rather than a ConcurrencyExceptionGroup traceback
+    out of ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
+    source is always local, so the result matches the resolution done later.
+    """
+    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
+    if not adopt_session:
+        return None
+    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
+    if not issubclass(resolved.agent_class, AntigravityAgent):
+        return None
+    for adopt_arg in adopt_session:
+        _resolve_adopt_session(adopt_arg, mngr_ctx)
+    return None
 
 
 @hookimpl
