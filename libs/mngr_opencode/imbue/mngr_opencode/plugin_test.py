@@ -13,6 +13,7 @@ import pytest
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import SendMessageError
@@ -63,7 +64,7 @@ def test_opencode_agent_config_merge_with_replaces_cli_args_and_overrides() -> N
     base = OpenCodeAgentConfig()
     override = OpenCodeAgentConfig(cli_args=("--verbose",), config_overrides={"model": "anthropic/claude-sonnet-4-5"})
 
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert isinstance(merged, OpenCodeAgentConfig)
     assert merged.cli_args == ("--verbose",)
@@ -71,12 +72,12 @@ def test_opencode_agent_config_merge_with_replaces_cli_args_and_overrides() -> N
     assert str(merged.command) == "opencode"
 
 
-def test_opencode_agent_config_merge_with_rejects_other_type() -> None:
+def test_merge_models_via_overlay_rejects_other_type() -> None:
     class _OtherConfig(OpenCodeAgentConfig):
         pass
 
     with pytest.raises(ConfigParseError):
-        OpenCodeAgentConfig().merge_with(_OtherConfig())
+        merge_models_via_overlay(OpenCodeAgentConfig(), _OtherConfig())
 
 
 def test_opencode_agent_subclasses_base_agent() -> None:

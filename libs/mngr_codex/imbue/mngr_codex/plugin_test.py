@@ -18,6 +18,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -73,7 +74,7 @@ def test_codex_agent_config_has_correct_defaults() -> None:
 def test_codex_agent_config_merge_with_replaces_cli_args() -> None:
     base = CodexAgentConfig()
     override = CodexAgentConfig(cli_args=("--foo",))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert isinstance(merged, CodexAgentConfig)
     assert merged.cli_args == ("--foo",)
     assert str(merged.command) == "codex"

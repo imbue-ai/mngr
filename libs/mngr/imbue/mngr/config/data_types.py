@@ -206,28 +206,6 @@ class AgentTypeConfig(FrozenModel):
             return split_cli_args_string(value) if value else ()
         return tuple(value)
 
-    def merge_with(self, override: Self) -> tuple[Self, list[str]]:
-        """Merge this config with an override config, returning the merged config and every
-        narrowing path the overlay merge surfaced (see ``MngrConfig.merge_with`` for what a
-        narrowing is; callers that only need the merged value drop the second element).
-
-        Uses ``model_fields_set`` so a sparse override preserves subclass-specific
-        fields (e.g. ``ClaudeAgentConfig.auto_dismiss_dialogs``). Aggregate fields
-        assign-by-default (use ``field__extend`` for additive); a ``SettingsPatchField``
-        accumulates instead. See ``config/README.md`` for the full merge scheme.
-        """
-        # Allow override to be the same class or a base class of self (e.g., when
-        # a secondary config file defines the same custom type without repeating
-        # parent_type, it gets parsed as the base AgentTypeConfig). Reject
-        # sibling subclasses (e.g., ClaudeAgentConfig vs CodexAgentConfig).
-        if not isinstance(self, type(override)):
-            raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with {type(override).__name__}")
-
-        # Computed via the overlay pipeline (behavior-identical to the old
-        # field-by-field merge); see ``overlay_merge.merge_models_via_overlay``
-        # and ``config/README.md``.
-        return merge_models_via_overlay(self, override)
-
 
 class ProviderInstanceConfig(FrozenModel):
     """Defines a custom provider instance."""

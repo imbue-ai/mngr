@@ -15,6 +15,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -64,7 +65,7 @@ def test_antigravity_agent_config_merge_with_replaces_cli_args() -> None:
     base = AntigravityAgentConfig()
     override = AntigravityAgentConfig(cli_args=("--verbose",))
 
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert isinstance(merged, AntigravityAgentConfig)
     # Override's cli_args replaces (rather than concatenates onto) the base.

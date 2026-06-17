@@ -2,8 +2,8 @@
 
 ``merge_models_via_overlay`` reproduces a model's old field-by-field merge by going
 through ``model_dump`` -> overlay ``combine`` -> ``model_validate``, built on the
-typed-node algebra in ``imbue.overlay.node_merge``. It backs ``AgentTypeConfig.merge_with``,
-``MngrConfig.merge_with``, and ``parent_type`` inheritance.
+typed-node algebra in ``imbue.overlay.node_merge``. It backs ``MngrConfig.merge_with`` and
+``parent_type`` inheritance (``apply_parent_overrides``).
 
 The pipeline is **serialize -> pre-process -> overlay merge -> reparse**:
 
@@ -41,6 +41,7 @@ from pydantic import BaseModel
 
 from imbue.mngr.config.field_markers import get_registry_field_names
 from imbue.mngr.config.field_markers import get_settings_patch_field_names
+from imbue.mngr.errors import ConfigParseError
 from imbue.overlay.markers import StaticDict
 from imbue.overlay.markers import StaticList
 from imbue.overlay.markers import StaticTuple
@@ -350,7 +351,11 @@ def merge_models_via_overlay(
     path the overlay merge surfaced (see module docstring for the merge mechanics).
 
     Callers that only need the merged value drop the second element explicitly
-    (e.g. ``AgentTypeConfig.merge_with``, ``apply_parent_overrides``).
+    (e.g. ``apply_parent_overrides``).
+
+    ``override`` must be the same class as ``base`` or a base class of it (the result
+    reparses into ``type(base)``, so a sibling or more-derived ``override`` would silently
+    lose fields); a mismatch raises ``ConfigParseError``.
 
     ``SettingsPatchField`` / ``RegistryField`` marks are read directly off each live
     model's class (``field_markers``): a settings-patch field accumulates via ``__extend``;
@@ -378,6 +383,8 @@ def merge_models_via_overlay(
     is the single config-load narrowing detector; the loader routes the whole list
     into its flag-gated narrowing error.
     """
+    if not isinstance(base, type(override)):
+        raise ConfigParseError(f"Cannot merge {type(base).__name__} with {type(override).__name__}")
     config_class = type(base)
     registry_field_names = get_registry_field_names(config_class)
     pipeline = _run_overlay_pipeline(

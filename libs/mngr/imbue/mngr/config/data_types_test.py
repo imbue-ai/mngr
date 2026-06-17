@@ -64,7 +64,7 @@ def test_merge_with_combines_settings_patch_field_same_key_extend() -> None:
     override = _PatchFieldAgentConfig.model_construct(
         settings_overrides={"permissions__extend": {"allow__extend": ["B"]}},
     )
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.settings_overrides == {"permissions__extend": {"allow__extend": ["A", "B"]}}
 
 
@@ -76,7 +76,7 @@ def test_merge_with_combines_settings_patch_field_disjoint_keys() -> None:
     override = _PatchFieldAgentConfig.model_construct(
         settings_overrides={"model": "opus"},
     )
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.settings_overrides == {
         "permissions__extend": {"allow__extend": ["A"]},
         "model": "opus",
@@ -87,7 +87,7 @@ def test_merge_with_assigns_unmarked_dict_field_by_default() -> None:
     """A non-marked dict field still assigns by default (whole-dict replace)."""
     base = _PatchFieldAgentConfig.model_construct(plain_map={"a": 1, "b": 2})
     override = _PatchFieldAgentConfig.model_construct(plain_map={"c": 3})
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.plain_map == {"c": 3}
 
 
@@ -157,66 +157,66 @@ def test_hook_definition_from_string_raises_on_missing_colon() -> None:
 
 
 def test_agent_type_config_merge_with_overrides_parent_type() -> None:
-    """AgentTypeConfig.merge_with should override parent type."""
+    """merge_models_via_overlay should override parent type."""
     base = AgentTypeConfig(parent_type=AgentTypeName("claude"))
     override = AgentTypeConfig(parent_type=AgentTypeName("codex"))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.parent_type == AgentTypeName("codex")
 
 
 def test_agent_type_config_merge_with_overrides_command() -> None:
-    """AgentTypeConfig.merge_with should override command."""
+    """merge_models_via_overlay should override command."""
     base = AgentTypeConfig(command=CommandString("cmd1"))
     override = AgentTypeConfig(command=CommandString("cmd2"))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.command == CommandString("cmd2")
 
 
 def test_agent_type_config_merge_with_replaces_cli_args() -> None:
-    """AgentTypeConfig.merge_with assigns cli_args from override (no concat)."""
+    """merge_models_via_overlay assigns cli_args from override (no concat)."""
     base = AgentTypeConfig(cli_args=("--arg1",))
     override = AgentTypeConfig(cli_args=("--arg2",))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.cli_args == ("--arg2",)
 
 
 def test_agent_type_config_merge_with_handles_empty_base_cli_args() -> None:
-    """AgentTypeConfig.merge_with should handle empty base cli_args."""
+    """merge_models_via_overlay should handle empty base cli_args."""
     base = AgentTypeConfig(cli_args=())
     override = AgentTypeConfig(cli_args=("--arg",))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.cli_args == ("--arg",)
 
 
 def test_agent_type_config_merge_with_replaces_with_empty_override_cli_args() -> None:
-    """AgentTypeConfig.merge_with assigns even an empty override (assign-by-default)."""
+    """merge_models_via_overlay assigns even an empty override (assign-by-default)."""
     base = AgentTypeConfig(cli_args=("--arg",))
     override = AgentTypeConfig(cli_args=())
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.cli_args == ()
 
 
 def test_agent_type_config_merge_with_replaces_extra_provision_command() -> None:
-    """AgentTypeConfig.merge_with assigns extra_provision_command from override."""
+    """merge_models_via_overlay assigns extra_provision_command from override."""
     base = AgentTypeConfig(extra_provision_command=("echo base",))
     override = AgentTypeConfig(extra_provision_command=("echo override",))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.extra_provision_command == ("echo override",)
 
 
 def test_agent_type_config_merge_with_replaces_env() -> None:
-    """AgentTypeConfig.merge_with assigns env from override (no concat)."""
+    """merge_models_via_overlay assigns env from override (no concat)."""
     base = AgentTypeConfig(env=("FOO=1",))
     override = AgentTypeConfig(env=("BAR=2",))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.env == ("BAR=2",)
 
 
 def test_agent_type_config_merge_with_replaces_upload_file() -> None:
-    """AgentTypeConfig.merge_with assigns upload_file from override (no concat)."""
+    """merge_models_via_overlay assigns upload_file from override (no concat)."""
     base = AgentTypeConfig(upload_file=("a.txt:/a.txt",))
     override = AgentTypeConfig(upload_file=("b.txt:/b.txt",))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.upload_file == ("b.txt:/b.txt",)
 
 
@@ -224,7 +224,7 @@ def test_agent_type_config_merge_with_preserves_unset_provisioning_fields() -> N
     """Base provisioning fields are preserved when override doesn't touch them."""
     base = AgentTypeConfig(extra_provision_command=("echo setup",), env=("KEY=val",))
     override = AgentTypeConfig(cli_args=("--flag",))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert merged.extra_provision_command == ("echo setup",)
     assert merged.env == ("KEY=val",)
     assert merged.cli_args == ("--flag",)
@@ -239,26 +239,26 @@ def test_agent_type_config_merge_with_preserves_subclass_fields() -> None:
     override = _TestAgentTypeConfig.model_construct(
         cli_args=("--override",),
     )
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert isinstance(merged, _TestAgentTypeConfig)
     assert merged.cli_args == ("--override",)
     assert merged.custom_flag is True
 
 
 def test_agent_type_config_merge_with_overrides_subclass_fields_when_set() -> None:
-    """AgentTypeConfig.merge_with should override subclass fields that were explicitly set."""
+    """merge_models_via_overlay should override subclass fields that were explicitly set."""
     base = _TestAgentTypeConfig(custom_flag=True)
     override = _TestAgentTypeConfig.model_construct(custom_flag=False)
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert isinstance(merged, _TestAgentTypeConfig)
     assert merged.custom_flag is False
 
 
 def test_agent_type_config_merge_with_accepts_base_class_override() -> None:
-    """AgentTypeConfig.merge_with on a subclass should accept a base-class override."""
+    """merge_models_via_overlay on a subclass should accept a base-class override."""
     base = _TestAgentTypeConfig(custom_flag=True, cli_args=("--base",))
     override = AgentTypeConfig.model_construct(cli_args=("--override",))
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
     assert isinstance(merged, _TestAgentTypeConfig)
     assert merged.cli_args == ("--override",)
     assert merged.custom_flag is True
@@ -326,7 +326,7 @@ def test_mngr_config_merge_with_none_override_retry_keeps_base() -> None:
 
 
 def test_mngr_config_merge_with_merges_agent_types_per_key(mngr_test_prefix: str) -> None:
-    """agent_types is a container dict: same-key entries recurse into AgentTypeConfig.merge_with."""
+    """agent_types is a container dict: same-key entries are merged per-key by the overlay pipeline."""
     base = MngrConfig(
         prefix=mngr_test_prefix, agent_types={AgentTypeName("claude"): AgentTypeConfig(cli_args=("--base",))}
     )
@@ -437,7 +437,7 @@ def test_mngr_config_merge_with_merges_logging(mngr_test_prefix: str) -> None:
 
 
 def test_mngr_config_merge_with_merges_create_templates_per_key(mngr_test_prefix: str) -> None:
-    """create_templates is a container dict: same-key entries recurse into CreateTemplate.merge_with."""
+    """create_templates is a container dict: same-key entries are merged per-key by the overlay pipeline."""
     base = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={

@@ -30,6 +30,7 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
@@ -311,7 +312,7 @@ def test_claude_agent_config_merge_overrides_command() -> None:
     base = ClaudeAgentConfig()
     override = ClaudeAgentConfig(command=CommandString("custom-claude"))
 
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.command == CommandString("custom-claude")
 
@@ -321,7 +322,7 @@ def test_claude_agent_config_merge_replaces_cli_args() -> None:
     base = ClaudeAgentConfig(cli_args=("--verbose",))
     override = ClaudeAgentConfig(cli_args=("--model", "sonnet"))
 
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.cli_args == ("--model", "sonnet")
 
@@ -331,7 +332,7 @@ def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> N
     base = ClaudeAgentConfig()
     override = ClaudeAgentConfig(cli_args=("--verbose",))
 
-    merged, _ = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.cli_args == ("--verbose",)
 
