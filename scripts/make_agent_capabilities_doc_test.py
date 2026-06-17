@@ -1,14 +1,10 @@
+from collections.abc import Iterator
+
+import pluggy
 import pytest
 
-from imbue.mngr.agents.agent_capabilities import AGENT_CAPABILITIES
-from imbue.mngr.agents.agent_capabilities import AgentCapability
-from imbue.mngr.agents.agent_capabilities import AgentCapabilityError
-from imbue.mngr.agents.agent_capabilities import AgentClassInfo
-from imbue.mngr.agents.agent_capabilities import CapabilityDetectionKind
-from imbue.mngr.agents.agent_capabilities import CapabilityScope
-from imbue.mngr.agents.agent_capabilities import is_capability_applicable
-from imbue.mngr.agents.agent_capabilities import is_capability_present
-from imbue.mngr.agents.agent_capabilities import render_capability_matrix
+from imbue.mngr.agents.agent_registry import reset_agent_registry
+from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -18,6 +14,20 @@ from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
+from imbue.mngr.providers.registry import reset_backend_registry
+from scripts.make_agent_capabilities_doc import AGENT_CAPABILITIES
+from scripts.make_agent_capabilities_doc import AgentCapability
+from scripts.make_agent_capabilities_doc import AgentCapabilityError
+from scripts.make_agent_capabilities_doc import AgentClassInfo
+from scripts.make_agent_capabilities_doc import CapabilityDetectionKind
+from scripts.make_agent_capabilities_doc import CapabilityScope
+from scripts.make_agent_capabilities_doc import build_agent_class_infos
+from scripts.make_agent_capabilities_doc import build_loaded_plugin_manager
+from scripts.make_agent_capabilities_doc import doc_path
+from scripts.make_agent_capabilities_doc import generate_capability_matrix_doc
+from scripts.make_agent_capabilities_doc import is_capability_applicable
+from scripts.make_agent_capabilities_doc import is_capability_present
+from scripts.make_agent_capabilities_doc import render_capability_matrix
 
 
 # A CLI-backed agent that emits both transcript layers but is not headless (claude-style).
@@ -303,3 +313,84 @@ def test_registry_capabilities_are_well_formed() -> None:
     # Keys are unique.
     keys = [c.key for c in AGENT_CAPABILITIES]
     assert len(keys) == len(set(keys))
+
+
+@pytest.fixture
+def loaded_plugin_manager() -> Iterator[pluggy.PluginManager]:
+    """A plugin manager with every installed mngr plugin loaded, reset on teardown.
+
+    Uses the same builder the generator script uses (load all entry points, local backend
+    only). Resets the global agent/backend/provider registries afterward so building the
+    full plugin set here does not leak into other scripts/ tests sharing the xdist worker.
+    """
+    pm = build_loaded_plugin_manager()
+    try:
+        yield pm
+    finally:
+        reset_agent_registry()
+        reset_backend_registry()
+        reset_provider_instances()
+
+
+def _present_keys(infos: tuple[AgentClassInfo, ...], agent_type_name: str) -> set[str]:
+    info = next(i for i in infos if i.agent_type_name == agent_type_name)
+    return {c.key for c in AGENT_CAPABILITIES if is_capability_present(c, info)}
+
+
+def test_builder_detects_known_capabilities(loaded_plugin_manager: pluggy.PluginManager) -> None:
+    infos = build_agent_class_infos(loaded_plugin_manager)
+    agent_type_names = {i.agent_type_name for i in infos}
+    assert {"claude", "codex", "opencode", "pi-coding", "antigravity"} <= agent_type_names
+
+    # Every real agent emits both transcript layers; the bare config shells do not.
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
+        keys = _present_keys(infos, agent_type_name)
+        assert "common_transcript" in keys
+        assert "raw_transcript" in keys
+    assert "common_transcript" not in _present_keys(infos, "command")
+
+    # waiting_reason field generator: claude/codex/opencode/pi yes (pi degenerately,
+    # a single-value END_OF_TURN); antigravity no (blocked on an upstream signal).
+    assert "waiting_reason_field" in _present_keys(infos, "claude")
+    assert "waiting_reason_field" in _present_keys(infos, "codex")
+    assert "waiting_reason_field" in _present_keys(infos, "opencode")
+    assert "waiting_reason_field" in _present_keys(infos, "pi-coding")
+    assert "waiting_reason_field" not in _present_keys(infos, "antigravity")
+
+    # live_output: claude publishes a streaming snapshot; codex does not.
+    assert "live_output" in _present_keys(infos, "claude")
+    assert "live_output" not in _present_keys(infos, "codex")
+    # session_resume (--adopt-session / --from carry-forward): claude only.
+    assert "session_resume" in _present_keys(infos, "claude")
+    for agent_type_name in ("codex", "opencode", "pi-coding", "antigravity"):
+        assert "session_resume" not in _present_keys(infos, agent_type_name)
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
+        assert "session_preservation" in _present_keys(infos, agent_type_name)
+        assert "unattended_operation" in _present_keys(infos, agent_type_name)
+    # Per-resource permission policy: agy/opencode/codex yes; claude/pi no.
+    for agent_type_name in ("antigravity", "opencode", "codex"):
+        assert "permission_policy" in _present_keys(infos, agent_type_name)
+    assert "permission_policy" not in _present_keys(infos, "claude")
+    assert "permission_policy" not in _present_keys(infos, "pi-coding")
+    # Version management: claude/codex yes; the rest no.
+    assert "version_management" in _present_keys(infos, "claude")
+    assert "version_management" in _present_keys(infos, "codex")
+    assert "version_management" not in _present_keys(infos, "opencode")
+
+    # Module-level capabilities (detected by package, not class).
+    assert "deploy_contributions" in _present_keys(infos, "claude")
+    assert "deploy_contributions" not in _present_keys(infos, "codex")
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding"):
+        assert "usage_tracking" in _present_keys(infos, agent_type_name)
+    assert "usage_tracking" not in _present_keys(infos, "antigravity")
+
+
+def test_capability_matrix_doc_is_current(loaded_plugin_manager: pluggy.PluginManager) -> None:
+    """The committed matrix doc must equal the matrix derived from the code (drift guard)."""
+    infos = build_agent_class_infos(loaded_plugin_manager)
+    generated = generate_capability_matrix_doc(AGENT_CAPABILITIES, infos)
+    path = doc_path()
+    assert path.read_text() == generated, (
+        f"{path} is stale relative to the agent capability registry; "
+        "regenerate with `just regenerate-agent-capabilities-doc`."
+    )

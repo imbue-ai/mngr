@@ -1,7 +1,7 @@
 # Agent capabilities
 
 <!-- GENERATED FILE -- do not edit by hand.
-     Regenerate with `just regenerate-agent-capabilities-doc` (see `mngr.agents.agent_capabilities`). -->
+     Regenerate with `just regenerate-agent-capabilities-doc` (see `scripts/make_agent_capabilities_doc.py`). -->
 
 Which agent types implement which capabilities, **derived from the code** (the agent classes
 and their plugins), not maintained by hand. `Y` means present; `-` means applicable but
