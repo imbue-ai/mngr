@@ -92,7 +92,7 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
-        """Run the start action; on creation, also wait for the TUI ready banner.
+        """Run the start action; on creation, also wait for the TUI ready indicator.
 
         ``send_message`` independently waits for readiness, so this create-path
         wait only matters for agents created without an initial message (where
