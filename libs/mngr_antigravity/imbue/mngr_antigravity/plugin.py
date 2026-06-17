@@ -88,6 +88,7 @@ transcript`` reads.
 from __future__ import annotations
 
 import importlib.resources
+import re
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -492,21 +493,21 @@ class AntigravityAgent(
 ):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
-    # Stable substring of the footer hint that agy renders ONLY once the
-    # input prompt is fully drawn and ready to receive keystrokes. Polled by
-    # ``InteractiveTuiAgent.wait_for_ready_signal``.
+    # Regex (searched against the pane) for the input box agy draws ONLY once the
+    # prompt is ready for keystrokes: a horizontal rule, the ``>`` prompt line, and a
+    # second horizontal rule. Polled by ``InteractiveTuiAgent.wait_for_ready_signal``.
     #
-    # We deliberately do NOT key off the "Antigravity CLI <version>" splash
-    # banner: agy renders an early "Welcome to the Antigravity CLI. You are
-    # currently not signed in." line *before* OAuth completes, which also
-    # contains the substring "Antigravity CLI" but does NOT mean the input
-    # row is ready. If mngr starts pasting at that point, agy drops the
-    # keystrokes on the floor (no input row yet to receive them) and
-    # ``wait_for_paste_visible`` times out, surfacing as a noisy
-    # ``mngr create --message`` timeout. The "? for shortcuts" footer string
-    # appears only with the rendered input prompt, so it's a reliable
-    # ready signal.
-    TUI_READY_INDICATOR: ClassVar[str] = "? for shortcuts"
+    # We key off the box chrome rather than text for two reasons. First, agy 1.0.9
+    # dropped the "? for shortcuts" footer hint that earlier versions rendered with the
+    # input row. Second, the only remaining stable text is the "Antigravity CLI" splash
+    # banner, which is unusable here: it appears in an early "Welcome to the Antigravity
+    # CLI..." line *before* the input row exists (pasting then drops keystrokes), and it
+    # scrolls off the top once a resumed conversation fills the screen. agy keeps both
+    # rules pinned on screen (trimming long input between them), so this box matches on a
+    # fresh start AND a resume, and only once the input row is actually drawn. The rule
+    # spans the terminal width, which at the minimum width is just two ``─`` -- hence
+    # ``{2,}`` rather than a longer run.
+    TUI_READY_INDICATOR: ClassVar[re.Pattern[str]] = re.compile(r"─{2,}\n>.*\n(?:.*\n)*?─{2,}")
 
     def get_expected_process_name(self) -> str:
         # `agy` is a single-file Go binary; ps/tmux show the literal command name.

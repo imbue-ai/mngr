@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -85,15 +86,27 @@ def test_antigravity_agent_subclasses_interactive_tui_agent() -> None:
 
 
 def test_antigravity_agent_advertises_tui_ready_indicator() -> None:
-    """Ready indicator is a footer-hint substring that only appears once the input prompt is drawn.
+    """Ready indicator is a regex for the input box, matching only once the prompt is drawn.
 
-    Pinned because the obvious-but-wrong choice ("Antigravity CLI" from the
-    splash banner) matches earlier than the input row is actually ready --
-    agy emits a "Welcome to the Antigravity CLI. You are currently not
-    signed in." line while still authing, which is too early to paste
-    into. See plugin.py for the rationale.
+    agy 1.0.9 dropped the "? for shortcuts" footer hint, and the splash banner is
+    unusable (it appears before the input row exists, and scrolls off on resume),
+    so readiness keys off the box chrome: a rule, the ``>`` prompt, and a rule.
     """
-    assert AntigravityAgent.TUI_READY_INDICATOR == "? for shortcuts"
+    pattern = AntigravityAgent.TUI_READY_INDICATOR
+    assert isinstance(pattern, re.Pattern)
+    # An empty, ready input box matches.
+    ready_pane = "Antigravity CLI 1.0.9\n" + "─" * 80 + "\n>\n" + "─" * 80 + "\n"
+    assert pattern.search(ready_pane) is not None
+    # Multi-line input between the rules still matches (agy keeps both rules pinned).
+    busy_pane = "─" * 80 + "\n> a multi\nline message\n" + "─" * 80 + "\n"
+    assert pattern.search(busy_pane) is not None
+    # At the minimum terminal width the rule is just two dashes; still matches.
+    min_width_pane = "──\n>\n──\n"
+    assert pattern.search(min_width_pane) is not None
+    # The early splash banner -- before the input box is drawn -- must NOT match,
+    # so mngr does not paste keystrokes onto the floor.
+    splash_only = "Welcome to the Antigravity CLI. You are currently not signed in.\n"
+    assert pattern.search(splash_only) is None
 
 
 def test_antigravity_agent_implements_send_enter_and_validate() -> None:
