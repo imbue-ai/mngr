@@ -519,11 +519,7 @@ class AzureProvider(TagMirrorVpsProvider):
         in ``_post_finalize_steps`` still applies). There is no sentinel on the bare
         path, so the script is built with ``None``.
         """
-        shutdown_script = _build_self_deallocate_script(None)
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+        self._write_shutdown_script(host, _build_self_deallocate_script(None))
 
     def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
         """Azure override: the oneshot ``.service`` runs the installed ARM self-deallocate script.

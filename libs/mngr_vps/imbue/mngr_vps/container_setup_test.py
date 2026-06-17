@@ -1,4 +1,3 @@
-import base64
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,7 +7,6 @@ import pytest
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_vps.container_setup import _build_start_container_script
 from imbue.mngr_vps.container_setup import _clone_build_context_for_self_contained_git
-from imbue.mngr_vps.container_setup import _remote_sh_command
 
 
 def test_build_start_container_script_shell_quotes_name() -> None:
@@ -36,14 +34,6 @@ def test_start_container_script_is_valid_posix_sh() -> None:
     script = _build_start_container_script("minds-dev-josh-1-lima-4")
     check = subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True)
     assert check.returncode == 0, check.stderr
-
-
-def test_remote_sh_command_round_trips() -> None:
-    script = _build_start_container_script("c1")
-    command = _remote_sh_command(script)
-    assert command.endswith("| base64 -d | sh")
-    encoded = command.split(" | ", 1)[0].removeprefix("echo ")
-    assert base64.b64decode(encoded).decode("utf-8") == script
 
 
 def test_clone_build_context_returns_none_for_non_git_context(tmp_path: Path) -> None:

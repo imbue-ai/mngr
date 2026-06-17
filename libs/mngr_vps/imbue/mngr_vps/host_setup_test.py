@@ -12,9 +12,9 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_VERSION
 from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
-from imbue.mngr_vps.host_setup import _remote_script_command
 from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps.host_setup import build_host_setup_steps
+from imbue.mngr_vps.host_setup import build_remote_script_command
 
 
 class _StubOuter(MutableModel):
@@ -110,7 +110,7 @@ def test_build_host_setup_steps_excludes_ssh_host_key_injection() -> None:
 
 def test_remote_script_command_round_trips() -> None:
     script = "set -e\necho 'hello $(world)'\nprintf '\\n'"
-    command = _remote_script_command(script)
+    command = build_remote_script_command(script)
     assert command.endswith("| base64 -d | sh")
     assert _decode_remote_command(command) == script
 

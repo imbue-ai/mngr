@@ -298,11 +298,10 @@ class OfflineCapableVpsProvider(VpsProvider):
                 to_update(record.field_ref().vps_ip, new_ip),
                 to_update(record.field_ref().certified_host_data, updated_data),
             )
-            host_store.write_host_record(updated_record)
-            # Mirror the resumed record to the external store so the offline view
-            # reflects the new vps_ip and cleared stop_reason; a no-op for providers
-            # without an external store.
-            self._persist_host_record_externally(updated_record)
+            # Write the resumed record on-volume and mirror it to the external store
+            # together, so the offline view reflects the new vps_ip and cleared
+            # stop_reason (the mirror is a no-op for providers without one).
+            self._write_and_mirror(host_store, updated_record)
         # Drop any cached Host bound to the old IP, then seed the record cache so
         # super().start_host()'s _find_host_record returns the rebound record.
         self._evict_cached_host(host_id)
@@ -462,11 +461,7 @@ class OfflineCapableVpsProvider(VpsProvider):
             self._write_bare_idle_shutdown_script(host)
             return
         sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
-        shutdown_script = build_sentinel_shutdown_script(sentinel_in_container)
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+        self._write_shutdown_script(host, build_sentinel_shutdown_script(sentinel_in_container))
 
     def _write_bare_idle_shutdown_script(self, host: Host) -> None:
         """Hook: write the BARE-placement idle ``shutdown.sh`` (default: the realizer's poweroff).
