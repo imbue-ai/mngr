@@ -20,6 +20,9 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.live_output import LIVE_OUTPUT_POLL_INTERVAL
+from imbue.mngr.interfaces.live_output import LIVE_OUTPUT_POLL_TIMEOUT
+from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -27,6 +30,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.polling import poll_until
 
 # this is the only place where it is acceptable to use the TYPE_CHECKING flag
 if TYPE_CHECKING:
@@ -535,15 +539,98 @@ class HasCommonTranscriptMixin(HasTranscriptMixin):
         ...
 
 
-class SupportsLiveOutputMixin:
-    """Marker for agents that publish a live, in-progress view of their output before a turn completes.
+def _read_text_or_none(host: OnlineHostInterface, path: Path) -> str | None:
+    """Read ``path`` via ``host``, returning None if it does not exist yet."""
+    try:
+        return host.read_text_file(path)
+    except FileNotFoundError:
+        return None
 
-    A bare marker with no contract of its own -- the concrete surface differs by agent kind:
-    a TUI agent exposes a streaming snapshot file (``HasStreamingSnapshotMixin``), while a
-    headless agent yields incremental stdout chunks (``StreamingHeadlessAgentMixin``). Both
-    inherit this so capability detection can treat "can stream live output" as one capability
-    regardless of how the agent surfaces it.
+
+class _LiveOutputTailer(MutableModel):
+    """Polls a live-output file and yields the text deltas a reader extracts from it.
+
+    The ``host`` is passed per call rather than stored as a field so this module
+    need not import ``OnlineHostInterface`` at runtime (it is only available
+    under ``TYPE_CHECKING`` here, since importing it would close an
+    ``agent -> live_output -> host -> agent`` cycle). The new-data check is a
+    bound method reading ``self.last_mtime`` (mutated on the model, not a
+    captured local), so the polling lambda binds only stable values.
     """
+
+    path: Path
+    is_finished: Callable[[], bool]
+    last_mtime: datetime | None = None
+
+    def has_new_data_or_finished(self, host: OnlineHostInterface) -> bool:
+        current_mtime = host.get_file_mtime(self.path)
+        if current_mtime is not None and current_mtime != self.last_mtime:
+            return True
+        return self.is_finished()
+
+    def tail(self, host: OnlineHostInterface, reader: LiveOutputReader) -> Iterator[str]:
+        while not reader.is_complete and not self.is_finished():
+            poll_until(
+                lambda: self.has_new_data_or_finished(host),
+                timeout=LIVE_OUTPUT_POLL_TIMEOUT,
+                poll_interval=LIVE_OUTPUT_POLL_INTERVAL,
+            )
+            self.last_mtime = host.get_file_mtime(self.path)
+            content = _read_text_or_none(host, self.path)
+            if content is not None:
+                yield from reader.feed(content)
+
+        # Final drain after the agent exits, unless a terminal marker already
+        # ended the stream (in which case trailing bytes are not ours to emit).
+        if not reader.is_complete:
+            content = _read_text_or_none(host, self.path)
+            if content is not None:
+                yield from reader.feed(content)
+            if not reader.is_complete:
+                yield from reader.finalize()
+
+
+class SupportsLiveOutputMixin(ABC):
+    """Mixin for agents that publish a live, in-progress view of their output before a turn completes.
+
+    The concrete surface differs by agent kind -- a headless agent captures its
+    stdout (raw text or stream-json) to a file, while a TUI agent's watcher
+    maintains a streaming-snapshot buffer -- but both reduce to the same shape:
+    a host file (:meth:`get_live_output_path`) plus a reader that turns
+    successive reads of it into text deltas (:meth:`make_live_output_reader`).
+    Capability detection treats "can stream live output" as one capability
+    regardless of which surface an agent uses.
+
+    The shared :meth:`stream_live_output` drives the poll-read-extract loop over
+    that file; pull consumers (a headless ``stream_output``) call it directly,
+    while push consumers (the robinhood multi-turn drivers) instead poll the
+    reader themselves, interleaved with their own transcript/lifecycle reads.
+    """
+
+    @abstractmethod
+    def get_live_output_path(self) -> Path:
+        """Return the host file this agent publishes its live, in-progress output to."""
+        ...
+
+    @abstractmethod
+    def make_live_output_reader(self) -> LiveOutputReader:
+        """Create a fresh reader that extracts text deltas from this agent's live-output file."""
+        ...
+
+    def stream_live_output(
+        self,
+        host: OnlineHostInterface,
+        reader: LiveOutputReader,
+        is_finished: Callable[[], bool],
+    ) -> Iterator[str]:
+        """Tail :meth:`get_live_output_path`, yielding text deltas until ``is_finished()``.
+
+        The caller supplies the ``reader`` (rather than this building it) so it
+        can inspect the reader's terminal state -- :attr:`LiveOutputReader.is_complete`
+        / :attr:`LiveOutputReader.stream_error` -- once streaming finishes.
+        """
+        tailer = _LiveOutputTailer(path=self.get_live_output_path(), is_finished=is_finished)
+        yield from tailer.tail(host, reader)
 
 
 class HeadlessAgentMixin(ABC):
@@ -592,24 +679,6 @@ class StreamingHeadlessAgentMixin(SupportsLiveOutputMixin, HeadlessAgentMixin):
             "stage_initial_message, so the --message content cannot be delivered.",
             type(self).__name__,
         )
-
-
-class HasStreamingSnapshotMixin(SupportsLiveOutputMixin, ABC):
-    """Mixin for agent types that publish a live, in-progress view of assistant text.
-
-    A consuming UI can read the buffer file to show output before a message
-    completes. The agent maintains the file (e.g. a background watcher that
-    periodically captures the rendered pane); this contract exposes where it
-    lives. Lowest-priority capability -- only needed if a UI wants live streaming.
-
-    This is the TUI agent's form of :class:`SupportsLiveOutputMixin`; a headless
-    agent streams the same kind of live output via ``StreamingHeadlessAgentMixin``.
-    """
-
-    @abstractmethod
-    def get_stream_buffer_path(self) -> Path:
-        """Return the path to this agent's response-streaming buffer file."""
-        ...
 
 
 class HasSessionPreservationMixin(ABC):

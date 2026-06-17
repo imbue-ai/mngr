@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -14,6 +13,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.live_output import LiveOutputReader
+from imbue.mngr.interfaces.live_output import RawTextReader
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -29,8 +30,8 @@ class _ConcreteHeadlessAgent(BaseHeadlessAgent[AgentTypeConfig]):
     def _get_stderr_path(self) -> Path:
         return self._get_agent_dir() / "stderr.log"
 
-    def stream_output(self) -> Iterator[str]:
-        raise NotImplementedError
+    def make_live_output_reader(self) -> LiveOutputReader:
+        return RawTextReader()
 
 
 class _AlwaysStopped(_ConcreteHeadlessAgent):

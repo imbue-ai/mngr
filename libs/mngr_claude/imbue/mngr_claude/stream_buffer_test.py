@@ -1,5 +1,6 @@
-from imbue.mngr_robinhood.stream_buffer import buffer_body
-from imbue.mngr_robinhood.stream_buffer import compute_stream_delta
+from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
+from imbue.mngr_claude.stream_buffer import buffer_body
+from imbue.mngr_claude.stream_buffer import compute_stream_delta
 
 
 def test_buffer_body_strips_id_line() -> None:
@@ -118,3 +119,38 @@ def test_compute_stream_delta_stale_shorter_snapshot_ignored() -> None:
     delta, emitted = compute_stream_delta("uuid-1\nline one\n", "line one\nline two\n", is_flush=True)
     assert delta == ""
     assert emitted == "line one\nline two\n"
+
+
+# =============================================================================
+# Tests for SnapshotDeltaReader (the LiveOutputReader wrapper)
+# =============================================================================
+
+
+def test_snapshot_reader_feed_emits_complete_lines_and_finalize_flushes_tail() -> None:
+    reader = SnapshotDeltaReader()
+    # The still-streaming final line is withheld during feed...
+    assert reader.feed("uuid-1\nline one\nline two") == ["line one\n"]
+    # ...and released by finalize (turn end), which also resets for the next turn.
+    assert reader.finalize() == ["line two"]
+    assert reader.emitted_body == ""
+    assert reader.last_content == ""
+
+
+def test_snapshot_reader_finalize_uses_last_nonempty_snapshot() -> None:
+    # The watcher empties the buffer when the agent goes idle; finalize must diff
+    # against the last snapshot that carried a body, not the post-idle empty read.
+    reader = SnapshotDeltaReader()
+    assert reader.feed("uuid-1\nonly line") == []
+    assert reader.feed("uuid-1") == []
+    assert reader.finalize() == ["only line"]
+
+
+def test_snapshot_reader_feed_emits_only_new_tail_across_polls() -> None:
+    reader = SnapshotDeltaReader()
+    parts = [
+        reader.feed("id\nline one\nstreaming"),
+        reader.feed("id\nline one\nline two\nstreaming"),
+        reader.feed("id\nline one\nline two\nline three\nstreaming"),
+    ]
+    assert parts == [["line one\n"], ["line two\n"], ["line three\n"]]
+    assert reader.finalize() == ["streaming"]

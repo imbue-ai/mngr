@@ -4,19 +4,16 @@ import shlex
 import time
 from collections.abc import Iterable
 from collections.abc import Iterator
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import Never
 
 from loguru import logger
 from pydantic import Field
 
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
-from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
-from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
 from imbue.mngr.agents.base_headless_agent import render_file_diagnostic
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import MngrError
@@ -24,8 +21,8 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import ClaudeCoreAgent
@@ -71,23 +68,17 @@ def _extract_result_error(line: str) -> str | None:
     return _result_error_from_parsed(parsed)
 
 
-class _StreamTailState(MutableModel):
-    """Encapsulates mutable state for tailing a file via the host interface.
+class StreamJsonReader(LiveOutputReader):
+    """Extracts assistant text deltas from claude ``--print`` stream-json output.
 
-    Separated from HeadlessClaude to avoid lambda-in-loop closure issues (B023)
-    when polling for file changes.
+    The stdout file is append-only NDJSON. :meth:`feed` consumes newly-appended
+    complete lines (holding any partial trailing line until more arrives) and
+    returns the text they carry; :meth:`finalize` flushes a trailing line left
+    at EOF without a newline. A stream-json ``result`` event ends the stream:
+    it sets :attr:`stream_error` (when ``is_error``) and marks the reader
+    :attr:`is_complete`, after which no further lines are consumed.
     """
 
-    stdout_path: Path
-    host: OnlineHostInterface
-    is_finished: Callable[[], bool]
-    # Monotonic deadline before which is_finished() is only trusted if the
-    # stdout file has some content. Guards against the race where tmux still
-    # shows the pre-send-keys idle pane at the moment we first check
-    # lifecycle; without this gate tail_until_done's loop exits immediately
-    # and we raise "no output" seconds before claude's output arrives.
-    startup_deadline: float
-    last_mtime: datetime | None = None
     chars_consumed: int = 0
     line_buffer: str = ""
     result_error: str | None = None
@@ -108,19 +99,36 @@ class _StreamTailState(MutableModel):
     # a turn contains many small deltas.
     yielded_text_chunks: list[str] = Field(default_factory=list)
 
-    def _authoritatively_finished(self) -> bool:
-        if time.monotonic() < self.startup_deadline:
-            try:
-                return self.is_finished() and self.host.read_text_file(self.stdout_path) != ""
-            except FileNotFoundError:
-                return False
-        return self.is_finished()
+    @property
+    def is_complete(self) -> bool:
+        return self.got_result
 
-    def _has_new_data_or_finished(self) -> bool:
-        current_mtime = self.host.get_file_mtime(self.stdout_path)
-        if current_mtime is not None and current_mtime != self.last_mtime:
-            return True
-        return self._authoritatively_finished()
+    @property
+    def stream_error(self) -> str | None:
+        return self.result_error
+
+    def feed(self, content: str) -> list[str]:
+        raw = content[self.chars_consumed :]
+        self.chars_consumed = len(content)
+        if not raw:
+            return []
+        combined = self.line_buffer + raw
+        self.line_buffer = ""
+        lines = combined.split("\n")
+        if not combined.endswith("\n"):
+            self.line_buffer = lines.pop()
+        return list(self._yield_text_from_lines(lines))
+
+    def finalize(self) -> list[str]:
+        # A result event already ended the stream; the trailing partial line (if
+        # any) is past it and not ours to emit, matching the original drain skip.
+        if self.got_result:
+            return []
+        remaining = self.line_buffer
+        self.line_buffer = ""
+        if not remaining:
+            return []
+        return list(self._yield_text_from_lines([remaining]))
 
     def _reset_turn_state(self) -> None:
         self.streaming_message_id = None
@@ -240,43 +248,6 @@ class _StreamTailState(MutableModel):
                 self.got_result = True
                 return
             yield from self._yield_text_for_parsed(parsed)
-
-    def tail_until_done(self) -> Iterator[str]:
-        while not self.got_result and not self._authoritatively_finished():
-            poll_until(
-                self._has_new_data_or_finished,
-                timeout=TAIL_POLL_TIMEOUT,
-                poll_interval=TAIL_POLL_INTERVAL,
-            )
-            self.last_mtime = self.host.get_file_mtime(self.stdout_path)
-
-            try:
-                content = self.host.read_text_file(self.stdout_path)
-            except FileNotFoundError:
-                continue
-
-            raw = content[self.chars_consumed :]
-            self.chars_consumed = len(content)
-
-            if raw:
-                combined = self.line_buffer + raw
-                self.line_buffer = ""
-
-                lines = combined.split("\n")
-                if not combined.endswith("\n"):
-                    self.line_buffer = lines.pop()
-
-                yield from self._yield_text_from_lines(lines)
-
-        if not self.got_result:
-            # Final drain after agent exits
-            try:
-                content = self.host.read_text_file(self.stdout_path)
-            except FileNotFoundError:
-                return
-            remaining = self.line_buffer + content[self.chars_consumed :]
-            if remaining:
-                yield from self._yield_text_from_lines(remaining.split("\n"))
 
 
 class NoPermissionsClaudeAgent(ClaudeCoreAgent):
@@ -472,44 +443,47 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
                 return error
         return None
 
-    def stream_output(self) -> Iterator[str]:
-        """Stream text output as it becomes available.
+    def get_live_output_path(self) -> Path:
+        """Explicitly select the headless (captured-stdout) live-output file.
 
-        Tails $MNGR_AGENT_STATE_DIR/stdout.jsonl via the host interface so it
-        works for both local and remote hosts. Yields text delta chunks parsed
-        from stream-json events.
-
-        Raises MngrError if the stream-json result event has is_error=true
-        (even if some text was yielded before the error), or if the agent exits
-        without producing any output (startup failure, auth error, etc.).
+        ``get_live_output_path`` is defined on both ``BaseHeadlessAgent`` (the
+        stdout capture) and ``ClaudeAgent`` (the TUI streaming snapshot); this
+        override pins the headless one rather than relying on MRO order.
         """
-        stdout_path = self._get_stdout_path()
+        return BaseHeadlessAgent.get_live_output_path(self)
+
+    def make_live_output_reader(self) -> LiveOutputReader:
+        """Parse the captured stream-json stdout into assistant text deltas."""
+        return StreamJsonReader()
+
+    def _make_live_output_finished_predicate(self) -> Callable[[], bool]:
+        """The lifecycle check, gated by a startup grace period.
+
+        Claude can take several seconds to start (first run, nvm resolution),
+        during which the tmux pane shows the shell as the current command and
+        lifecycle reads DONE/STOPPED. Until the grace deadline, treat the agent
+        as finished only once it has *also* produced some stdout; otherwise the
+        tail loop would exit and raise "no output" before claude's output lands.
+        """
         startup_deadline = time.monotonic() + self._startup_grace_seconds
+        return lambda: self._is_finished_after_grace(startup_deadline)
 
-        if not self._wait_for_stdout_file(stdout_path):
-            self._raise_no_output_error()
+    def _is_finished_after_grace(self, startup_deadline: float) -> bool:
+        if time.monotonic() < startup_deadline:
+            try:
+                return self._is_agent_finished() and self.host.read_text_file(self._get_stdout_path()) != ""
+            except FileNotFoundError:
+                return False
+        return self._is_agent_finished()
 
-        state = _StreamTailState(
-            stdout_path=stdout_path,
-            host=self.host,
-            is_finished=self._is_agent_finished,
-            startup_deadline=startup_deadline,
-        )
-        is_any_output_yielded = False
-        for chunk in state.tail_until_done():
-            is_any_output_yielded = True
-            yield chunk
-
-        # After streaming completes, check for errors
-        if state.result_error:
-            parts = [state.result_error]
-            stderr_error = self._get_stderr_error_message()
-            if stderr_error:
-                parts.append(stderr_error)
-            detail = "\n".join(parts)
-            raise MngrError(f"claude returned an error:\n{detail}")
-        if not is_any_output_yielded:
-            self._raise_no_output_error()
+    def _raise_stream_error(self, error: str) -> Never:
+        """Surface a stream-json result error, appending stderr context when present."""
+        parts = [error]
+        stderr_error = self._get_stderr_error_message()
+        if stderr_error:
+            parts.append(stderr_error)
+        detail = "\n".join(parts)
+        raise MngrError(f"claude returned an error:\n{detail}")
 
 
 @hookimpl

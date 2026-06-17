@@ -63,9 +63,9 @@ from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
-from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
+from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import RelativePath
@@ -73,6 +73,7 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.plugins.hookspecs import OptionStackItem
 from imbue.mngr.primitives import AgentLifecycleState
@@ -109,6 +110,7 @@ from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
+from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
@@ -2037,7 +2039,7 @@ class ClaudeCoreAgent(
 class ClaudeAgent(
     ClaudeCoreAgent,
     InteractiveTuiAgent[ClaudeAgentConfig],
-    HasStreamingSnapshotMixin,
+    SupportsLiveOutputMixin,
     HasSessionAdoptionMixin,
 ):
     """Interactive (TUI-driven) Claude agent.
@@ -2099,7 +2101,7 @@ class ClaudeAgent(
             accept_marker_command=self._build_accept_marker_command(),
         )
 
-    def get_stream_buffer_path(self) -> Path:
+    def get_live_output_path(self) -> Path:
         """Return the path to this agent's response-streaming buffer file.
 
         Written by the stream_snapshot.py watcher when
@@ -2108,6 +2110,10 @@ class ClaudeAgent(
         in-progress assistant text reverse-mapped to markdown.
         """
         return self._get_agent_dir() / "plugin" / "claude" / "stream_buffer"
+
+    def make_live_output_reader(self) -> LiveOutputReader:
+        """Diff successive stream_buffer snapshots into incremental assistant-text deltas."""
+        return SnapshotDeltaReader()
 
     def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Check for blocking dialogs before sending a message.
