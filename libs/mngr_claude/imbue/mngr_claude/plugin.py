@@ -314,13 +314,10 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
-        description="A patch merged onto your home Claude settings at provisioning: a bare key "
-        "replaces (and warns if it drops a sibling aggregate); `key__extend` merges; nest "
-        "`__extend` to merge deeper. Accumulates across config scopes and `parent_type` "
-        "inheritance: a lower/parent scope's `settings_overrides` is combined with (not replaced "
-        "by) a higher/child scope's, per-key, with `__extend` markers combined. "
-        "Example: {'model': 'opus[1m]', 'permissions__extend': {'allow__extend': ['Bash(npm *)']}}. "
-        "Not applied in use_env_config_dir mode (there is no per-agent settings.json to merge into).",
+        description="A patch merged onto your home Claude settings at provisioning, e.g. "
+        "{'model': 'opus[1m]', 'permissions__extend': {'allow__extend': ['Bash(npm *)']}}. Uses the "
+        "standard `__extend` merge scheme and accumulates across config scopes / `parent_type` "
+        "inheritance (see mngr's config README). Not applied in use_env_config_dir mode.",
     )
     emit_common_transcript: bool = Field(
         default=True,
@@ -337,14 +334,10 @@ class ClaudeAgentConfig(AgentTypeConfig):
     use_env_config_dir: bool = Field(
         default=False,
         description="When True, share the user's $CLAUDE_CONFIG_DIR across all claude agents instead of "
-        "provisioning a per-agent config dir. Local hosts only; $CLAUDE_CONFIG_DIR must be set. "
-        "When set, mngr never writes to the user's Claude config; the user is responsible for "
-        "interactive `claude` setup (trust dialogs, onboarding, credentials) ahead of time. "
-        "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode. "
-        "Reduced-support limitation: with no per-agent settings.json, mngr injects only its own hooks "
-        "via `claude --settings`, settings_overrides is NOT applied, and a user-supplied `--settings` "
-        "collides with mngr's (Claude is last-wins across --settings flags), so one silently clobbers "
-        "the other.",
+        "provisioning a per-agent config dir (local hosts only; $CLAUDE_CONFIG_DIR must be set). mngr "
+        "makes no writes to the user's config, and other sync/override/auto-dismiss fields are ignored. "
+        "See the imbue-mngr-claude README for the setup requirements and reduced-support limitations "
+        "(including the `--settings` collision).",
     )
     streaming_snapshot_interval_seconds: float = Field(
         default=0.0,
