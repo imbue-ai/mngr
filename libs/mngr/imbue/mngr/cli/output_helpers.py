@@ -107,14 +107,22 @@ class AbortError(BaseException):
         self.original_exception = original_exception
 
 
+def write_event_line(event_type: str, data: Mapping[str, Any]) -> None:
+    """Write a single JSONL event line: an ``event`` field plus the payload fields.
+
+    The one place the ``{"event": <type>, ...payload}`` shape is assembled, shared
+    by every JSONL emitter here (events, info, errors, operator results).
+    """
+    write_json_line({"event": event_type, **data})
+
+
 def emit_info(message: str, output_format: OutputFormat) -> None:
     """Emit an informational message in the appropriate format."""
     match output_format:
         case OutputFormat.HUMAN:
             write_human_line(message)
         case OutputFormat.JSONL:
-            event = {"event": "info", "message": message}
-            write_json_line(event)
+            write_event_line("info", {"message": message})
         case OutputFormat.JSON:
             # JSON mode: silent until final output
             pass
@@ -129,14 +137,17 @@ def emit_event(
     data: Mapping[str, Any],
     output_format: OutputFormat,
 ) -> None:
-    """Emit an event in the appropriate format."""
+    """Emit a streaming event in the appropriate format.
+
+    For the terminal result of an operator command (where JSON should emit the
+    canonical object rather than stay silent), use ``emit_operator_result``.
+    """
     match output_format:
         case OutputFormat.HUMAN:
             if "message" in data:
                 write_human_line(str(data["message"]))
         case OutputFormat.JSONL:
-            event = {"event": event_type, **data}
-            write_json_line(event)
+            write_event_line(event_type, data)
         case OutputFormat.JSON:
             # JSON mode: silent until final output
             pass
@@ -148,24 +159,22 @@ def emit_operator_result(
     event_name: str,
     data: Mapping[str, Any],
     output_format: OutputFormat,
-    human_lines: Sequence[str],
 ) -> None:
-    """Emit an operator-command result (e.g. provider ``prepare`` / ``cleanup``) in the requested format.
+    """Emit the machine-readable record of an operator-command result (provider ``prepare`` / ``cleanup``).
 
-    Centralizes the format dispatch the provider operator commands share: JSON
-    writes ``data`` as one object, JSONL emits a ``<event_name>`` event carrying
-    ``data``, and HUMAN writes each already-formatted line in ``human_lines``.
-    Each provider still owns its ``data`` dict and its human wording (the caller
-    builds ``human_lines``) -- only the format switch lives here.
+    JSON writes ``data`` as one terminal object; JSONL writes a ``<event_name>``
+    event carrying ``data``. HUMAN is a no-op: the human wording for these
+    commands is command-specific and multi-line, so each caller renders its own
+    ``write_human_line`` output. Only the structured-format dispatch -- the part
+    every provider shares -- lives here.
     """
     match output_format:
         case OutputFormat.JSON:
             write_json_line(data)
         case OutputFormat.JSONL:
-            emit_event(event_name, data, OutputFormat.JSONL)
+            write_event_line(event_name, data)
         case OutputFormat.HUMAN:
-            for line in human_lines:
-                write_human_line(line)
+            pass
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -184,10 +193,10 @@ def on_error(
         case OutputFormat.HUMAN:
             logger.error(error_msg)
         case OutputFormat.JSONL:
-            error_event: dict[str, Any] = {"event": "error", "message": error_msg}
+            error_data: dict[str, Any] = {"message": error_msg}
             if exc is not None:
-                error_event["error_class"] = type(exc).__name__
-            write_json_line(error_event)
+                error_data["error_class"] = type(exc).__name__
+            write_event_line("error", error_data)
         case OutputFormat.JSON:
             # JSON mode: errors collected and shown in final output
             pass
@@ -210,7 +219,7 @@ def emit_error_event(error: BaseException, output_format: OutputFormat | None) -
     """
     if output_format is not OutputFormat.JSONL:
         return
-    write_json_line({"event": "error", "error_class": type(error).__name__, "message": str(error)})
+    write_event_line("error", {"error_class": type(error).__name__, "message": str(error)})
 
 
 @pure

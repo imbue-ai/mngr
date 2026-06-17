@@ -30,7 +30,7 @@ Internal refactor (no behavior change): `S3StateBucket` now extends the shared `
 
 Internal refactor (no behavior change): `mngr aws prepare`'s host-dir identity provisioning now threads the already-resolved state-bucket name into `_resolve_and_provision_host_identity` (instead of a `was_bucket_set_up` bool), removing a redundant bucket-name re-resolution and an unreachable None-handling branch in `_provision_host_identity`.
 
-Internal refactor (no behavior change): `mngr aws prepare` / `cleanup` output now routes its format dispatch through the shared `emit_operator_result` helper instead of an inline `match` on the output format.
+Internal refactor (no behavior change): `mngr aws prepare` / `cleanup` output now emits its machine-readable record (JSON / JSONL) through the shared `emit_operator_result` helper and renders its human lines inline via `write_human_line`, rather than passing a `human_lines` list into the helper.
 
 Test-only: moved the duplicated moto `aws_session` / `aws_mock` fixtures into `mngr_aws`'s `conftest.py` (one definition instead of three), and tightened two state-bucket backend tests to assert the exact tag write / the absence of a misleading missing-identity warning.
 
