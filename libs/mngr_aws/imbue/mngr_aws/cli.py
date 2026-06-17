@@ -30,7 +30,6 @@ from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
@@ -39,6 +38,8 @@ from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.state_bucket import S3StateBucketError
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
 from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
+from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
+from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
 
 class _AwsOperatorCliOptions(CommonCliOptions):
@@ -67,35 +68,21 @@ class _AwsCleanupCliOptions(_AwsOperatorCliOptions):
 def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AwsProviderConfig:
     """Return the user's ``[providers.<provider_name>]`` block, or class defaults.
 
-    The operator commands need to land their SG / SG-deletion in the same
-    region and VPC the runtime ``mngr create --provider <provider_name>`` path
-    will later use. Class defaults (``AwsProviderConfig()``) are a fallback for
-    the first-run case where the user has not yet pinned a provider block; if
-    their settings.toml *does* configure the named provider, we honor it.
-
-    When the looked-up config is not an ``AwsProviderConfig`` (e.g. the user
-    pointed ``[providers.aws]`` at a non-AWS backend), fall back to class
-    defaults rather than erroring -- the operator command's CLI options
-    (``--region`` / ``--vpc-id`` / ``--sg-name``) can still drive an
-    AWS-targeted run. A warning is emitted in this case so the user notices
-    their ``--provider`` selection did not have the intended effect (a silent
-    fallback to class defaults would otherwise land the SG in
-    ``default_region`` / no VPC with no visible signal). The missing-block
-    case is silent because that is the expected first-run shape.
+    The operator commands need to land their SG / SG-deletion in the same region
+    and VPC the runtime ``mngr create --provider <provider_name>`` path will later
+    use. Thin wrapper over the shared ``resolve_provider_config`` (see it for the
+    {configured / wrong-backend / missing} contract).
     """
-    config = mngr_ctx.config.providers.get(ProviderInstanceName(provider_name))
-    if isinstance(config, AwsProviderConfig):
-        return config
-    if config is not None:
-        logger.warning(
-            "Provider {!r} is configured but is not an AWS backend (got {}); "
-            "falling back to AwsProviderConfig class defaults. Pass "
-            "--region / --vpc-id / --sg-name to override, or point --provider "
-            "at an AWS-backed block.",
-            provider_name,
-            type(config).__name__,
-        )
-    return AwsProviderConfig()
+    return resolve_provider_config(
+        mngr_ctx,
+        provider_name,
+        config_cls=AwsProviderConfig,
+        default_factory=AwsProviderConfig,
+        cloud_label="an AWS backend",
+        override_hint=(
+            "Pass --region / --vpc-id / --sg-name to override, or point --provider at an AWS-backed block."
+        ),
+    )
 
 
 def _build_operator_client(
@@ -272,30 +259,31 @@ def _perform_host_identity_cleanup(identity: S3StateHostIdentity | None) -> str 
 
 
 def _refuse_cleanup_if_instances_exist(client: AwsVpsClient) -> None:
-    """Raise ``click.ClickException`` when any mngr-managed instance still exists.
+    """Raise ``ManagedResourcesExistError`` when any mngr-managed instance still exists.
 
     Run first by ``mngr aws cleanup``, before any teardown, so a still-running
     instance aborts the whole cleanup (bucket + identity + SG) and strands
     nothing. Split out so the refusal is unit-testable against a stubbed client.
     """
     instances = client.list_mngr_managed_instances()
-    if instances:
-        summary = ", ".join(f"{i['id']} ({i['state']})" for i in instances)
-        raise click.ClickException(
-            f"Refusing to clean up region {client.region}: {len(instances)} mngr-managed "
-            f"instance(s) still exist: {summary}. Destroy them first with `mngr destroy "
-            "<agent>` (or terminate them), then re-run `mngr aws cleanup`."
-        )
+    refuse_if_managed_resources_exist(
+        [str(i["id"]) for i in instances],
+        summary=", ".join(f"{i['id']} ({i['state']})" for i in instances),
+        resource_noun="instance",
+        scope_description=f"region {client.region}",
+        cleanup_command="mngr aws cleanup",
+    )
 
 
 def _perform_cleanup(client: AwsVpsClient) -> str | None:
     """Core of ``mngr aws cleanup``: refuse if any instance exists, else delete the SG.
 
     Returns the deleted security-group id, or ``None`` when it was already absent
-    (idempotent). Raises ``click.ClickException`` when any mngr-managed instance
-    still exists in the region, so cleanup never strands a running agent. Split
-    from the click callback so the refuse/delete decision is unit-testable
-    against a stubbed client, without the click runtime or real credentials.
+    (idempotent). Raises ``ManagedResourcesExistError`` (a ``MngrError``) when any
+    mngr-managed instance still exists in the region, so cleanup never strands a
+    running agent. Split from the click callback so the refuse/delete decision is
+    unit-testable against a stubbed client, without the click runtime or real
+    credentials.
     """
     _refuse_cleanup_if_instances_exist(client)
     return client.delete_security_group()

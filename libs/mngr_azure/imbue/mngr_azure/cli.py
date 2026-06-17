@@ -33,7 +33,6 @@ from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
@@ -42,6 +41,8 @@ from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
+from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
+from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
 
 class _AzureOperatorCliOptions(CommonCliOptions):
@@ -72,35 +73,21 @@ def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> Azure
 
     The operator commands need to create / delete the resource group, vnet,
     subnet, and NSG using the same names the runtime ``mngr create --provider
-    <provider_name>`` path will later resolve. Class defaults
-    (``AzureProviderConfig()``) are a fallback for the first-run case where the
-    user has not yet pinned a provider block; if their settings.toml *does*
-    configure the named provider, we honor it.
-
-    When the looked-up config is not an ``AzureProviderConfig`` (e.g. the user
-    pointed ``[providers.azure]`` at a non-Azure backend), fall back to class
-    defaults rather than erroring -- the operator command's CLI options
-    (``--subscription-id`` / ``--region`` / ``--resource-group``) can still drive
-    an Azure-targeted run. A warning is emitted in this case so the user notices
-    their ``--provider`` selection did not have the intended effect (a silent
-    fallback to class defaults would otherwise create the resource group with the
-    default name in the default region with no visible signal). The missing-block
-    case is silent because that is the expected first-run shape. Mirrors
-    ``mngr_aws.cli._resolve_provider_config``.
+    <provider_name>`` path will later resolve. Thin wrapper over the shared
+    ``resolve_provider_config`` (see it for the {configured / wrong-backend /
+    missing} contract).
     """
-    config = mngr_ctx.config.providers.get(ProviderInstanceName(provider_name))
-    if isinstance(config, AzureProviderConfig):
-        return config
-    if config is not None:
-        logger.warning(
-            "Provider {!r} is configured but is not an Azure backend (got {}); "
-            "falling back to AzureProviderConfig class defaults. Pass "
-            "--subscription-id / --region / --resource-group to override, or point "
-            "--provider at an Azure-backed block.",
-            provider_name,
-            type(config).__name__,
-        )
-    return AzureProviderConfig()
+    return resolve_provider_config(
+        mngr_ctx,
+        provider_name,
+        config_cls=AzureProviderConfig,
+        default_factory=AzureProviderConfig,
+        cloud_label="an Azure backend",
+        override_hint=(
+            "Pass --subscription-id / --region / --resource-group to override, or "
+            "point --provider at an Azure-backed block."
+        ),
+    )
 
 
 def _build_operator_client(
@@ -144,31 +131,31 @@ def _build_operator_client(
 
 
 def _refuse_cleanup_if_vms_exist(client: AzureVpsClient) -> None:
-    """Raise ``AzureProviderError`` when any mngr-managed VM still exists.
+    """Raise ``ManagedResourcesExistError`` when any mngr-managed VM still exists.
 
     Run first by ``mngr azure cleanup``, before any teardown, so a still-running
     VM aborts the whole cleanup (storage account + identity + RG) and strands
     nothing. Split out so the refusal is unit-testable against a stubbed client.
     """
     vms = client.list_mngr_managed_vms()
-    if vms:
-        summary = ", ".join(str(vm["id"]) for vm in vms)
-        raise AzureProviderError(
-            f"Refusing to clean up resource group {client.resource_group}: {len(vms)} mngr-managed "
-            f"VM(s) still exist: {summary}. Destroy them first with `mngr destroy <agent>`, then "
-            "re-run `mngr azure cleanup`."
-        )
+    refuse_if_managed_resources_exist(
+        [str(vm["id"]) for vm in vms],
+        summary=", ".join(str(vm["id"]) for vm in vms),
+        resource_noun="VM",
+        scope_description=f"resource group {client.resource_group}",
+        cleanup_command="mngr azure cleanup",
+    )
 
 
 def _perform_cleanup(client: AzureVpsClient) -> str | None:
     """Core of ``mngr azure cleanup``: refuse if VMs exist, else delete the RG.
 
     Returns the deleted resource group name, or ``None`` when there was nothing
-    to delete. Raises ``AzureProviderError`` (an ``MngrError``, so it renders as a
-    clean CLI message) when any mngr-managed VM still exists, so cleanup never
-    strands a running agent. Split from the click callback so the refuse/delete
-    decision is unit-testable against a stubbed client, without the click runtime
-    or real credentials.
+    to delete. Raises ``ManagedResourcesExistError`` (an ``MngrError``, so it
+    renders as a clean CLI message) when any mngr-managed VM still exists, so
+    cleanup never strands a running agent. Split from the click callback so the
+    refuse/delete decision is unit-testable against a stubbed client, without the
+    click runtime or real credentials.
     """
     _refuse_cleanup_if_vms_exist(client)
     return client.delete_managed_resource_group()

@@ -34,10 +34,10 @@ from imbue.mngr_gcp.cli import _resolve_provider_config
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.config import GcpProviderConfig
-from imbue.mngr_gcp.errors import GcpError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
+from imbue.mngr_vps.errors import ManagedResourcesExistError
 
 
 def _prepare_client(firewalls: FakeFirewallsClient) -> _StubbedGcpVpsClient:
@@ -113,7 +113,7 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
         )
     ]
     client = _cleanup_client(instances, firewalls)
-    with pytest.raises(GcpError) as exc_info:
+    with pytest.raises(ManagedResourcesExistError) as exc_info:
         _perform_cleanup(client)
     # The refusal must name the blocking instance so the operator knows what to destroy.
     assert "mngr-host-1" in str(exc_info.value)
