@@ -25,7 +25,8 @@ class _LiveOutputTailer(MutableModel):
     """Polls a live-output file and yields the text deltas a reader extracts from it.
 
     The new-data check is a bound method reading ``self.last_mtime`` (mutated on
-    the model, not a captured local), so the polling lambda binds only ``self``.
+    the model, not a captured local), so it can be handed to ``poll_until``
+    directly without wrapping per-call state in a closure.
     """
 
     host: OnlineHostInterface
