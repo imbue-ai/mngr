@@ -23,6 +23,8 @@ from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -43,7 +45,9 @@ from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
@@ -890,18 +894,27 @@ class PiCodingAgent(
         self.adopt_session(host, options, mngr_ctx)
 
     def adopt_session(self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
-        """Adopt the session named by ``--adopt-session`` into this newly provisioned agent.
+        """Adopt a session so the new agent resumes existing context.
+
+        Dispatches to ``_adopt_session`` (``--adopt-session``) or
+        ``_adopt_cloned_session`` (``--from <agent>``); the two are mutually
+        exclusive (rejected upstream in the core ``builtin_adopt_session`` gate).
 
         ``--adopt-session`` is ``multiple=True``, so ``plugin_data["adopt_session"]``
         is a tuple; when set, the last entry's session (resolved across the
         user-native store, live mngr agents, and preserved agents) is copied into
         this agent's session store, rebound to this agent's work_dir, and recorded
-        as the resume pointer. Empty means no adoption (the agent starts fresh).
+        as the resume pointer. Empty (and no ``--from``) means no adoption (the
+        agent starts fresh).
         """
         adopt_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
-        if not adopt_args:
+        if adopt_args:
+            self._adopt_session(host, adopt_args[-1])
+        elif options.source_agent_state_location is not None:
+            self._adopt_cloned_session(host, options.source_agent_state_location)
+        else:
+            # Neither --adopt-session nor --from: the agent starts a fresh session.
             return
-        self._adopt_session(host, adopt_args[-1])
 
     def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> None:
         """Copy the resolved session into this agent's store, rebind it, and point resume at it.
@@ -911,18 +924,59 @@ class PiCodingAgent(
         2. Copy the source's encoded-cwd subdir into this agent's ``sessions/`` so the
            store mirrors pi's own layout (the subdir name is cosmetic -- pi resumes by
            the absolute path recorded below).
-        3. Rewrite the adopted JSONL's embedded cwd to this agent's host-canonical
-           work_dir, so pi never stalls at its missing-cwd dialog.
-        4. Write the adopted JSONL's new absolute path to ``pi_session_file`` so the
-           launch ``pi --session <file>`` resumes it.
+        3. Rebind the adopted JSONL to this agent's work_dir and record it as the
+           resume pointer (see ``_rebind_adopted_session``).
         """
         source_file = _resolve_adopt_session(adopt_arg, self.mngr_ctx)
         sessions_dir = self.get_pi_config_dir() / "sessions"
         dest_subdir = sessions_dir / source_file.parent.name
         with log_span("Adopting pi session {} into {}", source_file, dest_subdir):
             host.copy_directory(host, source_file.parent, dest_subdir)
+        self._rebind_adopted_session(host, dest_subdir / source_file.name)
 
-        adopted_file = dest_subdir / source_file.name
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+        """Resume the source agent's pi session in a ``--from`` clone.
+
+        A generic ``--from`` clone copies the source *workspace* but not the source
+        agent's *state dir*, so the cloned pi has no session to resume. This
+        transfers just the source's native session store (the same relpath that is
+        preserved and scanned) into this agent's store, picks the most-recent
+        session JSONL from it, and rebinds it to this agent's work_dir as the resume
+        pointer. If the source had no store, the clone starts a fresh session.
+        """
+        store_relpath = Path(_PI_SESSIONS_DIR_RELPATH)
+        transferred = transfer_cloned_agent_session_store(host, self._get_agent_dir(), source_location, store_relpath)
+        if not transferred:
+            logger.warning(
+                "Clone adopt: no pi session store at source {}; cloned agent will start a fresh session",
+                source_location.path / store_relpath,
+            )
+            return
+
+        sessions_dir = self._get_agent_dir() / store_relpath
+        latest = host.execute_idempotent_command(
+            f"ls -t {shlex.quote(str(sessions_dir))}/*/*.jsonl 2>/dev/null | head -n1",
+            timeout_seconds=5.0,
+        )
+        if not (latest.success and latest.stdout.strip()):
+            logger.warning(
+                "Clone adopt: transferred pi session store {} has no session JSONL (ls success={}, stderr={!r}); "
+                "cloned agent will start a fresh session",
+                sessions_dir,
+                latest.success,
+                latest.stderr.strip(),
+            )
+            return
+        self._rebind_adopted_session(host, Path(latest.stdout.strip()))
+
+    def _rebind_adopted_session(self, host: OnlineHostInterface, adopted_file: Path) -> None:
+        """Rebind an adopted session JSONL to this agent and point resume at it.
+
+        Rewrites the JSONL's embedded cwd to this agent's host-canonical work_dir
+        (so pi never stalls at its missing-cwd dialog) and writes its absolute path
+        to ``pi_session_file`` so the launch ``pi --session <file>`` resumes it.
+        Shared by ``--adopt-session`` and ``--from``.
+        """
         new_cwd = self._get_host_canonical_work_dir(host)
         host.write_text_file(adopted_file, _rewrite_pi_session_cwd(host.read_text_file(adopted_file), new_cwd))
         host.write_text_file(self._get_agent_dir() / _SESSION_FILE_NAME, str(adopted_file))
@@ -1004,6 +1058,29 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     preserve_host_agents_on_destroy(
         host, mngr_ctx, AgentTypeName(_PI_AGENT_TYPE), _pi_coding_items_to_preserve_for_discovered_agent
     )
+
+
+@hookimpl
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+    """pi-specific fail-fast pre-resolution of ``--adopt-session`` session ids.
+
+    The agent-agnostic gate (the type must support session adoption; mutual exclusion
+    with ``--from`` cloning) and the ``--adopt-session`` option declaration both live in
+    the core ``builtin_adopt_session`` hookimpl. This runs only for pi-coding agents and
+    resolves every named session *now* -- before any host or worktree is created -- so a
+    bad/ambiguous id is a clean ``UserInputError`` rather than a traceback out of
+    ``on_after_provisioning`` (which runs inside provision_agent's ConcurrencyGroup). The
+    source is always local, so the result matches the resolution done later.
+    """
+    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
+    if not adopt_session:
+        return None
+    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
+    if not issubclass(resolved.agent_class, PiCodingAgent):
+        return None
+    for session_arg in adopt_session:
+        _resolve_adopt_session(session_arg, mngr_ctx)
+    return None
 
 
 @hookimpl
