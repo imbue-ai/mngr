@@ -76,3 +76,19 @@ codex_marker_recompute
 rm -f "$CODEX_PERMISSIONS_WAITING_FILE"
 
 codex_marker_unlock
+
+# Turn-end flush: if this recompute left the agent WAITING (the `active` marker
+# is gone, so the root turn is done and no subagents are in flight), force one
+# synchronous common-transcript pass. A consumer harvesting the final message on
+# the WAITING signal would otherwise race the 5s converter daemon. Mirrors
+# claude's wait_for_stop_hook.sh and agy's statusline.sh. Done after releasing
+# the marker lock and gated defensively: the lib is provisioned by
+# Host._ensure_shared_shell_libs, but a missing lib or flush failure must never
+# disrupt codex's loop. mngr_common_transcript_flush writes nothing to stdout.
+if [ ! -e "$CODEX_MARKER_FILE" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh" ]; then
+    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_common_transcript_lib.sh
+    . "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+    if command -v mngr_common_transcript_flush >/dev/null 2>&1; then
+        mngr_common_transcript_flush
+    fi
+fi

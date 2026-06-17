@@ -160,6 +160,9 @@ from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_sett
 _DANGEROUSLY_SKIP_PERMISSIONS_FLAG: Final[str] = "--dangerously-skip-permissions"
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
+# The python converter common_transcript.sh invokes (python3
+# <dir>/common_transcript_convert.py); provisioned alongside the .sh.
+_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: Final[str] = "common_transcript_convert.py"
 _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 # The python3 decoder stream_transcript.sh invokes to read agy's SQLite conversation
 # store (agy >= 1.0.4); provisioned alongside the streamer into the commands/ dir.
@@ -381,9 +384,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # per-session channel whenever the agent enters a busy state -- i.e. once
         # it starts processing the just-submitted message (see statusline.sh).
         # Wait for that, exactly as Claude waits for its UserPromptSubmit hook.
-        # Known edge: a model that *refuses* the prompt -- e.g. quota exhausted
-        # -- never enters a busy state, so this times out even though the prompt
-        # was enqueued.
+        # agy waits on the statusLine busy-signal alone -- no acceptance marker is
+        # supplied (agy records none), so the hook signal is the sole confirmation,
+        # which covers the normal and queue-while-busy cases. (Known edge: a model
+        # that *refuses* the prompt -- e.g. quota exhausted -- never enters a busy
+        # state, so this times out even though the prompt was enqueued.)
         send_enter_via_tmux_wait_for_hook(
             self,
             tmux_target,
@@ -413,8 +418,12 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         }
 
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the antigravity common-transcript converter."""
-        return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
+        """Return the antigravity common-transcript converter shell script plus the
+        python module it invokes."""
+        return {
+            name: _load_antigravity_resource_script(name)
+            for name in (_COMMON_TRANSCRIPT_SCRIPT_NAME, _COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME)
+        }
 
     def _get_agy_log_file_path(self) -> Path:
         """Path agy is told to write its --log-file to.
