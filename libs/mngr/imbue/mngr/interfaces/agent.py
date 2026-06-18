@@ -629,8 +629,8 @@ class HasSessionAdoptionMixin(ABC):
 
     The read-side counterpart to :class:`HasSessionPreservationMixin`: it consumes an existing
     session (a live agent's, a preserved one's, or a config dir's) so a freshly created agent
-    resumes that context. Covers both an explicitly named session (e.g. claude's
-    ``--adopt-session <id>``) and the source agent's session when cloning (``--from <agent>``).
+    resumes that context. Covers both an explicitly named session (the ``--adopt <id>`` create
+    option) and the source agent's session when cloning (``--from <agent>``).
     The agent's ``on_after_provisioning`` calls this, gated by the relevant create options.
     """
 
