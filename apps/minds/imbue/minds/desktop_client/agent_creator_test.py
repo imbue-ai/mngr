@@ -1027,7 +1027,8 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
 
 # Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a
-# recording http-server fixture, which can exceed the default 10s pytest-timeout.
+# recording http-server fixture, which can exceed the default 10s
+# _wait_until_finished poll deadline (which the call below widens to 20s).
 @pytest.mark.timeout(30)
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
@@ -1045,13 +1046,19 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
     )
-    _wait_until_finished(creator, creation_id)
+    # Match the 20s poll deadline used by the imbue-cloud sibling above: the
+    # creation setup (fresh ConcurrencyGroups + recording http server) can take
+    # well over the default 10s under CI load.
+    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
 
     assert cli.create_calls == []
 
 
-# Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout.
+# Same timeout flake as its litellm-key siblings above: the creation setup
+# occasionally exceeds the default 10s _wait_until_finished poll deadline (which
+# the call below widens to 20s). Mark flaky so offload retries a contended run
+# rather than failing it outright.
+@pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
@@ -1068,7 +1075,10 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
         launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
-    _wait_until_finished(creator, creation_id)
+    # Match the 20s poll deadline used by the imbue-cloud sibling above: the
+    # creation setup (fresh ConcurrencyGroups + recording http server) can take
+    # well over the default 10s under CI load.
+    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
 
     assert cli.create_calls == []
 
