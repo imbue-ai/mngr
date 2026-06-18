@@ -64,6 +64,9 @@ def test_converts_user_and_assistant_messages(tmp_path: Path) -> None:
     }
     assert events[1]["type"] == "assistant_message"
     assert events[1]["text"] == "hi back"
+    # A text-only codex turn carries the text as a single (trivially ordered) part.
+    assert events[1]["parts"] == [{"type": "text", "content": "hi back"}]
+    assert events[1]["parts_ordered"] is True
     for event in events:
         assert validate_common_transcript_record(event) is None
 
