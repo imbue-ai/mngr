@@ -87,11 +87,11 @@ _REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Minimum version of the upstream ``latchkey`` CLI this package will operate
-# against. Kept in lockstep with the version mngr/minds bundles and installs
+# against. Bump this together with the version mngr/minds bundles and installs
 # (see ``remote_gateway.LATCHKEY_VERSION`` and the minds ``package.json`` pin)
-# so the wrapper never runs against a CLI older than the one it ships with.
+# so the wrapper never requires a CLI newer than the one that actually ships.
 # (2.14.0 was the first release supporting GitHub git operations over the
-# gateway, which backups rely on; the floor has since been raised in step with
+# gateway, which backups rely on; the floor has since been raised alongside
 # that pin.)
 LATCHKEY_MIN_VERSION: Final[str] = "2.17.0"
 
