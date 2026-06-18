@@ -76,7 +76,6 @@ def test_exec_echo_on_modal(
     assert "hello-from-modal" in result.stdout
 
 
-@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(300)

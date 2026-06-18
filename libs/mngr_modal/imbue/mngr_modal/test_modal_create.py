@@ -23,7 +23,6 @@ from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
 
 
-@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
