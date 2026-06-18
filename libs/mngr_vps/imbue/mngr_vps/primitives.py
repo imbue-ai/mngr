@@ -30,6 +30,34 @@ class IsolationMode(UpperCaseStrEnum):
     NONE = auto()
 
 
+# Instance-level identity marker recording a host's *placement* (container vs
+# bare), stamped at create and readable from the cloud API WITHOUT SSH (an EC2/
+# Azure tag, a GCE metadata item). This lets discovery pick the realizer matching
+# a host's actual placement before opening any on-host store -- so a bare host is
+# found by a default-CONTAINER config, and vice versa. The value is the lowercased
+# ``IsolationMode`` name (``"none"`` / ``"container"``), per the conventional
+# lowercase tag/label charset.
+ISOLATION_TAG_KEY: Final[str] = "mngr-isolation"
+
+
+def isolation_marker_value(isolation: IsolationMode) -> str:
+    """The ``mngr-isolation`` tag/metadata value to stamp for a placement (lowercased)."""
+    return isolation.value.lower()
+
+
+def isolation_from_marker(marker_value: str | None) -> IsolationMode:
+    """Resolve a host's placement from its instance ``mngr-isolation`` marker.
+
+    Hosts created before the marker existed carry no value (``None``); they were
+    all CONTAINER placements, so an absent marker defaults to ``CONTAINER`` to
+    preserve the prior behavior. An unrecognized value also falls back to
+    ``CONTAINER`` rather than failing discovery.
+    """
+    if marker_value == isolation_marker_value(IsolationMode.NONE):
+        return IsolationMode.NONE
+    return IsolationMode.CONTAINER
+
+
 class VpsInstanceStatus(UpperCaseStrEnum):
     """Status of a VPS instance as reported by the provider API."""
 

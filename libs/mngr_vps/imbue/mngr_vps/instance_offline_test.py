@@ -21,8 +21,10 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
@@ -31,6 +33,8 @@ from imbue.mngr_vps.host_store_test import _LocalFakeOuter
 from imbue.mngr_vps.host_store_test import _make_local_connector
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
 from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
+from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 
@@ -148,7 +152,7 @@ def test_offline_resume_mirrors_record_with_cleared_stop_reason(temp_mngr_ctx: M
         config=VpsProviderConfig(backend=ProviderBackendName("offline-test")),
         vps_client=ExternallyManagedVpsClient(),
     )
-    provider._realizer_cache = cast(HostRealizer, _FakeRealizer(cast(VpsHostStore, store)))
+    provider._realizer_cache = {IsolationMode.CONTAINER: cast(HostRealizer, _FakeRealizer(cast(VpsHostStore, store)))}
 
     with pytest.raises(_MirrorCalled):
         provider.start_host(host_id)
@@ -210,7 +214,7 @@ def test_offline_resume_waits_for_expected_host_key_before_connecting(temp_mngr_
         config=VpsProviderConfig(backend=ProviderBackendName("offline-test")),
         vps_client=ExternallyManagedVpsClient(),
     )
-    provider._realizer_cache = cast(HostRealizer, _FakeRealizer(cast(VpsHostStore, store)))
+    provider._realizer_cache = {IsolationMode.CONTAINER: cast(HostRealizer, _FakeRealizer(cast(VpsHostStore, store)))}
 
     with pytest.raises(_MirrorCalled):
         provider.start_host(host_id)
@@ -220,3 +224,99 @@ def test_offline_resume_waits_for_expected_host_key_before_connecting(temp_mngr_
     # It waits for mngr's locally-held VPS host public key (the key sshd serves on
     # port 22 -- the bare agent endpoint), not a record/account-sourced value.
     assert provider._expected_key_arg == provider._get_vps_host_keypair()[1]
+
+
+# =========================================================================
+# Instance-marker realizer selection (discover/connect a bare host with the
+# right realizer before any on-host store is opened)
+# =========================================================================
+
+
+class _MarkerProvider(OfflineCapableVpsProvider):
+    """Offline provider whose cached instance listing is supplied directly, so a
+    test can assert the realizer is selected from the instance ``mngr-isolation``
+    marker (no SSH) -- the path that makes a bare host discoverable."""
+
+    _instances: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+
+    @property
+    def _state_store(self) -> HostStateStore:
+        raise AssertionError("not exercised by this test")
+
+    def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
+        raise AssertionError("not exercised by this test")
+
+    def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
+        raise AssertionError("not exercised by this test")
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        raise AssertionError("not exercised by this test")
+
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        raise AssertionError("not exercised by this test")
+
+    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
+        raise AssertionError("not exercised by this test")
+
+    def _fetch_provider_instances(self) -> list[dict[str, Any]]:
+        return self._instances
+
+
+def _marker_provider(temp_mngr_ctx: MngrContext, instances: list[dict[str, Any]]) -> _MarkerProvider:
+    provider = _MarkerProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        # The provider config defaults to CONTAINER isolation; the whole point is
+        # that an existing bare host is still reached via the bare realizer.
+        config=VpsProviderConfig(backend=ProviderBackendName("offline-test")),
+        mngr_ctx=temp_mngr_ctx,
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    provider._instances = instances
+    return provider
+
+
+def test_realizer_for_vps_ip_picks_bare_from_isolation_none_marker(temp_mngr_ctx: MngrContext) -> None:
+    """Discovery probes a bare host's VPS with the BARE realizer when its instance
+    carries ``mngr-isolation=none`` -- even though the provider config defaults to
+    CONTAINER.
+
+    This is the core fix for the connect/discovery bug: ``_read_records_from_vps``
+    has only the IP (not yet the record), so it resolves the realizer from the
+    instance's marker via ``_realizer_for_vps_ip``. Without this a bare host probed
+    by the default container realizer finds no container and is invisible. Asserting
+    the realizer type AND its port-22 endpoint captures the exact wrong behavior.
+    """
+    instances = [{"id": "i-bare", "main_ip": "10.0.0.5", "tags": [f"{ISOLATION_TAG_KEY}=none"]}]
+    provider = _marker_provider(temp_mngr_ctx, instances)
+    # The create-time default realizer is unchanged (still the container one).
+    assert isinstance(provider._realizer, DockerRealizer)
+    realizer = provider._realizer_for_vps_ip("10.0.0.5")
+    assert isinstance(realizer, BareRealizer)
+    assert realizer.agent_endpoint("10.0.0.5").port == 22
+
+
+def test_realizer_for_vps_ip_picks_container_from_isolation_container_marker(temp_mngr_ctx: MngrContext) -> None:
+    """An instance marked ``mngr-isolation=container`` probes with the container realizer."""
+    instances = [{"id": "i-ctr", "main_ip": "10.0.0.6", "tags": [f"{ISOLATION_TAG_KEY}=container"]}]
+    provider = _marker_provider(temp_mngr_ctx, instances)
+    realizer = provider._realizer_for_vps_ip("10.0.0.6")
+    assert isinstance(realizer, DockerRealizer)
+
+
+def test_realizer_for_vps_ip_defaults_untagged_instance_to_container(temp_mngr_ctx: MngrContext) -> None:
+    """A pre-marker instance (no ``mngr-isolation`` tag) defaults to the container realizer.
+
+    Backward-compat guard: hosts created before the marker existed were all
+    container placements, so an absent marker preserves the prior behavior.
+    """
+    instances = [{"id": "i-old", "main_ip": "10.0.0.7", "tags": ["mngr-host-id=abc"]}]
+    provider = _marker_provider(temp_mngr_ctx, instances)
+    realizer = provider._realizer_for_vps_ip("10.0.0.7")
+    assert isinstance(realizer, DockerRealizer)
+
+
+def test_realizer_for_vps_ip_falls_back_to_create_time_realizer_for_unknown_ip(temp_mngr_ctx: MngrContext) -> None:
+    """An IP not in the listing (e.g. a just-created host) uses the create-time realizer."""
+    provider = _marker_provider(temp_mngr_ctx, instances=[])
+    assert provider._realizer_for_vps_ip("10.0.0.99") is provider._realizer

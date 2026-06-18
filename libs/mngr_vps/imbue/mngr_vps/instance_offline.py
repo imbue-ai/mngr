@@ -44,7 +44,10 @@ from imbue.mngr_vps.host_state_store import StateBucket
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import attempt_cloud_resource_teardown
+from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import isolation_from_marker
 from imbue.mngr_vps.systemd import render_systemd_unit
 
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
@@ -256,8 +259,9 @@ class OfflineCapableVpsProvider(VpsProvider):
             self._wait_for_expected_host_key(
                 new_ip, self._get_vps_host_keypair()[1], timeout_seconds=self.config.ssh_connect_timeout
             )
+        realizer = self._realizer_for_instance(instance)
         with self._make_outer_for_vps_ip(new_ip) as outer:
-            host_store = self._realizer.open_host_store(outer, host_id)
+            host_store = realizer.open_host_store(outer, host_id)
             record = host_store.read_host_record()
             if record is None or record.config is None:
                 raise HostNotFoundError(self.name, host_id)
@@ -485,6 +489,45 @@ class OfflineCapableVpsProvider(VpsProvider):
         wanted_tag = f"mngr-host-id={host_id}"
         return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
 
+    def _isolation_marker_for_instance(self, instance: Mapping[str, Any]) -> str | None:
+        """Read the instance's ``mngr-isolation`` placement marker (no SSH), or None.
+
+        Reads from the normalized ``key=value`` tag list (AWS EC2 tags, Azure VM
+        tags). GCP, whose identity lives in instance metadata, overrides this to
+        read the metadata item instead.
+        """
+        return normalized_tags_to_dict(instance).get(ISOLATION_TAG_KEY)
+
+    def _realizer_for_instance(self, instance: Mapping[str, Any]) -> HostRealizer:
+        """The realizer matching a host's placement, read from its instance marker (no SSH)."""
+        return self._realizer_for_isolation(isolation_from_marker(self._isolation_marker_for_instance(instance)))
+
+    def _realizer_for_host_id(self, host_id: HostId) -> HostRealizer:
+        """Resolve a host's realizer from its instance's ``mngr-isolation`` marker.
+
+        Falls back to the create-time realizer when the host's instance is not in
+        the cached listing (e.g. a freshly-created host whose listing predates it);
+        an absent marker on a found instance defaults to container (see
+        ``isolation_from_marker``).
+        """
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return self._realizer
+        return self._realizer_for_instance(instance)
+
+    def _realizer_for_vps_ip(self, vps_ip: str) -> HostRealizer:
+        """Probe ``vps_ip``'s host with the realizer matching its instance's placement marker.
+
+        Overrides the base (which returns the create-time realizer) so discovery
+        finds a bare host even under a default-container config: the instance's
+        ``mngr-isolation`` marker is read from the cached listing keyed by IP, with
+        no SSH. An IP not in the listing falls back to the create-time realizer.
+        """
+        for instance in self._list_instances_cached():
+            if instance.get("main_ip", "") == vps_ip:
+                return self._realizer_for_instance(instance)
+        return self._realizer
+
     def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
         """Outer-filesystem path of the in-container idle sentinel for this host.
 
@@ -498,9 +541,11 @@ class OfflineCapableVpsProvider(VpsProvider):
         """Outer-filesystem path of this host's ``host_dir`` tree (delegates to the realizer).
 
         Used by ``BucketHostDirBackend.capture`` to read the host's ``host_dir`` off
-        the box at ``mngr stop``, and by ``_idle_sentinel_path_on_outer``.
+        the box at ``mngr stop``, and by ``_idle_sentinel_path_on_outer``. Resolves
+        the host's own placement realizer (bare and container lay out ``host_dir``
+        at different outer paths) from its instance marker.
         """
-        return self._realizer.host_dir_path_on_outer(host_id)
+        return self._realizer_for_host_id(host_id).host_dir_path_on_outer(host_id)
 
     def _pull_host_dir_to_local(self, host_id: HostId, vps_ip: str, local_dir: Path) -> None:
         """Rsync the host's ``host_dir`` off the box into ``local_dir`` (operator-driven capture).

@@ -19,6 +19,7 @@ from imbue.mngr_gcp.client import GceInstanceName
 from imbue.mngr_gcp.client import GceLabelValue
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
+from imbue.mngr_gcp.client import ISOLATION_METADATA_KEY
 from imbue.mngr_gcp.client import _make_instance_name
 from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
@@ -163,8 +164,35 @@ def test_create_instance_builds_expected_resource() -> None:
     assert built.labels["mngr-provider"] == "gcp"
     assert "mngr-host-id" not in built.labels
     assert "mngr-created-at" not in built.labels
+    # No mngr-isolation tag passed in -> no isolation metadata stamped.
+    assert ISOLATION_METADATA_KEY not in metadata
     # External IP requested by default.
     assert built.network_interfaces[0].access_configs[0].type_ == "ONE_TO_ONE_NAT"
+
+
+def test_create_instance_stamps_isolation_marker_into_metadata() -> None:
+    """The ``mngr-isolation`` placement marker rides in GCE metadata (not a label).
+
+    GCP stores mngr identity in metadata (labels are too restricted), so offline
+    discovery reads the placement back from metadata to pick the bare realizer for
+    a STOPPED instance without SSH.
+    """
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "ssh-ed25519 AAAA test")
+    client.create_instance(
+        label="mngr-bare-agent",
+        region="us-west1-a",
+        plan="e2-medium",
+        user_data="#!/bin/bash\n",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-provider": "gcp", "mngr-host-id": "host-1", ISOLATION_METADATA_KEY: "none"},
+    )
+    built = instances.inserted[0]
+    metadata = {item.key: item.value for item in built.metadata.items}
+    assert metadata[ISOLATION_METADATA_KEY] == "none"
+    # The marker stays out of labels (which are charset-restricted).
+    assert ISOLATION_METADATA_KEY not in built.labels
 
 
 def test_create_instance_resolves_firewall_without_creating() -> None:

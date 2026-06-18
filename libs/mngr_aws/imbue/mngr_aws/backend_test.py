@@ -32,9 +32,12 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
+from imbue.mngr_vps.bare_realizer import BareRealizer
+from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.testing import seed_stopped_host_record
 
@@ -561,7 +564,7 @@ def test_destroy_host_offline_dispatch_ignores_stale_cached_record_with_vps_ip(t
     )
     # Seed the warm cache with a reachable-looking record (vps_ip + config set), as
     # an in-process ``mngr stop`` leaves it; the dispatch must still go offline.
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+    provider._host_record_cache[host_id] = VpsHostRecord(
         certified_host_data=CertifiedHostData(
             host_id=str(host_id),
             host_name="myhost",
@@ -663,6 +666,22 @@ def test_persist_agent_data_does_not_bypass_on_volume_store_for_running_host(tem
 def _normalized_instance(tag_pairs: dict[str, str]) -> dict:
     """A normalized instance dict (``{"id", "tags": ["k=v", ...]}``) for offline-discovery helper tests."""
     return {"id": "i-1", "tags": [f"{k}={v}" for k, v in tag_pairs.items()]}
+
+
+def test_realizer_for_instance_reads_bare_marker_from_ec2_tags(temp_mngr_ctx: MngrContext) -> None:
+    """An EC2 bare host (tag ``mngr-isolation=none``) resolves to the BARE realizer.
+
+    AWS stamps the placement marker as a plain EC2 tag, read back in the normalized
+    ``key=value`` list. The provider config defaults to CONTAINER, but the host's own
+    placement marker selects the bare realizer -- the fix that makes a bare host
+    discoverable/reachable without re-specifying isolation at connect time.
+    """
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
+    bare = _normalized_instance({"mngr-host-id": "h-1", ISOLATION_TAG_KEY: "none"})
+    assert isinstance(provider._realizer_for_instance(bare), BareRealizer)
+    # An untagged (pre-marker) instance defaults to the container realizer.
+    legacy = _normalized_instance({"mngr-host-id": "h-2"})
+    assert isinstance(provider._realizer_for_instance(legacy), DockerRealizer)
 
 
 def test_validate_provider_args_under_pytest_raises_when_unset(

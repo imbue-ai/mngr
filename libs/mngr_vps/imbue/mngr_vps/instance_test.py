@@ -1,6 +1,8 @@
 """Tests for VPS provider instance utilities."""
 
 from collections.abc import Callable
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -14,6 +16,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
+from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
@@ -32,10 +35,15 @@ from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import resolve_dockerfile_paths
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.errors import BareIsolationNotSupportedError
+from imbue.mngr_vps.host_store import VpsHostConfig
+from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import MinimalVpsProvider
 from imbue.mngr_vps.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps.instance import build_vps_tags
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import isolation_from_marker
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 
 # =============================================================================
@@ -183,27 +191,39 @@ _HOST_ID = HostId.generate()
 
 
 def test_build_vps_tags_emits_baseline_when_extras_empty() -> None:
-    """No MNGR_VPS_EXTRA_TAGS -> just the two always-on tags."""
-    assert build_vps_tags(_HOST_ID, "vultr", "") == {
+    """No MNGR_VPS_EXTRA_TAGS -> just the always-on identity + placement tags."""
+    assert build_vps_tags(_HOST_ID, "vultr", "", IsolationMode.CONTAINER) == {
         "mngr-host-id": str(_HOST_ID),
         "mngr-provider": "vultr",
+        ISOLATION_TAG_KEY: "container",
+    }
+
+
+def test_build_vps_tags_stamps_bare_isolation_marker() -> None:
+    """A bare placement is stamped ``mngr-isolation=none`` so discovery can pick the bare realizer."""
+    assert build_vps_tags(_HOST_ID, "aws", "", IsolationMode.NONE) == {
+        "mngr-host-id": str(_HOST_ID),
+        "mngr-provider": "aws",
+        ISOLATION_TAG_KEY: "none",
     }
 
 
 def test_build_vps_tags_appends_single_extra() -> None:
     """One ``key=value`` extra tag is merged in."""
-    assert build_vps_tags(_HOST_ID, "vultr", "minds_env=dev-josh") == {
+    assert build_vps_tags(_HOST_ID, "vultr", "minds_env=dev-josh", IsolationMode.CONTAINER) == {
         "mngr-host-id": str(_HOST_ID),
         "mngr-provider": "vultr",
+        ISOLATION_TAG_KEY: "container",
         "minds_env": "dev-josh",
     }
 
 
 def test_build_vps_tags_appends_multiple_comma_separated_extras() -> None:
     """Comma-separated extras are split + merged in."""
-    assert build_vps_tags(_HOST_ID, "vultr", "a=1,b=2,c=3") == {
+    assert build_vps_tags(_HOST_ID, "vultr", "a=1,b=2,c=3", IsolationMode.CONTAINER) == {
         "mngr-host-id": str(_HOST_ID),
         "mngr-provider": "vultr",
+        ISOLATION_TAG_KEY: "container",
         "a": "1",
         "b": "2",
         "c": "3",
@@ -212,9 +232,10 @@ def test_build_vps_tags_appends_multiple_comma_separated_extras() -> None:
 
 def test_build_vps_tags_strips_whitespace_around_extras() -> None:
     """Whitespace around each comma-separated entry is trimmed."""
-    assert build_vps_tags(_HOST_ID, "vultr", " a=1 , b=2 ") == {
+    assert build_vps_tags(_HOST_ID, "vultr", " a=1 , b=2 ", IsolationMode.CONTAINER) == {
         "mngr-host-id": str(_HOST_ID),
         "mngr-provider": "vultr",
+        ISOLATION_TAG_KEY: "container",
         "a": "1",
         "b": "2",
     }
@@ -222,9 +243,10 @@ def test_build_vps_tags_strips_whitespace_around_extras() -> None:
 
 def test_build_vps_tags_skips_blank_entries_from_trailing_commas() -> None:
     """Trailing / doubled commas don't emit empty tags."""
-    assert build_vps_tags(_HOST_ID, "vultr", "a=1,,b=2,") == {
+    assert build_vps_tags(_HOST_ID, "vultr", "a=1,,b=2,", IsolationMode.CONTAINER) == {
         "mngr-host-id": str(_HOST_ID),
         "mngr-provider": "vultr",
+        ISOLATION_TAG_KEY: "container",
         "a": "1",
         "b": "2",
     }
@@ -232,16 +254,17 @@ def test_build_vps_tags_skips_blank_entries_from_trailing_commas() -> None:
 
 def test_build_vps_tags_uses_provided_provider_name() -> None:
     """The provider name is interpolated, not hard-coded."""
-    assert build_vps_tags(_HOST_ID, "ovh", "") == {
+    assert build_vps_tags(_HOST_ID, "ovh", "", IsolationMode.CONTAINER) == {
         "mngr-host-id": str(_HOST_ID),
         "mngr-provider": "ovh",
+        ISOLATION_TAG_KEY: "container",
     }
 
 
 def test_build_vps_tags_rejects_entry_without_equals() -> None:
     """Extras missing an ``=`` separator are an error, not silently dropped."""
     with pytest.raises(MngrError, match="Invalid VPS extra tag"):
-        build_vps_tags(_HOST_ID, "vultr", "bare-tag")
+        build_vps_tags(_HOST_ID, "vultr", "bare-tag", IsolationMode.CONTAINER)
 
 
 def test_redact_secret_env_replaces_known_var_value() -> None:
@@ -513,6 +536,70 @@ def test_provider_builds_bare_realizer_for_none_isolation(temp_mngr_ctx: MngrCon
     provider = _minimal_provider(temp_mngr_ctx, IsolationMode.NONE)
     assert isinstance(provider._realizer, BareRealizer)
     assert provider.supports_snapshots is False
+
+
+def _record_for(host_id: HostId, *, container_name: str | None) -> VpsHostRecord:
+    """Build a VpsHostRecord whose placement is bare (no container) or container.
+
+    A bare host's ``config.container_name`` is None; a container host names its
+    container. The created/updated timestamps are backfilled by CertifiedHostData.
+    """
+    now = datetime.now(timezone.utc)
+    return VpsHostRecord(
+        certified_host_data=CertifiedHostData(host_id=str(host_id), host_name="h", created_at=now, updated_at=now),
+        vps_ip="10.0.0.1",
+        config=VpsHostConfig(
+            vps_instance_id=VpsInstanceId("i-1"),
+            region="r",
+            plan="p",
+            container_name=container_name,
+        ),
+    )
+
+
+def test_realizer_for_record_picks_bare_for_a_bare_record_under_default_container_config(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A bare host (record ``container_name is None``) resolves to the BARE realizer even
+    when the provider config defaults to CONTAINER.
+
+    This is the core fix: operations on an existing host use the realizer matching
+    THAT host's recorded placement, not the config knob -- so a bare host reached
+    by a default-container provider hits the VM's own port-22 sshd (no container
+    probe), rather than being invisible/unreachable. Asserting on the realizer type
+    and its agent endpoint port captures the exact behavior that was wrong.
+    """
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    # The create-time default realizer is unchanged (still the container one).
+    assert isinstance(provider._realizer, DockerRealizer)
+    bare_record = _record_for(HostId.generate(), container_name=None)
+    realizer = provider._realizer_for_record(bare_record)
+    assert isinstance(realizer, BareRealizer)
+    # The bare agent endpoint is the VM's own port 22 -- not the container port 2222.
+    assert realizer.agent_endpoint("10.0.0.1").port == 22
+
+
+def test_realizer_for_record_picks_container_for_a_container_record(temp_mngr_ctx: MngrContext) -> None:
+    """A container host (record names a container) resolves to the DockerRealizer."""
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    container_record = _record_for(HostId.generate(), container_name="mngr-agent-abc")
+    realizer = provider._realizer_for_record(container_record)
+    assert isinstance(realizer, DockerRealizer)
+    assert realizer.agent_endpoint("10.0.0.1").port == provider.config.container_ssh_port
+
+
+def test_isolation_from_marker_defaults_absent_to_container() -> None:
+    """An untagged (pre-marker) host defaults to CONTAINER; an explicit ``none`` marks bare.
+
+    Backward-compat guard: hosts created before the ``mngr-isolation`` marker
+    existed were all container placements, so an absent marker must default to
+    CONTAINER (preserving the prior behavior); an unknown value is also treated as
+    container rather than failing discovery.
+    """
+    assert isolation_from_marker(None) is IsolationMode.CONTAINER
+    assert isolation_from_marker("garbage") is IsolationMode.CONTAINER
+    assert isolation_from_marker("none") is IsolationMode.NONE
+    assert isolation_from_marker("container") is IsolationMode.CONTAINER
 
 
 def test_bare_provider_rejects_snapshot_operations_up_front(temp_mngr_ctx: MngrContext) -> None:
