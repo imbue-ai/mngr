@@ -22,8 +22,6 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
-from imbue.mngr.interfaces.data_types import CleanupFailure
-from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -39,14 +37,19 @@ from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
 from imbue.mngr_vps.host_state_store import StateBucket
+from imbue.mngr_vps.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
-from imbue.mngr_vps.instance import is_vps_resource_already_gone
+from imbue.mngr_vps.instance import attempt_cloud_resource_teardown
+from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import isolation_from_marker
 from imbue.mngr_vps.systemd import render_systemd_unit
 
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
@@ -203,7 +206,10 @@ class OfflineCapableVpsProvider(VpsProvider):
         )
         # The placement is stopped (host_dir quiesced) but the instance is still
         # reachable: capture host_dir to the bucket now, before the pause. ``capture``
-        # raises on failure, so pause in a ``finally`` -- a capture failure surfaces
+        # raises on a genuine failure (a lost connection, an rsync error, a bucket
+        # write error). The pause is billing-critical -- an un-paused instance keeps
+        # billing and, with the record already marked STOPPED, becomes undiscoverable
+        # -- so the ``finally`` pauses first, guaranteeing a capture failure surfaces
         # (failing ``mngr stop``) without ever leaving a running instance.
         try:
             self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
@@ -258,8 +264,9 @@ class OfflineCapableVpsProvider(VpsProvider):
             self._wait_for_expected_host_key(
                 new_ip, self._get_vps_host_keypair()[1], timeout_seconds=self.config.ssh_connect_timeout
             )
+        realizer = self._realizer_for_instance(instance)
         with self._make_outer_for_vps_ip(new_ip) as outer:
-            host_store = self._realizer.open_host_store(outer, host_id)
+            host_store = realizer.open_host_store(outer, host_id)
             record = host_store.read_host_record()
             if record is None or record.config is None:
                 raise HostNotFoundError(self.name, host_id)
@@ -291,18 +298,24 @@ class OfflineCapableVpsProvider(VpsProvider):
         return super().start_host(host_id, snapshot_id)
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
-        """Destroy a host, falling back to a cloud-API teardown when it is stopped.
+        """Destroy a host, taking a cloud-API teardown path when its instance is stopped.
 
-        The base ``VpsProvider.destroy_host`` resolves the instance through the
-        SSH/volume host record, so a STOPPED (deallocated / powered-off) instance --
-        whose disk persists but whose OS is down -- makes it raise
-        ``HostNotFoundError`` and leak the still-billing instance and its mirrored
-        state. This override runs the base teardown first (it succeeds for a running
-        host), and on that ``HostNotFoundError`` falls back to the offline path: it
-        resolves the instance from its ``mngr-host-id`` tag/label (no SSH), terminates
-        it through the same ``vps_client.destroy_instance`` primitive the online path
-        uses, and deletes the external state (host + agent records, and any captured
-        ``host_dir`` objects).
+        The base ``VpsProvider.destroy_host`` tears the host down over SSH using its
+        host record, which works only while the instance is reachable. A STOPPED
+        (deallocated / powered-off) instance -- whose disk persists but whose OS is
+        down -- has no reachable address, so the base path either raises
+        ``HostNotFoundError`` (no record found) or, worse, runs a doomed SSH teardown
+        against a stale cached ``vps_ip`` and leaks the still-billing instance.
+
+        So we dispatch up front on the instance's own power state (resolved from its
+        ``mngr-host-id`` tag/label -- no SSH): a stopped instance goes straight to the
+        offline teardown, which terminates it through the same
+        ``vps_client.destroy_instance`` primitive the online path uses and deletes the
+        external state (host + agent records, captured ``host_dir``). A running
+        instance, or one that cannot be resolved at all, delegates to the base path;
+        if that still raises ``HostNotFoundError`` (the instance is gone from the
+        listing but a stale record remains), we fall back to the offline teardown,
+        which is idempotent for an already-gone instance.
 
         Failing loudly is the point: a termination that could not be carried out
         raises a ``CleanupFailedGroup`` (non-zero exit) rather than reporting success,
@@ -310,51 +323,48 @@ class OfflineCapableVpsProvider(VpsProvider):
         already-gone instance (absent from the listing) is idempotent success -- the
         external state is still cleaned up.
         """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        # Dispatch on the instance's own power state, not the (possibly stale) cached
+        # host record, so a stopped instance never reaches the base SSH teardown.
+        instance = self._find_instance_for_host(host_id)
+        if instance is not None and self._is_instance_offline(instance):
+            logger.info("Host {} is stopped; destroying it via the offline path", host_id)
+            self._destroy_offline_host(host_id, instance)
+            return
         try:
             super().destroy_host(host)
-            return
         except HostNotFoundError:
-            pass
-        host_id = host.id if isinstance(host, HostInterface) else host
-        logger.info("Host {} is unreachable; destroying it via the offline path", host_id)
-        self._destroy_offline_host(host_id)
+            logger.info("Host {} is unreachable; destroying it via the offline path", host_id)
+            # The base could not reach the host but the dispatch above resolved no
+            # *offline* instance; pass the (possibly None) instance through so the
+            # offline teardown does not re-list and an absent instance is idempotent.
+            self._destroy_offline_host(host_id, instance)
 
-    def _destroy_offline_host(self, host_id: HostId) -> None:
+    def _destroy_offline_host(self, host_id: HostId, instance: dict[str, Any] | None) -> None:
         """Terminate a stopped host's instance via the cloud API and delete its external state.
 
-        Resolves the instance from its identity tag/label (the listing excludes
-        already-terminated instances, so an absent instance is benign). Terminates
-        through ``vps_client.destroy_instance`` and records a real failure -- raised as
-        a ``CleanupFailedGroup`` -- when the instance exists but could not be
-        terminated, so the still-billing instance is never reported as gone. The
-        per-host provider SSH key (recovered from the mirrored record) and the external
-        state (host + agent records, captured ``host_dir``) are cleaned up last,
-        including in the already-gone case.
+        ``instance`` is the host's instance as already resolved by the caller from the
+        cheap tag/label listing (``None`` when it is absent -- already terminated --
+        which the listing excludes). Terminates through ``vps_client.destroy_instance``
+        and records a real failure -- raised as a ``CleanupFailedGroup`` -- when the
+        instance exists but could not be terminated, so the still-billing instance is
+        never reported as gone. The per-host provider SSH key (recovered from the
+        mirrored record) and the external state (host + agent records, captured
+        ``host_dir``) are cleaned up last, including in the already-gone case.
         """
         self._evict_cached_host(host_id)
         with collecting_cleanup_failures() as failures:
-            # Terminate the (still-billing) instance first, before any state-store
-            # read -- a flaky mirror read must never block the billing-critical step.
-            instance = self._find_instance_for_host(host_id)
             # An instance still present in the listing must be terminated; an absent
             # one is already gone (benign) and only its external state is cleaned up.
             if instance is not None:
                 instance_id = VpsInstanceId(instance["id"])
                 with log_span("Terminating stopped cloud instance {}", instance_id):
-                    try:
-                        self.vps_client.destroy_instance(instance_id)
-                    except MngrError as e:
-                        logger.warning("Failed to terminate stopped instance {}: {}", instance_id, e)
-                        if not is_vps_resource_already_gone(e):
-                            failures.append(
-                                CleanupFailure(
-                                    category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                    message=(
-                                        f"failed to terminate stopped instance {instance_id} for host {host_id}: {e}"
-                                    ),
-                                    host_id=host_id,
-                                )
-                            )
+                    attempt_cloud_resource_teardown(
+                        lambda: self.vps_client.destroy_instance(instance_id),
+                        resource_description=f"stopped instance {instance_id}",
+                        host_id=host_id,
+                        failures=failures,
+                    )
             else:
                 logger.debug(
                     "No instance found for stopped host {}; treating its termination as already done", host_id
@@ -368,18 +378,12 @@ class OfflineCapableVpsProvider(VpsProvider):
             mirrored_record = self._state_store.read_host_record(host_id)
             ssh_key_id = mirrored_record.config.vps_ssh_key_id if mirrored_record and mirrored_record.config else None
             if ssh_key_id is not None:
-                try:
-                    self.vps_client.delete_ssh_key(ssh_key_id)
-                except MngrError as e:
-                    logger.warning("Failed to delete SSH key from provider: {}", e)
-                    if not is_vps_resource_already_gone(e):
-                        failures.append(
-                            CleanupFailure(
-                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                message=f"failed to delete SSH key {ssh_key_id} for host {host_id}: {e}",
-                                host_id=host_id,
-                            )
-                        )
+                attempt_cloud_resource_teardown(
+                    lambda: self.vps_client.delete_ssh_key(ssh_key_id),
+                    resource_description=f"SSH key {ssh_key_id}",
+                    host_id=host_id,
+                    failures=failures,
+                )
 
             # Delete the external mirror last, so the host stops appearing in offline
             # listings only once the instance is actually gone (or was already gone).
@@ -398,6 +402,32 @@ class OfflineCapableVpsProvider(VpsProvider):
         """Start the cloud instance and return its SSH address (a fresh IP, or the static one)."""
         ...
 
+    def _add_known_hosts_for_ip(
+        self, ip: str, *, vps_public_key: str | None, container_public_key: str | None
+    ) -> None:
+        """Add ``ip`` to the VPS (port 22) and container known_hosts with the given host keys.
+
+        The shared add half of the resume known_hosts rebind: each endpoint is added
+        only when its public key is present, so a caller with a key from one side
+        only (e.g. a record missing the container key) skips the absent one. Both
+        rebind paths -- ``_rebind_known_hosts`` (record-sourced keys) and
+        ``_rebind_known_hosts_pre_connect`` (locally-held keys) -- go through here.
+        """
+        if vps_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._vps_known_hosts_path(),
+                hostname=ip,
+                port=22,
+                public_key=vps_public_key,
+            )
+        if container_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._container_known_hosts_path(),
+                hostname=ip,
+                port=self.config.container_ssh_port,
+                public_key=container_public_key,
+            )
+
     def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
         """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
 
@@ -410,20 +440,11 @@ class OfflineCapableVpsProvider(VpsProvider):
         if old_ip is not None and old_ip != new_ip:
             remove_host_from_known_hosts(self._vps_known_hosts_path(), old_ip, 22)
             remove_host_from_known_hosts(self._container_known_hosts_path(), old_ip, self.config.container_ssh_port)
-        if record.ssh_host_public_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path=self._vps_known_hosts_path(),
-                hostname=new_ip,
-                port=22,
-                public_key=record.ssh_host_public_key,
-            )
-        if record.container_ssh_host_public_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path=self._container_known_hosts_path(),
-                hostname=new_ip,
-                port=self.config.container_ssh_port,
-                public_key=record.container_ssh_host_public_key,
-            )
+        self._add_known_hosts_for_ip(
+            new_ip,
+            vps_public_key=record.ssh_host_public_key,
+            container_public_key=record.container_ssh_host_public_key,
+        )
 
     def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
         """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
@@ -437,17 +458,10 @@ class OfflineCapableVpsProvider(VpsProvider):
         data mngr controls. Providers whose IP is stable across a pause override
         this to a no-op.
         """
-        add_host_to_known_hosts(
-            known_hosts_path=self._vps_known_hosts_path(),
-            hostname=new_ip,
-            port=22,
-            public_key=self._get_vps_host_keypair()[1],
-        )
-        add_host_to_known_hosts(
-            known_hosts_path=self._container_known_hosts_path(),
-            hostname=new_ip,
-            port=self.config.container_ssh_port,
-            public_key=self._get_container_host_keypair()[1],
+        self._add_known_hosts_for_ip(
+            new_ip,
+            vps_public_key=self._get_vps_host_keypair()[1],
+            container_public_key=self._get_container_host_keypair()[1],
         )
 
     def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
@@ -490,6 +504,45 @@ class OfflineCapableVpsProvider(VpsProvider):
         wanted_tag = f"mngr-host-id={host_id}"
         return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
 
+    def _isolation_marker_for_instance(self, instance: Mapping[str, Any]) -> str | None:
+        """Read the instance's ``mngr-isolation`` placement marker (no SSH), or None.
+
+        Reads from the normalized ``key=value`` tag list (AWS EC2 tags, Azure VM
+        tags). GCP, whose identity lives in instance metadata, overrides this to
+        read the metadata item instead.
+        """
+        return normalized_tags_to_dict(instance).get(ISOLATION_TAG_KEY)
+
+    def _realizer_for_instance(self, instance: Mapping[str, Any]) -> HostRealizer:
+        """The realizer matching a host's placement, read from its instance marker (no SSH)."""
+        return self._realizer_for_isolation(isolation_from_marker(self._isolation_marker_for_instance(instance)))
+
+    def _realizer_for_host_id(self, host_id: HostId) -> HostRealizer:
+        """Resolve a host's realizer from its instance's ``mngr-isolation`` marker.
+
+        Falls back to the create-time realizer when the host's instance is not in
+        the cached listing (e.g. a freshly-created host whose listing predates it);
+        an absent marker on a found instance defaults to container (see
+        ``isolation_from_marker``).
+        """
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return self._realizer
+        return self._realizer_for_instance(instance)
+
+    def _realizer_for_vps_ip(self, vps_ip: str) -> HostRealizer:
+        """Probe ``vps_ip``'s host with the realizer matching its instance's placement marker.
+
+        Overrides the base (which returns the create-time realizer) so discovery
+        finds a bare host even under a default-container config: the instance's
+        ``mngr-isolation`` marker is read from the cached listing keyed by IP, with
+        no SSH. An IP not in the listing falls back to the create-time realizer.
+        """
+        for instance in self._list_instances_cached():
+            if instance.get("main_ip", "") == vps_ip:
+                return self._realizer_for_instance(instance)
+        return self._realizer
+
     def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
         """Outer-filesystem path of the in-container idle sentinel for this host.
 
@@ -503,9 +556,11 @@ class OfflineCapableVpsProvider(VpsProvider):
         """Outer-filesystem path of this host's ``host_dir`` tree (delegates to the realizer).
 
         Used by ``BucketHostDirBackend.capture`` to read the host's ``host_dir`` off
-        the box at ``mngr stop``, and by ``_idle_sentinel_path_on_outer``.
+        the box at ``mngr stop``, and by ``_idle_sentinel_path_on_outer``. Resolves
+        the host's own placement realizer (bare and container lay out ``host_dir``
+        at different outer paths) from its instance marker.
         """
-        return self._realizer.host_dir_path_on_outer(host_id)
+        return self._realizer_for_host_id(host_id).host_dir_path_on_outer(host_id)
 
     def _pull_host_dir_to_local(self, host_id: HostId, vps_ip: str, local_dir: Path) -> None:
         """Rsync the host's ``host_dir`` off the box into ``local_dir`` (operator-driven capture).
@@ -654,6 +709,36 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         return NullHostDirBackend()
 
+    def _select_bucket_store(
+        self, bucket: StateBucket | None, *, store_label: str, prepare_command: str
+    ) -> HostStateStore:
+        """Build the ``BucketHostStateStore`` for ``bucket``, or raise when it is absent.
+
+        Shared by the object-storage providers (AWS S3, Azure Blob): their
+        ``_state_store`` cached property resolves its own bucket type and delegates
+        here. The bucket is required -- when ``None`` (not yet provisioned), this
+        raises the actionable ``missing_state_bucket_error`` pointing at
+        ``prepare_command`` -- so every persist / remove / list / read fails loudly
+        and uniformly. ``store_label`` names the store in errors (e.g. "S3 state
+        bucket"). GCP overrides ``_state_store`` with its metadata store and never
+        calls this.
+        """
+        if bucket is None:
+            raise missing_state_bucket_error(store_label, prepare_command)
+        return BucketHostStateStore(bucket=bucket, bucket_label=store_label)
+
+    def _select_bucket_host_dir_backend(self, bucket: StateBucket | None, *, enabled: bool) -> HostDirBackend:
+        """Select the offline ``host_dir`` backend once: bucket-backed when enabled + present, else no-op.
+
+        Shared by the object-storage providers: the only place the feature flag and
+        bucket presence are tested together, so every host_dir call site dispatches
+        through the selected backend instead of re-deriving the condition. ``enabled``
+        is the provider config's ``is_offline_host_dir_enabled``.
+        """
+        if enabled and bucket is not None:
+            return BucketHostDirBackend(provider=self, bucket=bucket)
+        return NullHostDirBackend()
+
     def _capture_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
         """Capture host_dir to the bucket before the instance pauses (operator-driven).
 
@@ -756,18 +841,39 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         _ = self._state_store
 
-    @abstractmethod
+    def _host_name_tag_key(self) -> str:
+        """The instance tag/label key holding the host name (as ``mngr-<host_name>``).
+
+        Default is ``Name`` (the AWS EC2 ``Name`` tag); Azure overrides it with its
+        own host-name tag key. Read by the shared
+        ``_offline_discovered_host_from_instance`` to label a STOPPED host. GCP
+        overrides ``_offline_discovered_host_from_instance`` itself (its identity is
+        metadata-encoded), so this hook is unused there.
+        """
+        return "Name"
+
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED ``DiscoveredHost`` from an instance's identity tags/labels/metadata.
 
-        Returns ``None`` when the instance is not a mngr host. Raises ``ValueError``
-        when the instance carries a mngr host identity that is malformed (a
-        corrupt/externally-edited host-id or name). Reads only the cheap cached
-        listing (host id + name), never the state store, so a discovery sweep stays
-        cheap; the full record is reconstructed from the store only on demand
-        (``to_offline_host``).
+        The shared default reads the cheap ``mngr-*`` identity tags a stopped
+        instance still carries (host id + the ``_host_name_tag_key()`` name tag) from
+        the normalized tag list -- never the state store -- so a discovery sweep
+        stays cheap; the full record is reconstructed from the store only on demand
+        (``to_offline_host``). Returns ``None`` when the instance is not a mngr host.
+        Raises ``ValueError`` when the instance carries a mngr host identity that is
+        malformed (a corrupt/externally-edited host-id or name). GCP overrides this
+        to read its metadata-encoded identity instead.
         """
-        ...
+        tags = normalized_tags_to_dict(instance)
+        host_id_str = tags.get("mngr-host-id")
+        if host_id_str is None:
+            return None
+        return DiscoveredHost(
+            host_id=HostId(host_id_str),
+            host_name=host_name_from_tags(tags, self._host_name_tag_key()),
+            provider_name=self.name,
+            host_state=HostState.STOPPED,
+        )
 
     @abstractmethod
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
@@ -839,8 +945,9 @@ class OfflineCapableVpsProvider(VpsProvider):
         that via ``super()``. That write is best-effort: a *stopped* host raises
         ``HostNotFoundError`` (no reachable ``vps_ip``), in which case only the
         offline mirror is written, so e.g. an offline ``mngr label`` still updates
-        the record a stopped host lists from. ``_mirror_agent_record`` is the only
-        per-provider step (instance tags/metadata, or an external store).
+        the record a stopped host lists from. ``_mirror_agent_record`` writes the
+        agent record to the provider's external ``_state_store`` (an object-storage
+        bucket for AWS/Azure, instance metadata for GCP).
         """
         try:
             super().persist_agent_data(host_id, agent_data)
@@ -965,8 +1072,8 @@ class OfflineCapableVpsProvider(VpsProvider):
 
         For a running host the SSH/volume-backed base reads the authoritative
         on-volume records; for a stopped host it raises ``HostNotFoundError`` and
-        we fall back to the offline source (instance tags/metadata, or an external
-        store for providers that have one).
+        we fall back to the offline source: the provider's external ``_state_store``
+        (an object-storage bucket for AWS/Azure, instance metadata for GCP).
         """
         try:
             return super().list_persisted_agent_data_for_host(host_id)

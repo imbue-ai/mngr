@@ -33,6 +33,7 @@ from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.client import HOST_ID_METADATA_KEY
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
+from imbue.mngr_gcp.client import ISOLATION_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
@@ -398,6 +399,14 @@ class GcpProvider(OfflineCapableVpsProvider):
         """Return the instance's metadata dict from the normalized list shape."""
         metadata = instance.get("metadata", {})
         return dict(metadata) if isinstance(metadata, Mapping) else {}
+
+    def _isolation_marker_for_instance(self, instance: Mapping[str, Any]) -> str | None:
+        """Read the ``mngr-isolation`` placement marker from GCE instance metadata (no SSH), or None.
+
+        GCP stores mngr identity in metadata (GCE labels are too restricted), so
+        the marker is read from metadata here rather than the normalized tag list.
+        """
+        return self._metadata_dict(instance).get(ISOLATION_METADATA_KEY)
 
     def _host_name_from_instance(self, instance: Mapping[str, Any]) -> HostName:
         """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id metadata)."""

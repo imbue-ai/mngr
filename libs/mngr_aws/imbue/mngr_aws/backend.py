@@ -18,9 +18,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import DiscoveredHost
-from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws import hookimpl
@@ -34,15 +31,9 @@ from imbue.mngr_vps.build_args import extract_presence_flag
 from imbue.mngr_vps.build_args import extract_single_value_arg
 from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
-from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
-from imbue.mngr_vps.host_state_store import NullHostDirBackend
-from imbue.mngr_vps.host_state_store import missing_state_bucket_error
-from imbue.mngr_vps.instance_offline import BucketHostDirBackend
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
-from imbue.mngr_vps.instance_offline import host_name_from_tags
-from imbue.mngr_vps.instance_offline import normalized_tags_to_dict
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
@@ -141,30 +132,26 @@ class AwsProvider(OfflineCapableVpsProvider):
     def _state_store(self) -> HostStateStore:
         """The external host/agent-record mirror: the S3 bucket, or raise when it is absent.
 
-        Selecting one store here lets the persist / remove / list / read paths stop
-        branching on bucket presence. The bucket is required: when it does not
-        exist, accessing this property raises an actionable error pointing at
-        ``mngr aws prepare`` (so create / label / offline reads all fail loudly and
-        uniformly). Offline ``host_dir`` reads are a separate, bucket-only feature
-        keyed off ``_state_bucket``.
+        Delegates to the shared ``_select_bucket_store``, supplying only the resolved
+        S3 bucket, its label, and the ``mngr aws prepare`` remediation command. The
+        bucket is required: when it does not exist, the helper raises an actionable
+        error pointing at ``mngr aws prepare``. Offline ``host_dir`` reads are a
+        separate, bucket-only feature keyed off ``_state_bucket``.
         """
-        bucket = self._state_bucket
-        if bucket is None:
-            raise missing_state_bucket_error("S3 state bucket", "mngr aws prepare")
-        return BucketHostStateStore(bucket=bucket, bucket_label="S3 state bucket")
+        return self._select_bucket_store(
+            self._state_bucket, store_label="S3 state bucket", prepare_command="mngr aws prepare"
+        )
 
     @cached_property
     def _host_dir_backend(self) -> HostDirBackend:
         """Select the offline host_dir backend once: bucket-backed when enabled + present, else no-op.
 
-        The only place ``is_offline_host_dir_enabled`` and ``_state_bucket``
-        presence are tested together; every host_dir call site dispatches through
-        the selected backend instead of re-deriving the condition.
+        Delegates to the shared ``_select_bucket_host_dir_backend``, supplying the
+        resolved S3 bucket and the config's ``is_offline_host_dir_enabled`` flag.
         """
-        bucket = self._state_bucket
-        if self.aws_config.is_offline_host_dir_enabled and bucket is not None:
-            return BucketHostDirBackend(provider=self, bucket=bucket)
-        return NullHostDirBackend()
+        return self._select_bucket_host_dir_backend(
+            self._state_bucket, enabled=self.aws_config.is_offline_host_dir_enabled
+        )
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List EC2 instances tagged with this provider's name."""
@@ -333,22 +320,10 @@ class AwsProvider(OfflineCapableVpsProvider):
     # Offline discovery (so STOPPED hosts list + resolve by name from the bucket)
     # =========================================================================
 
-    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from a stopped instance's ``mngr-*`` EC2 tags, or None.
-
-        Reads only the cheap identity tags stamped at create (host id + ``Name``),
-        never the bucket -- the full record is read from the state store on demand.
-        """
-        tags = normalized_tags_to_dict(instance)
-        host_id_str = tags.get("mngr-host-id")
-        if host_id_str is None:
-            return None
-        return DiscoveredHost(
-            host_id=HostId(host_id_str),
-            host_name=host_name_from_tags(tags, _HOST_NAME_TAG_KEY),
-            provider_name=self.name,
-            host_state=HostState.STOPPED,
-        )
+    def _host_name_tag_key(self) -> str:
+        # The host name is mirrored into the EC2 ``Name`` tag (as ``mngr-<host_name>``);
+        # the shared ``_offline_discovered_host_from_instance`` reads it through here.
+        return _HOST_NAME_TAG_KEY
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the EC2 instance's OS is down (stopping or stopped).

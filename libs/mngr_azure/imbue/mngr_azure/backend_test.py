@@ -416,8 +416,10 @@ def test_no_bucket_discovery_of_deallocated_vm_raises_prepare_pointer(temp_mngr_
 def test_offline_discovered_host_from_instance_builds_stopped_host(temp_mngr_ctx: MngrContext) -> None:
     """A deallocated VM with mngr-host-id + mngr-host-name tags yields a STOPPED DiscoveredHost.
 
-    Reads only the cheap identity tags (never the bucket), so this works regardless
-    of whether a state bucket exists.
+    Exercises the shared ``OfflineCapableVpsProvider._offline_discovered_host_from_instance``
+    default through Azure's ``_host_name_tag_key()`` hook (``mngr-host-name``). Reads
+    only the cheap identity tags (never the bucket), so this works regardless of
+    whether a state bucket exists.
     """
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()

@@ -33,3 +33,12 @@ Further internal dedup against the shared offline layer (no user-visible behavio
 Corrected the README "Implementation details" to match the label-vs-metadata move: only `mngr-provider` is a GCE label; `mngr-host-id` (incl. the stopped-host lookup for `mngr start`), `mngr-host-name`, and `mngr-created-at` live in instance metadata.
 
 Integrated the `mngr/volumes` offline-store simplification (commit `f8bb5c0a5`): the per-agent instance-tag mirror is removed in favor of a single uniform external `HostStateStore` per provider -- AWS/Azure use their object-storage state bucket as the sole offline store (a stopped host's offline metadata now requires the bucket; the provider's `_state_store` raises an actionable `missing_state_bucket_error` pointing at `mngr <cloud> prepare` when the bucket is absent), and GCP uses a lossless instance-metadata-backed store (full host record + one JSON value per agent). AWS/Azure/GCP now extend `OfflineCapableVpsProvider` directly. This supersedes the earlier-on-this-branch tag-mirror dedup (the lifted `TagHostStateStore` / `KeyValueMirrorVpsProvider` / `TagMirrorVpsProvider` are gone); the realizer architecture, the systemd-unit hardening, and the cli/config/state-bucket dedup are retained. No behavior change for container hosts beyond the offline-metadata-requires-bucket consequence noted above.
+
+Bugfix: a running bare (`isolation=NONE`) host is now discoverable and reachable
+with the default provider config -- `mngr conn`/`list`/`stop`/`start`/`destroy`
+no longer need `-S providers.<name>.isolation=NONE` at connect time. GCE instances
+now carry a `mngr-isolation` value in instance metadata (where GCP keeps mngr
+identity; GCE labels are too restricted), stamped at create, so discovery reads
+the host's placement from the cloud API without SSH and probes it with the
+matching realizer. Pre-existing instances have no marker and default to container,
+preserving prior behavior.

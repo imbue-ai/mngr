@@ -27,6 +27,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 from imbue.mngr_vps.vps_client import VpsClientInterface
@@ -52,6 +53,11 @@ GCP_PYTEST_LAUNCHED_LABEL: Final[str] = "mngr-pytest-launched"
 HOST_NAME_METADATA_KEY: Final[str] = "mngr-host-name"
 HOST_ID_METADATA_KEY: Final[str] = "mngr-host-id"
 CREATED_AT_METADATA_KEY: Final[str] = "mngr-created-at"
+# Placement marker (container vs bare). Stored in metadata, not a label, so a
+# STOPPED instance's placement is readable by offline discovery to pick the right
+# realizer (labels are too restricted; metadata mirrors the AWS/Azure tag). Reuses
+# the shared ``ISOLATION_TAG_KEY`` so the key never drifts from the read side.
+ISOLATION_METADATA_KEY: Final[str] = ISOLATION_TAG_KEY
 
 # SSH metadata is injected as ``<user>:<public-key>``. The google-guest-agent
 # creates whatever user is named here, so ``ubuntu`` works on any image (including
@@ -517,6 +523,11 @@ class GcpVpsClient(VpsClientInterface):
         host_id = tags.get("mngr-host-id")
         if host_id:
             metadata_items.append(compute_v1.Items(key=HOST_ID_METADATA_KEY, value=host_id))
+        # Mirror the placement marker (container vs bare) into metadata so offline
+        # discovery can pick the right realizer for a STOPPED instance without SSH.
+        isolation = tags.get(ISOLATION_TAG_KEY)
+        if isolation:
+            metadata_items.append(compute_v1.Items(key=ISOLATION_METADATA_KEY, value=isolation))
         if ssh_metadata_value:
             metadata_items.append(compute_v1.Items(key="ssh-keys", value=ssh_metadata_value))
 

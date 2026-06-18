@@ -1,10 +1,13 @@
 """Unit tests for ``S3StateBucket`` using moto's in-memory S3."""
 
 import boto3
+import pytest
 from moto import mock_aws
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr_aws.state_bucket import S3StateBucket
+from imbue.mngr_aws.state_bucket import S3StateBucketError
+from imbue.mngr_aws.state_bucket import _raise_on_delete_errors
 
 _US_EAST_1 = "us-east-1"
 _OTHER_REGION = "us-west-2"
@@ -105,3 +108,20 @@ def test_delete_bucket_empties_then_deletes(aws_session: boto3.Session) -> None:
     assert bucket.bucket_exists() is False
     # Deleting an already-absent bucket is idempotent.
     bucket.delete_bucket()
+
+
+def test_raise_on_delete_errors_surfaces_per_key_failures() -> None:
+    # DeleteObjects returns HTTP 200 with per-key failures in the Errors array
+    # (no ClientError), so a partial delete must be surfaced rather than swallowed.
+    response = {
+        "Deleted": [{"Key": "hosts/abc/host_state.json"}],
+        "Errors": [{"Key": "hosts/abc/agents/x.json", "Code": "AccessDenied", "Message": "denied"}],
+    }
+    with pytest.raises(S3StateBucketError) as exc_info:
+        _raise_on_delete_errors(response, "mngr-state-bucket")
+    assert "agents/x.json" in str(exc_info.value)
+    assert "AccessDenied" in str(exc_info.value)
+
+
+def test_raise_on_delete_errors_noop_on_clean_response() -> None:
+    _raise_on_delete_errors({"Deleted": [{"Key": "hosts/abc/host_state.json"}]}, "mngr-state-bucket")

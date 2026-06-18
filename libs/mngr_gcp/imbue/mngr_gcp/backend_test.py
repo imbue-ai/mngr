@@ -29,10 +29,12 @@ from imbue.mngr_gcp.backend import _GceMetadataHostStateStore
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.client import HOST_ID_METADATA_KEY
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
+from imbue.mngr_gcp.client import ISOLATION_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
+from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.testing import seed_stopped_host_record
 
@@ -422,6 +424,30 @@ def test_find_instance_for_host_matches_by_host_id_metadata(temp_mngr_ctx: MngrC
     found = provider._find_instance_for_host(host_id)
     assert found is not None
     assert found["id"] == "i-match"
+
+
+def test_realizer_for_vps_ip_reads_bare_marker_from_gce_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """A GCE bare host (metadata ``mngr-isolation=none``) is probed with the BARE realizer.
+
+    GCP stores the placement marker in metadata (not the normalized tag list), so the
+    GcpProvider overrides ``_isolation_marker_for_instance`` to read it from there.
+    Discovery then picks the bare realizer (port 22, no container probe) even though
+    the provider config defaults to CONTAINER -- the fix for connecting to a bare host.
+    """
+    provider, instances = _build_stubbed_provider(temp_mngr_ctx)
+    instances.list_result = [
+        _instance(
+            "i-bare",
+            "RUNNING",
+            host_id=HostId.generate(),
+            labels={"mngr-provider": "gcp-test"},
+            metadata={ISOLATION_METADATA_KEY: "none"},
+            nat_ip="10.0.0.42",
+        ),
+    ]
+    realizer = provider._realizer_for_vps_ip("10.0.0.42")
+    assert isinstance(realizer, BareRealizer)
+    assert realizer.agent_endpoint("10.0.0.42").port == 22
 
 
 def test_find_instance_for_host_returns_none_when_no_metadata_match(temp_mngr_ctx: MngrContext) -> None:

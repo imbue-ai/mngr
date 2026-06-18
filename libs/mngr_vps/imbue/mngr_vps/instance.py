@@ -115,11 +115,13 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VPS_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
 from imbue.mngr_vps.primitives import VPS_SSH_KEY_NAME
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import isolation_marker_value
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 ParsedVpsBuildOptionsT = TypeVar("ParsedVpsBuildOptionsT", bound=ParsedVpsBuildOptions)
@@ -141,23 +143,33 @@ class _VpsDiscoveryData(FrozenModel):
     )
 
 
-def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> dict[str, str]:
+def build_vps_tags(
+    host_id: HostId, provider_name: str, extra_tags_raw: str, isolation: IsolationMode
+) -> dict[str, str]:
     """Compose the tag mapping passed to the VPS create call.
 
-    Always emits ``mngr-host-id=<id>`` and ``mngr-provider=<name>``. The
-    ``extra_tags_raw`` string is a comma-separated list of ``key=value``
-    tags that the spawning caller wants attached at create time -- e.g.
-    minds-side pool-bake sets ``MNGR_VPS_EXTRA_TAGS=minds_env=<name>``
-    so the env's destroy can later find + delete the instance via the
-    Vultr tag filter. Empty / whitespace-only entries are skipped so
-    trailing commas don't produce blank tags. Entries without an ``=``
-    are rejected so misconfigured callers fail fast instead of silently
+    Always emits ``mngr-host-id=<id>``, ``mngr-provider=<name>`` and
+    ``mngr-isolation=<none|container>``. The isolation marker records the host's
+    placement on the instance itself, readable from the cloud API without SSH, so
+    discovery can pick the realizer matching the host's actual placement before
+    opening any on-host store (otherwise a bare host probed by the default
+    container realizer is invisible). The ``extra_tags_raw`` string is a
+    comma-separated list of ``key=value`` tags that the spawning caller wants
+    attached at create time -- e.g. minds-side pool-bake sets
+    ``MNGR_VPS_EXTRA_TAGS=minds_env=<name>`` so the env's destroy can later find +
+    delete the instance via the Vultr tag filter. Empty / whitespace-only entries
+    are skipped so trailing commas don't produce blank tags. Entries without an
+    ``=`` are rejected so misconfigured callers fail fast instead of silently
     losing the tag.
 
     Pulled out to module scope so the comma-splitting behaviour is unit
     testable without standing up an entire provisioning flow.
     """
-    tags: dict[str, str] = {"mngr-host-id": str(host_id), "mngr-provider": provider_name}
+    tags: dict[str, str] = {
+        "mngr-host-id": str(host_id),
+        "mngr-provider": provider_name,
+        ISOLATION_TAG_KEY: isolation_marker_value(isolation),
+    }
     for entry in extra_tags_raw.split(","):
         stripped = entry.strip()
         if not stripped:
@@ -185,6 +197,36 @@ def is_vps_resource_already_gone(error: MngrError) -> bool:
     status and is recorded.
     """
     return isinstance(error, VpsApiError) and error.status_code in _VPS_RESOURCE_ALREADY_GONE_STATUS_CODES
+
+
+def attempt_cloud_resource_teardown(
+    teardown: Callable[[], None],
+    *,
+    resource_description: str,
+    host_id: HostId,
+    failures: list[CleanupFailure],
+) -> None:
+    """Run a single cloud-API teardown step, recording a real cleanup failure if it leaks.
+
+    A failure that means the resource is already gone (HTTP 404/410) is benign and
+    dropped; any other ``MngrError`` means a resource that may still exist (and
+    incur cost), so it is recorded as a ``HOST_RESOURCE_REMAINS`` failure (the
+    aggregation boundary later raises these as a ``CleanupFailedGroup``).
+    ``resource_description`` names the leaked resource in the warning + failure
+    message (e.g. ``"VPS instance i-123"``).
+    """
+    try:
+        teardown()
+    except MngrError as e:
+        logger.warning("Failed to tear down {}: {}", resource_description, e)
+        if not is_vps_resource_already_gone(e):
+            failures.append(
+                CleanupFailure(
+                    category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                    message=f"failed to tear down {resource_description} for host {host_id}: {e}",
+                    host_id=host_id,
+                )
+            )
 
 
 def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | None:
@@ -251,18 +293,24 @@ class VpsProvider(BaseProviderInstance):
 
     _host_record_cache: dict[HostId, VpsHostRecord] = PrivateAttr(default_factory=dict)
     _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
-    _realizer_cache: HostRealizer | None = PrivateAttr(default=None)
+    _realizer_cache: dict[IsolationMode, HostRealizer] = PrivateAttr(default_factory=dict)
 
-    def _build_realizer(self) -> HostRealizer:
-        """Construct the realizer selected by ``config.isolation``.
+    def _realizer_for_isolation(self, isolation: IsolationMode) -> HostRealizer:
+        """Construct (and cache) the realizer for a given placement.
 
-        Internal to the base provider: subclasses are unchanged for the Docker
-        path and never pass a realizer. The default ``CONTAINER`` preserves the
-        original behavior.
+        Parameterized by ``isolation`` rather than reading ``config.isolation``
+        directly so a single provider can serve both placements: ``config.isolation``
+        selects the realizer for NEWLY-CREATED hosts (``self._realizer``), while
+        operations on an EXISTING host resolve that host's own placement (from its
+        instance marker or its record) and use the matching realizer. The default
+        ``CONTAINER`` preserves the original behavior.
         """
-        match self.config.isolation:
+        cached = self._realizer_cache.get(isolation)
+        if cached is not None:
+            return cached
+        match isolation:
             case IsolationMode.CONTAINER:
-                return DockerRealizer(
+                realizer: HostRealizer = DockerRealizer(
                     config=self.config,
                     mngr_ctx=self.mngr_ctx,
                     key_dir=self._key_dir(),
@@ -270,7 +318,7 @@ class VpsProvider(BaseProviderInstance):
                     provider_name=self.name,
                 )
             case IsolationMode.NONE:
-                return BareRealizer(
+                realizer = BareRealizer(
                     config=self.config,
                     mngr_ctx=self.mngr_ctx,
                     key_dir=self._key_dir(),
@@ -279,32 +327,66 @@ class VpsProvider(BaseProviderInstance):
                 )
             case _ as unreachable:
                 assert_never(unreachable)
+        self._realizer_cache[isolation] = realizer
+        return realizer
 
     @property
     def _realizer(self) -> HostRealizer:
-        """The placement realizer for this provider, built once on first use."""
-        if self._realizer_cache is None:
-            self._realizer_cache = self._build_realizer()
-        return self._realizer_cache
+        """The CREATE-time placement realizer, selected by ``config.isolation``.
 
-    @property
-    def _snapshot_capable_realizer(self) -> SnapshotCapableRealizer | None:
-        """The realizer as a snapshot-capable one, or None if it cannot snapshot."""
-        realizer = self._realizer
-        if isinstance(realizer, SnapshotCapableRealizer):
-            return realizer
-        return None
+        Use this only on the create path. Operations on an existing host must use
+        ``_realizer_for_record`` (the host's recorded placement) so a bare host is
+        reachable even when the provider config defaults to container, and vice
+        versa.
+        """
+        return self._realizer_for_isolation(self.config.isolation)
+
+    def _realizer_for_record(self, record: VpsHostRecord) -> HostRealizer:
+        """The realizer matching an EXISTING host's recorded placement.
+
+        A bare host's record has ``config.container_name is None`` (there is no
+        container); a container host names its container. A record predating the
+        bare placement always named a container, so ``container_name is None``
+        reliably means bare. When the record carries no config yet (not finalized),
+        fall back to the create-time realizer.
+        """
+        if record.config is None:
+            return self._realizer
+        is_bare = record.config.container_name is None
+        return self._realizer_for_isolation(IsolationMode.NONE if is_bare else IsolationMode.CONTAINER)
+
+    def _realizer_for_vps_ip(self, vps_ip: str) -> HostRealizer:
+        """The realizer to probe the host on ``vps_ip`` with, BEFORE its record is read.
+
+        Discovery has only the VPS IP -- not yet the host record (reading it
+        requires knowing the placement: a bare host's record lives at a fixed
+        root-disk path, a container host's inside its per-host docker volume). The
+        base provider has no SSH-free instance listing and is container-only on the
+        bare-rejecting providers, so it returns the create-time realizer
+        (``config.isolation``); ``OfflineCapableVpsProvider`` overrides this to read
+        the host's placement from the instance's ``mngr-isolation`` marker, so a
+        bare host is probed with the bare realizer even under a default-container
+        config.
+        """
+        del vps_ip
+        return self._realizer
 
     @property
     def supports_snapshots(self) -> bool:
-        return self._snapshot_capable_realizer is not None
+        """Whether this provider's CREATE-time placement can snapshot.
 
-    def _require_snapshot_capable_realizer(self) -> SnapshotCapableRealizer:
-        """Return the snapshot-capable realizer, or raise up front if unsupported."""
-        realizer = self._snapshot_capable_realizer
-        if realizer is None:
-            raise SnapshotsNotSupportedError(self.name)
-        return realizer
+        A provider-capability advertisement keyed off ``config.isolation`` (the
+        container realizer snapshots; the bare realizer does not). Per-host
+        snapshot operations narrow the host's own realizer instead, via
+        ``_require_snapshot_capable_realizer``.
+        """
+        return isinstance(self._realizer, SnapshotCapableRealizer)
+
+    def _require_snapshot_capable_realizer(self, realizer: HostRealizer) -> SnapshotCapableRealizer:
+        """Narrow ``realizer`` to a snapshot-capable one, or raise up front if it is not."""
+        if isinstance(realizer, SnapshotCapableRealizer):
+            return realizer
+        raise SnapshotsNotSupportedError(self.name)
 
     @property
     def supports_shutdown_hosts(self) -> bool:
@@ -480,13 +562,17 @@ class VpsProvider(BaseProviderInstance):
         host_id: HostId,
         host_name: HostName,
         vps_ip: str,
+        realizer: HostRealizer,
     ) -> Host:
         """Create a Host object with direct SSH to the agent placement on the VPS.
 
-        The realizer decides where the agent sshd lives (container realizer:
-        ``vps_ip:container_ssh_port`` with the container keypair).
+        ``realizer`` is the placement realizer for THIS host (the create-time
+        realizer on create; the host's recorded placement for an existing host).
+        It decides where the agent sshd lives (container realizer:
+        ``vps_ip:container_ssh_port`` with the container keypair; bare realizer:
+        the VM's own port-22 sshd).
         """
-        endpoint = self._realizer.agent_endpoint(vps_ip)
+        endpoint = realizer.agent_endpoint(vps_ip)
         pyinfra_host = create_pyinfra_host(
             hostname=endpoint.hostname,
             port=endpoint.port,
@@ -503,7 +589,7 @@ class VpsProvider(BaseProviderInstance):
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data, vps_ip
+                callback_host_id, certified_data, vps_ip, realizer
             ),
         )
         self._evict_cached_host(host_id, replacement=host)
@@ -521,6 +607,7 @@ class VpsProvider(BaseProviderInstance):
         """
         host_id = HostId(host_record.certified_host_data.host_id)
         vps_ip = host_record.vps_ip or ""
+        realizer = self._realizer_for_record(host_record)
         offline = make_readable_offline_host(
             OfflineHost(
                 id=host_id,
@@ -528,18 +615,25 @@ class VpsProvider(BaseProviderInstance):
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
                 on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                    callback_host_id, certified_data, vps_ip
+                    callback_host_id, certified_data, vps_ip, realizer
                 ),
             )
         )
         self._evict_cached_host(host_id, replacement=offline)
         return offline
 
-    def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str) -> None:
-        """Callback when host data.json is updated -- sync to the unified host volume."""
+    def _on_certified_host_data_updated(
+        self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str, realizer: HostRealizer
+    ) -> None:
+        """Callback when host data.json is updated -- sync to the unified host volume.
+
+        ``realizer`` is the placement realizer for this host (captured when the
+        host object was created), so the store is opened against the host's actual
+        placement rather than the provider's create-time default.
+        """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                host_store = self._realizer.open_host_store(outer, host_id)
+                host_store = realizer.open_host_store(outer, host_id)
                 existing = host_store.read_host_record()
                 if existing is not None:
                     updated = existing.model_copy_update(
@@ -936,7 +1030,9 @@ class VpsProvider(BaseProviderInstance):
             source="vps",
         )
         with log_span("Creating VPS instance"):
-            vps_tags = build_vps_tags(host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
+            vps_tags = build_vps_tags(
+                host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""), self.config.isolation
+            )
             vps_instance_id = self._create_vps_instance(
                 parsed=parsed,
                 label=f"mngr-{name}",
@@ -1005,7 +1101,7 @@ class VpsProvider(BaseProviderInstance):
         # empty, so these are None (the matching ``VpsHostConfig`` fields are
         # nullable to represent that).
         handle = realized.handle
-        host = self._create_host_object(host_id, name, vps_ip)
+        host = self._create_host_object(host_id, name, vps_ip, self._realizer)
 
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
         activity_config = lifecycle_options.to_activity_config(
@@ -1110,16 +1206,20 @@ class VpsProvider(BaseProviderInstance):
         external store. Default no-op.
         """
 
-    def _wait_for_container_sshd(self, vps_ip: str) -> None:
+    def _wait_for_container_sshd(self, vps_ip: str, realizer: HostRealizer | None = None) -> None:
         """Wait for the agent's sshd to be reachable at the realizer's endpoint port.
 
         Container realizer: the exposed container port; bare realizer: the VM's
-        own port 22. (The imbue_cloud slice provider overrides this to wait on a
-        dynamically forwarded port instead.)
+        own port 22. ``realizer`` defaults to the create-time realizer (the create
+        path); ``start_host`` passes the existing host's own placement realizer so
+        a bare host waits on port 22 even under a default-container config. (The
+        imbue_cloud slice provider overrides this to wait on a dynamically
+        forwarded port instead.)
         """
+        effective_realizer = realizer if realizer is not None else self._realizer
         wait_for_sshd(
             hostname=vps_ip,
-            port=self._realizer.agent_endpoint(vps_ip).port,
+            port=effective_realizer.agent_endpoint(vps_ip).port,
             timeout_seconds=self.config.ssh_connect_timeout,
         )
 
@@ -1175,6 +1275,7 @@ class VpsProvider(BaseProviderInstance):
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
+        realizer = self._realizer_for_record(host_record)
 
         if create_snapshot:
             try:
@@ -1189,7 +1290,7 @@ class VpsProvider(BaseProviderInstance):
         self._evict_cached_host(host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            self._realizer.stop_placement(outer, PlacementHandle.from_record(host_record), timeout_seconds)
+            realizer.stop_placement(outer, PlacementHandle.from_record(host_record), timeout_seconds)
 
             # Update the host record (bump updated_at). A subclass that stops more
             # than the container -- e.g. AWS stopping the EC2 instance -- passes a
@@ -1197,7 +1298,7 @@ class VpsProvider(BaseProviderInstance):
             # (STOPPED, not CRASHED) while the host is down; this single write
             # carries it, so the subclass needs no second write. The write must
             # land before any deeper stop, since the volume is unreachable after.
-            host_store = self._realizer.open_host_store(outer, host_id)
+            host_store = realizer.open_host_store(outer, host_id)
             certified = host_record.certified_host_data
             data_updates = [to_update(certified.field_ref().updated_at, datetime.now(timezone.utc))]
             if stop_reason is not None:
@@ -1221,16 +1322,17 @@ class VpsProvider(BaseProviderInstance):
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
+        realizer = self._realizer_for_record(host_record)
 
         handle = PlacementHandle.from_record(host_record)
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            self._realizer.start_placement(outer, handle)
+            realizer.start_placement(outer, handle)
 
             with log_span("Waiting for container SSH"):
-                self._wait_for_container_sshd(host_record.vps_ip)
+                self._wait_for_container_sshd(host_record.vps_ip, realizer)
 
             host_obj = self._create_host_object(
-                host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip
+                host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip, realizer
             )
 
             # A resume is itself activity: refresh the BOOT activity file (whose
@@ -1248,7 +1350,7 @@ class VpsProvider(BaseProviderInstance):
             # can't auto-stop is better than a failed resume.
             with log_span("Relaunching activity watcher"):
                 try:
-                    self._realizer.start_activity_watcher(outer, handle)
+                    realizer.start_activity_watcher(outer, handle)
                 except MngrError as e:
                     logger.warning(
                         "Failed to relaunch the activity watcher on resume for host {} ({}); "
@@ -1289,6 +1391,7 @@ class VpsProvider(BaseProviderInstance):
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
+        realizer = self._realizer_for_record(host_record)
 
         vps_config = host_record.config
         vps_ip = host_record.vps_ip
@@ -1304,41 +1407,30 @@ class VpsProvider(BaseProviderInstance):
                     # cleanup failures and raises a ``CleanupFailedGroup``, which we
                     # absorb into this destroy's aggregate.
                     try:
-                        self._realizer.teardown_placement(outer, host_id, PlacementHandle.from_record(host_record))
+                        realizer.teardown_placement(outer, host_id, PlacementHandle.from_record(host_record))
                     except CleanupFailedGroup as group:
                         collect_cleanup_failures(failures, group)
 
             # Destroy the VPS instance. An "already gone" (HTTP 404/410) response is benign;
             # any other error means a VPS instance that may still exist (and incur cost).
             with log_span("Destroying VPS instance"):
-                try:
-                    self.vps_client.destroy_instance(vps_config.vps_instance_id)
-                except MngrError as e:
-                    logger.warning("Failed to destroy VPS: {}", e)
-                    if not is_vps_resource_already_gone(e):
-                        failures.append(
-                            CleanupFailure(
-                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                message=f"failed to destroy VPS instance {vps_config.vps_instance_id} for host {host_id}: {e}",
-                                host_id=host_id,
-                            )
-                        )
+                attempt_cloud_resource_teardown(
+                    lambda: self.vps_client.destroy_instance(vps_config.vps_instance_id),
+                    resource_description=f"VPS instance {vps_config.vps_instance_id}",
+                    host_id=host_id,
+                    failures=failures,
+                )
 
             # Clean up SSH key from provider. An "already gone" (HTTP 404/410) response is
             # benign; any other error means a key that may still be registered.
-            if vps_config.vps_ssh_key_id is not None:
-                try:
-                    self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
-                except MngrError as e:
-                    logger.warning("Failed to delete SSH key from provider: {}", e)
-                    if not is_vps_resource_already_gone(e):
-                        failures.append(
-                            CleanupFailure(
-                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                message=f"failed to delete SSH key {vps_config.vps_ssh_key_id} for host {host_id}: {e}",
-                                host_id=host_id,
-                            )
-                        )
+            ssh_key_id = vps_config.vps_ssh_key_id
+            if ssh_key_id is not None:
+                attempt_cloud_resource_teardown(
+                    lambda: self.vps_client.delete_ssh_key(ssh_key_id),
+                    resource_description=f"SSH key {ssh_key_id}",
+                    host_id=host_id,
+                    failures=failures,
+                )
 
             # Clean up local known_hosts. These are cosmetic local-file edits; a
             # missing file or OS error here leaves no infrastructure behind, so it is
@@ -1404,13 +1496,14 @@ class VpsProvider(BaseProviderInstance):
 
         host_id = HostId(host_record.certified_host_data.host_id)
         vps_ip = host_record.vps_ip
+        realizer = self._realizer_for_record(host_record)
 
         if vps_ip is not None and host_record.config is not None:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 # Check if the placement is running.
-                if self._realizer.is_placement_running(outer, PlacementHandle.from_record(host_record)):
+                if realizer.is_placement_running(outer, PlacementHandle.from_record(host_record)):
                     return self._create_host_object(
-                        host_id, HostName(host_record.certified_host_data.host_name), vps_ip
+                        host_id, HostName(host_record.certified_host_data.host_name), vps_ip, realizer
                     )
 
         return self._create_offline_host(host_record)
@@ -1448,9 +1541,10 @@ class VpsProvider(BaseProviderInstance):
             )
             # Cache the host object
             if record.vps_ip is not None and record.config is not None:
+                realizer = self._realizer_for_record(record)
                 with self._make_outer_for_vps_ip(record.vps_ip) as outer:
-                    if self._realizer.is_placement_running(outer, PlacementHandle.from_record(record)):
-                        self._create_host_object(host_id, host_name, record.vps_ip)
+                    if realizer.is_placement_running(outer, PlacementHandle.from_record(record)):
+                        self._create_host_object(host_id, host_name, record.vps_ip, realizer)
                     else:
                         self._create_offline_host(record)
             else:
@@ -1517,7 +1611,7 @@ class VpsProvider(BaseProviderInstance):
 
             if is_running and record.vps_ip is not None:
                 host_state = HostState.RUNNING
-                self._create_host_object(host_id, host_name, record.vps_ip)
+                self._create_host_object(host_id, host_name, record.vps_ip, self._realizer_for_record(record))
             elif is_cleanly_stopped:
                 host_state = HostState.STOPPED
                 self._create_offline_host(record)
@@ -1617,9 +1711,14 @@ class VpsProvider(BaseProviderInstance):
         state) instead of disappearing entirely; one bad VPS must not silently
         drop its hosts.
         """
+        # Probe with the realizer matching THIS host's placement (resolved from the
+        # instance's ``mngr-isolation`` marker, no SSH needed), not the provider's
+        # create-time default -- otherwise a bare host probed by the default
+        # container realizer finds no container and is invisible to discovery.
+        realizer = self._realizer_for_vps_ip(vps_ip)
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                found = self._realizer.find_host_record(outer)
+                found = realizer.find_host_record(outer)
                 if found is None:
                     logger.debug("No mngr host on VPS {} yet, skipping", vps_ip)
                     return _VpsDiscoveryData()
@@ -1632,7 +1731,7 @@ class VpsProvider(BaseProviderInstance):
                 # fail earlier (in find_host_record) and are handled by the outer
                 # cache-fallback branch.
                 try:
-                    live_agent_data, is_running = self._realizer.read_live_listing(
+                    live_agent_data, is_running = realizer.read_live_listing(
                         outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
                     )
                 except MngrError as listing_exc:
@@ -1777,7 +1876,7 @@ class VpsProvider(BaseProviderInstance):
 
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
                 with log_span("Collecting listing data via single SSH command"):
-                    raw_output = self._realizer.collect_listing_output(
+                    raw_output = self._realizer_for_record(host_record).collect_listing_output(
                         outer,
                         PlacementHandle.from_record(host_record),
                         script,
@@ -1997,11 +2096,17 @@ class VpsProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         name: SnapshotName | None = None,
     ) -> SnapshotId:
-        realizer = self._require_snapshot_capable_realizer()
+        # Gate on the provider-level capability up front (before any host lookup),
+        # so a snapshot-incapable provider fails cleanly; the per-host realizer is
+        # then re-checked once the record is known (a bare host on a snapshot-capable
+        # provider still has no snapshots).
+        self._require_snapshot_capable_realizer(self._realizer)
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
+        host_realizer = self._realizer_for_record(host_record)
+        realizer = self._require_snapshot_capable_realizer(host_realizer)
 
         snapshot_name = name or SnapshotName(f"mngr-snapshot-{host_id}-{int(time.time())}")
 
@@ -2025,7 +2130,7 @@ class VpsProvider(BaseProviderInstance):
             )
 
             # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
-            host_store = self._realizer.open_host_store(outer, host_id)
+            host_store = host_realizer.open_host_store(outer, host_id)
             self._write_and_mirror(host_store, updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
@@ -2048,11 +2153,14 @@ class VpsProvider(BaseProviderInstance):
         ]
 
     def delete_snapshot(self, host: HostInterface | HostId, snapshot_id: SnapshotId) -> None:
-        realizer = self._require_snapshot_capable_realizer()
+        # Provider-level gate up front (matches create_snapshot), then narrow to the
+        # host's own placement realizer once the record is resolved.
+        self._require_snapshot_capable_realizer(self._realizer)
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
+        realizer = self._require_snapshot_capable_realizer(self._realizer_for_record(host_record))
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             realizer.delete_snapshot_placement(outer, snapshot_id)
@@ -2096,7 +2204,7 @@ class VpsProvider(BaseProviderInstance):
                     "cannot determine unified volume name to rename"
                 )
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-                host_store = self._realizer.open_host_store(outer, host_id)
+                host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
                 self._write_and_mirror(host_store, updated_record)
 
         return self.get_host(host_id)
@@ -2143,7 +2251,7 @@ class VpsProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._realizer.open_host_store(outer, host_id)
+            host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
             return host_store.list_persisted_agent_data()
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
@@ -2152,7 +2260,7 @@ class VpsProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._realizer.open_host_store(outer, host_id)
+            host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
             host_store.persist_agent_data(agent_data)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
@@ -2161,7 +2269,7 @@ class VpsProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._realizer.open_host_store(outer, host_id)
+            host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
             host_store.remove_persisted_agent_data(agent_id)
 
 

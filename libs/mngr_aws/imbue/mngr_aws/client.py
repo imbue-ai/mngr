@@ -631,39 +631,6 @@ class AwsVpsClient(VpsClientInterface):
         except TimeoutError as e:
             raise VpsProvisioningError(str(e)) from e
 
-    def add_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
-        """Add or overwrite tags on an instance via ``CreateTags`` (idempotent upsert).
-
-        Used to persist offline-discoverable metadata (per-agent records) onto the
-        EC2 instance, so a stopped instance -- which has no public IP and is
-        unreachable over SSH -- still surfaces in ``mngr list`` and can be resumed
-        by name. AWS limits: 50 tags per resource, key <=128 chars, value <=256
-        chars. No-op when ``tags`` is empty. AWS-only (reached via
-        ``self.aws_client``), like ``stop_instance``/``start_instance``.
-        """
-        if not tags:
-            return
-        with self._translate_aws_errors():
-            self._ec2().create_tags(
-                Resources=[str(instance_id)],
-                Tags=[{"Key": k, "Value": v} for k, v in tags.items()],
-            )
-
-    def remove_tags(self, instance_id: VpsInstanceId, keys: Sequence[str]) -> None:
-        """Remove tags (by key) from an instance via ``DeleteTags``. No-op when ``keys`` is empty.
-
-        ``DeleteTags`` with only a ``Key`` (no ``Value``) deletes the tag
-        regardless of its current value -- what we want for removing a
-        persisted-agent tag when its agent is destroyed.
-        """
-        if not keys:
-            return
-        with self._translate_aws_errors():
-            self._ec2().delete_tags(
-                Resources=[str(instance_id)],
-                Tags=[{"Key": k} for k in keys],
-            )
-
     def _describe_instance(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
         with self._translate_aws_errors():
             result = self._ec2().describe_instances(InstanceIds=[str(instance_id)])
