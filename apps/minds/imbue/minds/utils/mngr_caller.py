@@ -102,9 +102,18 @@ def _resolve_macos_proxy_state() -> _MacosProxyState:
     if sys.platform != "darwin":
         return None
     # ``_get_proxies`` / ``_get_proxy_settings`` are darwin-only ``_scproxy``
-    # bindings that typeshed does not model.
-    proxies = urllib.request._get_proxies()  # ty: ignore[unresolved-attribute]
-    settings = urllib.request._get_proxy_settings()  # ty: ignore[unresolved-attribute]
+    # bindings that typeshed does not model. They are undocumented CPython
+    # internals; if a future interpreter drops or renames them there is nothing
+    # for the child to neutralize (the fork-unsafe call we guard against goes
+    # through these very functions), so skip cleanly rather than raising.
+    if not hasattr(urllib.request, "_get_proxies") or not hasattr(urllib.request, "_get_proxy_settings"):
+        logger.warning(
+            "urllib.request._get_proxies/_get_proxy_settings missing on this macOS Python; "
+            "skipping forkserver proxy neutralization (mngr CLI children may probe the system proxy)"
+        )
+        return None
+    proxies = urllib.request._get_proxies()
+    settings = urllib.request._get_proxy_settings()
     return (dict(proxies), dict(settings))
 
 
