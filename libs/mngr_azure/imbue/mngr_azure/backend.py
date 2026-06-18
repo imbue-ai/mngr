@@ -698,12 +698,14 @@ class _BlobHostDirBackend(BucketHostDirBackend):
                 outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
         logger.info("Azure host_dir sync daemon installed for host {} (target {})", host_id, blob_prefix_url)
 
-    def _warn_if_identity_missing(self, host_id: HostId) -> None:
-        """Warn when an empty host_dir prefix is explained by the VM having no managed identity.
+    def _raise_if_identity_missing(self, host_id: HostId) -> None:
+        """Raise when an empty host_dir prefix is explained by the VM having no managed identity.
 
-        Detects the missing-identity case directly from cloud state: a VM with no
-        attached user-assigned managed identity could never push host_dir, which
-        is why the prefix is empty. Best-effort -- any probe failure is swallowed.
+        A VM with no attached user-assigned managed identity could never push
+        host_dir -- an actionable, permanent misconfiguration (the host predates the
+        identity), so it raises rather than yielding an empty offline read. Detection
+        is best-effort: a probe failure means we can't confirm, so we return without
+        raising and ``volume`` yields None.
         """
         try:
             instance = self.provider._find_instance_for_host(host_id)
@@ -718,11 +720,10 @@ class _BlobHostDirBackend(BucketHostDirBackend):
             )
             return
         if not identity_ids:
-            logger.warning(
-                "Host {}'s VM has no attached user-assigned managed identity, so its host_dir was never "
-                "pushed to the bucket and is not readable offline. Re-run `mngr azure prepare` "
-                "with sufficient permissions, then recreate the host so it picks up the identity.",
-                host_id,
+            raise BlobStateHostIdentityError(
+                f"Host {host_id}'s VM has no attached user-assigned managed identity, so its host_dir was never "
+                "pushed to the bucket and is not readable offline. Re-run `mngr azure prepare` with sufficient "
+                "permissions, then recreate the host so it picks up the identity."
             )
 
 

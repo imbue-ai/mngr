@@ -516,12 +516,14 @@ class _S3HostDirBackend(BucketHostDirBackend):
                 outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
         logger.info("AWS host_dir sync daemon installed for host {} (target {})", host_id, sync_target_uri)
 
-    def _warn_if_identity_missing(self, host_id: HostId) -> None:
-        """Warn when an empty host_dir prefix is explained by the instance having no IAM profile.
+    def _raise_if_identity_missing(self, host_id: HostId) -> None:
+        """Raise when an empty host_dir prefix is explained by the instance having no IAM profile.
 
-        Detects the missing-identity case directly from cloud state: an instance
-        with no attached IAM instance profile could never push host_dir, which is
-        why the prefix is empty. Best-effort -- any probe failure is swallowed.
+        An instance with no attached IAM instance profile could never push host_dir,
+        which is why the prefix is empty -- an actionable, permanent misconfiguration
+        (the host predates the identity), so it raises rather than yielding an empty
+        offline read. Detection is best-effort: a probe failure means we can't
+        confirm, so we return without raising and ``volume`` yields None.
         """
         try:
             instance = self.provider._find_instance_for_host(host_id)
@@ -532,11 +534,10 @@ class _S3HostDirBackend(BucketHostDirBackend):
             logger.debug("Could not check IAM profile for host {} while diagnosing empty host_dir: {}", host_id, e)
             return
         if profile_arn is None:
-            logger.warning(
-                "Host {}'s instance has no attached IAM instance profile, so its host_dir was never "
-                "pushed to the bucket and is not readable offline. Re-run `mngr aws prepare` "
-                "with sufficient IAM, then recreate the host so it picks up the profile.",
-                host_id,
+            raise S3StateHostIdentityError(
+                f"Host {host_id}'s instance has no attached IAM instance profile, so its host_dir was never "
+                "pushed to the bucket and is not readable offline. Re-run `mngr aws prepare` with sufficient "
+                "IAM, then recreate the host so it picks up the profile."
             )
 
 

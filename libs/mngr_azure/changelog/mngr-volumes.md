@@ -10,6 +10,6 @@ Added an offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled
 
 - When the feature is on, `mngr azure prepare` provisions the bucket-write identity -- a user-assigned managed identity plus a `Storage Blob Data Contributor` role assignment scoped to **just the state account** (least privilege, never the resource group or subscription) -- and a permission failure fails prepare (it needs `Microsoft.ManagedIdentity/userAssignedIdentities/write` + `Microsoft.Authorization/roleAssignments/write`). VM create attaches the identity (an operator-supplied identity takes precedence); the identity check and `azcopy` install raise on failure. `mngr azure cleanup` deletes the identity: an idempotent no-op when absent, but a delete failure raises.
 
-- When offline `host_dir` is requested for a host whose VM has no attached managed identity, mngr logs a non-fatal diagnostic pointing at re-running `mngr azure prepare` instead of returning an empty volume.
+- When offline `host_dir` is requested for a host whose VM has no attached managed identity (so it never pushed its `host_dir`), the read raises an actionable error pointing at re-running `mngr azure prepare` and recreating the host -- rather than returning an empty volume that looks like "no events". An empty `host_dir` on a VM that *does* have the identity (genuinely nothing synced yet) still reads as no volume.
 
 Test-only: added unit coverage for the host-identity raise-on-failure paths (provisioning and cleanup) via a `delete_error` failure-injection seam on the managed-identity fake.

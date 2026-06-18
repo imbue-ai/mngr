@@ -175,9 +175,11 @@ absent; a delete failure raises).
 Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write`
 + `Microsoft.Authorization/roleAssignments/write` (Owner or User Access
 Administrator). When offline `host_dir` is requested for a host whose VM has no
-attached managed identity, mngr logs a non-fatal diagnostic pointing at
-`mngr azure prepare` (with sufficient permissions) rather than returning an empty
-volume.
+attached managed identity (so it never pushed its `host_dir`), the read raises an
+actionable error pointing at `mngr azure prepare` (with sufficient permissions)
+and recreating the host, rather than returning an empty volume that looks like
+"no events". An empty `host_dir` on a VM that *does* have the identity (nothing
+synced yet) still reads as no volume.
 
 ### Quota note
 

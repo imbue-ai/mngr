@@ -12,4 +12,4 @@ Added an offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled
 
 - `mngr aws cleanup` also deletes the host-dir IAM identity (role + instance profile) after the bucket: an idempotent no-op when already absent, but a delete failure raises.
 
-- Offline `host_dir` reads use the operator's credentials (no instance identity needed to read). When the feature is on but a host's instance has no attached IAM profile (so it never pushed its `host_dir`), the offline read logs a non-fatal diagnostic pointing at re-running `mngr aws prepare` rather than returning an empty volume.
+- Offline `host_dir` reads use the operator's credentials (no instance identity needed to read). When the feature is on but a host's instance has no attached IAM profile (so it never pushed its `host_dir`), the offline read raises an actionable error pointing at re-running `mngr aws prepare` and recreating the host -- rather than returning an empty volume that looks like "no events". An empty `host_dir` on a host that *does* have the profile (genuinely nothing synced yet) still reads as no volume.

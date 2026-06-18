@@ -13,7 +13,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.config import AwsProviderConfig
@@ -189,33 +188,37 @@ def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(aws_mock: None, te
 
 
 def test_get_volume_for_host_returns_none_when_prefix_empty(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """An empty host_dir prefix with no resolvable instance yields None and emits no diagnostic warning.
+    """An empty host_dir prefix with no resolvable instance yields None (not a raise).
 
-    Complement of ``..._warns_when_instance_has_no_iam_profile``: when the
-    diagnostic can't even find the instance it returns early, so the user must not
-    see the (misleading) 'no IAM profile' warning. Together the two pin the
-    empty-prefix matrix (instance-without-profile -> warn; no-instance -> silent).
+    Complement of ``..._raises_when_instance_has_no_iam_profile``: when the identity
+    probe can't even find the instance it cannot confirm a missing profile, so it
+    returns early and ``get_volume_for_host`` yields None rather than raising.
+    Together the two pin the empty-prefix matrix (instance-without-profile -> raise;
+    no-instance -> None).
     """
     provider, stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    # The diagnostic calls _find_instance_for_host, which lists instances, finds
-    # no match, refreshes the cache once, and lists again -> two describe calls,
-    # then returns early (no instance, so no IAM-profile probe).
+    # The probe calls _find_instance_for_host, which lists instances, finds no
+    # match, refreshes the cache once, and lists again -> two describe calls, then
+    # returns early (no instance, so no IAM-profile probe and no raise).
     stubber.add_response("describe_instances", {"Reservations": []})
     stubber.add_response("describe_instances", {"Reservations": []})
     stubber.activate()
     try:
-        with capture_log_warnings() as warnings:
-            assert provider.get_volume_for_host(host_id) is None
+        assert provider.get_volume_for_host(host_id) is None
     finally:
         stubber.deactivate()
-    assert not any("no attached IAM instance profile" in message for message in warnings)
 
 
-def test_get_volume_for_host_warns_when_instance_has_no_iam_profile(
+def test_get_volume_for_host_raises_when_instance_has_no_iam_profile(
     aws_mock: None, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Empty host_dir + an instance with no IAM profile -> a 're-run prepare' WARNING (non-fatal)."""
+    """Empty host_dir + an instance with no IAM profile -> an actionable 're-run prepare' raise.
+
+    The instance never had the bucket-write profile, so it could never push its
+    host_dir -- a permanent misconfiguration (recreate the host), surfaced as a
+    raise rather than a silently-empty offline read.
+    """
     provider, stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     matching = {
@@ -237,11 +240,10 @@ def test_get_volume_for_host_warns_when_instance_has_no_iam_profile(
     stubber.add_response("describe_instances", matching)
     stubber.activate()
     try:
-        with capture_log_warnings() as warnings:
-            assert provider.get_volume_for_host(host_id) is None
+        with pytest.raises(S3StateHostIdentityError, match="no attached IAM instance profile"):
+            provider.get_volume_for_host(host_id)
     finally:
         stubber.deactivate()
-    assert any("no attached IAM instance profile" in message for message in warnings)
 
 
 def test_get_volume_for_host_returns_volume_when_objects_present(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
