@@ -2628,8 +2628,10 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         and before the instance is paused (still SSH-reachable), so the operator
         reads the final host_dir off the box and uploads it -- making the offline
         view current the moment the instance stops. The no-op backend makes this a
-        no-op for providers without a bucket. Best-effort (see ``capture``): a
-        failure never breaks ``stop_host``.
+        no-op for providers without a bucket. ``capture`` *raises* on failure; the
+        ``stop_host`` caller wraps it so the instance is still paused (in a
+        ``finally``) before the error surfaces -- a capture failure never leaves a
+        running instance, but it does fail the ``mngr stop`` so the operator knows.
         """
         self._host_dir_backend.capture(host_id, vps_ip)
 
@@ -3195,10 +3197,13 @@ class BucketHostDirBackend(HostDirBackend):
 
         Reads the host_dir tree over the outer-host interface (the operator's SSH
         connection) and writes each file into the bucket's host_dir volume with the
-        operator's credentials. Best-effort: a connection/storage failure is logged
-        and swallowed so it never breaks ``mngr stop`` -- the offline copy simply
-        stays as of the previous capture. The whole tree is read into memory before
-        upload, which is fine for a bounded ``host_dir`` (events / transcripts).
+        operator's credentials. Raises (with host_dir context) on failure rather
+        than swallowing it -- the operator should know the offline copy was not
+        captured. The caller (``stop_host``) pauses the instance in a ``finally``
+        *before* this can propagate, so raising never leaks a running instance: the
+        host is stopped and ``mngr stop`` then surfaces the error. The whole tree is
+        read into memory before upload, which is fine for a bounded ``host_dir``
+        (events / transcripts).
         """
         host_dir_on_outer = self.provider._host_dir_path_on_outer(host_id)
         try:
@@ -3213,21 +3218,20 @@ class BucketHostDirBackend(HostDirBackend):
                         files[rel] = outer.read_file(abs_path)
                     if files:
                         self.bucket.volume_for_host(host_id).write_files(files)
-        # Best-effort: swallow the expected failure modes -- a connection drop
-        # (HostConnectionError), a bucket storage error (MngrError), or a raw
-        # paramiko SFTP transfer error (a bare OSError mid-read while the container
-        # is quiescing -- the failure that crashed `mngr stop` before this catch
-        # was widened). A failed capture only costs offline-host_dir freshness. Any
-        # other (unexpected) error still surfaces, but stop_host's ``finally``
-        # guarantees the instance is paused first, so it can never leak a running
-        # instance.
+        # A capture failure surfaces (it is NOT swallowed) -- the operator should
+        # know the offline host_dir was not captured. stop_host's ``finally``
+        # guarantees the instance is paused *before* this propagates, so raising
+        # can never leak a running instance: the host is stopped and `mngr stop`
+        # then reports the failure. The expected failure modes (a connection drop,
+        # a bucket storage error, or a raw paramiko SFTP OSError mid-read while the
+        # container quiesces) are re-raised with host_dir context; an unexpected
+        # error propagates as-is.
         except (HostConnectionError, MngrError, OSError) as e:
-            logger.warning(
-                "Failed to capture host_dir to the bucket for host {}; the offline copy will be as of the "
-                "previous capture: {}",
-                host_id,
-                e,
-            )
+            raise MngrError(
+                f"Failed to capture host_dir to the bucket for host {host_id}: {e}. The host is stopped, but "
+                "its offline host_dir was not captured, so `mngr event` / `mngr file` on it will be unavailable "
+                "or stale until the next successful stop."
+            ) from e
 
 
 # The host-name tag value is stored as ``mngr-<host_name>``; strip the prefix to

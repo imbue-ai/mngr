@@ -93,8 +93,10 @@ class HostDirBackend(MutableModel, ABC):
     def capture(self, host_id: HostId, vps_ip: str) -> None:
         """Read the host's ``host_dir`` off the box and upload it to the bucket.
 
-        Best-effort: a capture failure must not break ``mngr stop`` -- it only
-        means the offline ``host_dir`` is stale (as of the previous capture).
+        Raises on failure so the operator knows the offline ``host_dir`` was not
+        captured. The caller invokes this before pausing the instance and pauses in
+        a ``finally``, so a capture failure surfaces (failing ``mngr stop``) without
+        ever leaving a running instance. The no-op backend never raises.
         """
 
     @abstractmethod
