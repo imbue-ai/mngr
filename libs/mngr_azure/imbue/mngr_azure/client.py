@@ -515,7 +515,6 @@ class AzureVpsClient(VpsClientInterface):
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
         spot: bool = False,
-        user_assigned_identity_id: str | None = None,
     ) -> VpsInstanceId:
         """Provision an Azure VM (public IP + NIC + VM) in the client's region.
 
@@ -532,11 +531,9 @@ class AzureVpsClient(VpsClientInterface):
         signature beyond the shared ``VpsClientInterface.create_instance``
         contract, so providers reach it via ``self.azure_client.create_instance``.
 
-        When ``user_assigned_identity_id`` is supplied (the bucket-write managed
-        identity provisioned by ``mngr azure prepare``), it is attached to the VM
-        alongside the system-assigned identity, so the on-box host_dir sync daemon
-        can write Blob storage via MSI. Attaching it requires the create
-        credentials to hold the identity's ``.../assign/action``.
+        The VM is given a system-assigned managed identity (used by the in-VM idle
+        watcher to deallocate itself). Offline ``host_dir`` needs no VM identity --
+        it is captured operator-side at ``mngr stop``.
         """
         if region != self.region:
             raise VpsApiError(
@@ -561,9 +558,7 @@ class AzureVpsClient(VpsClientInterface):
             vm_tags[AZURE_PYTEST_LAUNCHED_TAG] = "true"
 
         nic_id = self._create_public_ip_and_nic(vm_name, subnet_id, vm_tags)
-        vm_model = self._build_vm_model(
-            vm_name, plan, user_data, public_key, nic_id, vm_tags, spot, user_assigned_identity_id
-        )
+        vm_model = self._build_vm_model(vm_name, plan, user_data, public_key, nic_id, vm_tags, spot)
 
         # The public IP + NIC are created before the VM. If VM creation fails
         # (e.g. SkuNotAvailable / quota), this method raises before returning an
@@ -660,7 +655,6 @@ class AzureVpsClient(VpsClientInterface):
         nic_id: str,
         vm_tags: Mapping[str, str],
         spot: bool,
-        user_assigned_identity_id: str | None = None,
     ) -> Any:
         # azure-mgmt-compute 38.x "flattens" the per-VM sub-profiles into
         # ``properties`` at runtime, but its typed __init__ overload only exposes
@@ -717,23 +711,13 @@ class AzureVpsClient(VpsClientInterface):
         # System-assigned managed identity: the in-VM idle watcher uses its IMDS
         # token to deallocate this VM itself (see AzureProvider's idle watcher). A
         # per-VM role assignment (assign_self_deallocate_role) grants it the
-        # least-privilege deallocate action scoped to just this VM. When the
-        # bucket-write user-assigned identity is supplied, attach it too (type
-        # "SystemAssigned, UserAssigned") so the on-box host_dir sync daemon can
-        # write Blob storage via MSI -- its Storage Blob Data Contributor role is
-        # scoped to just the state account.
-        if user_assigned_identity_id is not None:
-            identity = compute_models.VirtualMachineIdentity(
-                type="SystemAssigned, UserAssigned",
-                user_assigned_identities={user_assigned_identity_id: compute_models.UserAssignedIdentitiesValue()},
-            )
-        else:
-            identity = compute_models.VirtualMachineIdentity(type="SystemAssigned")
+        # least-privilege deallocate action scoped to just this VM. Offline
+        # host_dir needs no VM identity -- it is captured operator-side at stop.
         return compute_models.VirtualMachine(
             location=self.region,
             tags=dict(vm_tags),
             properties=properties,
-            identity=identity,
+            identity=compute_models.VirtualMachineIdentity(type="SystemAssigned"),
         )
 
     def _public_ip_name(self, vm_name: str) -> str:
@@ -1068,28 +1052,6 @@ class AzureVpsClient(VpsClientInterface):
     def _is_role_assignment_exists(self, error: VpsApiError) -> bool:
         """True when a role-assignment create failed only because the assignment already exists."""
         return error.status_code == 409 or "roleassignmentexists" in str(error).lower().replace(" ", "")
-
-    def get_instance_user_assigned_identity_ids(self, instance_id: VpsInstanceId) -> list[str]:
-        """Return the resource ids of the VM's attached user-assigned managed identities (empty if none).
-
-        Reads the VM's ``identity.user_assigned_identities`` map. Used by the
-        offline host_dir path to detect a VM that was never granted the
-        bucket-write identity, so it can tell the user to re-run
-        ``mngr azure prepare``. Returns ``[]`` for a nonexistent VM too (no
-        identities to report). Mirrors AWS's ``get_instance_iam_profile_arn``.
-        """
-        try:
-            with self._translate_azure_errors():
-                vm = self._compute().virtual_machines.get(self.resource_group, str(instance_id))
-        except VpsApiError as e:
-            if e.status_code == 404:
-                return []
-            raise
-        identity = vm.identity
-        if identity is None:
-            return []
-        user_assigned = identity.user_assigned_identities
-        return list(user_assigned.keys()) if user_assigned else []
 
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
         try:

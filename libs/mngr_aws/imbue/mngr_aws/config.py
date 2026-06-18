@@ -13,7 +13,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.state_bucket import S3StateBucket
-from imbue.mngr_aws.state_bucket import S3StateHostIdentity
 from imbue.mngr_vps.config import PublicIpVpsProviderConfig
 
 
@@ -250,14 +249,3 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         if bucket_name is None:
             return None
         return S3StateBucket(session=session, region=self.default_region, bucket_name=bucket_name)
-
-    def build_host_identity(self, session: boto3.Session) -> S3StateHostIdentity | None:
-        """Build the bucket-write ``S3StateHostIdentity`` when a bucket name is resolvable, else None.
-
-        The identity name is derived from the state-bucket name, so it shares the
-        bucket's per-region (or operator-overridden) scope.
-        """
-        bucket_name = self.resolve_state_bucket_name(session)
-        if bucket_name is None:
-            return None
-        return S3StateHostIdentity(session=session, region=self.default_region, bucket_name=bucket_name)

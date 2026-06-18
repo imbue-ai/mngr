@@ -153,43 +153,30 @@ write propagates rather than being swallowed.
 ### Offline `host_dir` (on by default)
 
 A deallocated VM's `host_dir` is also readable without SSH, so `mngr event` /
-`mngr transcript` work against a stopped agent. When `is_offline_host_dir_enabled`
-is on (the default) and the state bucket exists, an on-box systemd oneshot + timer daemon
-syncs the VM's `host_dir` to the state container's `hosts/<host_id>/host_dir/`
-prefix every 60s, and once more on `mngr stop` just before the VM deallocates
-(so the offline copy is current). The sync runs `azcopy sync` authenticating as
-the VM's managed identity via MSI (`--auth-mode login`; no storage keys on the
-box), excluding large transient caches (`*.tmp`, `__pycache__`, `node_modules`).
-Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to disable it
-(offline host metadata still works via the bucket).
+`mngr transcript` work against a stopped agent. Capture is **operator-driven**:
+when `is_offline_host_dir_enabled` is on (the default) and the state bucket
+exists, at `mngr stop` mngr (already SSH-connected and holding the bucket
+credentials) reads the VM's `host_dir` off the box and uploads it to the state
+container's `hosts/<host_id>/host_dir/` prefix with **your own** credentials --
+the same ones that write the state records. There is **no on-box sync daemon and
+no managed identity**; the only data-plane access involved is the operator's own
+`Storage Blob Data Contributor` role on the state account (granted by `prepare`,
+see above). A stopped VM's `host_dir` is then read back from the bucket. Set
+`is_offline_host_dir_enabled = false` in `[providers.azure]` to disable the
+capture (offline host metadata still works via the bucket).
 
-The instance-push needs a cloud identity, which `prepare` provisions when
-`is_offline_host_dir_enabled` is on (the default):
+So `prepare` provisions no VM identity for `host_dir`:
 
 ```bash
-mngr azure prepare   # creates the bucket and (when enabled) the host-dir managed identity; fails if denied
+mngr azure prepare   # creates the network + state account (and grants you blob-data access); no host-dir identity
 ```
 
-`prepare` provisions a **user-assigned managed identity** plus a **`Storage Blob
-Data Contributor`** role assignment scoped to **just the state storage account**
-(least privilege -- never the resource group or subscription). When the feature
-is on, this is part of `prepare`, so a missing-permission / API failure **fails**
-the command. Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to
-skip the identity entirely. At `mngr create`, with the feature on, the VM is
-attached to the identity and the sync daemon installed -- both raise (failing
-create) if they cannot complete, since a VM that cannot push its `host_dir` would
-otherwise be silently unreadable offline (an operator-supplied identity takes
-precedence). `mngr azure cleanup` deletes the identity (idempotent when already
-absent; a delete failure raises).
-
-Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write`
-+ `Microsoft.Authorization/roleAssignments/write` (Owner or User Access
-Administrator). When offline `host_dir` is requested for a host whose VM has no
-attached managed identity (so it never pushed its `host_dir`), the read raises an
-actionable error pointing at `mngr azure prepare` (with sufficient permissions)
-and recreating the host, rather than returning an empty volume that looks like
-"no events". An empty `host_dir` on a VM that *does* have the identity (nothing
-synced yet) still reads as no volume.
+**Limitation:** capture happens only at `mngr stop`. A VM that idle-self-deallocates
+(or crashes) is **not** captured, because no operator is involved at that moment
+and (by design) the VM holds no bucket credentials; its offline `host_dir` then
+reflects its last `mngr stop` (or is empty if it was never stopped that way). An
+empty `host_dir` prefix reads as no volume. The state *records* are unaffected
+(always operator-written).
 
 ### Quota note
 
