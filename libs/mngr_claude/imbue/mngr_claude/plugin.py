@@ -289,7 +289,8 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="How to handle Claude Code's background auto-updater. NEVER sets DISABLE_AUTOUPDATER=1 "
         "in the agent environment so the binary stays on the installed version; AUTO leaves the auto-updater "
         "enabled. ASK has no interactive flow for claude and behaves like AUTO. When unset (the default), "
-        "resolves to NEVER for unattended (remote/deploy) agents and AUTO for attended local agents.",
+        "resolves to NEVER (auto-update disabled) so a managed agent stays on its installed version -- set "
+        "AUTO to opt back into Claude Code's auto-updater. Ignored in use_env_config_dir (shared) mode.",
     )
     auto_dismiss_dialogs: bool = Field(
         default=False,
@@ -1522,14 +1523,15 @@ class ClaudeCoreAgent(
         When the resolved update policy is NEVER, sets DISABLE_AUTOUPDATER=1 so
         Claude Code's background auto-updater does not move the binary off its
         installed (possibly pinned) version. setdefault leaves an explicit
-        user-provided value untouched.
+        user-provided value untouched. Skipped in ``use_env_config_dir`` (shared)
+        mode, where mngr leaves the user's claude environment entirely alone.
         """
         config = self.agent_config
         if not config.use_env_config_dir:
             env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
             env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
-        if _is_claude_auto_update_disabled(config.update_policy, is_unattended=not host.is_local):
-            env_vars.setdefault("DISABLE_AUTOUPDATER", "1")
+            if _is_claude_auto_update_disabled(config.update_policy, is_unattended=not host.is_local):
+                env_vars.setdefault("DISABLE_AUTOUPDATER", "1")
 
     def get_lifecycle_state(self) -> AgentLifecycleState:
         """Get lifecycle state, accounting for Claude-specific permissions_waiting file.

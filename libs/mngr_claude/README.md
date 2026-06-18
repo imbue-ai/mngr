@@ -44,10 +44,12 @@ update_policy = "NEVER" # disable claude's auto-updater so the pin sticks
 - `update_policy` — govern Claude Code's background auto-updater: `NEVER` sets
   `DISABLE_AUTOUPDATER=1` in the agent environment so the installed binary stays put,
   `AUTO` leaves the auto-updater enabled, and `ASK` behaves like `AUTO` (claude has no
-  interactive update flow). When unset (the default), it resolves to `NEVER` for
-  unattended (remote/deploy) agents and `AUTO` for attended local agents. Pin a
-  `version` together with `update_policy = "NEVER"` to keep claude frozen on that
-  version.
+  interactive update flow). When unset (the default), it resolves to `NEVER`
+  (auto-update disabled) so a managed agent stays on its installed version — set
+  `AUTO` to opt back into Claude Code's auto-updater. Ignored in `use_env_config_dir`
+  (shared) mode, where mngr leaves your claude environment alone. (Note: before this,
+  mngr did *not* disable claude's auto-updater on local agents — it inherited your
+  `~/.claude.json` `autoUpdates` value, so local agents typically auto-updated.)
 
 ## Approximate response streaming (`streaming_snapshot_interval_seconds`)
 

@@ -5183,6 +5183,8 @@ def test_modify_env_vars_sets_claude_config_dirs(
     # $CLAUDE_CONFIG_DIR / $ORIGINAL_CLAUDE_CONFIG_DIR, so the resolved value is
     # known: it must be exactly ~/.claude (not, e.g., the per-agent config dir).
     assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] == str(Path.home() / ".claude")
+    # The default policy disables claude's auto-updater even on an attended local host.
+    assert env_vars["DISABLE_AUTOUPDATER"] == "1"
 
 
 def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
@@ -5273,11 +5275,12 @@ def test_modify_env_vars_respects_explicit_disable_autoupdater(
     assert env_vars["DISABLE_AUTOUPDATER"] == "0"
 
 
-def test_is_claude_auto_update_disabled_defaults_by_attendedness() -> None:
-    """Unset policy disables the updater only when unattended (claude has no ask flow)."""
+def test_is_claude_auto_update_disabled_defaults_to_disabled() -> None:
+    """Unset policy disables the updater by default (claude has no ask flow), attended or not."""
     assert _is_claude_auto_update_disabled(None, is_unattended=True) is True
-    assert _is_claude_auto_update_disabled(None, is_unattended=False) is False
+    assert _is_claude_auto_update_disabled(None, is_unattended=False) is True
     assert _is_claude_auto_update_disabled(AgentUpdatePolicy.NEVER, is_unattended=False) is True
+    # Explicit AUTO opts back into the auto-updater, even unattended.
     assert _is_claude_auto_update_disabled(AgentUpdatePolicy.AUTO, is_unattended=True) is False
     # ASK has no interactive flow for claude, so it behaves like AUTO.
     assert _is_claude_auto_update_disabled(AgentUpdatePolicy.ASK, is_unattended=False) is False

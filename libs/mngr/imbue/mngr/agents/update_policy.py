@@ -21,7 +21,8 @@ class AgentUpdatePolicy(UpperCaseStrEnum):
     - ``NEVER`` -- block the CLI's auto-updater so the installed version stays put.
 
     The default is resolved by ``resolve_update_policy`` rather than being a fixed
-    value, because the right default depends on whether the agent runs unattended.
+    value, because the right default depends on whether the agent runs unattended
+    and whether it implements an interactive update flow.
     """
 
     AUTO = auto()
@@ -37,18 +38,16 @@ def resolve_update_policy(
 ) -> AgentUpdatePolicy:
     """Resolve a possibly-unset update policy to a concrete one.
 
-    A user's explicit choice always wins. When unset (``None``), the default is:
-
-    - ``NEVER`` when the agent runs unattended -- a remote/deploy agent has no one
-      watching, so it must not self-update mid-run (and an update could break a
-      pinned-version reproduction).
-    - otherwise ``ASK`` when the agent implements an interactive update flow, so an
-      attended user is prompted before anything changes;
-    - otherwise ``AUTO`` -- with no prompt flow available, fall back to the CLI's
-      own default behavior rather than silently freezing it.
+    A user's explicit choice always wins. When unset (``None``), the default is
+    ``NEVER`` -- a managed agent should stay on its installed (possibly pinned)
+    version rather than silently self-update -- with one exception: an *attended*
+    agent that implements an interactive update flow defaults to ``ASK``, so the
+    user is prompted at provision rather than frozen. An unattended agent always
+    defaults to ``NEVER`` (no one is watching to answer a prompt, and an update
+    could break a pinned-version reproduction).
     """
     if configured is not None:
         return configured
     if is_unattended:
         return AgentUpdatePolicy.NEVER
-    return AgentUpdatePolicy.ASK if is_ask_capable else AgentUpdatePolicy.AUTO
+    return AgentUpdatePolicy.ASK if is_ask_capable else AgentUpdatePolicy.NEVER

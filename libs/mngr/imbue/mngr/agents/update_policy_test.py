@@ -21,5 +21,7 @@ def test_attended_default_is_ask_when_ask_capable() -> None:
     assert resolve_update_policy(None, is_unattended=False, is_ask_capable=True) == AgentUpdatePolicy.ASK
 
 
-def test_attended_default_is_auto_without_ask_flow() -> None:
-    assert resolve_update_policy(None, is_unattended=False, is_ask_capable=False) == AgentUpdatePolicy.AUTO
+def test_attended_default_is_never_without_ask_flow() -> None:
+    # Without an interactive update flow, the default blocks self-update (rather than
+    # leaving the CLI's auto-updater on) so a managed agent stays on its installed version.
+    assert resolve_update_policy(None, is_unattended=False, is_ask_capable=False) == AgentUpdatePolicy.NEVER

@@ -93,7 +93,7 @@ mngr create my-agent my_opencode
 | `symlink_auth` | `true` | Symlink the per-agent `auth.json` to the shared one (one login authenticates all agents). Set `false` for full isolation. |
 | `auto_allow_permissions` | `false` | Inject a wildcard allow into the per-agent permission policy (auto-approve everything not explicitly denied). |
 | `version` | unset | Pin the opencode version to install (installer run with `VERSION=<version>`); provisioning verifies the installed opencode matches and errors on a mismatch. Default installs latest. |
-| `update_policy` | unset | Govern opencode's startup auto-update: `NEVER` writes `"autoupdate": false` into the per-agent `opencode.json`, `AUTO` leaves it on, `ASK` behaves like `AUTO`. Unset resolves to `NEVER` for unattended agents and `AUTO` for attended local agents. An explicit `autoupdate` in `config_overrides` wins. |
+| `update_policy` | unset | Govern opencode's startup auto-update: `NEVER` writes `"autoupdate": false` into the per-agent `opencode.json`, `AUTO` leaves it on, `ASK` behaves like `AUTO`. Unset resolves to `NEVER` (auto-update disabled); set `AUTO` to re-enable it. An explicit `autoupdate` in `config_overrides` wins. |
 | `emit_common_transcript` | `true` | Emit the common transcript that `mngr transcript` reads. |
 
 ## Choosing the model

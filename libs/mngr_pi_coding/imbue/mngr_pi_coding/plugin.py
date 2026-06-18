@@ -344,7 +344,7 @@ class PiCodingAgentConfig(AgentTypeConfig):
         description="How to handle pi's startup version check. NEVER sets PI_SKIP_VERSION_CHECK=1 in the agent "
         "environment so pi does not phone home to compare against the latest release; AUTO leaves the check "
         "enabled. ASK has no interactive flow for pi and behaves like AUTO. When unset (the default), resolves "
-        "to NEVER for unattended (remote/deploy) agents and AUTO for attended local agents. (pi only notifies "
+        "to NEVER (check disabled) -- set AUTO to leave pi's startup version check enabled. (pi only notifies "
         "about updates -- it never self-replaces -- so this governs the startup check, not a background update.)",
     )
     auto_allow_permissions: bool = Field(

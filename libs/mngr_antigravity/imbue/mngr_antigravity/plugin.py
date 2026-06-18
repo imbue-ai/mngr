@@ -481,8 +481,8 @@ class AntigravityAgentConfig(AgentTypeConfig):
         description="How to handle agy's background self-updater. NEVER sets "
         "AGY_CLI_DISABLE_AUTO_UPDATE=true in the agent environment so the installed build stays put; "
         "AUTO leaves agy's self-updater enabled. ASK has no interactive flow for agy and behaves like "
-        "AUTO. When unset (the default), resolves to NEVER for unattended (remote/deploy) agents and "
-        "AUTO for attended local agents.",
+        "AUTO. When unset (the default), resolves to NEVER (auto-update disabled) so the agent stays on "
+        "the installed build -- set AUTO to leave agy's self-updater enabled.",
     )
     # emit_common_transcript gates the JSONL -> common-schema converter that
     # writes to ``events/antigravity/common_transcript/events.jsonl``. The raw

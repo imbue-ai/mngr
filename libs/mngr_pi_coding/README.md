@@ -71,7 +71,7 @@ Tunables on the `pi-coding` agent type:
 | `sync_home_settings` | `true` | Share `settings.json` and resource dirs into the per-agent dir. |
 | `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). |
 | `version` | unset | Pin the pi version to install (`npm install -g @earendil-works/pi-coding-agent@<version>`); provisioning verifies the installed pi matches and errors on a mismatch. Default installs latest. |
-| `update_policy` | unset | Govern pi's startup version check: `NEVER` sets `PI_SKIP_VERSION_CHECK=1`, `AUTO` leaves it on, `ASK` behaves like `AUTO`. Unset resolves to `NEVER` for unattended agents and `AUTO` for attended local agents. |
+| `update_policy` | unset | Govern pi's startup version check: `NEVER` sets `PI_SKIP_VERSION_CHECK=1`, `AUTO` leaves it on, `ASK` behaves like `AUTO`. Unset resolves to `NEVER` (check disabled); set `AUTO` to re-enable it. |
 | `resume_session` | `true` | Resume this agent's pi session on start, so stop/start keeps context. |
 | `emit_common_transcript` | `true` | Emit the transcript `mngr transcript` reads. |
 | `emit_raw_transcript` | `true` | Capture the raw pi message stream. |

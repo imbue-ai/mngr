@@ -265,7 +265,7 @@ class OpenCodeAgentConfig(AgentTypeConfig):
         description='How to handle opencode\'s startup auto-update. NEVER sets `"autoupdate": false` in the '
         "per-agent opencode.json so opencode does not update itself on launch; AUTO leaves auto-update enabled. "
         "ASK has no interactive flow for opencode and behaves like AUTO. When unset (the default), resolves to "
-        "NEVER for unattended (remote/deploy) agents and AUTO for attended local agents. An explicit "
+        "NEVER (auto-update disabled) -- set AUTO to leave opencode's auto-update enabled. An explicit "
         "`autoupdate` key in `config_overrides` always wins.",
     )
     # emit_common_transcript gates the raw -> common-schema converter that writes

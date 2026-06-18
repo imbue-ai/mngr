@@ -363,10 +363,20 @@ def test_provision_disables_autoupdate_when_policy_never(
     assert parsed["autoupdate"] is False
 
 
-def test_provision_leaves_autoupdate_unset_on_attended_local(opencode_agent: OpenCodeAgent) -> None:
-    """The default policy on an attended local host leaves opencode's auto-update enabled (no key)."""
+def test_provision_disables_autoupdate_by_default_on_attended_local(opencode_agent: OpenCodeAgent) -> None:
+    """The default policy disables opencode's auto-update, even on an attended local host."""
     _provision(opencode_agent)
     parsed = json.loads(get_opencode_config_file_path(opencode_agent._get_opencode_config_dir()).read_text())
+    assert parsed["autoupdate"] is False
+
+
+def test_provision_leaves_autoupdate_unset_when_policy_auto(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Explicit AUTO opts back into opencode's auto-update (no autoupdate key written)."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.AUTO))
+    _provision(agent)
+    parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
     assert "autoupdate" not in parsed
 
 

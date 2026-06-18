@@ -537,10 +537,22 @@ def test_modify_env_vars_skips_version_check_when_policy_never(
     assert env_vars["PI_SKIP_VERSION_CHECK"] == "1"
 
 
-def test_modify_env_vars_leaves_version_check_on_attended_local(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
-    """Default policy on an attended local host leaves pi's startup version check enabled."""
+def test_modify_env_vars_skips_version_check_by_default_on_attended_local(
+    pi_agent: PiCodingAgent, tmp_path: Path
+) -> None:
+    """The default policy disables pi's startup version check, even on an attended local host."""
     env_vars: dict[str, str] = {}
     pi_agent.modify_env_vars(_fake_host(tmp_path, is_local=True), env_vars)
+    assert env_vars["PI_SKIP_VERSION_CHECK"] == "1"
+
+
+def test_modify_env_vars_leaves_version_check_when_policy_auto(
+    make_pi_agent: Callable[..., PiCodingAgent], tmp_path: Path
+) -> None:
+    """Explicit AUTO opts back into pi's startup version check (no PI_SKIP_VERSION_CHECK)."""
+    agent = make_pi_agent(agent_config=PiCodingAgentConfig(update_policy=AgentUpdatePolicy.AUTO))
+    env_vars: dict[str, str] = {}
+    agent.modify_env_vars(_fake_host(tmp_path, is_local=True), env_vars)
     assert "PI_SKIP_VERSION_CHECK" not in env_vars
 
 

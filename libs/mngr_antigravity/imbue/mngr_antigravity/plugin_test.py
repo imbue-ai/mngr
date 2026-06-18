@@ -590,8 +590,8 @@ def test_modify_env_vars_exposes_app_data_dir(antigravity_agent: AntigravityAgen
     # The agy --log-file is no longer surfaced via env: conversation-id discovery
     # uses the capture-hook file, so modify_env_vars sets only the app-data dir.
     assert "ANTIGRAVITY_AGY_LOG_FILE" not in env_vars
-    # On an attended local host with the default policy, agy's self-updater is left alone.
-    assert "AGY_CLI_DISABLE_AUTO_UPDATE" not in env_vars
+    # The default policy disables agy's self-updater, even on an attended local host.
+    assert env_vars["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
 
 
 def test_modify_env_vars_disables_auto_update_when_policy_never(
