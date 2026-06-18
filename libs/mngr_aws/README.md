@@ -23,7 +23,7 @@ backend = "aws"
 
 default_region = "us-east-1"
 default_instance_type = "t3.small"  # EC2 instance type
-default_ami_id = ""                # leave empty to use the pinned per-region default
+# default_ami_id = "ami-..."        # optional; falls back to the pinned per-region default when unset
 
 # Optional networking
 # security_group defaults to auto-create with name 'mngr-aws'. To override:
