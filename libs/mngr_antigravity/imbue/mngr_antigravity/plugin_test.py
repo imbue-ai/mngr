@@ -15,6 +15,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import UserInputError
@@ -589,6 +590,32 @@ def test_modify_env_vars_exposes_app_data_dir(antigravity_agent: AntigravityAgen
     # The agy --log-file is no longer surfaced via env: conversation-id discovery
     # uses the capture-hook file, so modify_env_vars sets only the app-data dir.
     assert "ANTIGRAVITY_AGY_LOG_FILE" not in env_vars
+    # On an attended local host with the default policy, agy's self-updater is left alone.
+    assert "AGY_CLI_DISABLE_AUTO_UPDATE" not in env_vars
+
+
+def test_modify_env_vars_disables_auto_update_when_policy_never(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """update_policy=NEVER sets AGY_CLI_DISABLE_AUTO_UPDATE=true even on an attended local host."""
+    agent = _make_antigravity_agent(
+        local_provider, tmp_path, AntigravityAgentConfig(update_policy=AgentUpdatePolicy.NEVER)
+    )
+    env_vars: dict[str, str] = {}
+    agent.modify_env_vars(agent.host, env_vars)
+    assert env_vars["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+
+
+def test_modify_env_vars_respects_explicit_disable_auto_update(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An explicit user-provided AGY_CLI_DISABLE_AUTO_UPDATE value is not overwritten."""
+    agent = _make_antigravity_agent(
+        local_provider, tmp_path, AntigravityAgentConfig(update_policy=AgentUpdatePolicy.NEVER)
+    )
+    env_vars: dict[str, str] = {"AGY_CLI_DISABLE_AUTO_UPDATE": "false"}
+    agent.modify_env_vars(agent.host, env_vars)
+    assert env_vars["AGY_CLI_DISABLE_AUTO_UPDATE"] == "false"
 
 
 def test_assemble_command_resumes_main_conversation_via_set_dash_dash(antigravity_agent: AntigravityAgent) -> None:

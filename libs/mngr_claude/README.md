@@ -27,6 +27,28 @@ When enabled:
 - Other sync/override/auto-dismiss fields on the agent config are silently
   ignored since shared mode has no per-agent dir to write into.
 
+## Version pinning and auto-updates
+
+Pin the Claude Code version that gets installed, and control its background
+auto-updater:
+
+```toml
+[agent_types.claude]
+version = "2.1.50"      # install this exact version; provisioning verifies it
+update_policy = "NEVER" # disable claude's auto-updater so the pin sticks
+```
+
+- `version` — pin the Claude Code version to install (the official installer is run
+  with `bash -s <version>`); provisioning verifies the installed binary matches and
+  errors on a mismatch. Default: unset (latest).
+- `update_policy` — govern Claude Code's background auto-updater: `NEVER` sets
+  `DISABLE_AUTOUPDATER=1` in the agent environment so the installed binary stays put,
+  `AUTO` leaves the auto-updater enabled, and `ASK` behaves like `AUTO` (claude has no
+  interactive update flow). When unset (the default), it resolves to `NEVER` for
+  unattended (remote/deploy) agents and `AUTO` for attended local agents. Pin a
+  `version` together with `update_policy = "NEVER"` to keep claude frozen on that
+  version.
+
 ## Approximate response streaming (`streaming_snapshot_interval_seconds`)
 
 Set `streaming_snapshot_interval_seconds` on the agent type config to get an

@@ -17,6 +17,9 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.installation import verify_pinned_cli_version
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
+from imbue.mngr.agents.update_policy import resolve_update_policy
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -330,6 +333,20 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=True,
         description="Check if pi is installed (if False, assumes it is already present)",
     )
+    version: str | None = Field(
+        default=None,
+        description="Pin the pi CLI version to install (e.g., '1.2.3'). When set, installation runs "
+        "`npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed "
+        "pi matches, erroring on a mismatch. When None (the default), installs the latest version.",
+    )
+    update_policy: AgentUpdatePolicy | None = Field(
+        default=None,
+        description="How to handle pi's startup version check. NEVER sets PI_SKIP_VERSION_CHECK=1 in the agent "
+        "environment so pi does not phone home to compare against the latest release; AUTO leaves the check "
+        "enabled. ASK has no interactive flow for pi and behaves like AUTO. When unset (the default), resolves "
+        "to NEVER for unattended (remote/deploy) agents and AUTO for attended local agents. (pi only notifies "
+        "about updates -- it never self-replaces -- so this governs the startup check, not a background update.)",
+    )
     auto_allow_permissions: bool = Field(
         default=True,
         description="pi runs every tool without an approval prompt, so it always operates unattended; "
@@ -384,6 +401,10 @@ class PiCodingAgentConfig(AgentTypeConfig):
 
 # The npm package pi ships under (used for the auto-install command).
 _PI_NPM_PACKAGE: str = "@earendil-works/pi-coding-agent"
+
+# Env var that disables pi's startup version check (its phone-home to compare the
+# installed version against the latest release). Set when the update policy is NEVER.
+_PI_SKIP_VERSION_CHECK_ENV_VAR: str = "PI_SKIP_VERSION_CHECK"
 
 
 def _has_api_credentials_available(
@@ -535,11 +556,21 @@ class PiCodingAgent(
         live) is injected by the host; the extension reads it directly. The
         remaining vars tell the extension which agent-type subdirectory to use
         and whether to emit each transcript layer.
+
+        When the resolved update policy is NEVER, also sets PI_SKIP_VERSION_CHECK=1
+        so pi does not run its startup version check. setdefault leaves an explicit
+        user value alone.
         """
         env_vars["PI_CODING_AGENT_DIR"] = str(self.get_pi_config_dir())
         env_vars["MNGR_PI_AGENT_TYPE"] = _PI_AGENT_TYPE
         env_vars["MNGR_PI_EMIT_COMMON_TRANSCRIPT"] = "1" if self.agent_config.emit_common_transcript else "0"
         env_vars["MNGR_PI_EMIT_RAW_TRANSCRIPT"] = "1" if self.agent_config.emit_raw_transcript else "0"
+        # pi has no interactive update flow, so ASK falls back to AUTO (is_ask_capable=False).
+        effective_policy = resolve_update_policy(
+            self.agent_config.update_policy, is_unattended=not host.is_local, is_ask_capable=False
+        )
+        if effective_policy is AgentUpdatePolicy.NEVER:
+            env_vars.setdefault(_PI_SKIP_VERSION_CHECK_ENV_VAR, "1")
 
     def _get_lifecycle_extension_path(self) -> Path:
         """Path the lifecycle extension is provisioned to and loaded from (``pi -e``)."""
@@ -753,6 +784,13 @@ class PiCodingAgent(
 
         if config.check_installation:
             ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
+            if config.version is not None:
+                verify_pinned_cli_version(
+                    host,
+                    command=str(config.command),
+                    binary_name=self.get_install_binary_name(),
+                    pinned_version=config.version,
+                )
 
         # Trust gate first (consent + durable global record), so a declined /
         # non-interactive-without-opt-in case exits cleanly before any setup.
@@ -1027,7 +1065,9 @@ class PiCodingAgent(
         return "pi"
 
     def get_install_command(self) -> str:
-        return f"npm install -g {_PI_NPM_PACKAGE}"
+        version = self.agent_config.version
+        package = f"{_PI_NPM_PACKAGE}@{version}" if version is not None else _PI_NPM_PACKAGE
+        return f"npm install -g {shlex.quote(package)}"
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and the session-file pointer before the state dir is deleted.

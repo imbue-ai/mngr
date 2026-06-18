@@ -107,6 +107,7 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
@@ -296,6 +297,13 @@ class CodexAgentConfig(AgentTypeConfig):
         "`NEVER`: only log a non-blocking notice, never update. Updating mutates the user's "
         "*global* codex install. mngr always disables codex's own blocking startup update prompt.",
     )
+    version: str | None = Field(
+        default=None,
+        description="Pin the codex CLI version to install (e.g., '0.139.0'). When set, installation runs "
+        "`npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches, erroring "
+        "on a mismatch. When None (the default), installs the latest version. A pin also suppresses the "
+        "provision-time update check (`update_policy` is ignored), since updating would defeat the pin.",
+    )
     # emit_common_transcript gates the rollout -> common-schema converter. The
     # raw transcript is always captured (HasTranscriptMixin); only the common
     # converter is gated.
@@ -414,16 +422,43 @@ class CodexAgent(
         return policy
 
     def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-        # codex follows an update policy (ask / auto / never) rather than pinning a version: a
-        # network-free check of the installed codex against its own recorded latest, then the
-        # update_policy action. Best-effort and never fatal -- an outdated codex still runs.
+        # With a pinned version, verify the installed codex matches and error on a mismatch --
+        # and skip the update check entirely, since prompting to update would defeat the pin.
+        if self.agent_config.version is not None:
+            self._verify_pinned_codex_version(host)
+            return
+        # Otherwise codex follows an update policy (ask / auto / never) rather than pinning a
+        # version: a network-free check of the installed codex against its own recorded latest,
+        # then the update_policy action. Best-effort and never fatal -- an outdated codex still runs.
         self._maybe_check_for_codex_update(host, self._resolve_user_codex_home(host), mngr_ctx)
+
+    def _verify_pinned_codex_version(self, host: OnlineHostInterface) -> None:
+        """Verify the installed codex matches ``config.version``, erroring on a mismatch.
+
+        Called only when a version is pinned. A mismatch means the wrong codex is on
+        PATH (e.g. a pre-existing global install that ``check_installation`` left in
+        place), which the user must resolve -- re-install the pinned version or update
+        the pin.
+        """
+        pinned_version = self.agent_config.version
+        probe = f"{self.agent_config.command} --version 2>/dev/null"
+        result = host.execute_idempotent_command(probe, timeout_seconds=30.0)
+        installed_version = parse_codex_cli_version(result.stdout) if result.success else None
+        if installed_version != pinned_version:
+            raise AgentInstallationError(
+                f"codex version mismatch: installed version is {installed_version!r}, "
+                f"but agent config pins version {pinned_version!r}. "
+                "Re-install codex with the correct version or update the pinned version in your agent config."
+            )
+        logger.debug("codex version {} matches pinned version", installed_version)
 
     def get_install_binary_name(self) -> str:
         return "codex"
 
     def get_install_command(self) -> str:
-        return "npm i -g @openai/codex"
+        version = self.agent_config.version
+        package = f"@openai/codex@{version}" if version is not None else "@openai/codex"
+        return f"npm i -g {shlex.quote(package)}"
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""

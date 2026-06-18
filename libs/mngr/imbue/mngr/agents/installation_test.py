@@ -6,6 +6,8 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.installation import extract_cli_semver
+from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -102,3 +104,49 @@ def test_raises_when_install_command_fails(tmp_path: Path) -> None:
         ensure_cli_installed(
             host, _ctx(tmp_path, is_auto_approve=False, is_remote_allowed=True), _BINARY, _INSTALL_CMD
         )
+
+
+@pytest.mark.parametrize(
+    ("version_output", "expected"),
+    [
+        ("pi 1.2.3", "1.2.3"),
+        ("opencode 0.4.10 (linux)", "0.4.10"),
+        ("codex-cli 0.139.0", "0.139.0"),
+        ("v2.1.50", "2.1.50"),
+        ("no version here", None),
+        ("", None),
+    ],
+)
+def test_extract_cli_semver(version_output: str, expected: str | None) -> None:
+    assert extract_cli_semver(version_output) == expected
+
+
+def _version_probe_host(tmp_path: Path, *, stdout: str, success: bool = True) -> Any:
+    return _RecordingHost(
+        host_dir=tmp_path,
+        is_local=True,
+        result_by_substring={"--version": CommandResult(stdout=stdout, stderr="", success=success)},
+    )
+
+
+def test_verify_pinned_cli_version_passes_on_match(tmp_path: Path) -> None:
+    host = _version_probe_host(tmp_path, stdout="fakecli 1.2.3")
+    verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")
+
+
+def test_verify_pinned_cli_version_raises_on_mismatch(tmp_path: Path) -> None:
+    host = _version_probe_host(tmp_path, stdout="fakecli 1.2.4")
+    with pytest.raises(AgentInstallationError, match="version mismatch"):
+        verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")
+
+
+def test_verify_pinned_cli_version_skips_when_unparseable(tmp_path: Path) -> None:
+    # No semver in the output -> lenient skip (no raise), so an unexpected --version
+    # format never spuriously aborts provisioning.
+    host = _version_probe_host(tmp_path, stdout="some unexpected banner")
+    verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")
+
+
+def test_verify_pinned_cli_version_skips_when_probe_fails(tmp_path: Path) -> None:
+    host = _version_probe_host(tmp_path, stdout="", success=False)
+    verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")

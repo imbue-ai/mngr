@@ -110,6 +110,8 @@ from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_di
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
+from imbue.mngr.agents.update_policy import resolve_update_policy
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -199,6 +201,12 @@ _BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "antigravity_background_tasks.sh"
 # (Conversation-id discovery uses the capture-hook file, not a log grep; see
 # ``CONVERSATION_IDS_FILENAME`` and ``capture_conversation_id.sh``.)
 _ANTIGRAVITY_APP_DATA_DIR_ENV_VAR: Final[str] = "ANTIGRAVITY_APP_DATA_DIR"
+
+# Env var that disables agy's background self-updater. The agy installer prints
+# "The Antigravity CLI automatically self-updates in the background during regular
+# runs"; setting this to "true" stops that so the installed binary stays put. The
+# name is confirmed present in the agy binary's strings.
+_ANTIGRAVITY_DISABLE_AUTO_UPDATE_ENV_VAR: Final[str] = "AGY_CLI_DISABLE_AUTO_UPDATE"
 
 # Relative path under $MNGR_AGENT_STATE_DIR for the agy --log-file. Keeping
 # it under logs/ groups it with the other per-agent log artifacts. This is a
@@ -465,6 +473,17 @@ class AntigravityAgentConfig(AgentTypeConfig):
         default=True,
         description="Check whether agy is installed and install it if missing (if False, assume it is already present).",
     )
+    # Note: agy has no version-pinning capability. Google's installer always installs the
+    # latest build from a manifest (no version argument or env var), so there is no `version`
+    # field here -- use `update_policy = "NEVER"` to freeze the installed build instead.
+    update_policy: AgentUpdatePolicy | None = Field(
+        default=None,
+        description="How to handle agy's background self-updater. NEVER sets "
+        "AGY_CLI_DISABLE_AUTO_UPDATE=true in the agent environment so the installed build stays put; "
+        "AUTO leaves agy's self-updater enabled. ASK has no interactive flow for agy and behaves like "
+        "AUTO. When unset (the default), resolves to NEVER for unattended (remote/deploy) agents and "
+        "AUTO for attended local agents.",
+    )
     # emit_common_transcript gates the JSONL -> common-schema converter that
     # writes to ``events/antigravity/common_transcript/events.jsonl``. The raw
     # transcript at ``logs/antigravity_transcript/events.jsonl`` is always
@@ -621,8 +640,18 @@ class AntigravityAgent(
         itself (absent from the binary); HOME relocation is what isolates agy.
         (Conversation-id discovery uses the capture-hook file, not a log grep;
         see ``_get_conversation_ids_file_path`` and ``CONVERSATION_IDS_FILENAME``.)
+
+        When the resolved update policy is NEVER, also sets
+        AGY_CLI_DISABLE_AUTO_UPDATE=true so agy's background self-updater does not
+        replace the installed build. setdefault leaves an explicit user value alone.
         """
         env_vars[_ANTIGRAVITY_APP_DATA_DIR_ENV_VAR] = str(get_antigravity_cli_dir(self._get_agy_home_dir()))
+        # agy has no interactive update flow, so ASK falls back to AUTO (is_ask_capable=False).
+        effective_policy = resolve_update_policy(
+            self.agent_config.update_policy, is_unattended=not host.is_local, is_ask_capable=False
+        )
+        if effective_policy is AgentUpdatePolicy.NEVER:
+            env_vars.setdefault(_ANTIGRAVITY_DISABLE_AUTO_UPDATE_ENV_VAR, "true")
 
     def _get_conversation_ids_file_path(self) -> Path:
         """Per-agent file recording every agy conversation ID this agent worked on.
