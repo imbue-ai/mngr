@@ -14,6 +14,7 @@ from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.recovery_probe import extract_provider_error
 from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_command
 from imbue.minds.desktop_client.recovery_probe import parse_listening_sockets
+from imbue.minds.desktop_client.recovery_probe import provider_unavailable_error
 from imbue.mngr.primitives import AgentId
 
 _AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "1")
@@ -438,6 +439,31 @@ def test_dispatch_tier_provider_unavailable_beats_host_state() -> None:
     )
     assert response.dispatch_tier == DispatchTier.PROVIDER_UNAVAILABLE
     assert response.unreachable_reason == "unreachable"
+    assert response.provider_label == "Imbue Cloud"
+
+
+def test_dispatch_tier_provider_unavailable_from_timed_out_listing() -> None:
+    """A host-health listing that times out (no body, no row) classifies as PROVIDER_UNAVAILABLE.
+
+    This is the regression for the full-network-outage case: when `mngr list`
+    never completes there is no errors[] body to parse and no host row, so the
+    probe synthesizes a provider-unavailable error (see ``provider_unavailable_error``
+    / ``_run_host_health_probe``). Without it, ``list_json=None`` yields an UNKNOWN
+    container state that falls through to the destructive HOST_UNRESPONSIVE tier.
+    """
+    response = build_host_health_response(
+        list_json=None,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        mngr_list_error="timed out after 30s",
+        provider_error=provider_unavailable_error(
+            "Could not reach Imbue Cloud: the workspace listing timed out after 30s."
+        ),
+        provider_label="Imbue Cloud",
+    )
+    assert response.dispatch_tier == DispatchTier.PROVIDER_UNAVAILABLE
     assert response.provider_label == "Imbue Cloud"
 
 

@@ -41,6 +41,19 @@ class MngrCommandError(MindError):
         self.error_class = error_class
 
 
+class MngrCommandTimeoutError(MngrCommandError):
+    """Raised when an mngr CLI command did not finish within its timeout.
+
+    A distinct subclass so callers can tell "the command ran and failed" (still
+    a ``MngrCommandError``, with a body to inspect) apart from "the command
+    never completed". The recovery host-health probe keys on this: a listing
+    that times out is evidence the provider/network is unreachable, not that the
+    host is reachable-but-wedged, so it must not offer a destructive restart.
+    """
+
+    ...
+
+
 class MalformedMngrOutputError(MindError, ValueError):
     """Raised when ``mngr list --format json`` produces output we can't parse.
 

@@ -3,3 +3,5 @@ Workspace recovery now understands remote (Imbue Cloud) minds, not just local do
 When the provider is reachable but rejects the request for another reason (expired login, no account configured), recovery now shows a plain "Can't reach your workspace" message with the reason instead of offering a restart that cannot fix an auth/account problem.
 
 The destructive "Restart workspace" action now re-checks the workspace one last time immediately before it stops the container, and silently returns you to your workspace if it has recovered on its own (e.g. a connectivity blip that cleared) -- so a transient hiccup can no longer cost you a live container and the in-progress work in its agents.
+
+When the recovery diagnostic can't even list your workspace's provider within its (now much shorter) timeout -- the signature of a full network outage -- recovery now treats that as "provider unreachable" and shows the Retry page instead of the destructive "Workspace unresponsive" page. Previously a dropped connection left the diagnostic spinning on "Loading workspace" for up to two minutes and then offered a restart that could not help.

@@ -347,6 +347,19 @@ def _extract_host_state(agent_row: dict | None) -> str:
 _PROVIDER_UNAVAILABLE_EXCEPTION: Final[str] = "ProviderUnavailableError"
 
 
+def provider_unavailable_error(message: str) -> ProviderProbeError:
+    """Build a synthetic provider error that classifies as PROVIDER_UNAVAILABLE.
+
+    Used when the host-state listing could not *complete* (e.g. the host-health
+    ``mngr list`` timed out), so there is no ``errors[]`` body to parse. An
+    inability to even enumerate the provider is evidence it is unreachable, so we
+    route it through the same retry-don't-restart tier as a connector-raised
+    ``ProviderUnavailableError`` rather than letting it fall through to the
+    destructive ``HOST_UNRESPONSIVE`` bucket.
+    """
+    return ProviderProbeError(exception_type=_PROVIDER_UNAVAILABLE_EXCEPTION, message=message)
+
+
 def extract_provider_error(list_json: str | None, provider_name: str | None) -> ProviderProbeError | None:
     """Pull this workspace's provider-level error from ``mngr list``'s ``errors[]``, if any.
 
