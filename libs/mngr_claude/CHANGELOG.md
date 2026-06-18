@@ -6,6 +6,27 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.17] - 2026-06-18
+
+### Added
+
+- Added: `ClaudeAgent` declares the new capability mixins (`HasStreamingSnapshotMixin` → `SupportsLiveOutputMixin`, `HasUnattendedModeMixin`, `HasVersionManagementMixin`, `CliBackedAgentMixin`, `HasSessionAdoptionMixin`), so these capabilities are code-detectable in the agent capability matrix. Session-adoption logic moved from `on_after_provisioning` into an `adopt_session` method.
+- Added: `mngr create --yes` now dismisses claude's first-run dialogs (onboarding, effort callout, work-dir trust) in the per-agent config. Previously these were only auto-dismissed for remote/unattended agents or explicit `auto_dismiss_dialogs`. `--yes` deliberately does not accept bypass-permissions mode; tool auto-allow stays governed by `auto_allow_permissions`/unattended.
+
+### Changed
+
+- Changed: Split `ClaudeAgent` into a shared `ClaudeCoreAgent` base and an interactive `ClaudeAgent(ClaudeCoreAgent, InteractiveTuiAgent, ...)` subclass. `HeadlessClaude` now extends `ClaudeCoreAgent` directly, so the headless variant no longer structurally inherits interactive-only capabilities. User-visible: `--adopt-session` is now rejected for `headless_claude` with a clear error, instead of being silently accepted and never resumed (headless runs `claude --print`, not `--resume`).
+- Changed: The session-adoption CLI option moved out of the claude plugin into core. The option is now `--adopt` (with `--adopt-session` kept as an accepted alias) and is shared by every interactive agent. Claude reads the adopted session ids from the first-class `CreateAgentOptions.adopt_session` field.
+- Changed: `ClaudeCoreAgent` now installs claude through the shared `ensure_cli_installed` helper (consent-gated locally, config-gated remotely; pinned to the configured version), then calls `reconcile_installed_version` to verify the present binary matches any pinned `version`. Install / version-mismatch failures now raise `AgentInstallationError` rather than `PluginMngrError`.
+- Changed: Adapted to the unified live-output contract. `ClaudeAgent` inherits `SupportsLiveOutputMixin` directly, exposes its streaming snapshot via `get_live_output_path()`, and supplies a `SnapshotDeltaReader` from `make_live_output_reader()`. The snapshot parsing/diffing (`compute_stream_delta` and friends, previously in `mngr_robinhood`) moves into the new `imbue.mngr_claude.stream_buffer` module. `HeadlessClaude` keeps streaming `claude --print` stream-json via the shared tail loop in mngr; the agent supplies a `StreamJsonReader`. No user-visible behavior change.
+- Changed: The claude common-transcript converter now emits `finish_reason` instead of `stop_reason` (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records preserving the source interleaving of text and tool-use blocks.
+
+### Fixed
+
+- Fixed: Resuming a Claude agent and immediately sending a message no longer drops keystrokes into a still-replaying transcript. The TUI-ready indicator is now the input-prompt glyph (`❯`) instead of the "Claude Code" welcome banner (which only renders on a fresh start, not on resume).
+- Fixed: `--adopt A --from X` (combined explicit-adopt plus clone) no longer refuses on a whole-directory clobber. The explicit session is copied into the destination's encoded project dir first, and the clone's rekey merges the source-encoded subdir's files into it non-destructively; a genuine per-file collision still raises `AgentStartError`.
+- Fixed: A `--from` clone whose source has no resumable session now warns and adopts nothing (rather than raising) — `--from` is a workspace clone, so carrying the source's conversation forward is a bonus. Explicit `--adopt` failures and the per-file merge collision remain hard errors.
+
 ## [v0.2.16] - 2026-06-16
 
 ### Changed

@@ -1,1 +1,0 @@
-The opencode common-transcript emitter now emits `finish_reason` instead of `stop_reason` on assistant records (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array built by walking the message's parts in arrival order, so the text/tool-call interleaving is preserved (`parts_ordered` true).

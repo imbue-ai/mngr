@@ -1,1 +1,0 @@
-Regenerated the `mngr imbue_cloud admin pool destroy` CLI reference docs to reflect its now backend-aware teardown: `--skip-vps-cancel` is documented as skipping the underlying-machine teardown (cancel the OVH VPS for an `ovh_vps` row, or destroy the lima VM for a `slice` row), used only when the machine is already gone.
