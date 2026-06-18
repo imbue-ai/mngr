@@ -154,9 +154,12 @@ def convert(input_file: str, output_file: str) -> int:
                 stop_reason = message.get("stop_reason")
                 usage_raw = message.get("usage", {})
 
-                # Extract text, tool calls
+                # Extract text and tool calls. ``parts`` preserves the original
+                # interleaving order of text and tool_use blocks; the flat
+                # ``text``/``tool_calls`` remain the baseline every emitter fills.
                 text_parts = []
                 tool_calls = []
+                parts: list[dict[str, Any]] = []
                 for block in content_blocks:
                     if not isinstance(block, dict):
                         continue
@@ -165,6 +168,7 @@ def convert(input_file: str, output_file: str) -> int:
                         text = block.get("text", "")
                         if text:
                             text_parts.append(text)
+                            parts.append({"type": "text", "content": text})
                     elif block_type == "tool_use":
                         call_id = block.get("id", "")
                         tool_name = block.get("name", "")
@@ -177,13 +181,13 @@ def convert(input_file: str, output_file: str) -> int:
                         if call_id and tool_name:
                             tool_name_by_call_id[call_id] = tool_name
 
-                        tool_calls.append(
-                            {
-                                "tool_call_id": call_id,
-                                "tool_name": tool_name,
-                                "input_preview": input_preview,
-                            }
-                        )
+                        tool_call = {
+                            "tool_call_id": call_id,
+                            "tool_name": tool_name,
+                            "input_preview": input_preview,
+                        }
+                        tool_calls.append(tool_call)
+                        parts.append({"type": "tool_call", **tool_call})
                     else:
                         # Other block types (thinking, redacted_thinking, etc.)
                         # carry no transcript-visible text or tool call.
@@ -208,7 +212,9 @@ def convert(input_file: str, output_file: str) -> int:
                     "model": model,
                     "text": "\n".join(text_parts),
                     "tool_calls": tool_calls,
-                    "stop_reason": stop_reason,
+                    "parts": parts,
+                    "parts_ordered": True,
+                    "finish_reason": stop_reason,
                     "usage": usage,
                     "message_uuid": uuid,
                 }
