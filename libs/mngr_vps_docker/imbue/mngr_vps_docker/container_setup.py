@@ -1048,7 +1048,6 @@ def download_directory_from_outer(
         "-az",
         "--no-specials",
         "--no-devices",
-        f"--partial-dir={_RSYNC_PARTIAL_DIR_REMOTE}",
         "-e",
         ssh_cmd,
         f"{user}@{hostname}:{remote_str}",
