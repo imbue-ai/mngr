@@ -181,6 +181,9 @@ def run(
     # background-worker branch) at 0600. Matches hooks/cleanup.py and
     # hooks/spawn.py, which set the same umask at the top of their run().
     os.umask(0o077)
+    # Drain stdin so the hook runner's writer never blocks on a full pipe;
+    # the SessionStart payload is unused here, so a failed drain of an
+    # otherwise-ignored stream is harmless and intentionally swallowed.
     try:
         stdin.read()
     except OSError:

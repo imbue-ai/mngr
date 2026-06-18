@@ -86,6 +86,21 @@ class UnguardedProjectStopHookError(MngrError):
     """
 
 
+class MalformedAgentSettingsError(MngrError):
+    """The agent's ``.claude/settings.local.json`` is corrupt and cannot be merged.
+
+    Raised at provisioning time when the merge (write) path reads a
+    settings.local.json that exists but does not parse as a JSON object.
+    The file is written by mngr_claude provisioning, so malformed content
+    indicates real corruption rather than an expected state -- we abort
+    loudly instead of either silently overwriting it (which would discard
+    whatever the user had) or silently skipping hook installation (which
+    would leave the proxy quietly disabled). The advisory read-only checks
+    deliberately differ: they log+return because they only inspect, never
+    write, so degrading there cannot clobber anything.
+    """
+
+
 class UnignoredProxyArtifactError(MngrError):
     """A subagent-proxy provisioning artifact path is not gitignored.
 
@@ -310,6 +325,37 @@ def _write_proxy_skill(host: OnlineHostInterface, work_dir: Path) -> None:
     host.write_text_file(skill_path, content)
 
 
+def _read_existing_local_settings(host: OnlineHostInterface, settings_path: Path) -> dict[str, Any]:
+    """Read and parse ``.claude/settings.local.json`` for the merge (write) path.
+
+    Returns ``{}`` when the file does not exist yet (the common
+    first-provisioning case). On malformed JSON -- or valid JSON that is
+    not an object -- raises ``MalformedAgentSettingsError`` loudly rather
+    than degrading: this file is plugin-written, so bad content means real
+    corruption, and silently treating it as ``{}`` here would clobber the
+    user's settings on the subsequent write. Splitting the read from the
+    parse keeps each ``try`` to a single statement per the style guide.
+    """
+    try:
+        content = host.read_text_file(settings_path)
+    except FileNotFoundError:
+        return {}
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise MalformedAgentSettingsError(
+            f"{settings_path} contains malformed JSON and cannot be merged with the "
+            f"subagent-proxy hooks: {e}. This file is written by mngr_claude provisioning, "
+            f"so malformed content indicates corruption; fix or remove the file and re-provision."
+        ) from e
+    if not isinstance(parsed, dict):
+        raise MalformedAgentSettingsError(
+            f"{settings_path} is valid JSON but not a JSON object (got {type(parsed).__name__}); "
+            f"the subagent-proxy hooks can only be merged into an object."
+        )
+    return parsed
+
+
 def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
     """Merge the deny-mode hooks into the agent's .claude/settings.local.json.
 
@@ -329,12 +375,7 @@ def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) 
     The surface is deliberately much smaller than PROXY mode.
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
-    existing_settings: dict[str, Any] = {}
-    try:
-        content = host.read_text_file(settings_path)
-        existing_settings = json.loads(content)
-    except FileNotFoundError:
-        pass
+    existing_settings = _read_existing_local_settings(host, settings_path)
 
     hooks_config = build_subagent_proxy_deny_hooks_config()
     merged = merge_hooks_config(existing_settings, hooks_config)
@@ -360,12 +401,7 @@ def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> No
     time, see the no-op.
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
-    existing_settings: dict[str, Any] = {}
-    try:
-        content = host.read_text_file(settings_path)
-        existing_settings = json.loads(content)
-    except FileNotFoundError:
-        pass
+    existing_settings = _read_existing_local_settings(host, settings_path)
 
     hooks_config = build_subagent_proxy_hooks_config()
     merged = merge_hooks_config(existing_settings, hooks_config)
@@ -585,16 +621,16 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     )
 
 
-def _resolve_plugin_mode(mngr_ctx: MngrContext | None) -> SubagentProxyMode:
+def _resolve_plugin_mode(mngr_ctx: MngrContext) -> SubagentProxyMode:
     """Resolve the plugin's mode from mngr_ctx, falling back to PROXY.
 
-    ``mngr_ctx`` is None in unit tests (which pass it explicitly to keep
-    the hookimpl signature satisfied without standing up a full MngrContext).
-    Treat that case as "use defaults" -- equivalent to a user who never
-    configured the plugin.
+    A context with no subagent-proxy plugin config resolves to the
+    ``SubagentProxyPluginConfig`` defaults (PROXY mode) -- equivalent to a
+    user who never configured the plugin. ``mngr_ctx`` is non-optional:
+    ``on_after_provisioning`` is always called by pluggy with a real context,
+    and tests pass a real (fixture-built) context too, so there is no
+    test-only None path to special-case here.
     """
-    if mngr_ctx is None:
-        return SubagentProxyPluginConfig().mode
     config = mngr_ctx.get_plugin_config(CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME, SubagentProxyPluginConfig)
     return config.mode
 

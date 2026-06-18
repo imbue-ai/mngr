@@ -1,10 +1,13 @@
 """Test utilities for mngr_claude_subagent_proxy: thin subclasses of the shared fakes."""
 
 import subprocess
+from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -13,6 +16,26 @@ from imbue.mngr.api.testing import FakeHost as BaseFakeHost
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+
+
+@contextmanager
+def capture_loguru_messages() -> Iterator[list[str]]:
+    """Install a loguru sink that appends formatted messages to a list.
+
+    Yields the growing list so a test can assert on emitted log lines
+    (e.g. that a swallowed error was at least logged). Removes the sink on
+    exit so it does not leak into other tests.
+    """
+    captured: list[str] = []
+
+    def sink(message: Any) -> None:
+        captured.append(message.record["message"])
+
+    handler_id = logger.add(sink, level="TRACE", format="{message}")
+    try:
+        yield captured
+    finally:
+        logger.remove(handler_id)
 
 
 class FakeAgent(BaseFakeAgent):

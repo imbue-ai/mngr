@@ -17,6 +17,7 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
 from imbue.mngr_claude_subagent_proxy.plugin import CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME
+from imbue.mngr_claude_subagent_proxy.plugin import MalformedAgentSettingsError
 from imbue.mngr_claude_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_claude_subagent_proxy.plugin import UnguardedProjectStopHookError
 from imbue.mngr_claude_subagent_proxy.plugin import UnignoredProxyArtifactError
@@ -27,12 +28,11 @@ from imbue.mngr_claude_subagent_proxy.plugin import on_before_agent_destroy
 from imbue.mngr_claude_subagent_proxy.testing import FakeAgent
 from imbue.mngr_claude_subagent_proxy.testing import FakeHost
 
-# on_after_provisioning declares its third parameter as MngrContext, but
-# ``_resolve_plugin_mode`` treats a None mngr_ctx as "use defaults" (PROXY
-# mode), so PROXY-mode tests can pass None and skip building a full
-# MngrContext. Tests that exercise DENY mode pass a real ctx instead.
-# The untyped wrapper keeps the None sentinel from leaking argument-type
-# noise to every call site.
+# on_after_provisioning / on_before_agent_destroy are pluggy hookimpls typed
+# against AgentInterface / OnlineHostInterface / MngrContext. Tests drive them
+# with FakeAgent / FakeHost doubles and fixture-built contexts (temp_mngr_ctx,
+# optionally narrowed via _ctx_with_plugin_config); the untyped aliases keep
+# those test-double types from leaking argument-type noise to every call site.
 _provision: Any = on_after_provisioning
 _destroy: Any = on_before_agent_destroy
 
@@ -59,7 +59,9 @@ def fake_host(host_dir: Path) -> FakeHost:
     return FakeHost(host_dir)
 
 
-def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHost) -> None:
+def test_plugin_hooks_register_on_claude_agent(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
     """The plugin's provisioning hook wires up hooks and the proxy agent.
 
     This is the golden-path CI check: verify that invoking on_after_provisioning
@@ -69,7 +71,7 @@ def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHo
     agent_id = AgentId.generate()
     agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig())
 
-    _provision(agent, fake_host, None)
+    _provision(agent, fake_host, temp_mngr_ctx)
 
     settings_path = work_dir / ".claude" / "settings.local.json"
     assert settings_path.exists()
@@ -115,7 +117,9 @@ def _seed_settings_with_stop_hooks(work_dir: Path) -> Path:
     return settings_path
 
 
-def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(work_dir: Path, fake_host: FakeHost) -> None:
+def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
     """A proxy-child agent with user-configured Stop/SubagentStop hooks raises UnsupportedSubagentHookError.
 
     The plugin doesn't know whether a user's Stop hook is meant to fire on
@@ -132,10 +136,12 @@ def test_plugin_raises_on_user_stop_hooks_for_subagent_proxy_child(work_dir: Pat
     _seed_settings_with_stop_hooks(work_dir)
 
     with pytest.raises(UnsupportedSubagentHookError):
-        _provision(agent, fake_host, None)
+        _provision(agent, fake_host, temp_mngr_ctx)
 
 
-def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(work_dir: Path, fake_host: FakeHost) -> None:
+def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
     """A proxy-child agent inheriting only mngr-managed Stop hooks provisions cleanly.
 
     mngr_claude's readiness Stop hook (which runs wait_for_stop_hook.sh)
@@ -173,7 +179,7 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(work_dir
         name=AgentName("reviewer--subagent-code-review-abcd1234"),
     )
 
-    _provision(agent, fake_host, None)
+    _provision(agent, fake_host, temp_mngr_ctx)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -181,13 +187,15 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(work_dir
     assert "PreToolUse" in hooks
 
 
-def test_plugin_preserves_stop_hooks_for_top_level_agent(work_dir: Path, fake_host: FakeHost) -> None:
+def test_plugin_preserves_stop_hooks_for_top_level_agent(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
     """A plain top-level agent (no --subagent- infix) keeps its Stop/SubagentStop hooks."""
     agent_id = AgentId.generate()
     agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
     settings_path = _seed_settings_with_stop_hooks(work_dir)
 
-    _provision(agent, fake_host, None)
+    _provision(agent, fake_host, temp_mngr_ctx)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -211,7 +219,7 @@ def _seed_project_settings_with_unguarded_stop(work_dir: Path) -> Path:
 
 
 def test_plugin_raises_on_unguarded_project_stop_hook(
-    work_dir: Path, fake_host: FakeHost, monkeypatch: pytest.MonkeyPatch
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An un-guarded Stop hook in .claude/settings.json blocks provisioning."""
     monkeypatch.delenv("MNGR_CLAUDE_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", raising=False)
@@ -219,10 +227,12 @@ def test_plugin_raises_on_unguarded_project_stop_hook(
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     with pytest.raises(UnguardedProjectStopHookError):
-        _provision(agent, fake_host, None)
+        _provision(agent, fake_host, temp_mngr_ctx)
 
 
-def test_plugin_allows_guarded_project_stop_hook(work_dir: Path, fake_host: FakeHost) -> None:
+def test_plugin_allows_guarded_project_stop_hook(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
     """A Stop hook in settings.json that has the env-conditional guard provisions cleanly."""
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir(parents=True)
@@ -248,26 +258,26 @@ def test_plugin_allows_guarded_project_stop_hook(work_dir: Path, fake_host: Fake
     )
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
-    _provision(agent, fake_host, None)
+    _provision(agent, fake_host, temp_mngr_ctx)
 
 
 def test_plugin_project_stop_hook_check_can_be_bypassed_via_env(
-    work_dir: Path, fake_host: FakeHost, monkeypatch: pytest.MonkeyPatch
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Setting the opt-out env var bypasses the un-guarded check."""
     monkeypatch.setenv("MNGR_CLAUDE_SUBAGENT_PROXY_ALLOW_UNGUARDED_PROJECT_STOP_HOOKS", "1")
     _seed_project_settings_with_unguarded_stop(work_dir)
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
-    _provision(agent, fake_host, None)
+    _provision(agent, fake_host, temp_mngr_ctx)
 
 
-def test_plugin_skips_non_claude_agents(work_dir: Path, fake_host: FakeHost) -> None:
+def test_plugin_skips_non_claude_agents(work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext) -> None:
     """Provisioning is a no-op for agents whose config is not ClaudeAgentConfig."""
     # Use a plain sentinel that is not a ClaudeAgentConfig instance.
     agent = FakeAgent(AgentId.generate(), work_dir, object())
 
-    _provision(agent, fake_host, None)
+    _provision(agent, fake_host, temp_mngr_ctx)
 
     assert len(fake_host.written_files) == 0
     assert fake_host.executed_commands == []
@@ -275,7 +285,7 @@ def test_plugin_skips_non_claude_agents(work_dir: Path, fake_host: FakeHost) -> 
 
 
 def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
-    work_dir: Path, fake_host: FakeHost
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
     """mngr_claude's UserPromptSubmit readiness entry survives the subagent-proxy strip.
 
@@ -320,7 +330,7 @@ def test_plugin_preserves_readiness_user_prompt_submit_for_subagent_proxy_child(
         name=AgentName("parent--subagent-slug-deadbeef"),
     )
 
-    _provision(agent, fake_host, None)
+    _provision(agent, fake_host, temp_mngr_ctx)
 
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -714,7 +724,48 @@ def test_deny_mode_merges_into_existing_settings_local_json(
     assert "PreToolUse" in hooks
 
 
-def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_host: FakeHost) -> None:
+@pytest.mark.parametrize("mode", [SubagentProxyMode.PROXY, SubagentProxyMode.DENY], ids=["proxy", "deny"])
+def test_malformed_settings_local_json_aborts_provisioning(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext, mode: SubagentProxyMode
+) -> None:
+    """A corrupt settings.local.json makes the merge (write) path fail loudly.
+
+    The file is written by mngr_claude provisioning, so malformed content
+    means real corruption. Both the PROXY and DENY merge paths must raise
+    MalformedAgentSettingsError rather than silently treating the file as
+    empty (which would clobber it on the subsequent write) or silently
+    skipping hook installation (which would leave the proxy disabled).
+    """
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text("{not valid json")
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=mode))
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    with pytest.raises(MalformedAgentSettingsError):
+        _provision(agent, fake_host, ctx)
+
+
+def test_non_object_settings_local_json_aborts_provisioning(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """settings.local.json that parses to a non-object (e.g. a JSON list) also fails loudly.
+
+    The merge path can only graft hooks onto a JSON object; a valid-but-wrong
+    shape is just as much a corruption signal as unparseable bytes.
+    """
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text('["unexpectedly", "a", "list"]')
+    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    with pytest.raises(MalformedAgentSettingsError):
+        _provision(agent, fake_host, temp_mngr_ctx)
+
+
+def test_plugin_strip_hooks_is_safe_when_settings_missing(
+    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
     """A subagent-proxy-child agent with no pre-existing settings.local.json provisions without error."""
     agent_id = AgentId.generate()
     agent = FakeAgent(
@@ -724,7 +775,7 @@ def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_h
         name=AgentName("parent--subagent-slug-deadbeef"),
     )
 
-    _provision(agent, fake_host, None)
+    _provision(agent, fake_host, temp_mngr_ctx)
 
     # Provisioning still wrote the merged settings (PreToolUse/PostToolUse/SessionStart),
     # and the to-be-stripped keys were never present to begin with.

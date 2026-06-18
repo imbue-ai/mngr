@@ -25,13 +25,22 @@ DEFAULT_MAX_SUBAGENT_DEPTH: Final[int] = 3
 
 
 def parse_int_env(name: str, default: int) -> int:
-    """Parse an int-valued env var; return ``default`` on missing/empty/invalid."""
+    """Parse an int-valued env var; return ``default`` on missing/empty/invalid.
+
+    A present-but-unparseable value is logged at warning level before
+    falling back. The callers (hooks/spawn.py, hooks/deny.py) use this for
+    the plugin-set MNGR_SUBAGENT_DEPTH / MNGR_MAX_SUBAGENT_DEPTH vars, so a
+    malformed value is unexpected and silently resetting it to the default
+    could mask a depth-limit miscalculation. Mirrors the warning that
+    subagent_wait._get_result_max_chars emits on the same condition.
+    """
     raw = os.environ.get(name)
     if raw is None or raw == "":
         return default
     try:
         return int(raw)
     except ValueError:
+        logger.warning("Invalid int env var {}={!r}; using default {}", name, raw, default)
         return default
 
 
