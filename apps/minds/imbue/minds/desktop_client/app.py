@@ -4669,5 +4669,11 @@ def _run_system_interface_health_probe_loop(
                 if probe_status == 200:
                     tracker.record_probe_success(aid)
                 else:
-                    tracker.record_probe_failure(aid)
+                    # Remote (imbue_cloud) workspaces ride the public internet, so
+                    # they tolerate a longer sustained-failure window before STUCK
+                    # (a transient blip shouldn't funnel them onto the recovery
+                    # page). Remoteness is read from the provider here and passed
+                    # per probe -- the tracker has no provider knowledge.
+                    is_remote = _is_leased_imbue_cloud_workspace(backend_resolver, str(aid))
+                    tracker.record_probe_failure(aid, is_remote=is_remote)
             threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)

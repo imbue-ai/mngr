@@ -99,6 +99,46 @@ def test_sustained_probe_failures_transition_to_stuck() -> None:
     assert seen == [(aid, AgentHealth.STUCK)]
 
 
+def test_remote_probe_failures_use_the_longer_remote_threshold() -> None:
+    """A remote probe tolerates a longer sustained-failure window: at an elapsed time past the
+    local threshold but before the remote one, a remote workspace stays HEALTHY (a local one would
+    already be STUCK), and only once the remote window elapses does it transition to STUCK."""
+    tracker = SystemInterfaceHealthTracker(
+        stuck_threshold_seconds=_FAST_THRESHOLD,
+        remote_stuck_threshold_seconds=0.3,
+    )
+    aid = AgentId.generate()
+
+    tracker.record_failure(aid)
+    tracker.record_probe_failure(aid, is_remote=True)
+    # Past the local threshold but well before the remote one: still HEALTHY.
+    _sleep(_FAST_THRESHOLD + 0.02)
+    tracker.record_probe_failure(aid, is_remote=True)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+
+    # Once the remote window elapses, the next remote probe sticks it.
+    _sleep(0.3)
+    tracker.record_probe_failure(aid, is_remote=True)
+    assert tracker.get_health(aid) == AgentHealth.STUCK
+
+
+def test_local_probe_failures_ignore_the_remote_threshold() -> None:
+    """The remote threshold must not slow down a local workspace: a local probe still sticks at the
+    short local threshold even when a (much longer) remote threshold is configured."""
+    tracker = SystemInterfaceHealthTracker(
+        stuck_threshold_seconds=_FAST_THRESHOLD,
+        remote_stuck_threshold_seconds=10.0,
+    )
+    aid = AgentId.generate()
+
+    tracker.record_failure(aid)
+    tracker.record_probe_failure(aid, is_remote=False)
+    _sleep(_FAST_THRESHOLD + 0.02)
+    tracker.record_probe_failure(aid, is_remote=False)
+
+    assert tracker.get_health(aid) == AgentHealth.STUCK
+
+
 def test_probe_failure_without_record_is_ignored() -> None:
     """A probe failure for an agent that was never enrolled does nothing.
 
