@@ -7,12 +7,16 @@ regression tests:
 - libs/mngr_gemini/.../test_background_tasks_prefix_collision.py
 """
 
+from pathlib import Path
+
 import pydantic
 import pytest
 
+from imbue.mngr.hosts.tmux import MNGR_TMUX_TMPDIR_ENV_VAR
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mngr.hosts.tmux import get_mngr_tmux_tmpdir
 
 
 def test_tmux_session_target_renders_with_exact_match_prefix() -> None:
@@ -54,3 +58,13 @@ def test_build_tmux_capture_pane_command_visible_only() -> None:
 def test_build_tmux_capture_pane_command_with_scrollback() -> None:
     result = build_tmux_capture_pane_command(TmuxWindowTarget(session_name="mngr-my-agent"), include_scrollback=True)
     assert result == "tmux capture-pane -t =mngr-my-agent:0 -S - -p"
+
+
+def test_get_mngr_tmux_tmpdir_defaults_to_host_dir_subdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(MNGR_TMUX_TMPDIR_ENV_VAR, raising=False)
+    assert get_mngr_tmux_tmpdir(Path("/home/user/.mngr")) == Path("/home/user/.mngr/tmux")
+
+
+def test_get_mngr_tmux_tmpdir_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(MNGR_TMUX_TMPDIR_ENV_VAR, "/tmp/mngr-tmux-short")
+    assert get_mngr_tmux_tmpdir(Path("/home/user/.mngr")) == Path("/tmp/mngr-tmux-short")

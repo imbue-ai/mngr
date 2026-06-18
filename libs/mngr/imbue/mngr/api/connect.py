@@ -10,8 +10,10 @@ from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
+from imbue.mngr.hosts.tmux import TMUX_TMPDIR_ENV_VAR
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.hosts.tmux import get_mngr_tmux_tmpdir
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.deps import SSH
@@ -104,6 +106,9 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
     # Use single quotes around most things to avoid shell expansion issues,
     # but the paths need to be interpolated
     return (
+        # Target mngr's private tmux server for the remote attach and the
+        # show-options/resize checks above.
+        f"export {TMUX_TMPDIR_ENV_VAR}={shlex.quote(str(get_mngr_tmux_tmpdir(host_dir)))}; "
         f"mkdir -p '{activity_dir}'; "
         f"(while true; do "
         f"TIME_MS=$(($(date +%s) * 1000)); "
@@ -267,13 +272,15 @@ def connect_to_agent(
     session_name = f"{mngr_ctx.config.prefix}{agent.name}"
 
     if host.is_local:
+        # Copy os.environ so we can adjust tmux-related vars without mutating it.
+        env = dict(os.environ)
+        # Attach to mngr's private tmux server, not the user's default socket.
+        env[TMUX_TMPDIR_ENV_VAR] = str(get_mngr_tmux_tmpdir(host.host_dir))
         # Detect nested tmux: if $TMUX is set, we're inside a tmux session
-        env = os.environ
         if os.environ.get("TMUX"):
             if not mngr_ctx.config.is_nested_tmux_allowed:
                 raise NestedTmuxError(session_name)
-            # Copy and remove TMUX so tmux allows the nested attachment
-            env = dict(os.environ)
+            # Remove TMUX so tmux allows the nested attachment
             del env["TMUX"]
         # Pass the raw `=name` form straight to argv. We deliberately do NOT
         # route this through TmuxSessionTarget.as_shell_arg() (the helper used

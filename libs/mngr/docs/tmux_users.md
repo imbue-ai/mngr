@@ -51,16 +51,47 @@ There are several approaches:
 
 You can find other approaches by searching for "nested tmux" or "tmux in tmux".
 
-## Isolating mngr's tmux sessions
+## mngr's tmux sessions are isolated from yours
 
-By default, `mngr` creates tmux sessions on your default tmux server. This means `mngr`'s sessions will show up alongside your personal sessions in `tmux ls`, and could interfere with your own tmux workflow.
+`mngr` runs its agents on its own private tmux server (a dedicated socket under
+`<host_dir>/tmux`, selected via `TMUX_TMPDIR`), separate from your default tmux
+server. This keeps `mngr`'s server-global tmux options and key bindings off your
+own hand-started sessions, and your `tmux ls` never shows `mngr`'s agent
+sessions. No configuration is needed.
 
-To keep `mngr`'s tmux sessions isolated from your own, set `TMUX_TMPDIR` to give `mngr` its own tmux server:
+To see or attach to an agent's session directly, point `tmux` at the same
+server (the socket lives under your mngr host dir, `~/.mngr/tmux` by default):
 
 ```bash
-TMUX_TMPDIR="/tmp/mngr-tmux" mngr create my-agent
+TMUX_TMPDIR=~/.mngr/tmux tmux ls
 ```
 
-Your normal `tmux ls` will no longer show `mngr`'s sessions, and you won't run into nested tmux issues.
+(Normally you would just use `mngr connect`, which targets the private server
+for you.)
 
-Note: the directory must already exist or tmux will silently connect to the normal server instead.
+### Overriding the socket location
+
+Set `MNGR_TMUX_TMPDIR` to put `mngr`'s tmux socket somewhere other than
+`<host_dir>/tmux`. The main reason to do this is the unix-socket path length
+limit (~104 characters on macOS): if your `host_dir` is very deep, the derived
+socket path can overflow it, and tmux silently falls back to your default
+server. Point `MNGR_TMUX_TMPDIR` at a short directory (e.g. `/tmp/mngr-tmux`) to
+avoid that.
+
+### Upgrading from an older mngr
+
+Older versions of `mngr` ran agents on your default tmux server. After
+upgrading, `mngr` looks only at its private server, so any agents that were
+already running still have their sessions on your default server and now show up
+as `STOPPED` in `mngr list` (and `mngr connect` can no longer reach them). This
+is a one-time transition.
+
+To migrate a stranded agent, reattach to its old session directly to wrap up or
+save its work:
+
+```bash
+tmux attach -t =mngr-<agent-name>   # uses your default server
+```
+
+then start a fresh agent so it runs on the private server. Agents you create
+after upgrading always use the private server automatically.

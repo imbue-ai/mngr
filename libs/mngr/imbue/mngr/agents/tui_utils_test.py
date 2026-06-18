@@ -1,5 +1,6 @@
 """Unit tests for tui_utils."""
 
+from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import isolate_tmux_server
 
 # =========================================================================
 # Paste-detection helpers
@@ -176,22 +178,24 @@ def test_send_enter_and_poll_retries_when_indicator_missing() -> None:
 def signal_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-) -> _ProbeAgent:
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[_ProbeAgent, None, None]:
     """Real-host probe used by @pytest.mark.tmux tests that drive tmux directly."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    return _ProbeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("signal-probe"),
-        agent_type=AgentTypeName("probe"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=local_provider.mngr_ctx,
-        agent_config=AgentTypeConfig(),
-        host=host,
-    )
+    with isolate_tmux_server(monkeypatch):
+        yield _ProbeAgent.model_construct(
+            id=AgentId.generate(),
+            name=AgentName("signal-probe"),
+            agent_type=AgentTypeName("probe"),
+            work_dir=work_dir,
+            create_time=datetime.now(timezone.utc),
+            host_id=host.id,
+            mngr_ctx=local_provider.mngr_ctx,
+            agent_config=AgentTypeConfig(),
+            host=host,
+        )
 
 
 @pytest.mark.tmux

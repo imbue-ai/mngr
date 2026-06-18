@@ -67,8 +67,11 @@ from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.tmux import TMUX_ENV_VAR
+from imbue.mngr.hosts.tmux import TMUX_TMPDIR_ENV_VAR
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.hosts.tmux import get_mngr_tmux_tmpdir
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
@@ -445,6 +448,16 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         ``socket.timeout`` on its own), so opt-in callers see a timeout as a hard
         failure on both backends rather than an ordinary failed result.
         """
+        # Point every tmux command mngr runs at mngr's private server (see
+        # get_mngr_tmux_tmpdir). This is the single chokepoint all host command
+        # execution funnels through, so it covers local and remote uniformly.
+        # TMUX is cleared so an inherited value (mngr invoked from inside a tmux
+        # session) cannot pin commands to that server instead of mngr's socket.
+        _env = {
+            TMUX_ENV_VAR: "",
+            TMUX_TMPDIR_ENV_VAR: str(get_mngr_tmux_tmpdir(self.host_dir)),
+            **(_env or {}),
+        }
         if self.is_local:
             # Bypass pyinfra's LocalConnector, which spawns local processes via
             # gevent. gevent attaches a libev SIGCHLD child watcher to the
@@ -2260,6 +2273,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         env_vars["MNGR_AGENT_STATE_DIR"] = str(agent_state_dir)
         env_vars["MNGR_AGENT_WORK_DIR"] = str(agent.work_dir)
         env_vars["LLM_USER_PATH"] = str(agent_state_dir / "llm_data")
+        # So tmux run from inside the agent shell (e.g. ttyd's `unset TMUX; tmux
+        # attach`, or a user-opened window) targets mngr's private server.
+        env_vars[TMUX_TMPDIR_ENV_VAR] = str(get_mngr_tmux_tmpdir(self.host_dir))
 
         # 2. Add programmatic defaults
         base_branch = (options.git.base_branch if options.git else None) or ""
@@ -3313,10 +3329,16 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
+    # Create mngr's private TMUX_TMPDIR before anything reads it: tmux silently
+    # falls back to the default socket when the directory is absent, so the guard
+    # below must run after the mkdir or it could match a same-named session on
+    # the user's default server (e.g. a pre-migration orphan) and wrongly bail.
+    mkdir_tmux_tmpdir = f"mkdir -p {shlex.quote(str(get_mngr_tmux_tmpdir(host_dir)))}"
+
     # Bail out early if the session already exists. stderr is redirected to
     # suppress the "can't find session" message when the session doesn't exist yet.
     quoted_exact_session = TmuxSessionTarget(session_name=session_name).as_shell_arg()
-    guard = f"tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
+    guard = f"{mkdir_tmux_tmpdir} && tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
 
     steps: list[str] = []
 

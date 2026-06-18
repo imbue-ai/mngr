@@ -11,6 +11,7 @@ from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.tmux import get_mngr_tmux_tmpdir
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -37,6 +38,30 @@ def test_create_host_creates_container_with_ssh(docker_provider: DockerProviderI
     result = host.execute_idempotent_command("echo hello")
     assert result.success
     assert "hello" in result.stdout
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_host_command_targets_private_tmux_server_in_container(
+    docker_provider: DockerProviderInstance,
+) -> None:
+    """The TMUX_TMPDIR injection crosses the SSH boundary into the container.
+
+    A command run through the host layer (remote SSH path) must see mngr's
+    private TMUX_TMPDIR and an empty $TMUX, validating the remote injection
+    end-to-end.
+    """
+    host = docker_provider.create_host(HostName("test-tmux-env"))
+    assert isinstance(host, Host)
+    assert not host.is_local
+
+    tmpdir_result = host.execute_idempotent_command('printf "%s" "$TMUX_TMPDIR"')
+    assert tmpdir_result.success
+    assert tmpdir_result.stdout == str(get_mngr_tmux_tmpdir(host.host_dir))
+
+    tmux_result = host.execute_idempotent_command('printf "%s" "$TMUX"')
+    assert tmux_result.success
+    assert tmux_result.stdout == ""
 
 
 @pytest.mark.docker
