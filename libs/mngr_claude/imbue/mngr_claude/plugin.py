@@ -309,7 +309,7 @@ class ClaudeAgentConfig(AgentTypeConfig):
     settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
         description="A patch merged onto your home Claude settings at provisioning, using the standard "
-        "`__extend` merge scheme (see mngr's config README). Not applied in use_env_config_dir mode.",
+        "`__extend` merge scheme (see mngr's config README).",
     )
     emit_common_transcript: bool = Field(
         default=True,
@@ -357,6 +357,15 @@ def build_mngr_hook_configs(config: ClaudeAgentConfig, *, is_unattended: bool) -
     if is_unattended:
         hook_configs.append(build_permission_auto_allow_hooks_config())
     return hook_configs
+
+
+def _has_settings_flag(args: Sequence[str]) -> bool:
+    """True if ``args`` contains a claude ``--settings`` flag (``--settings X`` or ``--settings=X``).
+
+    Detection only looks at the flag token, so it works for both the quote-retaining
+    ``cli_args`` tokens and the raw ``agent_args`` argv.
+    """
+    return any(arg == "--settings" or arg.startswith("--settings=") for arg in args)
 
 
 class ProvisioningContext(FrozenModel):
@@ -533,6 +542,28 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
     return json.dumps(data, indent=2) + "\n"
 
 
+def _apply_settings_overrides(
+    base_data: dict[str, Any], settings_overrides: dict[str, Any], *, allow_narrowing: bool
+) -> dict[str, Any]:
+    """Fold the user's ``settings_overrides`` patch onto a concrete base settings dict.
+
+    Normalizes ``base_data`` to a concrete patch (so a stray ``__extend`` a user placed in
+    it degrades to a plain key -- finalize against nothing is assign), then folds the
+    override patch on top via the overlay typed-node algebra: a ``key__extend`` merges onto
+    the base value (list concat / set union / recursive dict merge), a bare ``Default`` key
+    assigns, and ``Assign`` / ``Static*`` suppress the narrowing otherwise recorded for a
+    dropped aggregate. ``finalize`` is total, so no marker survives into the result.
+
+    Hard-errors (via the shared narrowing message) when a bare override key at any depth
+    drops a non-empty aggregate from the base, unless ``allow_narrowing`` is set.
+    """
+    base = finalize(lift(base_data))
+    merged, narrowings = merge_narrowing_allowed(lift(base), lift(settings_overrides))
+    if narrowings and not allow_narrowing:
+        raise ConfigParseError(build_settings_narrowing_message([f"  {path}" for path in narrowings]))
+    return finalize(merged)
+
+
 def _build_settings_json(
     source_claude_dir: Path,
     config: ClaudeAgentConfig,
@@ -577,31 +608,9 @@ def _build_settings_json(
     data.update(compute_settings_json_flags(ctx))
 
     # Fold in mngr's own hooks (concatenated into the hook event lists by
-    # merge_hooks_config).
+    # merge_hooks_config), then fold the user's settings_overrides patch onto that base.
     data = fold_hook_configs(data, build_mngr_hook_configs(config, is_unattended=is_unattended))
-
-    # Normalize the base ``B``: lift any ``__extend`` a user may have placed in
-    # their home settings.json into nodes and finalize against nothing
-    # (extend-against-empty = assign), so ``B`` is concrete by construction. mngr's
-    # own flags/hooks carry no markers, so in practice only the synced home file
-    # could contribute one.
-    base = finalize(lift(data))
-
-    # Fold the ``settings_overrides`` patch onto the concrete base ``B`` via the overlay
-    # typed-node algebra -- the deferred-resolution consumer for ``settings_overrides``
-    # (see the mngr config/README.md and the ``imbue.overlay`` README). ``Extend`` merges
-    # onto the base, bare ``Default`` assigns, and ``Assign`` / ``Static*`` suppress the
-    # narrowing otherwise recorded for a dropped aggregate.
-    merged, narrowings = merge_narrowing_allowed(lift(base), lift(config.settings_overrides))
-
-    # Narrowing guard: any bare override key (at any depth) that drops a non-empty
-    # aggregate from ``B`` hard-errors unless the escape hatch is set. The message body is
-    # the one shared with the config-load narrowing error (here the detail lines are just
-    # the dotted key paths; the loader names the assigning/dropped scopes per key).
-    if narrowings and not allow_narrowing:
-        raise ConfigParseError(build_settings_narrowing_message([f"  {path}" for path in narrowings]))
-
-    data = finalize(merged)
+    data = _apply_settings_overrides(data, config.settings_overrides, allow_narrowing=allow_narrowing)
     return json.dumps(data, indent=2) + "\n"
 
 
@@ -1593,8 +1602,8 @@ class ClaudeCoreAgent(
 
         return transfers
 
-    def _configure_agent_hooks(self, host: OnlineHostInterface) -> None:
-        """Write mngr's Claude hooks to the agent's managed settings file.
+    def _configure_agent_hooks(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        """Write mngr's hooks (and the user's settings_overrides) to the managed settings file.
 
         This is the ``use_env_config_dir``-mode channel only. In that mode there
         is no per-agent config dir to bake hooks into, so mngr loads them at
@@ -1604,19 +1613,28 @@ class ClaudeCoreAgent(
         ``get_managed_settings_path``). Overwritten fresh each provision, so it
         never accumulates stale hooks.
 
-        In normal mode the same hooks are baked into the per-agent config-dir
+        In normal mode the same content is baked into the per-agent config-dir
         ``settings.json`` by ``_build_settings_json`` instead; this method is not
         called.
 
         Always writes the readiness hooks (which mark the agent active/idle via
         files in its state dir). Adds the macOS keychain-sync hook when
-        sync_credentials_on_login is set, and the permission auto-allow hook
-        when auto_allow_permissions is set.
+        sync_credentials_on_login is set, and the permission auto-allow hook when
+        unattended. Then folds the user's ``settings_overrides`` patch onto that,
+        so the managed file is the single ``--settings`` overlay Claude layers
+        (highest precedence) over the user's shared config -- the base for the
+        fold is mngr's hooks (not the shared config, which Claude layers itself),
+        so narrowing here only guards against an override dropping mngr's hooks.
         """
-        # The always-on readiness hooks, plus the optional credential-sync
-        # (macOS) and permission auto-allow hooks.
+        # The always-on readiness hooks, plus the optional credential-sync (macOS) and
+        # permission auto-allow hooks, with the user's settings_overrides folded on top.
         settings = fold_hook_configs(
             {}, build_mngr_hook_configs(self.agent_config, is_unattended=self.is_unattended_enabled())
+        )
+        settings = _apply_settings_overrides(
+            settings,
+            self.agent_config.settings_overrides,
+            allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
         )
 
         settings_path = get_managed_settings_path(self._get_agent_dir())
@@ -1864,7 +1882,7 @@ class ClaudeCoreAgent(
             # (-> _build_settings_json) above. In use_env_config_dir mode there is
             # no per-agent config dir, so write the managed --settings file instead.
             if config.use_env_config_dir:
-                self._configure_agent_hooks(host)
+                self._configure_agent_hooks(host, mngr_ctx)
 
             # should be done by now, just wanted to do in parallel for latency reasons
             provision_backgroun_script_thread.join(60.0)
@@ -2261,6 +2279,18 @@ class ClaudeAgent(
                     "use_env_config_dir=True is only supported for local hosts; "
                     "this agent targets a non-local host. Disable use_env_config_dir "
                     "or move the agent to a local host."
+                )
+            # mngr injects its own `--settings` (the managed hooks file) in this mode, which
+            # would collide with a user-supplied `--settings` (Claude is last-wins). mngr
+            # can't reliably merge them -- a `--settings` value may be inline JSON, not a
+            # file -- so fail fast and point at the supported alternatives.
+            if _has_settings_flag(config.cli_args) or _has_settings_flag(options.agent_args):
+                raise UserInputError(
+                    "use_env_config_dir=True passes mngr's own `--settings` to claude (to load its "
+                    "hooks), which collides with the `--settings` you supplied via cli_args/agent_args. "
+                    "Put those settings in the agent type's `settings_overrides` (applied in this mode), "
+                    "or set use_env_config_dir=False so mngr provisions a per-agent config dir and claude "
+                    "layers your `--settings` natively."
                 )
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip when auto_dismiss_dialogs is True because
