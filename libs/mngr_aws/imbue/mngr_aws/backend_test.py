@@ -1,6 +1,7 @@
 """Tests for AWS provider backend registration."""
 
 from collections.abc import Iterator
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -13,8 +14,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -28,6 +32,7 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -378,6 +383,149 @@ def test_offline_discovered_host_from_instance_returns_none_without_host_id_tag(
     """An instance lacking the ``mngr-host-id`` identity tag is not a mngr host (returns None)."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     assert provider._offline_discovered_host_from_instance(_normalized_instance({"Name": "mngr-other"})) is None
+
+
+class _RecordingStateBucket:
+    """In-memory ``StateBucket`` that records which host's state was deleted.
+
+    Lets the offline-destroy tests assert that ``destroy_host`` removes the
+    stopped host's mirrored state (the only externally observable effect of the
+    offline teardown besides the EC2 terminate call), without standing up a real
+    S3 bucket.
+    """
+
+    def __init__(self, record_json: str | None = None) -> None:
+        self.deleted_host_ids: list[HostId] = []
+        self._record_json = record_json
+
+    def write_host_record_json(self, host_id: HostId, record_json: str) -> None: ...
+
+    def read_host_record_json(self, host_id: HostId) -> str | None:
+        return self._record_json
+
+    def write_agent_record(self, host_id: HostId, agent_id: str, data: Mapping[str, object]) -> None: ...
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        return []
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None: ...
+
+    def delete_host_state(self, host_id: HostId) -> None:
+        self.deleted_host_ids.append(host_id)
+
+    def host_dir_prefix_has_objects(self, host_id: HostId) -> bool:
+        return False
+
+    def volume_for_host(self, host_id: HostId) -> Volume:
+        raise NotImplementedError
+
+
+def _seed_state_store_bucket(provider: AwsProvider, record_json: str | None = None) -> _RecordingStateBucket:
+    """Pre-seed the provider's cached ``_state_store`` with a recording bucket."""
+    bucket = _RecordingStateBucket(record_json)
+    provider.__dict__["_state_store"] = BucketHostStateStore(bucket=bucket, bucket_label="test bucket")
+    return bucket
+
+
+def _stopped_host_record_json(host_id: HostId, *, vps_ssh_key_id: str) -> str:
+    """A mirrored stopped-host record carrying the per-host SSH key id to clean up on destroy."""
+    return VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="myhost",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+        config=VpsHostConfig(
+            vps_instance_id=VpsInstanceId("i-stopped"),
+            region="us-east-1",
+            plan="t3.small",
+            container_name="mngr-c",
+            volume_name="mngr-vol",
+            vps_ssh_key_id=vps_ssh_key_id,
+        ),
+    ).model_dump_json()
+
+
+def _stopped_instance_describe_response(instance_id: str, host_id: HostId) -> dict:
+    return _describe_instances_response(
+        [_instance_with_tags(instance_id, "stopped", "", {"mngr-host-id": str(host_id), "mngr-provider": "aws-test"})]
+    )
+
+
+def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx: MngrContext) -> None:
+    """Destroying a STOPPED host terminates its EC2 instance and removes its external state.
+
+    The base SSH/volume teardown raises ``HostNotFoundError`` for a stopped host
+    (no reachable vps_ip), so ``OfflineCapableVpsProvider.destroy_host`` must
+    fall back to the offline path: resolve the instance by its ``mngr-host-id`` tag,
+    terminate it, and delete the mirrored state. This is the fix for the leak where
+    ``mngr destroy`` of a stopped host left the instance running.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    seed_stopped_host_record(provider, host_id)
+    bucket = _seed_state_store_bucket(provider, _stopped_host_record_json(host_id, vps_ssh_key_id="mngr-key"))
+    # The offline path resolves the instance from the tag listing, terminates it,
+    # then cleans up the per-host EC2 KeyPair recovered from the mirrored record.
+    stubber.add_response("describe_instances", _stopped_instance_describe_response("i-stopped", host_id))
+    stubber.add_response("terminate_instances", {})
+    stubber.add_response("delete_key_pair", {})
+    stubber.activate()
+    try:
+        provider.destroy_host(host_id)
+    finally:
+        stubber.deactivate()
+    stubber.assert_no_pending_responses()
+    assert bucket.deleted_host_ids == [host_id]
+
+
+def test_destroy_host_offline_fails_loudly_when_terminate_fails(temp_mngr_ctx: MngrContext) -> None:
+    """A stopped instance that cannot be terminated raises rather than reporting success.
+
+    A leaked, still-billing instance must never masquerade as a clean destroy: when
+    ``terminate_instances`` fails with a non-"already gone" error, the offline
+    teardown records a ``HOST_RESOURCE_REMAINS`` failure and raises a
+    ``CleanupFailedGroup`` (so the CLI exits non-zero).
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    seed_stopped_host_record(provider, host_id)
+    _seed_state_store_bucket(provider)
+    stubber.add_response("describe_instances", _stopped_instance_describe_response("i-stuck", host_id))
+    stubber.add_client_error("terminate_instances", service_error_code="InternalError", http_status_code=500)
+    stubber.activate()
+    try:
+        with pytest.raises(CleanupFailedGroup) as exc_info:
+            provider.destroy_host(host_id)
+    finally:
+        stubber.deactivate()
+    categories = {failure.category for failure in exc_info.value.failures}
+    assert CleanupFailureCategory.HOST_RESOURCE_REMAINS in categories
+
+
+def test_destroy_host_offline_is_idempotent_when_instance_already_gone(temp_mngr_ctx: MngrContext) -> None:
+    """Destroying a stopped host whose instance is already terminated still succeeds and clears state.
+
+    A terminated instance is absent from the tag listing, so ``_find_instance_for_host``
+    returns None (after its cache-refresh retry => two describe calls). The teardown
+    treats that as already-done (no terminate call) and still removes the external
+    state, so a re-run of ``destroy`` is idempotent rather than a hard failure.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    seed_stopped_host_record(provider, host_id)
+    bucket = _seed_state_store_bucket(provider)
+    stubber.add_response("describe_instances", _describe_instances_response([]))
+    stubber.add_response("describe_instances", _describe_instances_response([]))
+    stubber.activate()
+    try:
+        provider.destroy_host(host_id)
+    finally:
+        stubber.deactivate()
+    stubber.assert_no_pending_responses()
+    assert bucket.deleted_host_ids == [host_id]
 
 
 def _reachable_provider_with_record(temp_mngr_ctx: MngrContext, host_id: HostId) -> AwsProvider:

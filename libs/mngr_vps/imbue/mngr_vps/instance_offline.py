@@ -1,4 +1,5 @@
 import shlex
+import tempfile
 from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -20,7 +21,9 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
-from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -33,13 +36,16 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
 from imbue.mngr_vps.host_state_store import StateBucket
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.instance import is_vps_resource_already_gone
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.systemd import render_systemd_unit
 
@@ -196,9 +202,13 @@ class OfflineCapableVpsProvider(VpsProvider):
             host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
         )
         # The placement is stopped (host_dir quiesced) but the instance is still
-        # reachable: capture host_dir to the bucket now, before the pause.
-        self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
-        self._pause_cloud_instance(host_record.config.vps_instance_id)
+        # reachable: capture host_dir to the bucket now, before the pause. ``capture``
+        # raises on failure, so pause in a ``finally`` -- a capture failure surfaces
+        # (failing ``mngr stop``) without ever leaving a running instance.
+        try:
+            self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
+        finally:
+            self._pause_cloud_instance(host_record.config.vps_instance_id)
 
     def start_host(
         self,
@@ -279,6 +289,104 @@ class OfflineCapableVpsProvider(VpsProvider):
         # refreshes BOOT activity on resume, so auto-stop-on-idle keeps working
         # across resumes with no provider-specific step here.
         return super().start_host(host_id, snapshot_id)
+
+    def destroy_host(self, host: HostInterface | HostId) -> None:
+        """Destroy a host, falling back to a cloud-API teardown when it is stopped.
+
+        The base ``VpsProvider.destroy_host`` resolves the instance through the
+        SSH/volume host record, so a STOPPED (deallocated / powered-off) instance --
+        whose disk persists but whose OS is down -- makes it raise
+        ``HostNotFoundError`` and leak the still-billing instance and its mirrored
+        state. This override runs the base teardown first (it succeeds for a running
+        host), and on that ``HostNotFoundError`` falls back to the offline path: it
+        resolves the instance from its ``mngr-host-id`` tag/label (no SSH), terminates
+        it through the same ``vps_client.destroy_instance`` primitive the online path
+        uses, and deletes the external state (host + agent records, and any captured
+        ``host_dir`` objects).
+
+        Failing loudly is the point: a termination that could not be carried out
+        raises a ``CleanupFailedGroup`` (non-zero exit) rather than reporting success,
+        so a leaked instance can never masquerade as a clean destroy. A genuinely
+        already-gone instance (absent from the listing) is idempotent success -- the
+        external state is still cleaned up.
+        """
+        try:
+            super().destroy_host(host)
+            return
+        except HostNotFoundError:
+            pass
+        host_id = host.id if isinstance(host, HostInterface) else host
+        logger.info("Host {} is unreachable; destroying it via the offline path", host_id)
+        self._destroy_offline_host(host_id)
+
+    def _destroy_offline_host(self, host_id: HostId) -> None:
+        """Terminate a stopped host's instance via the cloud API and delete its external state.
+
+        Resolves the instance from its identity tag/label (the listing excludes
+        already-terminated instances, so an absent instance is benign). Terminates
+        through ``vps_client.destroy_instance`` and records a real failure -- raised as
+        a ``CleanupFailedGroup`` -- when the instance exists but could not be
+        terminated, so the still-billing instance is never reported as gone. The
+        per-host provider SSH key (recovered from the mirrored record) and the external
+        state (host + agent records, captured ``host_dir``) are cleaned up last,
+        including in the already-gone case.
+        """
+        self._evict_cached_host(host_id)
+        with collecting_cleanup_failures() as failures:
+            # Terminate the (still-billing) instance first, before any state-store
+            # read -- a flaky mirror read must never block the billing-critical step.
+            instance = self._find_instance_for_host(host_id)
+            # An instance still present in the listing must be terminated; an absent
+            # one is already gone (benign) and only its external state is cleaned up.
+            if instance is not None:
+                instance_id = VpsInstanceId(instance["id"])
+                with log_span("Terminating stopped cloud instance {}", instance_id):
+                    try:
+                        self.vps_client.destroy_instance(instance_id)
+                    except MngrError as e:
+                        logger.warning("Failed to terminate stopped instance {}: {}", instance_id, e)
+                        if not is_vps_resource_already_gone(e):
+                            failures.append(
+                                CleanupFailure(
+                                    category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                    message=(
+                                        f"failed to terminate stopped instance {instance_id} for host {host_id}: {e}"
+                                    ),
+                                    host_id=host_id,
+                                )
+                            )
+            else:
+                logger.debug(
+                    "No instance found for stopped host {}; treating its termination as already done", host_id
+                )
+
+            # Clean up the per-host provider SSH key (the same teardown step the online
+            # destroy runs). The id is recovered from the mirrored record; it is not
+            # required to terminate the instance, so this runs after the terminate
+            # above. An "already gone" (404/410) response is benign; any other error
+            # means a key that may still be registered.
+            mirrored_record = self._state_store.read_host_record(host_id)
+            ssh_key_id = mirrored_record.config.vps_ssh_key_id if mirrored_record and mirrored_record.config else None
+            if ssh_key_id is not None:
+                try:
+                    self.vps_client.delete_ssh_key(ssh_key_id)
+                except MngrError as e:
+                    logger.warning("Failed to delete SSH key from provider: {}", e)
+                    if not is_vps_resource_already_gone(e):
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to delete SSH key {ssh_key_id} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
+
+            # Delete the external mirror last, so the host stops appearing in offline
+            # listings only once the instance is actually gone (or was already gone).
+            # The store removal is idempotent and tolerates an absent record; a storage
+            # error propagates so a failed cleanup is not silently dropped.
+            self._delete_host_record_externally(host_id)
+            logger.info("Stopped host {} destroyed via the offline path", host_id)
 
     @abstractmethod
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
@@ -398,6 +506,23 @@ class OfflineCapableVpsProvider(VpsProvider):
         the box at ``mngr stop``, and by ``_idle_sentinel_path_on_outer``.
         """
         return self._realizer.host_dir_path_on_outer(host_id)
+
+    def _pull_host_dir_to_local(self, host_id: HostId, vps_ip: str, local_dir: Path) -> None:
+        """Rsync the host's ``host_dir`` off the box into ``local_dir`` (operator-driven capture).
+
+        Opens the operator's outer SSH connection and rsyncs the host_dir tree
+        down. rsync copies the regular-file tree and natively skips sockets / other
+        special files, so a live tmux socket can't sink the capture. A connection
+        or rsync failure raises (as a ``MngrError``).
+        """
+        host_dir_on_outer = self._host_dir_path_on_outer(host_id)
+        cg = ConcurrencyGroup(name="rsync-host-dir-capture")
+        with (
+            translate_outer_concurrency_errors("capture host_dir off the host"),
+            self._make_outer_for_vps_ip(vps_ip) as outer,
+            cg,
+        ):
+            download_directory_from_outer(outer, cg, str(host_dir_on_outer), local_dir)
 
     # =========================================================================
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
@@ -849,6 +974,21 @@ class OfflineCapableVpsProvider(VpsProvider):
             return self._offline_agent_dicts_for(host_id)
 
 
+def _read_local_file_tree(root: Path) -> dict[str, bytes]:
+    """Read every regular file under ``root`` into a ``{posix-relpath: bytes}`` map.
+
+    Used after rsyncing a captured ``host_dir`` into a local temp dir: walks the
+    tree and reads regular files only, skipping symlinks and any special files
+    rsync may have left behind. Keys are POSIX-relative to ``root``.
+    """
+    files: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        files[path.relative_to(root).as_posix()] = path.read_bytes()
+    return files
+
+
 class BucketHostDirBackend(HostDirBackend):
     """Operator-driven offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
 
@@ -881,33 +1021,42 @@ class BucketHostDirBackend(HostDirBackend):
     def capture(self, host_id: HostId, vps_ip: str) -> None:
         """Pull the host's ``host_dir`` off the box and upload it to the bucket (operator-driven).
 
-        Reads the host_dir tree over the outer-host interface (the operator's SSH
-        connection) and writes each file into the bucket's host_dir volume with the
-        operator's credentials. Best-effort: a connection/storage failure is logged
-        and swallowed so it never breaks ``mngr stop`` -- the offline copy simply
-        stays as of the previous capture. The whole tree is read into memory before
-        upload, which is fine for a bounded ``host_dir`` (events / transcripts).
+        rsyncs the host_dir tree off the box into a local temp dir (via the
+        provider's outer SSH connection), then writes every captured file into the
+        bucket's host_dir volume with the operator's credentials. rsync handles the
+        whole tree and skips sockets / other special files natively, so a live tmux
+        socket can't sink the capture. A genuine failure -- a lost connection, an
+        rsync error, or a bucket write error -- raises (with host_dir context)
+        rather than being swallowed, so the operator knows the offline copy was not
+        captured; an empty host_dir is captured as nothing (no error). The caller
+        (``stop_host``) pauses the instance in a ``finally`` *before* this can
+        propagate, so raising never leaks a running instance: the host is stopped
+        and ``mngr stop`` then surfaces the error. The tree is read into memory
+        before upload, which is fine for a bounded ``host_dir`` (events / transcripts).
         """
-        host_dir_on_outer = self.provider._host_dir_path_on_outer(host_id)
         try:
             with log_span("Capturing host_dir to the bucket for host {}", host_id):
-                with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
-                    files: dict[str, bytes] = {}
-                    for entry in outer.list_directory(host_dir_on_outer, recursive=True):
-                        if entry.file_type == FileType.DIRECTORY:
-                            continue
-                        abs_path = Path(entry.path)
-                        rel = abs_path.relative_to(host_dir_on_outer).as_posix()
-                        files[rel] = outer.read_file(abs_path)
+                with tempfile.TemporaryDirectory(prefix="mngr-host-dir-capture-") as tmp:
+                    local_root = Path(tmp)
+                    self.provider._pull_host_dir_to_local(host_id, vps_ip, local_root)
+                    files = _read_local_file_tree(local_root)
                     if files:
                         self.bucket.volume_for_host(host_id).write_files(files)
-        except (HostConnectionError, MngrError) as e:
-            logger.warning(
-                "Failed to capture host_dir to the bucket for host {}; the offline copy will be as of the "
-                "previous capture: {}",
-                host_id,
-                e,
-            )
+                    else:
+                        logger.debug("host_dir for host {} is empty; nothing to capture", host_id)
+        # A capture failure surfaces (it is NOT swallowed) -- the operator should
+        # know the offline host_dir was not captured. stop_host's ``finally``
+        # guarantees the instance is paused *before* this propagates, so raising
+        # can never leak a running instance: the host is stopped and `mngr stop`
+        # then reports the failure. The expected failure modes (a connection drop,
+        # an rsync failure, or a bucket storage error) are re-raised with host_dir
+        # context; an unexpected error propagates as-is.
+        except (HostConnectionError, MngrError, OSError) as e:
+            raise MngrError(
+                f"Failed to capture host_dir to the bucket for host {host_id}: {e}. The host is stopped, but "
+                "its offline host_dir was not captured, so `mngr event` / `mngr file` on it will be unavailable "
+                "or stale until the next successful stop."
+            ) from e
 
 
 # Identity tags a stopped instance still carries (host id + name), read cheaply
