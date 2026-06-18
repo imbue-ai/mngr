@@ -16,7 +16,7 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 | waiting_reason_field | Y | n/a | - | Y | Y | Y | n/a | n/a |
 | live_output | Y | Y | - | - | - | - | - | Y |
 | session_preservation | Y | Y | Y | Y | Y | Y | n/a | n/a |
-| session_resume | Y | n/a | - | - | - | - | n/a | n/a |
+| session_resume | Y | n/a | Y | Y | Y | Y | n/a | n/a |
 | auto_install | Y | Y | Y | Y | Y | Y | n/a | n/a |
 | unattended_operation | Y | Y | Y | Y | Y | Y | Y | Y |
 | permission_policy | - | - | Y | Y | Y | - | n/a | n/a |

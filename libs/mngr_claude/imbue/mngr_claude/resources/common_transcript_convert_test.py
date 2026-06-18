@@ -91,6 +91,21 @@ def test_converts_assistant_message_with_tokens_and_tool_calls(tmp_path: Path) -
     assert validate_common_transcript_record(event) is None
 
 
+def test_assistant_parts_preserve_text_then_tool_order(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(
+        input_file, [_assistant("u1", text="hello", tool_uses=[{"id": "t1", "name": "Bash", "input": {"cmd": "ls"}}])]
+    )
+    common_transcript_convert.convert(str(input_file), str(output_file))
+    event = _events(output_file)[0]
+    # parts preserve the source order (text block, then tool_use block), unlike the
+    # flat text + tool_calls split.
+    assert event["parts"] == [
+        {"type": "text", "content": "hello"},
+        {"type": "tool_call", "tool_call_id": "t1", "tool_name": "Bash", "input_preview": '{"cmd":"ls"}'},
+    ]
+
+
 def test_converts_user_text_message(tmp_path: Path) -> None:
     input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     _write(input_file, [_user_text("u1", "hi there")])

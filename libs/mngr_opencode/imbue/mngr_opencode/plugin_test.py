@@ -3,6 +3,7 @@
 import json
 import shlex
 import shutil
+import sqlite3
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -12,9 +13,11 @@ from typing import ClassVar
 
 import pytest
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import AgentStartError
@@ -22,6 +25,7 @@ from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -34,11 +38,13 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_DB_RELPATH
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
+from imbue.mngr_opencode.opencode_config import get_opencode_db_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
 from imbue.mngr_opencode.plugin import OpenCodeAgent
@@ -48,6 +54,7 @@ from imbue.mngr_opencode.plugin import _resolve_lifecycle_state_for_permission
 from imbue.mngr_opencode.plugin import _waiting_reason
 from imbue.mngr_opencode.plugin import agent_field_generators
 from imbue.mngr_opencode.plugin import register_agent_type
+from imbue.mngr_opencode.testing import write_opencode_session
 
 
 def test_opencode_agent_config_has_correct_defaults() -> None:
@@ -116,6 +123,11 @@ def test_get_install_binary_name_is_opencode() -> None:
 def test_get_install_command_installs_opencode() -> None:
     agent = OpenCodeAgent.model_construct(agent_config=OpenCodeAgentConfig())
     assert agent.get_install_command() == "curl -fsSL https://opencode.ai/install | bash"
+
+
+def test_get_install_command_pins_version() -> None:
+    agent = OpenCodeAgent.model_construct(agent_config=OpenCodeAgentConfig(version="0.4.10"))
+    assert agent.get_install_command() == "curl -fsSL https://opencode.ai/install | VERSION=0.4.10 bash"
 
 
 def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
@@ -339,6 +351,33 @@ def test_provision_injects_wildcard_allow_when_auto_allow(
     _provision(agent)
     parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
     assert parsed["permission"] == {"*": "allow"}
+
+
+def test_provision_disables_autoupdate_when_policy_never(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """update_policy=NEVER writes autoupdate:false into the per-agent opencode.json."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.NEVER))
+    _provision(agent)
+    parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
+    assert parsed["autoupdate"] is False
+
+
+def test_provision_disables_autoupdate_by_default_on_attended_local(opencode_agent: OpenCodeAgent) -> None:
+    """The default policy disables opencode's auto-update, even on an attended local host."""
+    _provision(opencode_agent)
+    parsed = json.loads(get_opencode_config_file_path(opencode_agent._get_opencode_config_dir()).read_text())
+    assert parsed["autoupdate"] is False
+
+
+def test_provision_leaves_autoupdate_unset_when_policy_auto(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Explicit AUTO opts back into opencode's auto-update (no autoupdate key written)."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.AUTO))
+    _provision(agent)
+    parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
+    assert "autoupdate" not in parsed
 
 
 def test_provision_installs_lifecycle_plugin(opencode_agent: OpenCodeAgent) -> None:
@@ -577,6 +616,170 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
 
     dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
     assert not dest_dir.exists()
+
+
+# =============================================================================
+# Session adoption (--adopt / --from), driven against the real local host
+# =============================================================================
+
+
+def _dest_db_sessions(agent: OpenCodeAgent) -> set[str]:
+    """Return the session ids present in the agent's own ``opencode.db``."""
+    dest_db = get_opencode_db_path_for_data_home(agent._get_opencode_data_home())
+    connection = sqlite3.connect(dest_db)
+    try:
+        return {str(row[0]) for row in connection.execute("SELECT id FROM session").fetchall()}
+    finally:
+        connection.close()
+
+
+def _resolved_work_dir(agent: OpenCodeAgent) -> str:
+    """Return the agent's work dir as opencode stores it (symlinks resolved, e.g. /tmp on macOS)."""
+    return str(Path(agent.work_dir).resolve())
+
+
+@pytest.mark.rsync
+def test_adopt_session_single_copies_db_rebinds_and_resumes(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A single ``--adopt`` copies the source db in, rebinds it to the work dir, and resumes it."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    source_db = tmp_path / "src_a" / "opencode.db"
+    write_opencode_session(source_db, "ses_a", "/old/work", message_id="msg_a")
+
+    agent.adopt_session(
+        agent.host,
+        CreateAgentOptions(agent_type=AgentTypeName("opencode"), adopt_session=(str(source_db),)),
+        agent.mngr_ctx,
+    )
+
+    assert _dest_db_sessions(agent) == {"ses_a"}
+    assert agent._get_root_session_file_path().read_text() == "ses_a"
+    dest_db = get_opencode_db_path_for_data_home(agent._get_opencode_data_home())
+    connection = sqlite3.connect(dest_db)
+    try:
+        directory = connection.execute("SELECT directory FROM session WHERE id='ses_a'").fetchone()[0]
+    finally:
+        connection.close()
+    assert directory == _resolved_work_dir(agent)
+
+
+@pytest.mark.rsync
+def test_adopt_session_multi_merges_both_sessions_and_resumes_last(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """``--adopt A B`` merges both sessions into one db (B folded in) and resumes B (the last)."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    source_a = tmp_path / "src_a" / "opencode.db"
+    source_b = tmp_path / "src_b" / "opencode.db"
+    write_opencode_session(source_a, "ses_a", "/work/a", message_id="msg_a")
+    write_opencode_session(source_b, "ses_b", "/work/b", message_id="msg_b")
+
+    agent.adopt_session(
+        agent.host,
+        CreateAgentOptions(agent_type=AgentTypeName("opencode"), adopt_session=(str(source_a), str(source_b))),
+        agent.mngr_ctx,
+    )
+
+    # Both sessions live in the single dest db; the last named one is the one resumed.
+    assert _dest_db_sessions(agent) == {"ses_a", "ses_b"}
+    assert agent._get_root_session_file_path().read_text() == "ses_b"
+    dest_db = get_opencode_db_path_for_data_home(agent._get_opencode_data_home())
+    connection = sqlite3.connect(dest_db)
+    try:
+        messages = {row[0] for row in connection.execute("SELECT id FROM message").fetchall()}
+        # Both adopted sessions are rebound to this agent's work dir.
+        directories = {row[0] for row in connection.execute("SELECT directory FROM session").fetchall()}
+    finally:
+        connection.close()
+    assert messages == {"msg_a", "msg_b"}
+    assert directories == {_resolved_work_dir(agent)}
+
+
+@pytest.mark.rsync
+def test_adopt_session_from_clone_resumes_the_clone(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """``--adopt A --from X`` merges A and the clone, then resumes the clone's session."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    source_a = tmp_path / "src_a" / "opencode.db"
+    write_opencode_session(source_a, "ses_a", "/work/a", message_id="msg_a")
+
+    # The clone source is a state dir whose native store holds one root session.
+    source_state_dir = tmp_path / "source_agent"
+    clone_db = source_state_dir / AGENT_OPENCODE_DB_RELPATH
+    write_opencode_session(clone_db, "ses_clone", "/work/clone", message_id="msg_clone")
+    source_location = HostLocation(host=agent.host, path=source_state_dir)
+
+    agent.adopt_session(
+        agent.host,
+        CreateAgentOptions(
+            agent_type=AgentTypeName("opencode"),
+            adopt_session=(str(source_a),),
+            source_agent_state_location=source_location,
+        ),
+        agent.mngr_ctx,
+    )
+
+    # Both the explicit session and the clone's session are present; the clone is resumed.
+    assert _dest_db_sessions(agent) == {"ses_a", "ses_clone"}
+    assert agent._get_root_session_file_path().read_text() == "ses_clone"
+
+
+def test_adopt_session_from_clone_with_no_store_starts_fresh(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A ``--from`` clone whose source has no opencode store warns and starts fresh, not a hard error."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    # A source state dir with no native opencode store at all.
+    source_location = HostLocation(host=agent.host, path=tmp_path / "empty_source")
+
+    agent.adopt_session(
+        agent.host,
+        CreateAgentOptions(agent_type=AgentTypeName("opencode"), source_agent_state_location=source_location),
+        agent.mngr_ctx,
+    )
+
+    # No session was resumed and no db was staged onto the agent: it starts fresh.
+    assert not agent._get_root_session_file_path().exists()
+    assert not get_opencode_db_path_for_data_home(agent._get_opencode_data_home()).exists()
+
+
+class _RemoteSourceHost(FrozenModel):
+    """A non-local host stand-in whose file reads map onto the local filesystem (for the remote-clone path)."""
+
+    is_local: bool = False
+
+    def path_exists(self, path: Path) -> bool:
+        return path.exists()
+
+    def read_file(self, path: Path) -> bytes:
+        return path.read_bytes()
+
+
+@pytest.mark.rsync
+def test_adopt_cloned_session_from_remote_source_pulls_db_locally(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A ``--from`` clone whose source lives on a remote host pulls the db locally, then stages it.
+
+    ``_localize_source_db`` must copy the source ``opencode.db`` (and its sidecars) off the remote host
+    before the local stdlib-``sqlite3`` merge/rebind can touch it; the staged db then lands on the dest.
+    """
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    source_state_dir = tmp_path / "remote_source"
+    clone_db = source_state_dir / AGENT_OPENCODE_DB_RELPATH
+    write_opencode_session(clone_db, "ses_remote", "/remote/work", message_id="msg_remote")
+    # A read-only sidecar alongside the db so the pull-sidecars branch is exercised too.
+    (clone_db.parent / "opencode.db-wal").write_bytes(b"")
+    source_location = HostLocation.model_construct(host=_RemoteSourceHost(), path=source_state_dir)
+
+    agent.adopt_session(
+        agent.host,
+        CreateAgentOptions(agent_type=AgentTypeName("opencode"), source_agent_state_location=source_location),
+        agent.mngr_ctx,
+    )
+
+    assert _dest_db_sessions(agent) == {"ses_remote"}
+    assert agent._get_root_session_file_path().read_text() == "ses_remote"
 
 
 # =============================================================================

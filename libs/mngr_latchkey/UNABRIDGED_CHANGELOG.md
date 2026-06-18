@@ -4,6 +4,17 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+- Avoid `logger.warning()`.
+- Replace `logger.debug()` with `logger.info()` to prevent logs from growing needlessly.
+
+Fixed a bug where applying a latchkey permission grant could fail with a 500 (`ENOENT ... latchkey_permissions.json.tmp.<hex>`) when the per-host directory did not exist yet. The gateway's `permissions` extension (`POST /permissions/rules`) now creates the target file's parent directories (e.g. `hosts/<host_id>/`) before writing, matching its documented "creates the target file if it does not yet exist" behavior.
+
+Added `maybe_recover_host_permissions_for_agent` to `agent_setup`: a best-effort repair that, given an agent's opaque permissions handle, host id, and agent id, materializes the canonical per-host permissions file (and points the opaque handle's symlink at it, recreating the handle if it had gone missing) when that file is missing, and idempotently re-registers the agent in the host's `minds-api-proxy` allowlist (closing the gap where discovery-time auto-register skipped the agent because the host file did not exist yet). Cheap in the common case (the canonical file already exists). Used by minds to self-heal hosts whose agent-creation finalize/link step was skipped or failed.
+
+Added `point_opaque_handle_at_host` to `store`: (re)creates an opaque permissions handle as a symlink to the canonical host file without moving anything (the symlink-only tail of `link_opaque_permissions_to_host`, now shared between the two).
+
 ## 2026-06-16
 
 Exposed the catch-all permission name as a public `WILDCARD_PERMISSION_NAME` constant (still `any`) so the minds permission dialog can present it to users as `all` while keeping the stored/granted value unchanged.
