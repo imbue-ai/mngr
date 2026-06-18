@@ -106,8 +106,8 @@ class AssistantMessageRecord(_RecordModel):
     # carries both; ``parts`` is authoritative for ordering). ``parts_ordered`` is False when
     # the emitter could only synthesize a best-effort order because its native format does not
     # record where tool calls sat relative to the text (antigravity); it is True when the order
-    # is faithful (claude, pi-coding, opencode) or trivial (codex, whose assistant messages are
-    # text-only).
+    # is faithful (claude, pi-coding, opencode) or trivial (codex, whose assistant turns are
+    # either text-only or a single tool_call, each its own rollout item).
     # ``model`` may be unknown ("" or null); ``usage`` is populated only by CLIs that expose
     # token counts; ``finish_reason`` (the OTel GenAI term for the stop reason) is absent on
     # agents that do not report one (e.g. pi-coding).
