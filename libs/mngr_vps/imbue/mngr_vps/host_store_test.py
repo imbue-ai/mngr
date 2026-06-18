@@ -1,4 +1,4 @@
-"""Tests for VPS Docker host store data types and volume-backed I/O."""
+"""Tests for VPS host store data types and volume-backed I/O."""
 
 import json
 import shlex
@@ -70,7 +70,7 @@ def test_vps_host_config_optional_fields() -> None:
     assert config.vps_ssh_key_id is None
 
 
-def test_vps_docker_host_record_optional_fields() -> None:
+def test_vps_host_record_optional_fields() -> None:
     certified_data = _make_certified_data()
     record = VpsHostRecord(certified_host_data=certified_data)
     assert record.vps_ip is None
@@ -80,7 +80,7 @@ def test_vps_docker_host_record_optional_fields() -> None:
     assert record.container_id is None
 
 
-def test_vps_docker_host_record_serialization_roundtrip() -> None:
+def test_vps_host_record_serialization_roundtrip() -> None:
     certified_data = _make_certified_data()
     config = VpsHostConfig(
         vps_instance_id=VpsInstanceId("inst-abc123"),

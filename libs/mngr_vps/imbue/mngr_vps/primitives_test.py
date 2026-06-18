@@ -1,4 +1,4 @@
-"""Tests for VPS Docker primitives."""
+"""Tests for VPS primitives."""
 
 import pytest
 

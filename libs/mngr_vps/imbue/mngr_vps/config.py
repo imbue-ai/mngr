@@ -12,7 +12,7 @@ from imbue.mngr_vps.primitives import IsolationMode
 
 
 class VpsProviderConfig(ProviderInstanceConfig):
-    """Base configuration for VPS Docker providers."""
+    """Base configuration for VPS providers (container or bare placement)."""
 
     isolation: IsolationMode = Field(
         default=IsolationMode.CONTAINER,

@@ -31,8 +31,8 @@ from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import HOST_ID_METADATA_KEY
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
-from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
@@ -45,7 +45,6 @@ from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
-from imbue.mngr_vps.instance_offline import normalized_tags_to_dict
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
@@ -344,9 +343,13 @@ class GcpProvider(OfflineCapableVpsProvider):
     # so ``_host_dir_backend`` stays the base ``NullHostDirBackend`` and nothing is installed.
 
     def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Match on the GCE-label-encoded host id (GCE labels cannot hold a raw mngr host id)."""
-        wanted = f"mngr-host-id={to_gce_label_value(str(host_id))}"
-        return [instance for instance in self._list_instances_cached() if wanted in instance.get("tags", ())]
+        """Match on the host id stored verbatim in instance metadata (GCE labels cannot hold a raw mngr host id)."""
+        wanted = str(host_id)
+        return [
+            instance
+            for instance in self._list_instances_cached()
+            if self._metadata_dict(instance).get(HOST_ID_METADATA_KEY) == wanted
+        ]
 
     # =========================================================================
     # Offline discovery + the metadata-backed state store (so STOPPED hosts list
@@ -379,22 +382,23 @@ class GcpProvider(OfflineCapableVpsProvider):
         return dict(metadata) if isinstance(metadata, Mapping) else {}
 
     def _host_name_from_instance(self, instance: Mapping[str, Any]) -> HostName:
-        """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id label)."""
-        name = self._metadata_dict(instance).get(HOST_NAME_METADATA_KEY, "")
+        """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id metadata)."""
+        metadata = self._metadata_dict(instance)
+        name = metadata.get(HOST_NAME_METADATA_KEY, "")
         if name.startswith(_HOST_NAME_PREFIX):
             return HostName(name[len(_HOST_NAME_PREFIX) :])
         if name:
             return HostName(name)
-        return HostName(normalized_tags_to_dict(instance).get("mngr-host-id", "unknown"))
+        return HostName(metadata.get(HOST_ID_METADATA_KEY, "unknown"))
 
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from an instance's labels + metadata, or None.
+        """Build a STOPPED-state DiscoveredHost from an instance's metadata, or None.
 
-        Reads only the cheap identity label/metadata stamped at create (host id +
+        Reads only the cheap identity metadata stamped at create (host id +
         host name), never the metadata state record -- the full record is read from
         the state store on demand.
         """
-        host_id_str = normalized_tags_to_dict(instance).get("mngr-host-id")
+        host_id_str = self._metadata_dict(instance).get(HOST_ID_METADATA_KEY)
         if host_id_str is None:
             return None
         return DiscoveredHost(

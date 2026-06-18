@@ -175,8 +175,9 @@ def build_host_dir_sync_script(sync_command: str) -> str:
 
 class OfflineCapableVpsProvider(VpsProvider):
     """``VpsProvider`` for cloud providers whose hosts can be stopped while
-    their disk persists, with host/agent identity mirrored into instance
-    tags/metadata.
+    their disk persists, with host/agent records mirrored to an external
+    ``HostStateStore`` (an object-storage state bucket for AWS/Azure, instance
+    metadata for GCP).
 
     A stopped (deallocated / powered-off) instance keeps its disk but is
     SSH-unreachable, so the volume-backed base discovery and host resolution
@@ -185,9 +186,9 @@ class OfflineCapableVpsProvider(VpsProvider):
     back to that listing whenever the on-volume path raises ``HostNotFoundError``.
 
     Subclasses (AWS/GCP/Azure) supply the per-provider instance-data hooks below.
-    The agent-record *write* side (``persist_agent_data`` /
-    ``remove_persisted_agent_data``) stays provider-specific because the tag vs
-    metadata write APIs differ too much to share.
+    The agent-record write side (``persist_agent_data`` /
+    ``remove_persisted_agent_data``) is shared here: both delegate uniformly to
+    the provider's ``_state_store``.
 
     It also owns the shared cloud stop/start lifecycle: ``stop_host`` pauses the
     whole instance (so a paused agent costs only disk) and ``start_host`` resumes
@@ -538,8 +539,8 @@ class OfflineCapableVpsProvider(VpsProvider):
     def _host_dir_backend(self) -> HostDirBackend:
         """The offline ``host_dir`` capability: bucket-backed when enabled + present, else a no-op.
 
-        Offline ``host_dir`` is a bucket feature, so this lives on the offline-capable
-        layer (not the tag mirror). The default is the no-op ``NullHostDirBackend`` --
+        Offline ``host_dir`` is a bucket feature, so it lives on this
+        offline-capable layer. The default is the no-op ``NullHostDirBackend`` --
         correct for a provider with no bucket (e.g. GCP). Providers that mirror
         host_dir to a bucket override this with a selected-once cached property, so
         the host_dir paths below never re-test ``is_offline_host_dir_enabled`` /

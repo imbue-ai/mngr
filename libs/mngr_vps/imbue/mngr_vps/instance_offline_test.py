@@ -1,4 +1,4 @@
-"""Tests for the offline/tag-mirror VPS provider subsystem."""
+"""Tests for the offline VPS provider subsystem (external HostStateStore mirror)."""
 
 from collections.abc import Iterator
 from collections.abc import Mapping

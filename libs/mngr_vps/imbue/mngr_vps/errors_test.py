@@ -1,4 +1,4 @@
-"""Tests for VPS Docker error hierarchy."""
+"""Tests for VPS error hierarchy."""
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_vps.errors import VpsApiError
