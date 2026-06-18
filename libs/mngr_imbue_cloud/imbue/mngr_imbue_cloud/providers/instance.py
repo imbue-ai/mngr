@@ -40,6 +40,7 @@ from typing import Any
 from typing import Final
 from typing import assert_never
 
+import httpx
 import paramiko
 from loguru import logger
 from pydantic import ConfigDict
@@ -52,6 +53,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -399,14 +401,35 @@ class ImbueCloudProvider(BaseProviderInstance):
         if self._leased_hosts_cache is not None:
             return self._leased_hosts_cache
         account = self._require_account()
-        token = self._get_access_token(account)
         # Do NOT swallow a discovery failure to an empty list: a transient
         # connector outage / expired token would then look like "this account
         # has zero leased hosts", which the discovery layer cannot distinguish
         # from a real empty result (and which defeats mngr's mark-UNKNOWN-on-
         # provider-failure safeguard). Let it propagate -- this method already
         # raises (via _require_account), so callers tolerate it.
-        self._leased_hosts_cache = self.client.list_hosts(token)
+        #
+        # Narrow the propagated type by cause so consumers can tell "the
+        # connector is unreachable" apart from "auth/account problem": a
+        # transport-level httpx failure (connection refused, DNS, timeout --
+        # the flaky-wifi / connector-down case) becomes ProviderUnavailableError,
+        # which recovery UIs treat as "don't bother restarting, just retry". A
+        # connector status error (ImbueCloudConnectorError) or an auth failure
+        # (ImbueCloudAuthError) keeps its own type and falls through to the
+        # generic "can't reach your workspace" handling instead. The curated
+        # user_help_text keeps ProviderUnavailableError from telling a cloud user
+        # to "start Docker".
+        try:
+            token = self._get_access_token(account)
+            self._leased_hosts_cache = self.client.list_hosts(token)
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailableError(
+                self.name,
+                f"could not reach Imbue Cloud: {exc}",
+                user_help_text=(
+                    "Check your internet connection and try again. If the problem persists, "
+                    "Imbue Cloud may be temporarily unavailable."
+                ),
+            ) from exc
         return self._leased_hosts_cache
 
     def discover_hosts(
