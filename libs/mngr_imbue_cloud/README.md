@@ -10,10 +10,10 @@ Each signed-in account is its own provider instance entry in `~/.mngr/config.tom
 [providers.imbue_cloud_alice]
 backend = "imbue_cloud"
 account = "alice@imbue.com"
-# connector_url is optional; defaults to the prod URL.
+# connector_url is optional; when unset, the env var below is used.
 ```
 
-The default connector URL can be overridden via the `MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL` environment variable.
+There is no baked-in default connector URL: it comes from the per-instance `connector_url` field, or, when that is unset, the `MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL` environment variable. If neither is set, the provider raises.
 
 ## Sign in
 
@@ -51,7 +51,7 @@ minds drives this automatically: it tries `fast_mode=require` first and, on `Fas
 ## Destroy / delete / stop
 
 - `mngr destroy <agent>` is **terminal**: it wipes the workspace and its data, then releases the lease back to the pool. The user's data is gone before the lease is released.
-- `mngr delete <agent>` (or `mngr imbue_cloud hosts release <lease-id>`) runs the same flow; it's the path mngr's GC takes after the destroyed-host grace period. Safe to re-run on an already-released lease.
+- `mngr delete <agent>` (or `mngr imbue_cloud hosts release <host-db-id>`) runs the same flow; it's the path mngr's GC takes after the destroyed-host grace period. Safe to re-run on an already-released lease.
 - `mngr stop <agent>` is the "resume later" path: it stops the container but preserves the lease and on-disk data, and `mngr start <agent>` brings the same workspace back up.
 
 ## Buckets

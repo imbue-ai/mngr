@@ -8,10 +8,10 @@ This package is a library -- it provides abstract base classes that concrete VPS
 
 How an agent sits on the VPS is a selectable axis, chosen by the `isolation` config knob and implemented by a `HostRealizer`:
 
-- **`isolation=CONTAINER`** (default): the agent runs inside a Docker container, reached at `<vps_ip>:2222`. This is the original behavior and the only fully-wired shape today; the architecture below describes it.
-- **`isolation=NONE`** (bare): the agent runs directly on the VPS OS, reached at `<vps_ip>:22`. Supported only on providers with a machine stop/start lifecycle (aws/gcp/azure) -- a provider without one rejects `isolation=NONE` at create time, since the idle bare agent stops the machine and would otherwise strand it.
+- **`isolation=CONTAINER`** (default): the agent runs inside a Docker container, reached at `<vps_ip>:2222`. This is the original behavior; the architecture below describes it.
+- **`isolation=NONE`** (bare): the agent runs directly on the VPS OS as root, reached at `<vps_ip>:22`. Supported only on providers with a machine stop/start lifecycle (aws/gcp/azure) -- a provider without one rejects `isolation=NONE` at create time (`BareIsolationNotSupportedError`), since the idle bare agent powers the machine off and would otherwise strand it.
 
-The genuinely Docker-specific code lives in `docker_realizer.py` and `container_setup.py`; the rest of the package (provisioning, instance lifecycle, host record, discovery) is shape-agnostic.
+The provider selects the realizer from `config.isolation` for newly-created hosts, and resolves an existing host's recorded placement (from its `mngr-isolation` instance marker or its record) for operations on it -- so a bare host stays reachable even under a default-container config, and vice versa. The Docker-specific code lives in `docker_realizer.py` and `container_setup.py`; the bare path in `bare_realizer.py`; the rest of the package (provisioning, instance lifecycle, host record, discovery) is shape-agnostic.
 
 ## Architecture (container shape)
 
@@ -115,7 +115,7 @@ mngr create my-agent --provider vultr -b --vultr-plan=vc2-2c-4gb -b --file=Docke
 --memory=4g           # Memory limit
 ```
 
-## Host lifecycle
+## Host lifecycle (container shape)
 
 | Operation | What happens |
 |-----------|-------------|
@@ -124,6 +124,8 @@ mngr create my-agent --provider vultr -b --vultr-plan=vc2-2c-4gb -b --file=Docke
 | `start` | `docker start` the container. Wait for SSH. |
 | `destroy` | Remove container, best-effort `btrfs subvolume delete` of the per-host subvolume (drops `host_state.json`, `agents/`, and `host_dir/` together), remove the docker named volume entry, destroy VPS (which also takes the loop file with it), clean up SSH keys |
 | idle timeout | `docker stop` the container. VPS keeps running. |
+
+In the bare shape (`isolation=NONE`) there is no container, volume, or btrfs: `create` installs host packages and the `host_dir` layout under a fixed root-disk directory (`/var/lib/mngr-host`) with the agent running as the VM's root sshd; `stop`/`start`/idle stop and restart the whole machine (the substrate's job); `destroy` destroys the VPS. Because the machine is unreachable while stopped, offline-capable providers (aws/azure/gcp) mirror the host record to a `HostStateStore` (object-storage bucket or GCP metadata) so `mngr list`/`start` still work; this mirror also serves stopped container hosts on those providers.
 
 ## Implementing a new VPS provider
 
@@ -136,7 +138,8 @@ To add support for a new VPS provider (e.g., DigitalOcean, Hetzner):
    - `_credentials_configured()` — return whether the provider's API credentials are resolvable
    The shared discovery flow (SSH-into-each-VPS, read state container, fall back to cache on failure)
    lives on `VpsProvider` itself; subclasses only need to wire up these two hooks.
-4. Create a `ProviderBackendInterface` implementation and register via pluggy entry points
+4. Override `_supports_bare_isolation` to return True only if the provider's substrate can stop and later restart a machine (required for `isolation=NONE`; the default is False)
+5. Create a `ProviderBackendInterface` implementation and register via pluggy entry points
 
 The btrfs loop-file setup is provided by the container realizer (`DockerRealizer`, in its `realize_placement`); new providers do not need to install `btrfs-progs` or wire up the loop mount themselves as long as the outer host is a Debian-family Linux with `apt-get` available.
 

@@ -18,7 +18,7 @@ api_key = "YOUR_VULTR_API_KEY"
 
 ```bash
 mngr create my-agent --provider vultr
-mngr create my-agent --provider vultr -b --region=sjc -b --plan=vc2-2c-4gb
+mngr create my-agent --provider vultr -b --vultr-region=sjc -b --vultr-plan=vc2-2c-4gb
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent

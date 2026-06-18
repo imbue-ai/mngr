@@ -2,9 +2,9 @@
 
 GCP Compute Engine provider backend plugin for mngr. Runs agents in Docker containers on Google Compute Engine (GCE) VMs.
 
-> This plugin is **experimental**. The shared `mngr_vps_docker` machinery underneath it is well-tested, but GCP-specific defaults and the IAM permission set may change. Treat the security defaults (see "GCP-specific configuration") as a starting point: review the firewall rule, image choice, service account, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental**. The shared `mngr_vps` machinery underneath it is well-tested, but GCP-specific defaults and the IAM permission set may change. Treat the security defaults (see "GCP-specific configuration") as a starting point: review the firewall rule, image choice, service account, and `auto_shutdown_seconds` before pointing this at production resources.
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -106,7 +106,7 @@ GCE VMs are zonal, so the placement knob is `--gcp-zone=` (e.g. `us-west1-b`), n
 
 ## GCP-specific configuration
 
-These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
+These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |

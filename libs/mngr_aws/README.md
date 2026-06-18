@@ -2,9 +2,9 @@
 
 AWS provider backend plugin for mngr. Runs agents in Docker containers on Amazon EC2 instances.
 
-> This plugin is **experimental**. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults may change. Treat the security defaults (see "AWS-specific configuration") as a starting point: review the security group, AMI choice, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental**. The shared `mngr_vps` machinery underneath it is well-tested, but AWS-specific defaults may change. Treat the security defaults (see "AWS-specific configuration") as a starting point: review the security group, AMI choice, and `auto_shutdown_seconds` before pointing this at production resources.
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -21,7 +21,7 @@ backend = "aws"
 
 default_region = "us-east-1"
 default_instance_type = "t3.small"  # EC2 instance type
-default_ami_id = ""                # leave empty to use default_ami_by_region
+# default_ami_id = "ami-..."        # optional override; defaults to the pinned per-region AMI
 
 # Optional networking. security_group defaults to auto-create with name 'mngr-aws'.
 # To override:
@@ -77,7 +77,7 @@ Stopped agents stay listed and resumable with `mngr start`; a paused agent costs
 
 ## AWS-specific configuration
 
-These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
+These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
@@ -107,17 +107,17 @@ mngr aws prepare --region us-east-1
 mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
 ```
 
-`prepare` creates (or reuses) the `mngr-aws` security group in the region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It is read-only when the group already exists with the required ingress, so it is safe to re-run before every create even with a describe-only key.
+`prepare` creates (or reuses) the `mngr-aws` security group in the region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It also idempotently creates a private, encrypted S3 **state bucket** (`mngr-state-<account_id>-<region>` by default; override with `state_bucket_name`) that holds mngr's control-plane state so stopped instances stay listable and resumable offline. The bucket is **required** infrastructure and is `prepare`'s primary job: if the key lacks the S3 / `sts:GetCallerIdentity` permissions, `prepare` fails rather than doing security-group-only setup. The security-group step is read-only when the group already exists with the required ingress.
 
 ## Teardown: `mngr aws cleanup`
 
-`mngr aws cleanup` deletes the `mngr-aws` security group, returning the region to its pre-`prepare` state.
+`mngr aws cleanup` deletes the `mngr-aws` security group and the S3 state bucket, returning the region to its pre-`prepare` state.
 
 ```bash
 mngr aws cleanup --region us-east-1
 ```
 
-It refuses (deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent.
+It refuses (deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It also refuses to delete the state bucket while it still holds offline host state (orphaned records from hosts that no longer exist as instances); pass `--force` to delete it anyway. It is idempotent.
 
 ## Required IAM permissions
 
@@ -129,21 +129,26 @@ ec2:StopInstances, ec2:StartInstances,
 ec2:CreateTags, ec2:DeleteTags,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
-ec2:DescribeImages
+ec2:DescribeImages,
+s3:PutObject, s3:GetObject, s3:DeleteObject, s3:ListBucket
 ```
 
-No `iam:*` actions are required by default; `iam:PassRole` is needed only if you set `iam_instance_profile`.
+The S3 actions mirror state into the bucket `prepare` created (the bucket must already exist). No `iam:*` actions are required by default; `iam:PassRole` is needed only if you set `iam_instance_profile`. Offline `host_dir` capture needs no extra IAM -- it is uploaded operator-side at `mngr stop` with your own credentials.
 
 For `mngr aws prepare` (one-time admin setup), additionally:
 
 ```
-ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress
+ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress,
+sts:GetCallerIdentity,
+s3:CreateBucket, s3:PutBucketPublicAccessBlock,
+s3:PutEncryptionConfiguration, s3:PutBucketTagging, s3:ListBucket
 ```
 
 For `mngr aws cleanup` (teardown), additionally:
 
 ```
-ec2:DeleteSecurityGroup
+ec2:DeleteSecurityGroup,
+s3:ListBucket, s3:DeleteObject, s3:DeleteBucket
 ```
 
 ## Limitations
