@@ -1,4 +1,4 @@
-Fixed several over-defensive edge-case handlers that could silently mask failures (surfaced by the new `identify-suspicious-edge-cases` skill):
+Fixed several over-defensive edge-case handlers that could silently mask failures (surfaced by the `identify-suspicious-edge-cases` skill):
 
 - `poll()` no longer fabricates a magic `1007` exit code for a run-thread that finished with neither a result nor an exception; it now raises `ProcessInvariantError` instead of letting a fake status flow downstream.
 - A submitted task that raises `BaseException` (e.g. `KeyboardInterrupt`) now completes its future via `set_exception` instead of leaving `result()` hung forever.
