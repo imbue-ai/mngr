@@ -208,27 +208,6 @@ def _perform_state_bucket_cleanup(bucket: GcsStateBucket, *, force: bool) -> str
     return bucket.bucket_name
 
 
-def _perform_cleanup(client: GcpVpsClient) -> str | None:
-    """Core of ``mngr gcp cleanup``: refuse if instances exist, else delete the rule.
-
-    Returns the deleted firewall rule name, or ``None`` when there was nothing to
-    delete. Raises ``ManagedResourcesExistError`` (a ``MngrError``) when any
-    mngr-managed instance still exists in the project, so cleanup never strands a
-    running agent's SSH access. Split from the click callback so the refuse/delete
-    decision is unit-testable against a stubbed client, without the click runtime
-    or real credentials.
-    """
-    instances = client.list_mngr_managed_instances()
-    refuse_if_managed_resources_exist(
-        [str(i["id"]) for i in instances],
-        summary=", ".join(f"{i['id']} ({i['state']} in {i['zone']})" for i in instances),
-        resource_noun="instance",
-        scope_description=f"project {client.project_id}",
-        cleanup_command="mngr gcp cleanup",
-    )
-    return client.delete_firewall()
-
-
 def _refuse_cleanup_if_instances_exist(client: GcpVpsClient) -> None:
     """Raise ``ManagedResourcesExistError`` when any mngr-managed instance still exists.
 
@@ -245,6 +224,20 @@ def _refuse_cleanup_if_instances_exist(client: GcpVpsClient) -> None:
         scope_description=f"project {client.project_id}",
         cleanup_command="mngr gcp cleanup",
     )
+
+
+def _perform_cleanup(client: GcpVpsClient) -> str | None:
+    """Core of ``mngr gcp cleanup``: refuse if instances exist, else delete the rule.
+
+    Returns the deleted firewall rule name, or ``None`` when there was nothing to
+    delete. Raises ``ManagedResourcesExistError`` (a ``MngrError``) when any
+    mngr-managed instance still exists in the project, so cleanup never strands a
+    running agent's SSH access. Split from the click callback so the refuse/delete
+    decision is unit-testable against a stubbed client, without the click runtime
+    or real credentials. Mirrors ``mngr_aws.cli._perform_cleanup``.
+    """
+    _refuse_cleanup_if_instances_exist(client)
+    return client.delete_firewall()
 
 
 def _output_prepare_result(
