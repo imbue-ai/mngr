@@ -129,9 +129,8 @@ authoritative app-server-backed variant (see below) would remove the ambiguity.
 
 ## Not yet implemented
 
-Relative to `mngr_claude`, these are not yet ported (tracked for follow-up): session
-preservation on destroy, deploy/scheduling contributions, the streaming snapshot, and
-installation/version management.
+Relative to `mngr_claude`, these are not yet ported (tracked for follow-up):
+deploy/scheduling contributions and the streaming snapshot.
 
 ## Future direction: an app-server-backed agent variant
 
