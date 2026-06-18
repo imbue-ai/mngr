@@ -76,11 +76,15 @@ class HostDirBackend(MutableModel, ABC):
     The *launch* methods (``create_identity``, ``install_sync``) raise on failure:
     with the bucket required, an instance that cannot be wired up to push its
     host_dir is a setup failure, surfaced at create rather than silently yielding
-    an unreadable offline host_dir later. The *read*/*pause* methods stay
-    best-effort: ``volume``/``volume_reference`` return None for a genuinely empty
-    host_dir (but raise on a bucket probe *error*), and ``trigger_final_sync``
-    only logs -- the periodic sync means a missed final sync costs freshness, not
-    the offline copy.
+    an unreadable offline host_dir later. The read path is mostly strict too:
+    ``volume`` returns None only for a genuinely empty host_dir whose instance
+    still has its bucket-write identity, but it *raises* when an empty prefix is
+    explained by a missing identity (a permanent misconfiguration -- the host
+    predates the identity), and a bucket probe *error* propagates. The
+    no-network-probe ``volume_reference`` just builds the reference (None only when
+    the feature is off). Only ``trigger_final_sync`` stays soft -- it logs and
+    returns, since the periodic sync means a missed final sync costs freshness,
+    not the offline copy.
     """
 
     @abstractmethod

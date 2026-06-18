@@ -131,7 +131,17 @@ Blob data-plane access uses AAD (the same `DefaultAzureCredential` the provider
 already uses), so to read/write host state you need the **`Storage Blob Data
 Contributor`** role on the state storage account, in addition to the
 storage-account create/delete permission `prepare`/`cleanup` use
-(`Microsoft.Storage/storageAccounts/write` + `delete`). The state account is
+(`Microsoft.Storage/storageAccounts/write` + `delete`). Azure splits the control
+plane from the data plane: **creating** the storage account (or holding
+Owner/Contributor on it) does **not** grant data-plane blob access, so the
+account creator is not auto-authorized to read the state blobs. To avoid an
+`AuthorizationPermissionMismatch` on every offline read, `mngr azure prepare`
+therefore also grants **your own principal** (the user or service principal that
+runs `prepare`) the `Storage Blob Data Contributor` role scoped to just the state
+account — this needs `Microsoft.Authorization/roleAssignments/write` (Owner or
+User Access Administrator). Note this grants only the principal that runs
+`prepare`: in a multi-operator setup, each other operator needs the same grant
+(re-run `prepare` as them, or assign their principal the role out of band). The state account is
 **required** infrastructure, with no VM-tag fallback: creating it is `prepare`'s
 primary job, so a missing storage permission (or any account/container create
 failure) **fails** the command rather than continuing with a network-only
@@ -175,9 +185,11 @@ absent; a delete failure raises).
 Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write`
 + `Microsoft.Authorization/roleAssignments/write` (Owner or User Access
 Administrator). When offline `host_dir` is requested for a host whose VM has no
-attached managed identity, mngr logs a non-fatal diagnostic pointing at
-`mngr azure prepare` (with sufficient permissions) rather than returning an empty
-volume.
+attached managed identity (so it never pushed its `host_dir`), the read raises an
+actionable error pointing at `mngr azure prepare` (with sufficient permissions)
+and recreating the host, rather than returning an empty volume that looks like
+"no events". An empty `host_dir` on a VM that *does* have the identity (nothing
+synced yet) still reads as no volume.
 
 ### Quota note
 
