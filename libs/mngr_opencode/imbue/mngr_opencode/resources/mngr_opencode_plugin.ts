@@ -90,6 +90,12 @@ const _messageText = (parts: any[]): string =>
     .map((part) => part.text)
     .join("")
 
+const _toolCallFromPart = (part: any): Record<string, unknown> => ({
+  tool_call_id: part?.callID ?? "",
+  tool_name: part?.tool ?? "",
+  input_preview: _truncate(_shortValue(part?.state?.input ?? {}), _MAX_INPUT_PREVIEW_LENGTH),
+})
+
 const _toolStateOutput = (state: any): { output: string; isError: boolean } => {
   if (!state || typeof state !== "object") {
     return { output: "", isError: false }
@@ -275,11 +281,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         continue
       }
 
-      const toolCalls = toolParts.map((part) => ({
-        tool_call_id: part?.callID ?? "",
-        tool_name: part?.tool ?? "",
-        input_preview: _truncate(_shortValue(part?.state?.input ?? {}), _MAX_INPUT_PREVIEW_LENGTH),
-      }))
+      const toolCalls = toolParts.map(_toolCallFromPart)
       // Build the ordered parts[] by walking the message's parts in arrival order, so the
       // text/tool_call interleaving is preserved (faithful -> parts_ordered: true).
       const commonParts: Array<Record<string, unknown>> = []
@@ -287,12 +289,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         if (part?.type === "text" && !part?.synthetic && typeof part?.text === "string" && part.text) {
           commonParts.push({ type: "text", content: part.text })
         } else if (part?.type === "tool") {
-          commonParts.push({
-            type: "tool_call",
-            tool_call_id: part?.callID ?? "",
-            tool_name: part?.tool ?? "",
-            input_preview: _truncate(_shortValue(part?.state?.input ?? {}), _MAX_INPUT_PREVIEW_LENGTH),
-          })
+          commonParts.push({ type: "tool_call", ..._toolCallFromPart(part) })
         }
       }
       const providerId = message?.providerID ?? ""
