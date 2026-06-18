@@ -54,7 +54,7 @@ def test_cleanup_logic_deletes_rg_when_no_vms() -> None:
 def test_cleanup_logic_refuses_when_vms_exist() -> None:
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure"})
+        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure"}, instance_view=None)
     ]
     client = _operator_client(compute=compute)
     with pytest.raises(AzureProviderError, match="Refusing to clean up"):

@@ -22,6 +22,7 @@ from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_class_registry import register_agent_class
@@ -70,8 +71,19 @@ def register_placeholder_agent_type(name: str) -> None:
 
 
 def register_test_placeholder_agent_type() -> None:
-    """Register the canonical placeholder agent type as a BaseAgent fixture."""
-    register_placeholder_agent_type(PLACEHOLDER_AGENT_TYPE)
+    """Register the canonical placeholder agent type as a SendKeysAgent fixture.
+
+    Registered as ``SendKeysAgent`` (an interactive ``BaseAgent`` that accepts
+    messages via tmux send-keys) rather than the bare ``BaseAgent`` that
+    ``register_placeholder_agent_type`` uses, so the canonical "any agent" stand-in
+    is messageable -- the message-API tests send to it, and most real agent types
+    are interactive. ``SendKeysAgent`` IS-A ``BaseAgent``, so tests that use the
+    placeholder as a generic agent are unaffected.
+    """
+    if not is_agent_class_registered(PLACEHOLDER_AGENT_TYPE):
+        register_agent_class(PLACEHOLDER_AGENT_TYPE, SendKeysAgent)
+    if not is_agent_config_registered(PLACEHOLDER_AGENT_TYPE):
+        register_agent_config(PLACEHOLDER_AGENT_TYPE, AgentTypeConfig)
 
 
 @pytest.fixture

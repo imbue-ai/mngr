@@ -20,6 +20,7 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -362,7 +363,7 @@ def create(
                         timeout=timeout,
                     )
                     logger.info("Sending initial message...")
-                    agent.send_message(initial_message)
+                    require_interactive_agent(agent).send_message(initial_message)
                 else:
                     # No initial message - just start the agent
                     logger.info("Starting agent {} ...", agent.name)

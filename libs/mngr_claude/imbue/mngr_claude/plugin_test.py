@@ -29,6 +29,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
@@ -73,6 +74,7 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
+from imbue.mngr_claude.plugin import _build_claude_install_command
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
@@ -1051,12 +1053,12 @@ def test_get_expected_process_name_returns_claude(
     assert agent.get_expected_process_name() == "claude"
 
 
-def test_tui_ready_indicator_is_claude_code(
+def test_tui_ready_indicator_is_input_prompt_glyph(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """ClaudeAgent inherits InteractiveTuiAgent's TUI_READY_INDICATOR class var."""
+    """ClaudeAgent uses the input-prompt glyph, which renders on both fresh start and resume."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    assert agent.get_tui_ready_indicator() == "Claude Code"
+    assert agent.get_tui_ready_indicator() == "❯"
 
 
 @pytest.mark.skipif(
@@ -1685,7 +1687,7 @@ def test_provision_raises_when_remote_installation_disabled(
 
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=non_local_host, options=options, mngr_ctx=ctx)
-        assert isinstance(exc_info.value.main_exception, PluginMngrError)
+        assert isinstance(exc_info.value.main_exception, AgentInstallationError)
         assert "automatic remote installation is disabled" in str(exc_info.value.main_exception)
 
 
@@ -3407,7 +3409,7 @@ def test_provision_raises_on_version_mismatch(
 
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=host_with_wrong_version, options=options, mngr_ctx=ctx)
-        assert isinstance(exc_info.value.main_exception, PluginMngrError)
+        assert isinstance(exc_info.value.main_exception, AgentInstallationError)
         assert "Claude version mismatch" in str(exc_info.value.main_exception)
 
 
@@ -3461,6 +3463,67 @@ def test_install_claude_verifies_binary_exists() -> None:
     # executable; anchor to the imported constant rather than a hand-typed literal.
     tokens = _install_clause_tokens(executed_commands[0], "test -x")
     assert tokens == ["test", "-x", f"{CLAUDE_INSTALL_PATH}/claude"]
+
+
+# =============================================================================
+# Capability-mixin contract methods (install / unattended / version)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_claude() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_install_binary_name() == "claude"
+
+
+def test_get_install_command_installs_claude() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_install_command() == _build_claude_install_command(None)
+
+
+def test_get_install_command_pins_configured_version() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    assert agent.get_install_command() == _build_claude_install_command("2.1.50")
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(auto_allow_permissions=True))
+    attended = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def _version_stub_host(version_output: str) -> OnlineHostInterface:
+    """A host whose `claude --version` returns ``version_output`` (for reconcile tests)."""
+    return cast(
+        OnlineHostInterface,
+        SimpleNamespace(
+            execute_idempotent_command=lambda *args, **kwargs: SimpleNamespace(
+                success=True, stdout=version_output, stderr=""
+            )
+        ),
+    )
+
+
+def test_reconcile_installed_version_unpinned_is_noop() -> None:
+    # Unpinned: claude follows its own auto-update, so there is nothing to enforce and
+    # reconcile returns without touching the host.
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    agent.reconcile_installed_version(
+        cast(OnlineHostInterface, SimpleNamespace()), cast(MngrContext, SimpleNamespace())
+    )
+
+
+def test_reconcile_installed_version_pinned_match_is_noop() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    agent.reconcile_installed_version(_version_stub_host("2.1.50 (Claude Code)"), cast(MngrContext, SimpleNamespace()))
+
+
+def test_reconcile_installed_version_raises_on_mismatch() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    with pytest.raises(AgentInstallationError, match="version mismatch"):
+        agent.reconcile_installed_version(
+            _version_stub_host("9.9.9 (Claude Code)"), cast(MngrContext, SimpleNamespace())
+        )
 
 
 # =============================================================================
@@ -3525,7 +3588,7 @@ def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrConte
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    with pytest.raises(UserInputError, match="--adopt-session can only be used with a Claude agent type"):
+    with pytest.raises(UserInputError, match="--adopt-session can only be used with an interactive Claude agent type"):
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 

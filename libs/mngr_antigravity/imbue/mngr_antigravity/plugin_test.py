@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -159,11 +160,98 @@ def test_register_agent_aliases_maps_agy_to_antigravity() -> None:
     assert register_agent_aliases() == {"agy": "antigravity"}
 
 
+# =============================================================================
+# Capability-mixin contract methods (install / unattended / permission policy)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_agy() -> None:
+    agent = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig())
+    assert agent.get_install_binary_name() == "agy"
+
+
+def test_get_install_command_installs_agy() -> None:
+    agent = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig())
+    assert agent.get_install_command() == "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig(auto_allow_permissions=True))
+    attended = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def test_get_permission_policy_returns_configured_permissions_block() -> None:
+    policy = {"allow": ["command(git)"]}
+    agent = AntigravityAgent.model_construct(
+        agent_config=AntigravityAgentConfig(settings_overrides={"permissions": policy})
+    )
+    assert agent.get_permission_policy() == policy
+
+
+def test_get_permission_policy_is_empty_when_unset() -> None:
+    agent = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig())
+    assert agent.get_permission_policy() == {}
+
+
+class _BinaryPresentStubHost(FakeHost):
+    """FakeHost that reports the install-check binary as present and records commands.
+
+    Lets ``provision`` run its install-check line (``command -v agy``) without
+    triggering an install: the binary is reported present, so ``ensure_cli_installed``
+    returns after the check. Other commands fall through to the local FakeHost.
+    """
+
+    executed_commands: list[str] = []
+
+    def _execute_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.executed_commands.append(command)
+        if command.startswith("command -v "):
+            return CommandResult(stdout="/usr/local/bin/agy", stderr="", success=True)
+        return super()._execute_command(command, user, cwd, env, timeout_seconds)
+
+
+def test_provision_runs_install_check_when_enabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
+) -> None:
+    """With ``check_installation=True``, provision issues the ``command -v agy`` install check.
+
+    The binary is reported present so no install command runs; reaching the
+    ``command -v`` probe proves the install-check line executed.
+    """
+    agent = _make_antigravity_agent(
+        local_provider, tmp_path, AntigravityAgentConfig(check_installation=True, auto_dismiss_dialogs=True)
+    )
+    stub_host: Any = _BinaryPresentStubHost(host_dir=tmp_path, is_local=True)
+    agent.provision(
+        host=stub_host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    assert any(command.startswith("command -v agy") for command in stub_host.executed_commands)
+
+
 def _make_antigravity_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     agent_config: AntigravityAgentConfig,
 ) -> AntigravityAgent:
+    # These setup tests run against a real local host where agy is not installed; the
+    # install check is irrelevant to provision setup (files/trust/config) and is covered
+    # separately, so skip it unless a caller opted in explicitly.
+    # FIXME: this should be routed through the real config-loading path (a settings.toml
+    # [agent_types.antigravity] config_overrides block) rather than mutating the config
+    # object here based on model_fields_set introspection.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -265,6 +353,10 @@ def _make_subclassed_agent_with_flags(
     is_auto_approve: bool = False,
 ) -> AntigravityAgent:
     """Build a subclassed agent with the requested MngrContext flags set."""
+    # Skip the binary install-check (agy is not on the test host): these tests
+    # exercise the trust/provision flow, not install. Install is covered separately.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
