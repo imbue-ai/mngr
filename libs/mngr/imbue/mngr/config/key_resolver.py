@@ -131,11 +131,14 @@ def _resolve_extends(
     ``config/README.md`` and the ``imbue.overlay`` README for the semantics). Lookups
     against ``base`` traverse pydantic model attributes and Mapping keys interchangeably,
     so the same function works whether ``base`` is a parsed ``MngrConfig``, a nested
-    config object, or a raw dict. On a deferred-resolution path (see
-    ``is_deferred_extend_path`` / ``is_deferred_assign_path``) a marker whose base lookup yields ``None`` is preserved
+    config object, or a raw dict. On a deferred-resolution path a marker is preserved
     verbatim rather than collapsed, so it resolves later against a concrete runtime base
     (a new template's ``env__extend`` against the ``mngr create`` params; a
-    ``settings_overrides`` marker against the provision base).
+    ``settings_overrides`` marker against the provision base). A deferred ``__extend``
+    (``is_deferred_extend_path``) is preserved only when the base has no value to extend;
+    a deferred ``__assign`` (``is_deferred_assign_path``) is preserved unconditionally, so
+    the no-warn intent survives even when a lower scope already set the key (the only case
+    a narrowing could fire).
     """
     check_no_conflicting_assign(override, ".".join(path))
     result: dict[str, Any] = {}
@@ -147,13 +150,16 @@ def _resolve_extends(
         if is_extend_key(key):
             continue
         bare = assign_bare_key(key) if is_assign_key(key) else key
-        # Preserve a deferred ``__assign`` verbatim when the base has no value,
-        # mirroring the deferred ``__extend`` handling below: the ``key__assign`` is
-        # carried to the runtime consumer (``_build_settings_json``), which re-lifts
-        # it as a no-warn ``Assign`` instead of a narrowing-checked bare assign.
+        # Preserve a deferred ``__assign`` verbatim: the ``key__assign`` is carried to
+        # the runtime consumer (``_build_settings_json``), which re-lifts it as a no-warn
+        # ``Assign`` instead of a narrowing-checked bare assign. Unlike the deferred
+        # ``__extend`` below, this is NOT gated on the base lacking a value: the no-warn
+        # intent matters precisely when a lower scope *did* set the key (the only time a
+        # narrowing could fire), so collapsing it to bare there would lose the opt-out and
+        # let the cross-scope narrowing guard error on exactly the key the user opted out.
         # Scoped to paths whose consumer understands ``__assign`` (settings_overrides,
         # not create_templates, whose ``apply_create_template`` reads only ``__extend``).
-        if is_assign_key(key) and is_deferred_assign_path(path) and _walk_to_field(base, path + (bare,)) is None:
+        if is_assign_key(key) and is_deferred_assign_path(path):
             result[key] = value
             continue
         if isinstance(value, dict):

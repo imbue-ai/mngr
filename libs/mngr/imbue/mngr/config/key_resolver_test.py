@@ -382,6 +382,22 @@ def test_resolve_extends_preserves_assign_inside_settings_overrides() -> None:
     assert resolved == override
 
 
+def test_resolve_extends_preserves_assign_inside_settings_overrides_when_base_set() -> None:
+    """A deferred ``__assign`` is preserved verbatim even when the base *already* has a
+    value at that key -- which is exactly when a cross-scope narrowing could fire. If the
+    suffix collapsed to bare here, a higher scope's ``permissions__assign`` over a lower
+    scope's ``permissions`` would be flagged as narrowing despite the explicit opt-out.
+    """
+    base = {
+        "agent_types": {
+            "my_claude": {"settings_overrides": {"permissions": {"allow": ["A"], "defaultMode": "acceptEdits"}}}
+        }
+    }
+    override = {"agent_types": {"my_claude": {"settings_overrides": {"permissions__assign": {"allow": ["B"]}}}}}
+    resolved = resolve_extends(base, override)
+    assert resolved == override
+
+
 def test_resolve_extends_collapses_assign_inside_create_templates() -> None:
     """``create_templates`` is excluded from deferred-``__assign`` preservation: its
     consumer (``apply_create_template``) reads only ``__extend``, so a ``__assign``

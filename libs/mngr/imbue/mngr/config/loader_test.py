@@ -2356,6 +2356,74 @@ def test_load_config_extend_avoids_settings_overrides_narrowing(
     assert settings_overrides["permissions"]["allow"] == ["A", "B"]
 
 
+def test_load_config_assign_avoids_settings_overrides_narrowing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A local layer's ``permissions__assign`` over the project layer's non-empty
+    ``permissions`` dict suppresses the cross-scope narrowing without any global opt-in
+    -- the per-key replace-without-warning operator. The local value wins wholesale (the
+    project's ``defaultMode`` is intentionally dropped), and no error is raised.
+
+    Regression: the deferred ``__assign`` was previously collapsed to a bare assign at
+    config-load whenever a lower scope already set the key, so the no-warn intent was lost
+    and the guard errored on exactly the key the user opted out of.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow = ["A"]\n'
+        'defaultMode = "acceptEdits"\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides]\n"
+        'permissions__assign = { allow = ["B"] }\n'
+    )
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
+    # The deferred ``__assign`` marker survives config-load (it resolves at provision);
+    # the replacement value is the local layer's, and ``defaultMode`` is dropped.
+    assert settings_overrides["permissions__assign"]["allow"] == ["B"]
+    assert "defaultMode" not in settings_overrides["permissions__assign"]
+
+
+def test_load_config_assign_opts_out_of_settings_overrides_narrowing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A higher-scope ``permissions__assign`` opts out of the cross-scope
+    ``settings_overrides`` narrowing without the global flag: it replaces the lower
+    scope's value, dropping its sibling, without raising.
+
+    Regression: the deferred ``__assign`` was previously preserved only when the
+    config-load base lacked the key, so a *lower* scope having set it collapsed the
+    ``__assign`` to a bare assign and re-armed the narrowing guard -- erroring on the
+    exact key the user opted out of. The marker is now preserved unconditionally on a
+    deferred settings-overrides path, so it survives to the cross-scope merge as a
+    no-warn ``Assign`` (and on to provision)."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'defaultMode = "acceptEdits"\n'
+        'allow = ["A"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides]\n"
+        'permissions__assign = { allow = ["B"] }\n'
+    )
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
+    # The marker is preserved for deferred provision-time resolution; the no-warn
+    # ``__assign`` intent (replace, dropping ``defaultMode``) is what survives.
+    assert settings_overrides["permissions__assign"] == {"allow": ["B"]}
+
+
 def test_load_config_settings_overrides_accumulation_does_not_narrow(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
