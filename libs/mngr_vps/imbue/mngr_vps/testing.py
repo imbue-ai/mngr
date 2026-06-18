@@ -69,6 +69,9 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
         self._isolation = isolation
         # The container shape snapshots via `docker commit`; the bare shape has no snapshots.
         self.supports_snapshots = isolation is IsolationMode.CONTAINER
+        # NONE isolation runs the agent on the VM's OS (no container), so Trip 1 runs its bare-shape
+        # assertion -- the coverage the retired per-provider bare lifecycle tests used to own.
+        self.is_bare_host = isolation is IsolationMode.NONE
 
     def auto_shutdown_create_args(self) -> Sequence[str]:
         # Drive the idle watcher: with no SSH connection the in-host watcher sees no activity and

@@ -215,21 +215,6 @@ def azure_test_settings_dir(
     yield tmp_path
 
 
-@pytest.fixture()
-def azure_bare_test_settings_dir(
-    tmp_path: Path,
-    azure_release_subscription_id: str,
-    _azure_release_test_network_prepared: None,
-) -> Iterator[Path]:
-    """Like ``azure_test_settings_dir`` but with ``isolation = "NONE"`` (bare placement).
-
-    Exercises the no-Docker shape: the agent runs directly on the Azure VM's OS,
-    reached at ``<ip>:22`` as root, with no container.
-    """
-    _write_release_settings(tmp_path, azure_release_subscription_id, isolation="NONE")
-    yield tmp_path
-
-
 def _run_mngr(
     project_config_dir: Path,
     cwd: Path,
@@ -277,91 +262,9 @@ def _run_mngr(
 
 
 # =============================================================================
-# Provider lifecycle (full create / exec / stop / start / destroy)
+# Provider create with a project Dockerfile built on the VM (unique coverage:
+# the remote build-on-VM path, not exercised by the shared trips).
 # =============================================================================
-
-
-@pytest.mark.rsync
-def test_provider_lifecycle_create_exec_and_destroy(
-    azure_test_settings_dir: Path,
-    temp_git_repo: Path,
-) -> None:
-    agent_name = f"{AZURE_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
-
-    result = _run_mngr(
-        azure_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "azure",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
-    )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-azure")
-        assert result.returncode == 0, f"Exec failed: {result.stderr}"
-        assert "hello-from-azure" in result.stdout
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists")
-        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
-        assert "exists" in result.stdout
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0, f"List failed: {result.stderr}"
-        assert agent_name in result.stdout
-        assert "azure" in result.stdout
-    finally:
-        _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-
-
-@pytest.mark.rsync
-def test_provider_lifecycle_create_stop_start_destroy(
-    azure_test_settings_dir: Path,
-    temp_git_repo: Path,
-) -> None:
-    agent_name = f"{AZURE_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
-
-    result = _run_mngr(
-        azure_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "azure",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
-    )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "stop", agent_name)
-        assert result.returncode == 0, f"Stop failed: {result.stderr}"
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0
-        assert agent_name in result.stdout
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
-        assert result.returncode == 0, f"Start failed: {result.stderr}"
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-restart")
-        assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
-        assert "alive-after-restart" in result.stdout
-    finally:
-        _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
 
 
 @pytest.mark.rsync
@@ -436,74 +339,6 @@ def test_provider_create_builds_dockerfile_on_vm(
         )
     finally:
         _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-
-
-# =============================================================================
-# Bare placement (isolation=NONE): the agent runs on the Azure VM's OS,
-# no Docker container. Mirrors the container lifecycle tests above.
-# =============================================================================
-
-
-@pytest.mark.rsync
-def test_bare_provider_lifecycle_create_exec_and_destroy(
-    azure_bare_test_settings_dir: Path,
-    temp_git_repo: Path,
-) -> None:
-    """A bare Azure host comes up reachable, with the agent on the VM's OS (no container).
-
-    The bare-specific assertions prove the no-Docker shape end to end: the agent
-    shell is the Azure VM's root (``/var/lib/mngr-host`` -- the bare host store --
-    exists, and there is no ``/.dockerenv``), and the mngr host_dir symlink
-    (``/mngr``) still works.
-    """
-    agent_name = f"{AZURE_TEST_NAME_PREFIX}bare-{int(time.time()) % 100000}"
-    result = _run_mngr(
-        azure_bare_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "azure",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
-    )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(
-            azure_bare_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-bare-azure"
-        )
-        assert result.returncode == 0, f"Exec failed: {result.stderr}"
-        assert "hello-from-bare-azure" in result.stdout
-
-        result = _run_mngr(
-            azure_bare_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists"
-        )
-        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
-        assert "exists" in result.stdout
-
-        # Bare-specific: the agent shell is the VM's root, not a container.
-        result = _run_mngr(
-            azure_bare_test_settings_dir,
-            temp_git_repo,
-            "exec",
-            agent_name,
-            "test -d /var/lib/mngr-host && test ! -e /.dockerenv && echo bare-confirmed",
-        )
-        assert result.returncode == 0, f"bare-shape check failed: {result.stderr}\n{result.stdout}"
-        assert "bare-confirmed" in result.stdout, f"expected a bare (non-container) host: {result.stdout}"
-
-        result = _run_mngr(azure_bare_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0, f"List failed: {result.stderr}"
-        assert agent_name in result.stdout
-        assert "azure" in result.stdout
-    finally:
-        _run_mngr(azure_bare_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
 
 
 # =============================================================================

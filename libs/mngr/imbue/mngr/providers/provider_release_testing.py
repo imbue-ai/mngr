@@ -85,6 +85,11 @@ _OFFLINE_HOST_DIR_ENV_VAR: Final[str] = "MNGR_RELEASE_TEST_OFFLINE_HOST_DIR"
 # stop and the subsequent ``mngr start`` resume -- the same rationale as the Trip 1 marker.
 _TRIP2_MARKER_HOST_PATH: Final[str] = "/mngr/trip2-marker.txt"
 
+# The bare host store. On a bare (no-container) host the agent shell is the VM's own root, so this
+# directory exists and ``/.dockerenv`` does not -- the signature Trip 1 checks for ``is_bare_host``
+# profiles to prove the shape did not silently fall back to a container.
+_BARE_HOST_STORE_PATH: Final[str] = "/var/lib/mngr-host"
+
 
 class ProviderReleaseProfile(abc.ABC):
     """Per-provider plumbing for the shared provider release trip.
@@ -117,6 +122,12 @@ class ProviderReleaseProfile(abc.ABC):
     # uses ``NullHostDirBackend`` and Modal has no ``--stop-host`` window, so both stay False.
     # Read only by Trip 1's opt-in offline-host_dir step (gated by ``_OFFLINE_HOST_DIR_ENV_VAR``).
     supports_offline_host_dir: bool = False
+    # Whether this profile's shape is a *bare* host -- the agent shell is the VM's own OS, with no
+    # container. When True, Trip 1 asserts the no-container shape end to end (the bare host store
+    # exists and there is no ``/.dockerenv``), the coverage the retired per-provider bare lifecycle
+    # tests used to own. The VPS family sets it from its ``IsolationMode`` (NONE -> bare); Modal has
+    # no bare shape, so it stays False.
+    is_bare_host: bool = False
 
     # Capability boolean the harness branches Trip 2 (idle auto-shutdown) on.
     # ``resumes_after_auto_shutdown`` is whether the provider comes back from its idle
@@ -358,6 +369,22 @@ def run_provider_release_trip1(
         assert written.returncode == 0, f"writing the marker failed:\n{written.stdout}"
         read_back = _exec_on_host(settings_dir, workspace, host_name, f"cat {_MARKER_HOST_PATH}")
         assert marker_token in read_back.stdout, f"marker not readable after write:\n{read_back.stdout}"
+
+        # 4b. Bare shape: the agent shell is the VM's own root, not a container. Assert the bare
+        #     host store exists and there is no `/.dockerenv`, so a NONE-isolation host that silently
+        #     fell back to a container fails loudly. (Container shapes skip this: Modal's container
+        #     equivalent is a sandbox, not a docker container, so `/.dockerenv` is not universal.)
+        if profile.is_bare_host:
+            bare_shape = _exec_on_host(
+                settings_dir,
+                workspace,
+                host_name,
+                f"test -d {_BARE_HOST_STORE_PATH} && test ! -e /.dockerenv && echo bare-confirmed",
+            )
+            assert "bare-confirmed" in bare_shape.stdout, (
+                f"expected a bare (non-container) host -- {_BARE_HOST_STORE_PATH} present and no "
+                f"/.dockerenv:\n{bare_shape.stdout}"
+            )
 
         # 5. Plain stop stops only the agent's tmux; the host keeps running and the marker stays.
         stopped = _run_mngr(settings_dir, workspace, "stop", host_name, timeout=_LIFECYCLE_TIMEOUT_SECONDS)

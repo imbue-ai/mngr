@@ -3,3 +3,5 @@ Added `VpsCloudReleaseProfile` and `find_handle_by_launched_label` to `testing.p
 Extended `VpsCloudReleaseProfile` for Trip 4 (error classification): it declares that the VPS-family clouds raise the contract `ProviderUnavailableError` on unresolvable credentials and reject `--vps-*` build args via the shared migration check; per-provider subclasses supply the credential-unresolvable env and whether the missing-credential help text is curated.
 
 Extended `VpsCloudReleaseProfile` for Trip 2 (idle auto-shutdown): it declares the cloud trio resumes after auto-shutdown and drives the shutdown via the idle watcher (`mngr create --idle-timeout`), whose poweroff lands the VM in its resumable stopped state (AWS stop / GCP TERMINATED / Azure deallocated).
+
+`VpsCloudReleaseProfile` now sets the harness's `is_bare_host` flag from its `IsolationMode` (NONE -> bare), so Trip 1 runs its bare-shape assertion for the NONE parametrization -- the coverage the retired per-provider bare lifecycle tests used to own.
