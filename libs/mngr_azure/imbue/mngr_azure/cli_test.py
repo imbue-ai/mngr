@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pluggy
 import pytest
+from azure.core.exceptions import HttpResponseError
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
@@ -27,6 +28,7 @@ from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.testing import FakeAuthorizationClient
 from imbue.mngr_azure.testing import FakeBlobStorageBackend
 from imbue.mngr_azure.testing import FakeComputeClient
@@ -271,6 +273,23 @@ def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:
 
 def test_perform_host_identity_cleanup_noop_when_absent() -> None:
     assert _perform_host_identity_cleanup(_stubbed_identity(exists=False)) is None
+
+
+def test_provision_host_identity_raises_on_msi_failure() -> None:
+    """A managed-identity API failure during provisioning propagates (no warn-and-continue)."""
+    identity = _stubbed_identity()
+    identity.fake_msi_client.user_assigned_identities.create_error = HttpResponseError(message="forbidden")
+    with pytest.raises(BlobStateHostIdentityError):
+        _provision_host_identity(identity)
+
+
+def test_perform_host_identity_cleanup_raises_on_delete_failure() -> None:
+    """A delete failure surfaces so cleanup reports an incomplete teardown rather than swallowing it."""
+    identity = _stubbed_identity()
+    identity.ensure_host_identity()
+    identity.fake_msi_client.user_assigned_identities.delete_error = HttpResponseError(message="forbidden")
+    with pytest.raises(BlobStateHostIdentityError):
+        _perform_host_identity_cleanup(identity)
 
 
 def test_prepare_command_fails_clearly_without_subscription(
