@@ -73,7 +73,9 @@ class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
 
     Redirects stdout/stderr to files so callers can read output programmatically
     via stream_output(). Does not support interactive messages, paste detection,
-    or TUI readiness checking.
+    or TUI readiness checking. It does not wrap a known CLI (so the CLI-oriented
+    capabilities are ``n/a``) and runs unattended by construction via
+    ``BaseHeadlessAgent``.
     """
 
     def assemble_command(

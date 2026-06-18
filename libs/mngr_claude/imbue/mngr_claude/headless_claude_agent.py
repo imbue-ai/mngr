@@ -19,18 +19,15 @@ from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
 from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
 from imbue.mngr.agents.base_headless_agent import render_file_diagnostic
 from imbue.mngr.config.data_types import AgentTypeConfig
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
-from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_claude.plugin import ClaudeCoreAgent
 from imbue.mngr_claude.stream_json import assistant_message_id
 from imbue.mngr_claude.stream_json import assistant_text
 from imbue.mngr_claude.stream_json import classify_stream_event
@@ -281,26 +278,6 @@ class _StreamTailState(MutableModel):
                 yield from self._yield_text_from_lines(remaining.split("\n"))
 
 
-class NoPermissionsClaudeAgent(ClaudeAgent):
-    """ClaudeAgent with no permissions granted (no tools, no trust needed).
-
-    Skips trust validation and dialog dismissal during provisioning since
-    the agent cannot perform any actions that require permissions. All other
-    provisioning (config dir setup, installation, hooks) runs normally.
-    """
-
-    def on_before_provisioning(
-        self,
-        host: OnlineHostInterface,
-        options: CreateAgentOptions,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """No-op: skip trust/dialog validation for no-permissions agents."""
-
-    def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
-        """No-op: no permissions means no dialogs to check."""
-
-
 class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     """Config for the headless_claude agent type.
 
@@ -323,7 +300,7 @@ _MNGR_PROMPT_FILE: str = ".mngr-prompt"
 _MNGR_PROMPT_CAT_ARG: str = f'"$(cat "$MNGR_AGENT_STATE_DIR/{_MNGR_PROMPT_FILE}")"'
 
 
-class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
+class HeadlessClaude(ClaudeCoreAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
     """Agent type for non-interactive (headless) Claude usage.
 
     Runs `claude --print` with stdout redirected to a file so callers can
@@ -333,6 +310,14 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
 
     _no_output_error_subject: str = "claude"
     _startup_grace_seconds: float = _STARTUP_GRACE_SECONDS
+
+    def is_unattended_enabled(self) -> bool:
+        # Diamond resolution (HeadlessClaude(ClaudeCoreAgent, BaseHeadlessAgent)): both bases
+        # define this -- ClaudeCoreAgent config-driven (auto_allow_permissions), BaseHeadlessAgent
+        # always True. Keep ClaudeCoreAgent's config-driven behavior so the auto-allow hook is
+        # gated exactly as before the split. The MRO already resolves here; the explicit override
+        # makes the choice deliberate (see test_headless_claude_resolves_all_shared_method_conflicts).
+        return ClaudeCoreAgent.is_unattended_enabled(self)
 
     def stage_initial_message(self, initial_message: str) -> None:
         """Persist ``initial_message`` to ``.mngr-prompt`` inside the agent's state dir.
@@ -345,17 +330,6 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         """
         prompt_path = self._get_agent_dir() / _MNGR_PROMPT_FILE
         self.host.write_text_file(prompt_path, initial_message)
-
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Headless agents do not accept interactive messages.
-
-        Must be defined here because ClaudeAgent overrides BaseAgent's no-op
-        _preflight_send_message with dialog-checking logic. Without this
-        explicit override, the MRO resolves to ClaudeAgent's implementation
-        instead of BaseHeadlessAgent's, since ClaudeAgent appears earlier
-        in HeadlessClaude's MRO.
-        """
-        BaseHeadlessAgent._preflight_send_message(self, tmux_target)
 
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None

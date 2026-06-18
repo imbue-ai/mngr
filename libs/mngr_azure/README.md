@@ -118,9 +118,9 @@ Blob container holding mngr's control-plane state — the full host record and t
 per-agent records — keyed by host id. The mngr host machine writes these with
 **your own Azure credentials** (no keys stored on the box) whenever it writes
 state (on create and on stop), so a **deallocated** VM's full state is readable
-without SSH. This replaces the VM-tag mirror, which (a) silently dropped
-per-agent `labels` larger than the 256-char Azure tag value limit and (b) could
-only reconstruct a lossy subset of the host record while the VM was stopped.
+without SSH. This is the sole offline store: the previous VM-tag mirror has been
+removed (it silently dropped per-agent `labels` larger than the 256-char Azure
+tag value limit and could only reconstruct a lossy subset of the host record).
 
 The storage-account name defaults to a deterministic `mngrst<hash>` derived from
 your subscription + resource group (storage-account names are globally unique,
@@ -132,10 +132,10 @@ already uses), so to read/write host state you need the **`Storage Blob Data
 Contributor`** role on the state storage account, in addition to the
 storage-account create/delete permission `prepare`/`cleanup` use
 (`Microsoft.Storage/storageAccounts/write` + `delete`). A missing storage
-permission during `prepare` is **not fatal**: it degrades to a warning, the
-network prepare still succeeds, and offline state falls back to the VM-tag
-mirror. Existing deployments that never re-ran the new `prepare` keep working on
-that fallback.
+permission during `prepare` is **not fatal**: it degrades to a warning and the
+network prepare still succeeds, but offline host state is then **unavailable** --
+a deallocated VM cannot be listed or resumed until `prepare` is re-run with the
+storage permission. Creating and operating a *running* VM is unaffected.
 
 ### Offline `host_dir` (on by default)
 
@@ -228,8 +228,9 @@ halts compute billing (an OS-level shutdown would only power it off — "Stopped
 paused agent costs only disk storage. `mngr start` re-allocates it. The public IP
 is static, so it and the SSH host keys survive the stop (no known_hosts rebind on
 resume). A deallocated VM still shows in `mngr list` and resolves by name (offline
-discovery reads its state from the state storage account, or the VM tag mirror as
-a fallback). `mngr destroy` deletes the VM, and the NIC, public IP and
+discovery reads its state from the state storage account; without one, offline
+reads raise an actionable error pointing at `mngr azure prepare`). `mngr destroy`
+deletes the VM, and the NIC, public IP and
 OS disk are reaped automatically via their `delete_option=Delete` (no orphaned
 resources).
 
@@ -260,14 +261,15 @@ size has no capacity in the region right now; pick another size with
   eviction, matching AWS spot's terminate-on-reclaim.
 - VMs are tagged `mngr-provider`, `mngr-host-id`, `mngr-created-at`,
   `managed-by=mngr`, and `mngr-host-name`; discovery filters the resource group's
-  VM list by `mngr-provider`. Offline discovery reconstructs deallocated/stopped
-  VMs from those index tags and reads their full host record + per-agent records
-  from the **state storage account** (see "Offline state storage account") when
-  it exists. When it does not (older `prepare` / no storage permission), it falls
-  back to the per-agent VM-tag mirror (`mngr-agent-<id>-<field>`), which is
-  capped at the 256-char Azure tag value limit. Either way, power state for a
-  not-SSH-reachable VM is confirmed with a per-VM `get_instance_status` call
-  (Azure rejects `expand=instanceView` on a resource-group VM list).
+  VM list by `mngr-provider`. Offline discovery identifies deallocated/stopped
+  VMs from those cheap index tags and reads their full host record + per-agent
+  records from the **state storage account** (see "Offline state storage
+  account"). When it does not exist (older `prepare` / no storage permission),
+  offline host state is unavailable and the read raises an actionable error
+  pointing at `mngr azure prepare` (no per-agent VM-tag mirror is written). Power
+  state for a not-SSH-reachable VM is confirmed with a per-VM
+  `get_instance_status` call (Azure rejects `expand=instanceView` on a
+  resource-group VM list).
 - **Stop/start = deallocate/start:** `mngr stop` deallocates the VM
   (`virtual_machines.begin_deallocate`) to halt compute billing; `mngr start`
   re-allocates it (`begin_start`). The static public IP and on-disk SSH host keys

@@ -14,8 +14,6 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DiscoveredHost
@@ -31,11 +29,7 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.host_store_test import _LocalFakeOuter
 from imbue.mngr_vps.host_store_test import _make_local_connector
-from imbue.mngr_vps.instance_offline import AGENT_TAG_FIELDS
-from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
-from imbue.mngr_vps.instance_offline import TagHostStateStore
-from imbue.mngr_vps.instance_offline import TagMirrorVpsProvider
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
@@ -109,6 +103,10 @@ class _ResumeMirrorProvider(OfflineCapableVpsProvider):
         raise _MirrorCalled
 
     # -- abstract hooks not exercised by the resume path under test --------------
+    @property
+    def _state_store(self) -> HostStateStore:
+        raise AssertionError("not exercised by this test")
+
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
         raise AssertionError("not exercised by this test")
 
@@ -119,18 +117,6 @@ class _ResumeMirrorProvider(OfflineCapableVpsProvider):
         raise AssertionError("not exercised by this test")
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
-        raise AssertionError("not exercised by this test")
-
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        raise AssertionError("not exercised by this test")
-
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        raise AssertionError("not exercised by this test")
-
-    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        raise AssertionError("not exercised by this test")
-
-    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
         raise AssertionError("not exercised by this test")
 
 
@@ -173,87 +159,3 @@ def test_offline_resume_mirrors_record_with_cleared_stop_reason(temp_mngr_ctx: M
     assert store.written.certified_host_data.stop_reason is None
     assert store.written.vps_ip == "10.0.0.9"
     assert provider._mirrored_record is store.written
-
-
-# =========================================================================
-# Shared TagHostStateStore: tag-removal delegation + key building
-# =========================================================================
-
-
-class _RecordingTagProvider(TagMirrorVpsProvider):
-    """``TagMirrorVpsProvider`` stub that records the tag-removal calls the store makes.
-
-    Only the two methods ``TagHostStateStore`` reaches are implemented; the stub is
-    built via ``model_construct`` so the unrelated provider abstractmethods need no
-    bodies for these store-level tests.
-    """
-
-    _instance_by_host: dict[HostId, dict[str, Any] | None] = PrivateAttr(default_factory=dict)
-    _removed: list[tuple[str, list[str]]] = PrivateAttr(default_factory=list)
-
-    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
-        return self._instance_by_host.get(host_id)
-
-    def _remove_instance_tags(self, instance: Mapping[str, Any], keys: Sequence[str]) -> None:
-        self._removed.append((str(instance["id"]), list(keys)))
-
-    # -- abstract hooks the store-level tests do not exercise --------------------
-    def _state_bucket(self) -> None:
-        return None
-
-    def _bucket_error_type(self) -> type[MngrError]:
-        return MngrError
-
-    def _bucket_label(self) -> str:
-        return "test bucket"
-
-    def _host_name_key(self) -> str:
-        return "Name"
-
-    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
-        raise AssertionError("not exercised by this test")
-
-    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        raise AssertionError("not exercised by this test")
-
-    def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
-        raise AssertionError("not exercised by this test")
-
-    def _persist_agent_to_tags(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        raise AssertionError("not exercised by this test")
-
-    def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
-        raise AssertionError("not exercised by this test")
-
-
-def test_tag_host_state_store_remove_agent_record_builds_per_field_keys() -> None:
-    """remove_agent_record resolves the instance and removes one tag per agent field."""
-    host_id = HostId.generate()
-    provider = _RecordingTagProvider.model_construct()
-    provider._instance_by_host[host_id] = {"id": "i-abc"}
-    store = TagHostStateStore.model_construct(provider=provider)
-
-    store.remove_agent_record(host_id, "agent-7")
-
-    expected_keys = [f"{AGENT_TAG_PREFIX}agent-7-{field}" for field in AGENT_TAG_FIELDS]
-    assert provider._removed == [("i-abc", expected_keys)]
-
-
-def test_tag_host_state_store_remove_agent_record_is_noop_when_instance_gone() -> None:
-    """remove_agent_record makes no tag-removal call when the host's instance is absent."""
-    host_id = HostId.generate()
-    provider = _RecordingTagProvider.model_construct()
-    provider._instance_by_host[host_id] = None
-    store = TagHostStateStore.model_construct(provider=provider)
-
-    store.remove_agent_record(host_id, "agent-7")
-
-    assert provider._removed == []
-
-
-def test_tag_host_state_store_host_record_writes_are_noops() -> None:
-    """The instance's own tags carry the host record, so the host-record store ops are no-ops."""
-    store: HostStateStore = TagHostStateStore.model_construct(provider=_RecordingTagProvider.model_construct())
-    # Neither call resolves an instance or removes tags; they simply return.
-    store.persist_host_record(cast(VpsHostRecord, object()))
-    store.delete_host_state(HostId.generate())

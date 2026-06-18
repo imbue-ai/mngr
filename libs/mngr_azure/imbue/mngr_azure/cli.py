@@ -189,8 +189,8 @@ def _ensure_state_bucket_best_effort(bucket: BlobStateBucket) -> tuple[str | Non
         was_created = bucket.ensure_bucket()
     except BlobStateBucketError as e:
         logger.warning(
-            "Failed to create the Azure state storage account {!r} (offline host state will fall back to the "
-            "VM tag mirror): {}",
+            "Failed to create the Azure state storage account {!r}; offline host state will be unavailable "
+            "(a stopped host cannot be listed or resumed) until prepare succeeds: {}",
             bucket.account_name,
             e,
         )
@@ -475,9 +475,9 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     client.ensure_self_deallocate_role()
     # Best-effort: create the state storage account + container that hold the full
     # host record and per-agent records (so a deallocated VM's state is readable
-    # offline, with no 256-char tag limit). A missing storage permission degrades
-    # to a warning so the network prepare still succeeds (offline state then falls
-    # back to the VM tag mirror).
+    # offline). A missing storage permission degrades to a warning so the network
+    # prepare still succeeds (offline host state is then unavailable until prepare
+    # is re-run with sufficient permissions).
     state_account_name, was_bucket_created = _ensure_state_bucket_best_effort(_build_state_bucket(base, client))
     # Provision the bucket-write managed identity (best-effort) when the offline
     # host_dir feature is enabled. The bucket-only steps above are unconditional,

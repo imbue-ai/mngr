@@ -10,6 +10,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -23,11 +24,15 @@ from imbue.mngr_azure.backend import _build_self_deallocate_script
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.testing import FakeAuthorizationClient
+from imbue.mngr_azure.testing import FakeBlobStorageBackend
 from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
-from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
+from imbue.mngr_azure.testing import _StubbedBlobStateBucket
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
+from imbue.mngr_vps.host_state_store import MissingBucketHostStateStore
+from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
@@ -188,13 +193,18 @@ def test_parse_build_args_rejects_unknown_azure_flag(temp_mngr_ctx: MngrContext)
 
 
 # =============================================================================
-# Offline tag paths (stop/start lifecycle): instance lookup, agent-data mirror,
-# discovery, offline-host reconstruction.
+# Offline paths (stop/start lifecycle): instance lookup, offline discovery from
+# the cheap identity tags, and the no-bucket state-store behavior.
 #
 # These build an AzureProvider over a _StubbedAzureVpsClient whose fake compute
 # client returns hand-built VM SimpleNamespaces; the provider normalizes them
 # through the real list_instances path (tags -> "key=value" list, power state ->
 # "state"). The Azure analog of the AWS/GCP backend offline tests.
+#
+# The per-agent VM tag mirror was removed: agent records and the full host record
+# now live solely in the Blob state bucket (via ``_state_store``). The base
+# identity tags (``mngr-host-id`` / ``mngr-host-name``) are still stamped at
+# create and drive offline discovery of a deallocated VM.
 # =============================================================================
 
 
@@ -204,8 +214,9 @@ def _build_stubbed_provider(
     """Build an AzureProvider whose Azure client is a _StubbedAzureVpsClient over fakes.
 
     Returns the provider, the fake compute client (so a test can seed
-    ``virtual_machines.list_result`` -- the tag-based lookups read it) and the fake
-    resource client (so a test can assert on the recorded tag-update patches).
+    ``virtual_machines.list_result`` -- the host-id lookup and offline discovery
+    read it) and the fake resource client. No ``_state_bucket`` is seeded, so the
+    provider's ``_state_store`` resolves to a ``MissingBucketHostStateStore``.
     Mirrors the AWS / GCP ``_build_stubbed_provider``.
     """
     config = AzureProviderConfig(subscription_id="sub-123", auto_shutdown_seconds=3600)
@@ -230,7 +241,32 @@ def _build_stubbed_provider(
         azure_client=client,
         azure_config=config,
     )
+    # No state bucket: seed the cached_property to None so ``_state_store`` resolves
+    # to a ``MissingBucketHostStateStore`` (writes no-op, offline reads raise) and
+    # the existence probe never hits real Azure.
+    provider.__dict__["_state_bucket"] = None
     return provider, compute, resource
+
+
+def _seed_fake_bucket(provider: AzureProvider) -> _StubbedBlobStateBucket:
+    """Seed a fake-backed Blob state bucket into ``provider._state_bucket`` and return it.
+
+    Makes ``_state_store`` resolve to a ``BucketHostStateStore`` so offline reads
+    (agent records, the host record) round-trip through the in-memory backend rather
+    than raising the missing-bucket error.
+    """
+    config = provider.azure_config
+    bucket = _StubbedBlobStateBucket(
+        credential=None,
+        subscription_id="sub-123",
+        resource_group=config.resource_group,
+        region=config.default_region,
+        account_name="mngrststateacct1234",
+        fake_backend=FakeBlobStorageBackend(),
+    )
+    bucket.ensure_bucket()
+    provider.__dict__["_state_bucket"] = bucket
+    return bucket
 
 
 def _vm(name: str, *, tags: dict[str, str] | None = None) -> SimpleNamespace:
@@ -295,7 +331,7 @@ def test_find_instance_for_host_refuses_duplicate_host_id_tag(temp_mngr_ctx: Mng
     """Two VMs sharing a mngr-host-id tag are refused, not silently disambiguated.
 
     The tag is account-writable, so a duplicate could otherwise steer ``mngr start``
-    (and the agent-tag writes keyed off this lookup) onto the wrong VM. The lookup
+    (and the offline operations keyed off this lookup) onto the wrong VM. The lookup
     must raise rather than pick the first match.
     """
     provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
@@ -311,64 +347,53 @@ def test_find_instance_for_host_refuses_duplicate_host_id_tag(temp_mngr_ctx: Mng
         provider._find_instance_for_host(host_id)
 
 
-def test_persist_agent_data_mirrors_fields_into_vm_tags(temp_mngr_ctx: MngrContext) -> None:
-    """persist_agent_data finds the VM by host tag and upserts per-field agent tags.
+def test_no_bucket_persist_agent_data_does_not_raise_and_writes_no_vm_tags(temp_mngr_ctx: MngrContext) -> None:
+    """With no state bucket, mirroring an agent record is a no-op write -- it must not raise.
 
-    Exercises the deallocated-host path (the on-volume base write is unavailable, so
-    only the VM tags are written); the seeded ``vps_ip=None`` record makes
-    ``super().persist_agent_data`` short-circuit with ``HostNotFoundError``. A Merge
-    tag patch carries the name/type, plus labels as compact JSON.
+    The per-agent VM tag mirror is gone; ``_state_store`` is a
+    ``MissingBucketHostStateStore`` whose write methods no-op so a running host
+    stays usable. The seeded ``vps_ip=None`` record makes ``super().persist_agent_data``
+    short-circuit with ``HostNotFoundError``, so the only remaining step is the
+    (no-op) offline mirror. No server-side tag patch is ever recorded.
     """
-    provider, compute, resource = _build_stubbed_provider(temp_mngr_ctx)
+    provider, _compute, resource = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     seed_stopped_host_record(provider, host_id)
-    _seed_compute(compute, [_vm("vm-1", tags={"mngr-host-id": str(host_id)})])
     provider.persist_agent_data(
         host_id,
         {"id": str(agent_id), "name": "a1", "type": "command", "labels": {"env": "prod"}},
     )
-    assert len(resource.tags.updates) == 1
-    _scope, parameters = resource.tags.updates[0]
-    assert parameters.operation == "Merge"
-    written = parameters.properties.tags
-    assert written[f"{AGENT_TAG_PREFIX}{agent_id}-name"] == "a1"
-    assert written[f"{AGENT_TAG_PREFIX}{agent_id}-type"] == "command"
-    assert written[f"{AGENT_TAG_PREFIX}{agent_id}-labels"] == '{"env":"prod"}'
+    assert resource.tags.updates == []
 
 
-def test_list_persisted_agent_data_for_host_reads_tags(temp_mngr_ctx: MngrContext) -> None:
-    """list_persisted_agent_data_for_host reassembles an agent from its tags (deallocated host)."""
+def test_no_bucket_list_persisted_agent_data_raises_prepare_pointer(temp_mngr_ctx: MngrContext) -> None:
+    """An offline agent-record read against a no-bucket provider raises the prepare-pointer error."""
+    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    seed_stopped_host_record(provider, host_id)
+    with pytest.raises(MngrError, match="mngr azure prepare"):
+        provider.list_persisted_agent_data_for_host(host_id)
+
+
+def test_no_bucket_to_offline_host_raises_prepare_pointer(temp_mngr_ctx: MngrContext) -> None:
+    """A stopped host cannot be reconstructed without a bucket: ``to_offline_host`` raises a prepare pointer."""
+    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    with pytest.raises(MngrError, match="mngr azure prepare"):
+        provider.to_offline_host(host_id)
+
+
+def test_no_bucket_discovery_of_deallocated_vm_raises_prepare_pointer(temp_mngr_ctx: MngrContext) -> None:
+    """A deallocated VM surfaced in discovery reads its agents from the store, which raises without a bucket.
+
+    The cheap identity tags still identify the deallocated VM, so the offline
+    discovery loop reaches the agent-record read -- and that read against the
+    ``MissingBucketHostStateStore`` raises the actionable prepare-pointer error
+    (rather than silently dropping the stopped host's agents).
+    """
     provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    agent_id = AgentId.generate()
-    _seed_compute(
-        compute,
-        [
-            _vm(
-                "vm-1",
-                tags={
-                    "mngr-host-id": str(host_id),
-                    f"{AGENT_TAG_PREFIX}{agent_id}-name": "a1",
-                    f"{AGENT_TAG_PREFIX}{agent_id}-type": "command",
-                    f"{AGENT_TAG_PREFIX}{agent_id}-labels": '{"env":"prod"}',
-                },
-            )
-        ],
-    )
-    agents = provider.list_persisted_agent_data_for_host(host_id)
-    assert len(agents) == 1
-    assert agents[0]["id"] == str(agent_id)
-    assert agents[0]["name"] == "a1"
-    assert agents[0]["type"] == "command"
-    assert agents[0]["labels"] == {"env": "prod"}
-
-
-def test_discover_hosts_and_agents_surfaces_deallocated_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
-    """A deallocated VM is reconstructed from tags as a STOPPED host with its agents."""
-    provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    host_id = HostId.generate()
-    agent_id = AgentId.generate()
     _seed_compute(
         compute,
         [
@@ -378,9 +403,60 @@ def test_discover_hosts_and_agents_surfaces_deallocated_host_from_tags(temp_mngr
                     "mngr-host-id": str(host_id),
                     "mngr-provider": "azure-test",
                     "mngr-host-name": "mngr-myhost",
-                    f"{AGENT_TAG_PREFIX}{agent_id}-name": "a1",
-                    f"{AGENT_TAG_PREFIX}{agent_id}-type": "command",
                 },
+            )
+        ],
+    )
+    _set_power_state(compute, "deallocated")
+    with ConcurrencyGroup(name="test") as cg:
+        with pytest.raises(MngrError, match="mngr azure prepare"):
+            provider.discover_hosts_and_agents(cg)
+
+
+def test_offline_discovered_host_from_instance_builds_stopped_host(temp_mngr_ctx: MngrContext) -> None:
+    """A deallocated VM with mngr-host-id + mngr-host-name tags yields a STOPPED DiscoveredHost.
+
+    Reads only the cheap identity tags (never the bucket), so this works regardless
+    of whether a state bucket exists.
+    """
+    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    instance = {
+        "id": "vm-1",
+        "tags": [f"mngr-host-id={host_id}", "mngr-host-name=mngr-myhost", "mngr-provider=azure-test"],
+    }
+    discovered = provider._offline_discovered_host_from_instance(instance)
+    assert discovered is not None
+    assert discovered.host_id == host_id
+    assert str(discovered.host_name) == "myhost"
+    assert discovered.host_state == HostState.STOPPED
+    assert discovered.provider_name == provider.name
+
+
+def test_offline_discovered_host_from_instance_returns_none_without_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
+    """A VM with no mngr-host-id tag is not a mngr host: the discovery helper returns None."""
+    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    instance = {"id": "vm-1", "tags": ["mngr-provider=azure-test"]}
+    assert provider._offline_discovered_host_from_instance(instance) is None
+
+
+def test_discover_hosts_and_agents_surfaces_deallocated_host_with_bucket_agents(temp_mngr_ctx: MngrContext) -> None:
+    """A deallocated VM surfaces as a STOPPED host, with its agents read from the state bucket.
+
+    The cheap identity tags (host id + name) identify the deallocated VM; its agent
+    records come from the Blob bucket via ``_state_store``, not from VM tags.
+    """
+    provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    bucket = _seed_fake_bucket(provider)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    bucket.write_agent_record(host_id, str(agent_id), {"id": str(agent_id), "name": "a1", "type": "command"})
+    _seed_compute(
+        compute,
+        [
+            _vm(
+                "vm-1",
+                tags={"mngr-host-id": str(host_id), "mngr-provider": "azure-test", "mngr-host-name": "mngr-myhost"},
             )
         ],
     )
@@ -393,42 +469,18 @@ def test_discover_hosts_and_agents_surfaces_deallocated_host_from_tags(temp_mngr
     assert str(hosts[0].host_name) == "myhost"
     assert hosts[0].host_state == HostState.STOPPED
     agents = result[hosts[0]]
-    assert len(agents) == 1
-    assert agents[0].agent_id == agent_id
+    assert [a.agent_id for a in agents] == [agent_id]
     assert str(agents[0].agent_name) == "a1"
 
 
-def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp_mngr_ctx: MngrContext) -> None:
-    """A still-stopping VM (OS down, status HALTED) is reconstructed so it doesn't vanish mid-stop."""
-    provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    host_id = HostId.generate()
-    agent_id = AgentId.generate()
-    _seed_compute(
-        compute,
-        [
-            _vm(
-                "vm-1",
-                tags={
-                    "mngr-host-id": str(host_id),
-                    "mngr-provider": "azure-test",
-                    "mngr-host-name": "mngr-myhost",
-                    f"{AGENT_TAG_PREFIX}{agent_id}-name": "a1",
-                },
-            )
-        ],
-    )
-    _set_power_state(compute, "stopping")
-    with ConcurrencyGroup(name="test") as cg:
-        result = provider.discover_hosts_and_agents(cg)
-    hosts = {host.host_id: host for host in result}
-    assert host_id in hosts
-    assert hosts[host_id].host_state == HostState.STOPPED
-    assert [a.agent_id for a in result[hosts[host_id]]] == [agent_id]
-
-
 def test_discover_hosts_and_agents_skips_vm_with_absent_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
-    """A VM with no mngr-host-id tag is skipped; a well-formed deallocated host still surfaces."""
+    """A VM with no mngr-host-id tag is skipped; a well-formed deallocated host still surfaces.
+
+    Bucket-mode: the good host's agents read empty from the bucket (none written),
+    so it surfaces with no agents while the bad VM never enters the result.
+    """
     provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    _seed_fake_bucket(provider)
     good_host_id = HostId.generate()
     _seed_compute(
         compute,
@@ -476,149 +528,51 @@ def test_discover_hosts_and_agents_skips_running_but_unreachable_vm(temp_mngr_ct
     assert host_id not in {host.host_id for host in result}
 
 
-def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
-    """to_offline_host rebuilds a STOPPED offline host from tags when SSH can't reach it.
+def test_to_offline_host_reconstructs_stopped_host_from_bucket(temp_mngr_ctx: MngrContext) -> None:
+    """to_offline_host rebuilds a STOPPED offline host from the bucket's host record when SSH can't reach it.
 
-    The name comes from the ``mngr-host-name`` tag (``mngr-`` prefix stripped) and
-    created_at from the ISO ``mngr-created-at`` tag.
+    The full record is read from ``_state_store`` (the Blob bucket), not from VM
+    tags -- the tag-based reconstruction was removed.
     """
-    provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    bucket = _seed_fake_bucket(provider)
     host_id = HostId.generate()
-    _seed_compute(
-        compute,
-        [
-            _vm(
-                "vm-1",
-                tags={
-                    "mngr-host-id": str(host_id),
-                    "mngr-host-name": "mngr-myhost",
-                    "mngr-created-at": "2026-01-01T00:00:00+00:00",
-                },
-            )
-        ],
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="recovered-host",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        stop_reason=HostState.STOPPED.value,
     )
+    bucket.write_host_record_json(host_id, VpsHostRecord(certified_host_data=certified).model_dump_json())
+
     offline = provider.to_offline_host(host_id)
     assert offline.id == host_id
-    assert str(offline.get_certified_data().host_name) == "myhost"
+    assert str(offline.get_certified_data().host_name) == "recovered-host"
     assert offline.get_state() == HostState.STOPPED
-    created_at = offline.get_certified_data().created_at
-    assert (created_at.year, created_at.month, created_at.day) == (2026, 1, 1)
-
-
-def test_to_offline_host_falls_back_to_now_on_malformed_created_at(
-    temp_mngr_ctx: MngrContext, log_warnings: list[str]
-) -> None:
-    """A malformed mngr-created-at tag is surfaced (warning) and falls back to now(), not swallowed."""
-    provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    host_id = HostId.generate()
-    before = datetime.now(timezone.utc)
-    _seed_compute(
-        compute,
-        [
-            _vm(
-                "vm-1",
-                tags={"mngr-host-id": str(host_id), "mngr-host-name": "mngr-myhost", "mngr-created-at": "not-a-stamp"},
-            )
-        ],
-    )
-    offline = provider.to_offline_host(host_id)
-    assert offline.id == host_id
-    assert offline.get_state() == HostState.STOPPED
-    assert offline.get_certified_data().created_at >= before
-    assert any("Malformed mngr-created-at" in w for w in log_warnings), log_warnings
 
 
 # =============================================================================
-# Agent-tag helpers (the per-field upsert/delete logic, unit-level)
+# State store selection (BucketHostStateStore vs MissingBucketHostStateStore)
 # =============================================================================
 
 
-def _normalized_instance(tag_pairs: dict[str, str]) -> dict:
-    """A normalized instance dict (``{"id", "tags": ["k=v", ...]}``) for tag-helper unit tests."""
-    return {"id": "vm-1", "tags": [f"{k}={v}" for k, v in tag_pairs.items()]}
-
-
-def test_agent_field_items_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -> None:
-    """name/type/labels each map to their own mngr-agent-<id>-<field> tag; the id is in the key."""
+def test_state_store_is_missing_bucket_store_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
+    """With no resolved bucket, ``_state_store`` is the raise-on-read placeholder store."""
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    set_tags, delete_keys = provider._agent_field_items(
-        "agent-1",
-        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}},
-        _normalized_instance({"mngr-host-id": "h"}),
-    )
-    assert set_tags == {
-        "mngr-agent-agent-1-name": "a1",
-        "mngr-agent-agent-1-type": "command",
-        "mngr-agent-agent-1-labels": '{"env":"prod"}',
-    }
-    assert delete_keys == []
+    store = provider._state_store
+    assert isinstance(store, MissingBucketHostStateStore)
+    assert store.prepare_command == "mngr azure prepare"
+    assert store.store_label == "Azure state bucket"
 
 
-def test_agent_field_items_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
-    """An agent with absent or empty labels gets no -labels tag."""
+def test_state_store_is_bucket_store_when_bucket_exists(temp_mngr_ctx: MngrContext) -> None:
+    """When a bucket exists, ``_state_store`` is the bucket-backed store over that bucket."""
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    instance = _normalized_instance({})
-    for agent_data in (
-        {"id": "agent-1", "name": "a1", "type": "command"},
-        {"id": "agent-1", "name": "a1", "type": "command", "labels": {}},
-    ):
-        set_tags, _ = provider._agent_field_items("agent-1", agent_data, instance)
-        assert "mngr-agent-agent-1-labels" not in set_tags
-
-
-def test_agent_field_items_drops_oversized_labels_with_warning(
-    temp_mngr_ctx: MngrContext, log_warnings: list[str]
-) -> None:
-    """Labels too large for a 256-char Azure tag are dropped (name/type kept) with a warning."""
-    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    set_tags, _ = provider._agent_field_items(
-        "agent-1",
-        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"k": "x" * 300}},
-        _normalized_instance({}),
-    )
-    assert set_tags == {"mngr-agent-agent-1-name": "a1", "mngr-agent-agent-1-type": "command"}
-    assert any("exceeds the" in w and "labels" in w for w in log_warnings), log_warnings
-
-
-def test_agent_field_items_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
-    """When an update carries empty labels (an explicit removal), the stale -labels tag is deleted."""
-    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    instance = _normalized_instance(
-        {
-            "mngr-agent-agent-1-name": "a1",
-            "mngr-agent-agent-1-type": "command",
-            "mngr-agent-agent-1-labels": '{"env":"prod"}',
-        }
-    )
-    set_tags, delete_keys = provider._agent_field_items(
-        "agent-1", {"id": "agent-1", "name": "a1", "type": "command", "labels": {}}, instance
-    )
-    assert "mngr-agent-agent-1-labels" not in set_tags
-    assert delete_keys == ["mngr-agent-agent-1-labels"]
-
-
-def test_agent_field_items_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
-    """A partial persist (e.g. only id+type) must NOT delete the agent's existing name/labels tags."""
-    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    instance = _normalized_instance(
-        {
-            "mngr-agent-agent-1-name": "a1",
-            "mngr-agent-agent-1-type": "command",
-            "mngr-agent-agent-1-labels": '{"env":"prod"}',
-        }
-    )
-    set_tags, delete_keys = provider._agent_field_items("agent-1", {"id": "agent-1", "type": "claude"}, instance)
-    assert set_tags == {"mngr-agent-agent-1-type": "claude"}
-    assert delete_keys == []
-
-
-def test_persisted_agent_dicts_reassembles_id_with_dashes(temp_mngr_ctx: MngrContext) -> None:
-    """An agent id containing dashes still reassembles: the field is split off the *final* dash."""
-    provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    agents = provider._persisted_agent_dicts_from_instance(
-        _normalized_instance({"mngr-agent-ab-cd-ef-name": "a1", "mngr-agent-ab-cd-ef-type": "command"})
-    )
-    assert agents == [{"id": "ab-cd-ef", "name": "a1", "type": "command"}]
+    bucket = _seed_fake_bucket(provider)
+    store = provider._state_store
+    assert isinstance(store, BucketHostStateStore)
+    assert store.bucket is bucket
 
 
 # =============================================================================
@@ -656,22 +610,6 @@ def test_build_self_deallocate_script_fetches_token_resource_id_and_posts_deallo
     assert script.index("rm -f") < script.index("deallocate?api-version")
     # On a refused deallocate the script logs and exits -- it must NOT poweroff,
     # since an Azure OS shutdown does not halt billing.
-    assert "shutdown" not in script
-    assert "exit 1" in script
-
-
-def test_build_self_deallocate_script_omits_sentinel_removal_for_bare() -> None:
-    """With no sentinel (bare path), the script still deallocates but skips the rm line.
-
-    The bare placement runs this directly as the agent's shutdown.sh -- there is no
-    idle sentinel, so passing None omits the ``rm -f`` line while keeping the ARM
-    deallocate. It still must not fall back to an OS poweroff (which would strand a
-    still-billing Azure VM).
-    """
-    script = _build_self_deallocate_script(None)
-    assert "rm -f" not in script
-    assert "/deallocate?api-version=" in script
-    assert "-X POST" in script
     assert "shutdown" not in script
     assert "exit 1" in script
 
