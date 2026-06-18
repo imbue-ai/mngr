@@ -545,24 +545,52 @@ def test_transcript_cli_resolves_config_subtype_through_parent(
     """A config-defined subtype (parent_type='claude') resolves to its parent's class.
 
     Regression: transcript used a flat ``get_agent_class`` lookup that only knew
-    plugin-registered types, so a custom type like 'write-plus' (parent_type='claude')
-    failed up front with "Unknown agent type 'write-plus'". It must instead resolve
-    through the parent chain (like every other command) and read the transcript.
+    plugin-registered types, so a custom ``[agent_types.X]`` with parent_type='claude'
+    failed up front with "Unknown agent type 'X'". It must instead resolve through the
+    parent chain (like every other command) and read the parent's transcript.
     """
-    _register_subtype_in_settings(get_or_create_profile_dir(temp_host_dir) / "settings.toml", "write-plus", "claude")
+    _register_subtype_in_settings(get_or_create_profile_dir(temp_host_dir) / "settings.toml", "coder", "claude")
     _agent_id, events_dir = create_agent_with_events_dir(
         local_provider.host_dir,
-        agent_name="write-plus-agent",
+        agent_name="coder-agent",
         events_source="claude/common_transcript",
-        agent_type="write-plus",
+        agent_type="coder",
     )
     write_common_transcript_events(events_dir, SAMPLE_TRANSCRIPT_EVENTS)
 
     result = cli_runner.invoke(
         transcript,
-        ["write-plus-agent"],
+        ["coder-agent"],
         obj=plugin_manager,
     )
     assert result.exit_code == 0, result.output
     assert "Hello" in result.output
     assert "World" in result.output
+
+
+def test_transcript_cli_blocks_unresolvable_agent_type(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """An agent whose type does not resolve at all must be blocked, not silently read.
+
+    The precheck exists to refuse types we do not know how to read. A type that
+    is neither registered nor defined in config (e.g. its plugin was uninstalled)
+    must fail fast with the resolver's clear error rather than falling through to
+    transcript discovery.
+    """
+    create_agent_with_events_dir(
+        local_provider.host_dir,
+        agent_name="orphan-type-agent",
+        agent_type="definitely-unregistered-type",
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["orphan-type-agent"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "definitely-unregistered-type" in result.output
