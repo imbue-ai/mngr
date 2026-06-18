@@ -70,6 +70,23 @@ def test_build_opencode_config_auto_allow_injects_wildcard_then_overrides_win() 
     assert overridden["permission"] == {"bash": "deny"}
 
 
+def test_build_opencode_config_omits_autoupdate_by_default() -> None:
+    """Without disable_auto_update, no autoupdate key is set (opencode defaults to enabled)."""
+    config = build_opencode_config({}, {}, False)
+    assert "autoupdate" not in config
+
+
+def test_build_opencode_config_disables_autoupdate_when_requested() -> None:
+    config = build_opencode_config({}, {}, False, disable_auto_update=True)
+    assert config["autoupdate"] is False
+
+
+def test_build_opencode_config_autoupdate_override_wins() -> None:
+    """An explicit autoupdate in config_overrides wins over the disable flag."""
+    config = build_opencode_config({}, {"autoupdate": "notify"}, False, disable_auto_update=True)
+    assert config["autoupdate"] == "notify"
+
+
 def test_build_opencode_config_does_not_mutate_base() -> None:
     base = {"theme": "dark"}
     build_opencode_config(base, {"model": "m"}, True)

@@ -1,0 +1,1 @@
+Fixed `mngr transcript` failing with "Unknown agent type" for config-defined agent subtypes (a custom `[agent_types.X]` with a `parent_type`, e.g. `parent_type = "claude"`). The command now resolves the type through its parent chain (like every other command) instead of a flat class-registry lookup, so it recognizes such subtypes and reads the parent's transcript.

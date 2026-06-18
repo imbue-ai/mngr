@@ -217,7 +217,7 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
     ``isinstance`` check is against ``ClaudeCoreAgent`` (the shared base of every
     Claude agent), so it covers ``claude``, ``headless_claude``, and user-defined
     agent types whose ``parent_type`` chain reaches ``claude`` (e.g.
-    config-defined templates like ``write-plus``).
+    config-defined templates like a custom ``coder``).
     """
     if not isinstance(agent, ClaudeCoreAgent):
         return

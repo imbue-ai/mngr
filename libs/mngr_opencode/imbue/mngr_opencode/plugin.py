@@ -66,6 +66,9 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.installation import verify_pinned_cli_version
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
+from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -250,6 +253,20 @@ class OpenCodeAgentConfig(AgentTypeConfig):
         default=True,
         description="Check whether opencode is installed and install it if missing "
         "(if False, assume it is already present).",
+    )
+    version: str | None = Field(
+        default=None,
+        description="Pin the opencode version to install (e.g., '0.4.10'). When set, installation runs the "
+        "opencode installer with VERSION=<version> and provisioning verifies the installed opencode matches, "
+        "erroring on a mismatch. When None (the default), installs the latest version.",
+    )
+    update_policy: AgentUpdatePolicy | None = Field(
+        default=None,
+        description='How to handle opencode\'s startup auto-update. NEVER sets `"autoupdate": false` in the '
+        "per-agent opencode.json so opencode does not update itself on launch; AUTO leaves auto-update enabled. "
+        "ASK has no interactive flow for opencode and behaves like AUTO. When unset (the default), resolves to "
+        "NEVER (auto-update disabled) -- set AUTO to leave opencode's auto-update enabled. An explicit "
+        "`autoupdate` key in `config_overrides` always wins.",
     )
     # emit_common_transcript gates the raw -> common-schema converter that writes
     # events/opencode/common_transcript/events.jsonl. The raw transcript at
@@ -475,6 +492,13 @@ class OpenCodeAgent(
         """
         if self.agent_config.check_installation:
             ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
+            if self.agent_config.version is not None:
+                verify_pinned_cli_version(
+                    host,
+                    command=str(self.agent_config.command),
+                    binary_name=self.get_install_binary_name(),
+                    pinned_version=self.agent_config.version,
+                )
         host_home = self._resolve_host_home(host)
         self._provision_opencode_config(host, host_home)
         self._provision_plugin(host)
@@ -657,10 +681,13 @@ class OpenCodeAgent(
         if self.agent_config.sync_global_config:
             user_config_path = host_home.joinpath(*_USER_CONFIG_RELATIVE_PATH)
             base_config = read_opencode_config(host, user_config_path)
+        # Unattended is keyed off the host, matching the other agent plugins.
+        disable_auto_update = is_self_update_disabled(self.agent_config.update_policy, is_unattended=not host.is_local)
         per_agent_config = build_opencode_config(
             base_config,
             self.agent_config.config_overrides,
             self.is_unattended_enabled(),
+            disable_auto_update=disable_auto_update,
         )
         config_path = get_opencode_config_file_path(self._get_opencode_config_dir())
         with log_span("Writing per-agent opencode config to {}", config_path):
@@ -764,7 +791,12 @@ class OpenCodeAgent(
         return "opencode"
 
     def get_install_command(self) -> str:
-        return "curl -fsSL https://opencode.ai/install | bash"
+        # The opencode installer reads ``requested_version=${VERSION:-}``, so a pinned
+        # version is passed by setting VERSION on the bash that runs the piped script.
+        version = self.agent_config.version
+        if version is None:
+            return "curl -fsSL https://opencode.ai/install | bash"
+        return f"curl -fsSL https://opencode.ai/install | VERSION={shlex.quote(version)} bash"
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""

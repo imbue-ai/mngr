@@ -1,3 +1,4 @@
+import re
 import shlex
 from typing import Final
 
@@ -12,6 +13,75 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 # healthy install so a genuinely stuck one fails rather than hanging forever.
 _INSTALL_TIMEOUT_SECONDS: Final[float] = 300.0
 _CHECK_TIMEOUT_SECONDS: Final[float] = 10.0
+_VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# A "version token" in a ``--version`` banner: a maximal run of word chars, dots,
+# plus and minus (so "1.2.3", "0.4.10", "1.2.3-rc1", "v2.1.50", "codex-cli" are each
+# single tokens). Used to look for the user's pinned string verbatim rather than
+# imposing a semver shape on it.
+_VERSION_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[\w.+-]+")
+
+
+def is_pinned_version_present(version_output: str, pinned_version: str) -> bool:
+    """Whether ``pinned_version`` appears verbatim as a token in ``--version`` output.
+
+    Transparent on purpose: the user's pinned string is matched as-is against the
+    whitespace/paren-delimited tokens of the banner (e.g. "pi 1.2.3",
+    "2.1.50 (Claude Code)", "codex-cli 0.138.0"), so any pin the installer accepts
+    -- a plain ``X.Y.Z``, a four-component version, or a pre-release like
+    ``1.2.3-rc1`` -- verifies correctly without this code knowing the version
+    scheme. A leading ``v`` on either side is ignored so "v1.2.3" matches "1.2.3".
+    Token equality (not substring) means a pin of "1.2.3" does not match an
+    installed "1.2.30".
+    """
+    pinned = pinned_version.strip()
+    if not pinned:
+        return False
+    candidates = {pinned, pinned.lstrip("v")}
+    for token in _VERSION_TOKEN_RE.findall(version_output):
+        if token in candidates or token.lstrip("v") in candidates:
+            return True
+    return False
+
+
+def verify_pinned_cli_version(
+    host: OnlineHostInterface,
+    *,
+    command: str,
+    binary_name: str,
+    pinned_version: str,
+) -> None:
+    """Verify the installed CLI reports ``pinned_version``, erroring on a mismatch.
+
+    Needed because ``ensure_cli_installed`` skips installation when the binary is
+    already present, so a pre-existing global install at the wrong version would
+    otherwise satisfy a pin silently. Probes ``<command> --version`` and checks
+    whether the pinned string is present in the banner (see
+    ``is_pinned_version_present`` -- the pin is passed through verbatim, no version
+    scheme assumed). Raises ``AgentInstallationError`` when the banner is non-empty
+    and lacks the pin. When the probe fails or yields no output (e.g. the CLI is
+    absent or has no ``--version``), logs at debug and returns rather than aborting
+    provisioning.
+
+    Both stdout and stderr are inspected because not every CLI prints its version
+    to stdout -- pi, for one, writes ``--version`` to stderr -- and the streams are
+    combined in code rather than via a shell ``2>&1`` so the result does not depend
+    on how a given host executes the command.
+    """
+    probe = f"{command} --version"
+    result = host.execute_idempotent_command(probe, timeout_seconds=_VERSION_PROBE_TIMEOUT_SECONDS)
+    output = f"{result.stdout}\n{result.stderr}".strip() if result.success else ""
+    if not output:
+        logger.debug("Could not determine installed {} version; skipping version pin check.", binary_name)
+        return
+    if is_pinned_version_present(output, pinned_version):
+        logger.debug("{} reports pinned version {}", binary_name, pinned_version)
+        return
+    raise AgentInstallationError(
+        f"{binary_name} version mismatch: `{command} --version` reported {output!r}, "
+        f"but agent config pins version {pinned_version!r}. "
+        f"Re-install {binary_name} with the correct version or update the pinned version in your agent config."
+    )
 
 
 def is_binary_present(host: OnlineHostInterface, binary_name: str) -> bool:
