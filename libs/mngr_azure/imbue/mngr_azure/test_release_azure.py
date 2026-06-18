@@ -42,6 +42,7 @@ from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
 
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
 from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
@@ -540,6 +541,23 @@ def test_provider_release_trip1(
     _azure_release_test_network_prepared: None,
 ) -> None:
     run_provider_release_trip1(
+        _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip3(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    azure_release_client: AzureVpsClient,
+    azure_release_subscription_id: str,
+    _azure_release_test_network_prepared: None,
+) -> None:
+    run_provider_release_trip3(
         _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
         tmp_path,
         temp_git_repo,

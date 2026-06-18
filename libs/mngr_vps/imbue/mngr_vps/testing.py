@@ -42,6 +42,9 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
     """
 
     supports_shutdown_hosts = True
+    # The container shape snapshots via `docker commit`, which lives on the VPS's own disk and
+    # dies with `destroy_host`; so a VPS-family snapshot is not portable.
+    snapshot_survives_destroy = False
 
     def __init__(self, client: VpsClientInterface, isolation: IsolationMode) -> None:
         self._client = client

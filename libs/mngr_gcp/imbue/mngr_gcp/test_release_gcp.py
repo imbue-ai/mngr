@@ -49,6 +49,7 @@ import google.auth
 import pytest
 
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.testing import GCP_DEFAULT_REGION
@@ -482,6 +483,21 @@ def test_provider_release_trip1(
     _gcp_release_test_firewall_prepared: None,
 ) -> None:
     run_provider_release_trip1(
+        _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
+    )
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip3(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    gcp_release_client: GcpVpsClient,
+    gcp_release_test_project: str,
+    _gcp_release_test_firewall_prepared: None,
+) -> None:
+    run_provider_release_trip3(
         _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
     )
 

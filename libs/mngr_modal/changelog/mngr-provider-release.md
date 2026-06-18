@@ -1,1 +1,3 @@
 Added `test_provider_release_trip1` to the Modal release suite: a single-boot full-lifecycle trip (create, exec, plain stop, `--stop-host` refusal, start, persistence, snapshot, out-of-band kill, gc, backend-clean) built on the shared provider release harness. Modal cannot stop a host's compute, so the trip asserts `mngr stop --stop-host` is refused with `HostShutdownNotSupportedError`; it is not parametrized over isolation (Modal has no isolation modes). Gated on Modal credentials plus the new `MNGR_MODAL_RELEASE_TESTS=1` opt-in.
+
+Also added `test_provider_release_trip3` (snapshot survives destroy): Modal snapshots are portable, so the trip snapshots a host, destroys it, then asserts a fresh `mngr create --snapshot` restores the captured filesystem.

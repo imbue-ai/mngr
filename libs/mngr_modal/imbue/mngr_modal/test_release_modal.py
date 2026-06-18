@@ -51,6 +51,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.providers.provider_release_testing import ProviderReleaseProfile
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
 from imbue.mngr.utils.testing import delete_modal_environment
 from imbue.mngr.utils.testing import delete_modal_volumes_in_environment
@@ -141,6 +142,9 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
     # so the harness takes the refusal branch for ``mngr stop --stop-host``.
     supports_shutdown_hosts = False
     supports_snapshots = True
+    # Modal snapshots are portable filesystem images that outlive the sandbox, so they survive
+    # destroy and can seed a fresh `mngr create --snapshot`.
+    snapshot_survives_destroy = True
 
     def __init__(self, provider: ModalProviderInstance, user_id: str, app_name: str) -> None:
         self._provider = provider
@@ -269,6 +273,27 @@ def test_provider_release_trip1(
 ) -> None:
     provider, user_id, app_name = _modal_release_alignment
     run_provider_release_trip1(
+        _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+@pytest.mark.release
+@pytest.mark.modal
+@pytest.mark.rsync
+@pytest.mark.timeout(1200)
+@pytest.mark.skipif(
+    not (_modal_credentials_available() and MODAL_RELEASE_TESTS_OPT_IN),
+    reason="Modal credentials or MNGR_MODAL_RELEASE_TESTS=1 not set",
+)
+def test_provider_release_trip3(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    _modal_release_alignment: tuple[ModalProviderInstance, str, str],
+) -> None:
+    provider, user_id, app_name = _modal_release_alignment
+    run_provider_release_trip3(
         _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
         tmp_path,
         temp_git_repo,

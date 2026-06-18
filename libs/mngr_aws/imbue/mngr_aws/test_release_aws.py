@@ -47,6 +47,7 @@ from botocore.exceptions import ClientError
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.client import AwsVpsClient
@@ -815,6 +816,20 @@ def test_provider_release_trip1(
     _aws_release_test_security_group_prepared: None,
 ) -> None:
     run_provider_release_trip1(
+        _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
+    )
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip3(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+    _aws_release_test_security_group_prepared: None,
+) -> None:
+    run_provider_release_trip3(
         _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
     )
 

@@ -94,9 +94,13 @@ class ProviderReleaseProfile(abc.ABC):
     # whether ``mngr stop --stop-host`` is expected to really stop the machine or to refuse
     # loudly. ``supports_snapshots`` is the *effective* value for this profile's shape (the
     # provider sets it False for a bare/no-container shape even when the container shape
-    # supports snapshots).
+    # supports snapshots). ``snapshot_survives_destroy`` is whether a snapshot taken before
+    # ``destroy`` is still usable afterward (a portable snapshot) -- True only where snapshots
+    # outlive the host (Modal); the container shape's ``docker commit`` snapshot dies with the
+    # VPS, so it is False there. Only read by Trip 3, and only when ``supports_snapshots``.
     supports_shutdown_hosts: bool
     supports_snapshots: bool
+    snapshot_survives_destroy: bool
 
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
@@ -357,3 +361,179 @@ def run_provider_release_trip1(
             _run_mngr(settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
         if handle is not None:
             profile.force_strand_host(handle)
+
+
+# A unique prefix on the snapshot ``--format`` template so the id can be picked out of the
+# merged stdout/stderr stream that ``_run_mngr`` returns.
+_SNAPID_SENTINEL: Final[str] = "trip3-snapid="
+# The snapshot must capture this marker, so it lives on the host's own filesystem (the container
+# / sandbox root), NOT the ``/mngr`` volume mount -- a docker-commit snapshot does not capture
+# the volume, only the writable container layer.
+_SNAPSHOT_MARKER_PATH: Final[str] = "/root/trip3-marker.txt"
+
+
+def _snapshot_ids_in_output(output: str) -> list[str]:
+    """Return the snapshot ids printed via the ``trip3-snapid={...}`` format sentinel."""
+    ids: list[str] = []
+    for line in output.splitlines():
+        marker_index = line.find(_SNAPID_SENTINEL)
+        if marker_index != -1:
+            ids.append(line[marker_index + len(_SNAPID_SENTINEL) :].strip())
+    return ids
+
+
+def run_provider_release_trip3(
+    profile: ProviderReleaseProfile,
+    tmp_path: Path,
+    workspace: Path,
+) -> None:
+    """Drive Trip 3 ("snapshot survives destroy") for ``profile``.
+
+    Asserts a snapshot is *portable*: it outlives ``mngr destroy`` and can seed a fresh
+    ``mngr create --snapshot``, which restores the captured filesystem. Where the provider's
+    snapshot is not portable (the container shape's ``docker commit`` lives on the VPS disk and
+    dies with it), the trip instead asserts that documented divergence -- the snapshot record is
+    *gone* after destroy -- so the test flips loudly the moment snapshots become portable there.
+
+    Skipped where the shape has no snapshots at all (the bare realizer; providers without
+    snapshot support), keyed on ``supports_snapshots``.
+    """
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    if not profile.supports_snapshots:
+        pytest.skip(f"shape does not support snapshots: {profile.provider_name}")
+
+    settings_dir = tmp_path
+    profile.write_settings(settings_dir)
+    host_name = f"{profile.name_prefix}{get_short_random_string()}"
+    restored_name = f"{profile.name_prefix}r-{get_short_random_string()}"
+    marker_token = f"trip3-{get_short_random_string()}"
+    snapshot_id: str | None = None
+    is_host_destroyed = False
+    is_restored_created = False
+
+    try:
+        # 1. Create the host and write a marker into its own filesystem (so the snapshot captures it).
+        create = _run_mngr(
+            settings_dir,
+            workspace,
+            "create",
+            host_name,
+            "--type",
+            "command",
+            "--provider",
+            profile.provider_name,
+            "--no-connect",
+            *profile.create_extra_args(),
+            "--",
+            "sleep",
+            "99999",
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}"
+        written = _exec_on_host(settings_dir, workspace, host_name, f"echo {marker_token} > {_SNAPSHOT_MARKER_PATH}")
+        assert written.returncode == 0, f"writing the marker failed:\n{written.stdout}"
+
+        # 2. Snapshot the host and capture the new snapshot id (human output omits it; use --format).
+        created = _run_mngr(
+            settings_dir,
+            workspace,
+            "snapshot",
+            "create",
+            host_name,
+            "--format",
+            f"{_SNAPID_SENTINEL}{{snapshot_id}}",
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        assert created.returncode == 0, f"snapshot create failed:\n{created.stdout}"
+        created_ids = _snapshot_ids_in_output(created.stdout)
+        assert len(created_ids) == 1, f"expected exactly one created snapshot id, got {created_ids}:\n{created.stdout}"
+        snapshot_id = created_ids[0]
+
+        # 3. The snapshot is listed for the host before destroy (true for every snapshot provider).
+        listed = _run_mngr(
+            settings_dir,
+            workspace,
+            "snapshot",
+            "list",
+            host_name,
+            "--format",
+            f"{_SNAPID_SENTINEL}{{id}}",
+            timeout=_LIFECYCLE_TIMEOUT_SECONDS,
+        )
+        assert snapshot_id in _snapshot_ids_in_output(listed.stdout), (
+            f"snapshot {snapshot_id} not listed before destroy:\n{listed.stdout}"
+        )
+
+        # 4. Destroy the host.
+        destroyed = _run_mngr(
+            settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS
+        )
+        assert destroyed.returncode == 0, f"destroy failed:\n{destroyed.stdout}"
+        is_host_destroyed = True
+
+        # 5. Probe whether the snapshot is portable across the destroy.
+        if profile.snapshot_survives_destroy:
+            # The real, user-facing promise of a portable snapshot is that a fresh host created
+            # from it carries the captured marker. (Probe restore, not `snapshot list`: that list
+            # is host-scoped and omits a destroyed host's snapshots even when the image itself
+            # persists -- e.g. Modal.)
+            restored = _run_mngr(
+                settings_dir,
+                workspace,
+                "create",
+                restored_name,
+                "--type",
+                "command",
+                "--provider",
+                profile.provider_name,
+                "--no-connect",
+                "--snapshot",
+                snapshot_id,
+                *profile.create_extra_args(),
+                "--",
+                "sleep",
+                "99999",
+                timeout=_CREATE_TIMEOUT_SECONDS,
+            )
+            assert restored.returncode == 0, f"create --snapshot failed:\n{restored.stdout}"
+            is_restored_created = True
+            recovered = _exec_on_host(settings_dir, workspace, restored_name, f"cat {_SNAPSHOT_MARKER_PATH}")
+            assert marker_token in recovered.stdout, (
+                f"portable snapshot did not restore the marker file:\n{recovered.stdout}"
+            )
+        else:
+            # Documented divergence: the container shape's docker-commit snapshot lives on the
+            # VPS disk and dies with it, so its record is gone from `snapshot list` after destroy.
+            # Assert that, so the test fails loudly (-> flip snapshot_survives_destroy) the moment
+            # snapshots become portable here.
+            after = _run_mngr(
+                settings_dir,
+                workspace,
+                "snapshot",
+                "list",
+                "--format",
+                f"{_SNAPID_SENTINEL}{{id}}",
+                timeout=_LIFECYCLE_TIMEOUT_SECONDS,
+            )
+            assert snapshot_id not in _snapshot_ids_in_output(after.stdout), (
+                f"snapshot {snapshot_id} unexpectedly survived destroy for {profile.provider_name}; "
+                "if snapshots are now portable here, set snapshot_survives_destroy=True"
+            )
+    finally:
+        if not is_host_destroyed:
+            _run_mngr(settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
+        if is_restored_created:
+            _run_mngr(settings_dir, workspace, "destroy", restored_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
+        if snapshot_id is not None and profile.snapshot_survives_destroy:
+            _run_mngr(
+                settings_dir,
+                workspace,
+                "snapshot",
+                "destroy",
+                "--snapshot",
+                snapshot_id,
+                "--force",
+                timeout=_LIFECYCLE_TIMEOUT_SECONDS,
+            )
