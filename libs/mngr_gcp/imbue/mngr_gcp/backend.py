@@ -485,8 +485,10 @@ class _GceMetadataHostStateStore(HostStateStore):
         try:
             return VpsDockerHostRecord.model_validate_json(record_json)
         except ValueError as e:
-            logger.warning("Malformed host record in GCE metadata for {}: {}", host_id, e)
-            return None
+            # A malformed record raises rather than returning None (matching
+            # BucketHostStateStore.read_host_record): silently dropping it would
+            # make an otherwise-known stopped host vanish from listings.
+            raise MngrError(f"Malformed host record in GCE metadata for {host_id}: {e}") from e
 
 
 class GcpProviderBackend(ProviderBackendInterface):
