@@ -25,6 +25,7 @@ from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.data_types import would_assignment_narrow
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -1525,7 +1526,7 @@ def test_get_or_create_user_id_uses_env_var_when_file_missing(tmp_path: Path, mo
 def test_get_or_create_user_id_validates_env_var_matches_existing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """get_or_create_user_id should assert when MNGR_USER_ID doesn't match existing file."""
+    """get_or_create_user_id should raise a typed ConfigError when MNGR_USER_ID doesn't match existing file."""
     profile_dir = tmp_path / "profile"
     profile_dir.mkdir()
     existing_id = "b" * 32
@@ -1534,7 +1535,7 @@ def test_get_or_create_user_id_validates_env_var_matches_existing(
 
     monkeypatch.setenv("MNGR_USER_ID", "c" * 32)
 
-    with pytest.raises(AssertionError, match="MNGR_USER_ID environment variable does not match"):
+    with pytest.raises(ConfigError, match="MNGR_USER_ID environment variable"):
         get_or_create_user_id(profile_dir)
 
 
@@ -1552,6 +1553,20 @@ def test_get_or_create_user_id_accepts_env_var_matching_existing(
 
     result = get_or_create_user_id(profile_dir)
     assert result == existing_id
+
+
+def test_get_or_create_user_id_regenerates_empty_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty/whitespace-only user_id file is treated as missing and regenerated, not crashed on."""
+    monkeypatch.delenv("MNGR_USER_ID", raising=False)
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    user_id_file = profile_dir / "user_id"
+    user_id_file.write_text("   \n")
+
+    result = get_or_create_user_id(profile_dir)
+    assert len(result) == 32
+    # The regenerated ID should have been persisted back to the file.
+    assert user_id_file.read_text().strip() == result
 
 
 def test_mngr_context_get_profile_user_id(temp_mngr_ctx: MngrContext) -> None:

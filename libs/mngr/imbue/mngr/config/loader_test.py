@@ -762,8 +762,18 @@ def test_parse_create_templates_rejects_unknown_field_even_with_extend_suffix() 
     CreateCliOptions field. (Same shape as the bare-key validation that flagged
     typos in template options before.)"""
     raw = {"dev": {"bogus_typo__extend": ["X=1"]}}
-    with pytest.raises(ConfigParseError, match="Unknown field 'bogus_typo__extend'"):
+    with pytest.raises(ConfigParseError, match="bogus_typo__extend"):
         _parse_create_templates(raw)
+
+
+def test_parse_create_templates_drops_unknown_field_when_not_strict() -> None:
+    """Under strict=False, an unknown template option is dropped (not fatal), so a config
+    written for a newer mngr that adds a `create` option doesn't break an older mngr."""
+    raw = {"dev": {"new_host": "modal", "future_option": "value"}}
+    result = _parse_create_templates(raw, strict=False, silent=True)
+    template = result[CreateTemplateName("dev")]
+    assert template.options == {"new_host": "modal"}
+    assert "future_option" not in template.options
 
 
 # =============================================================================
@@ -1289,6 +1299,34 @@ def test_get_or_create_profile_dir_handles_config_without_profile_key(tmp_path: 
     # Should have created a new profile
     assert result.exists()
     assert result.parent == base_dir / "profiles"
+
+
+def test_get_or_create_profile_dir_raises_on_non_string_profile(tmp_path: Path) -> None:
+    """A present-but-non-string 'profile' value should raise a clear ConfigParseError."""
+    base_dir = tmp_path / "mngr"
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = base_dir / "config.toml"
+    config_path.write_text("profile = 12345\n")
+
+    with pytest.raises(ConfigParseError, match="'profile' in .* must be a string"):
+        get_or_create_profile_dir(base_dir)
+
+
+def test_get_or_create_profile_dir_regenerates_on_empty_profile(tmp_path: Path) -> None:
+    """An empty-string 'profile' value falls through to self-heal (mint a new profile)."""
+    base_dir = tmp_path / "mngr"
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = base_dir / "config.toml"
+    config_path.write_text('profile = ""\n')
+
+    result = get_or_create_profile_dir(base_dir)
+
+    assert result.exists()
+    assert result.parent == base_dir / "profiles"
+    # config.toml is rewritten to point at the freshly minted profile id.
+    assert config_path.read_text().strip() == f'profile = "{result.name}"'
 
 
 def test_get_or_create_profile_dir_returns_same_profile_on_subsequent_calls(tmp_path: Path) -> None:

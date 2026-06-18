@@ -244,8 +244,14 @@ def read_default_command(command_name: str) -> str | None:
             if not isinstance(cmd_section, dict):
                 continue
             value = cmd_section.get("default_subcommand")
-            if value is not None:
-                merged[cmd_name] = str(value)
+            # Only accept string values. Blindly coercing with str() would turn a
+            # malformed `default_subcommand = true` / `= 3` into "True" / "3" and
+            # then dispatch to a subcommand by that bogus name. The full config
+            # loader re-validates this field with proper typing, so this
+            # best-effort pre-reader simply skips non-strings (an empty string is
+            # a valid value meaning "explicitly disabled" and is preserved).
+            if isinstance(value, str):
+                merged[cmd_name] = value
     return merged.get(command_name)
 
 

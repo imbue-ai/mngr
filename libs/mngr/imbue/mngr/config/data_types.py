@@ -25,6 +25,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -980,19 +981,22 @@ def get_or_create_user_id(profile_dir: Path) -> UserId:
     """
     user_id_file = profile_dir / USER_ID_FILENAME
 
-    if user_id_file.exists():
-        user_id = user_id_file.read_text().strip()
-        if os.environ.get("MNGR_USER_ID", ""):
-            assert user_id == os.environ.get("MNGR_USER_ID", ""), (
-                "MNGR_USER_ID environment variable does not match existing user ID file"
+    env_user_id = os.environ.get("MNGR_USER_ID", "")
+    # An empty or whitespace-only file (e.g. from an interrupted write or a
+    # manual `touch`) is treated as missing and regenerated below, matching the
+    # get-or-create intent rather than crashing inside UserId("").
+    existing_user_id = user_id_file.read_text().strip() if user_id_file.exists() else ""
+    if existing_user_id:
+        if env_user_id and existing_user_id != env_user_id:
+            raise ConfigError(
+                f"MNGR_USER_ID environment variable ('{env_user_id}') does not match the user ID "
+                f"recorded in {user_id_file} ('{existing_user_id}'). Unset MNGR_USER_ID or delete "
+                f"the file to resolve the conflict."
             )
-    else:
-        if os.environ.get("MNGR_USER_ID", ""):
-            user_id = os.environ.get("MNGR_USER_ID", "")
-        else:
-            # Generate a new user ID
-            user_id = uuid4().hex
-        atomic_write(user_id_file, user_id)
+        return UserId(existing_user_id)
+
+    user_id = env_user_id if env_user_id else uuid4().hex
+    atomic_write(user_id_file, user_id)
     return UserId(user_id)
 
 

@@ -361,12 +361,21 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
     root_config = try_load_toml(config_path)
     if root_config is not None:
         profile_id = root_config.get("profile")
+        # A present `profile` key that isn't a string (e.g. `profile = 12345`
+        # from a hand-edit) would otherwise blow up opaquely in
+        # `profiles_dir / profile_id`; surface it as a clear config error
+        # instead. An empty string falls through to self-heal below, matching
+        # the original truthiness behavior.
+        if profile_id is not None and not isinstance(profile_id, str):
+            raise ConfigParseError(f"'profile' in {config_path} must be a string, got {profile_id!r}")
         if profile_id:
             profile_dir = profiles_dir / profile_id
             profile_dir.mkdir(parents=True, exist_ok=True)
             return profile_dir
 
-    # No valid config.toml or no profile specified -- create a new profile
+    # No valid config.toml or no (or empty) profile specified -- create a new
+    # profile. config.toml is mngr-owned and holds only the profile pointer, so
+    # rewriting it here intentionally does not preserve any other content.
     profile_id = uuid4().hex
     profile_dir = profiles_dir / profile_id
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -552,6 +561,7 @@ def _drop_unknown_fields(
     strict: bool = True,
     silent: bool = False,
     extra_hint: str | None = None,
+    field_for_key: Callable[[str], str] = lambda key: key,
 ) -> dict[str, Any]:
     """Return ``raw_config`` keeping only fields declared on ``model_class``.
 
@@ -568,9 +578,15 @@ def _drop_unknown_fields(
 
     `extra_hint` is appended to the error/warning message after the field listing
     when there are unknown fields. Used to suggest causes (e.g. a missing plugin).
+
+    `field_for_key` maps a raw key to the field name used for the membership check;
+    it defaults to the identity. Callers whose keys carry an operator suffix (e.g.
+    the ``__extend`` suffix on create_templates options) pass a mapper that strips
+    it, so the suffixed key validates against the bare field while still being
+    reported and removed under its original spelling.
     """
     known_fields = set(model_class.model_fields.keys())
-    unknown = set(raw_config.keys()) - known_fields
+    unknown = {key for key in raw_config if field_for_key(key) not in known_fields}
     if not unknown:
         return raw_config
     base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
@@ -975,7 +991,12 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     return commands
 
 
-def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[CreateTemplateName, CreateTemplate]:
+def _parse_create_templates(
+    raw_templates: dict[str, dict[str, Any]],
+    *,
+    strict: bool = True,
+    silent: bool = False,
+) -> dict[CreateTemplateName, CreateTemplate]:
     """Parse create templates from config.
 
     Format: create_templates.{template_name}.{param_name} = value
@@ -994,17 +1015,23 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
 
     for template_name, raw_options in raw_templates.items():
         raw_options = _normalize_field_keys(raw_options, f"create_templates.{template_name}")
-        # make sure the options don't define anything that cannot be handled
-        # (an ``__extend`` suffix is a valid operator on any CLI option key, so
-        # strip it before checking against the CreateCliOptions schema).
-        for field in raw_options.keys():
-            base_field = bare_key(field) if is_extend_key(field) else field
-            if base_field not in CreateCliOptions.model_fields:
-                raise ConfigParseError(
-                    f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
-                )
-        # fine, add the template
-        templates[CreateTemplateName(template_name)] = CreateTemplate.model_construct(options=raw_options)
+        # Make sure the options don't define anything that cannot be handled, using
+        # the same forward-compat policy the other sub-parsers go through: under
+        # strict=True an unknown option is fatal (catches typos in ``config set``),
+        # but under strict=False (MNGR_ALLOW_UNKNOWN_CONFIG) it is warned-and-dropped
+        # so a config written for a newer mngr that adds a ``create`` option doesn't
+        # break an older mngr; silent=True suppresses the warning entirely. An
+        # ``__extend`` suffix is a valid operator on any CLI option key, so it is
+        # stripped before checking membership against the CreateCliOptions schema.
+        cleaned_options = _drop_unknown_fields(
+            raw_options,
+            CreateCliOptions,
+            f"create_templates.{template_name}",
+            strict=strict,
+            silent=silent,
+            field_for_key=lambda key: bare_key(key) if is_extend_key(key) else key,
+        )
+        templates[CreateTemplateName(template_name)] = CreateTemplate.model_construct(options=cleaned_options)
 
     return templates
 
@@ -1052,7 +1079,9 @@ def parse_config(
     )
     kwargs["commands"] = _parse_commands(raw.pop("commands", {})) if "commands" in raw else {}
     kwargs["create_templates"] = (
-        _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
+        _parse_create_templates(raw.pop("create_templates", {}), strict=strict, silent=silent)
+        if "create_templates" in raw
+        else {}
     )
     kwargs["retry"] = (
         _parse_retry_config(raw.pop("retry", {}), strict=strict, silent=silent) if "retry" in raw else None

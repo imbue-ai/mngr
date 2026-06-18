@@ -126,6 +126,18 @@ def test_read_default_command_empty_string_disables(
     assert read_default_command("mngr") == ""
 
 
+def test_read_default_command_skips_non_string_value(
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
+) -> None:
+    """A non-string default_subcommand is skipped rather than coerced into a bogus dispatch target."""
+    (project_config_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n[commands.mngr]\ndefault_subcommand = true\n"
+    )
+
+    assert read_default_command("mngr") is None
+
+
 def test_read_default_command_independent_command_names(
     project_config_dir: Path,
     temp_git_repo_cwd: Path,
