@@ -3,6 +3,7 @@
 import json
 
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
@@ -108,3 +109,20 @@ def test_parse_listing_collection_output_with_agent() -> None:
 def test_parse_listing_collection_output_empty() -> None:
     result = parse_listing_collection_output("")
     assert result.get("agents", []) == []
+
+
+def test_extract_agent_data_returns_data_dicts_and_skips_malformed() -> None:
+    """Only well-formed ``{"data": {...}}`` entries contribute agent data."""
+    parsed_listing = {
+        "container_state": "running",
+        "agents": [
+            {"data": {"id": "a-1", "name": "system-services"}},
+            {"data": {"id": "a-2", "name": "chat-host"}},
+            {"user_activity_mtime": 123},
+        ],
+    }
+
+    assert extract_agent_data_from_parsed_listing(parsed_listing) == [
+        {"id": "a-1", "name": "system-services"},
+        {"id": "a-2", "name": "chat-host"},
+    ]

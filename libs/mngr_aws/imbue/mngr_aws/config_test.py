@@ -2,13 +2,16 @@
 
 from pathlib import Path
 
+import boto3
 import pytest
+from moto import mock_aws
 
 from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.testing import clear_aws_env
 
 
@@ -67,29 +70,64 @@ def test_get_session_returns_session_with_region(monkeypatch: pytest.MonkeyPatch
     assert creds is not None
 
 
+def test_resolve_state_bucket_name_uses_explicit_override() -> None:
+    """An explicit ``state_bucket_name`` wins and needs no STS call."""
+    config = AwsProviderConfig(state_bucket_name="my-custom-bucket")
+    session = boto3.Session(region_name="us-east-1")
+    assert config.resolve_state_bucket_name(session) == "my-custom-bucket"
+
+
+def test_resolve_state_bucket_name_derives_from_account_and_region() -> None:
+    """When unset, the bucket name derives as mngr-state-<account_id>-<region>."""
+    with mock_aws():
+        session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-west-2")
+        # moto's default account id is 123456789012.
+        config = AwsProviderConfig(default_region="us-west-2")
+        assert config.resolve_state_bucket_name(session) == "mngr-state-123456789012-us-west-2"
+
+
+def test_resolve_state_bucket_name_region_override_matches_bucket_location() -> None:
+    """A region override embeds that region in the derived name (so the operator CLI's
+    name and the bucket's actual region agree when ``--region`` differs from default)."""
+    with mock_aws():
+        session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
+        config = AwsProviderConfig(default_region="us-east-1")
+        assert config.resolve_state_bucket_name(session, "us-west-2") == "mngr-state-123456789012-us-west-2"
+        # No override falls back to default_region (the runtime path).
+        assert config.resolve_state_bucket_name(session) == "mngr-state-123456789012-us-east-1"
+
+
+def test_build_state_bucket_returns_bucket_when_resolvable() -> None:
+    """``build_state_bucket`` returns an S3StateBucket bound to the derived name/region."""
+    with mock_aws():
+        session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
+        config = AwsProviderConfig(state_bucket_name="my-bucket", default_region="us-east-1")
+        bucket = config.build_state_bucket(session)
+        assert bucket is not None
+        assert bucket.bucket_name == "my-bucket"
+        assert bucket.region == "us-east-1"
+
+
 def test_get_ami_id_for_region_uses_default_ami_id() -> None:
     config = AwsProviderConfig(default_ami_id="ami-deadbeef")
     assert config.get_ami_id_for_region("us-east-1") == "ami-deadbeef"
     assert config.get_ami_id_for_region("eu-west-1") == "ami-deadbeef"
 
 
-def test_get_ami_id_for_region_uses_region_map() -> None:
-    config = AwsProviderConfig(default_ami_by_region={"us-east-1": "ami-east", "eu-west-1": "ami-eu"})
-    assert config.get_ami_id_for_region("us-east-1") == "ami-east"
-    assert config.get_ami_id_for_region("eu-west-1") == "ami-eu"
+def test_get_ami_id_for_region_uses_pinned_region_default() -> None:
+    config = AwsProviderConfig()
+    for region, ami_id in DEFAULT_AMI_BY_REGION.items():
+        assert config.get_ami_id_for_region(region) == ami_id
 
 
 def test_get_ami_id_for_region_raises_when_missing() -> None:
-    config = AwsProviderConfig(default_ami_by_region={})
+    config = AwsProviderConfig()
     with pytest.raises(ValueError, match="No AMI configured"):
-        config.get_ami_id_for_region("us-east-1")
+        config.get_ami_id_for_region("ap-south-1")
 
 
-def test_get_ami_id_explicit_takes_precedence_over_region_map() -> None:
-    config = AwsProviderConfig(
-        default_ami_id="ami-override",
-        default_ami_by_region={"us-east-1": "ami-region-specific"},
-    )
+def test_get_ami_id_explicit_takes_precedence_over_region_default() -> None:
+    config = AwsProviderConfig(default_ami_id="ami-override")
     assert config.get_ami_id_for_region("us-east-1") == "ami-override"
 
 

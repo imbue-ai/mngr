@@ -7,7 +7,7 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 
 _DEFAULT_ENDPOINT: Final[str] = "ovh-us"
 _DEFAULT_PLAN: Final[str] = "vps-2025-model1"
@@ -31,7 +31,7 @@ class OvhPricingMode(UpperCaseStrEnum):
         return self.value.lower()
 
 
-class OvhProviderConfig(VpsDockerProviderConfig):
+class OvhProviderConfig(VpsProviderConfig):
     """Configuration for the OVH classic-VPS Docker provider."""
 
     backend: ProviderBackendName = Field(
@@ -44,23 +44,23 @@ class OvhProviderConfig(VpsDockerProviderConfig):
     )
     application_key: SecretStr | None = Field(
         default=None,
-        description="OVH application key (AK). Falls back to OVH_APPLICATION_KEY or OVH_APP_KEY env vars.",
+        description="OVH application key (AK). Falls back to OVH_APPLICATION_KEY/OVH_APP_KEY env vars or ~/.ovh.conf.",
     )
     application_secret: SecretStr | None = Field(
         default=None,
-        description="OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET or OVH_APP_SECRET env vars.",
+        description="OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET/OVH_APP_SECRET env vars or ~/.ovh.conf.",
     )
     consumer_key: SecretStr | None = Field(
         default=None,
-        description="OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var.",
+        description="OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var or ~/.ovh.conf.",
     )
     client_id: SecretStr | None = Field(
         default=None,
-        description="OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var.",
+        description="OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var or ~/.ovh.conf.",
     )
     client_secret: SecretStr | None = Field(
         default=None,
-        description="OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var.",
+        description="OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var or ~/.ovh.conf.",
     )
     project_id: str | None = Field(
         default=None,

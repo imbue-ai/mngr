@@ -55,7 +55,7 @@ Whether an outer host is accessible per provider:
 | `docker` (local socket / `unix://...`) | the local machine |
 | `docker` (`ssh://user@host`) | the SSH-reachable VM (credentials from your `~/.ssh/config` + ssh-agent) |
 | `docker` (`tcp://...`) | None |
-| `mngr_vps_docker` / `mngr_vultr` | the VPS (`root@vps_ip:22`, per-provider SSH key) |
+| `mngr_vps` / `mngr_vultr` | the VPS (`root@vps_ip:22`, per-provider SSH key) |
 | `mngr_imbue_cloud` | the leased VPS (`root@vps_ip:22`, per-host SSH key) |
 
 Outer hosts are exposed on the CLI via `mngr exec --outer` (see [exec](../commands/primary/exec.md)).

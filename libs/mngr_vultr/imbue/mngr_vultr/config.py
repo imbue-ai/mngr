@@ -5,14 +5,14 @@ from pydantic import SecretStr
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 
 
 class VultrConfigError(MngrError, ValueError):
     """Raised when the Vultr provider configuration is incomplete or invalid."""
 
 
-class VultrProviderConfig(VpsDockerProviderConfig):
+class VultrProviderConfig(VpsProviderConfig):
     """Configuration for the Vultr VPS Docker provider."""
 
     backend: ProviderBackendName = Field(

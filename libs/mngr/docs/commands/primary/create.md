@@ -213,8 +213,8 @@ Provider: aws
                                 per region (see mngr_aws README 'Multiple regions').
     --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
     --aws-ami=AMI-ID            Override the per-host AMI for this create only
-                                (default: provider config's default_ami_id /
-                                default_ami_by_region for the chosen region)
+                                (default: provider config's default_ami_id, or the
+                                pinned per-region default for the chosen region)
     --aws-spot                  Run on EC2 spot capacity (presence-only flag).
                                 AWS may reclaim with ~2 min notice; the host is
                                 terminated, not stopped, on reclaim. Opt-in only.

@@ -29,8 +29,8 @@ from imbue.minds.errors import MindError
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.iam_tags import IamResource
 from imbue.mngr_ovh.iam_tags import list_vps_resources
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 _TAG_KEY: Final[str] = "minds_env"
 

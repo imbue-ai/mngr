@@ -2,7 +2,7 @@
 
 OVH Cloud VPS provider backend plugin for mngr. Runs agents in Docker containers on OVH classic VPS instances (e.g. `vps-2025-model1` with 1 vCPU / 8 GB RAM / 80 GB SSD at ~$7.99/mo).
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -51,17 +51,17 @@ mngr ovh list --all     # include untagged VPSes too -- useful for sanity-checki
 
 ## OVH-specific configuration
 
-These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
+These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
 | `endpoint` | `ovh-us` | python-ovh endpoint id ('ovh-eu', 'ovh-ca', ...). Falls back to OVH_ENDPOINT. |
-| `application_key` | `None` (env / `~/.ovh.conf`) | OVH application key (AK). Falls back to OVH_APPLICATION_KEY or OVH_APP_KEY env vars. |
-| `application_secret` | `None` (env / `~/.ovh.conf`) | OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET or OVH_APP_SECRET env vars. |
-| `consumer_key` | `None` (env / `~/.ovh.conf`) | OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var. |
-| `client_id` | `None` (env / `~/.ovh.conf`) | OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var. |
-| `client_secret` | `None` (env / `~/.ovh.conf`) | OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var. |
+| `application_key` | `None` | OVH application key (AK). Falls back to OVH_APPLICATION_KEY/OVH_APP_KEY env vars or ~/.ovh.conf. |
+| `application_secret` | `None` | OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET/OVH_APP_SECRET env vars or ~/.ovh.conf. |
+| `consumer_key` | `None` | OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var or ~/.ovh.conf. |
+| `client_id` | `None` | OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var or ~/.ovh.conf. |
+| `client_secret` | `None` | OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var or ~/.ovh.conf. |
 | `default_region` | `US-EAST-VA` | Default VPS datacenter (e.g. US-WEST-OR for US accounts). |
 | `default_plan` | `vps-2025-model1` | Default VPS plan code (1 vCPU / 8 GB RAM / 80 GB SSD, ~$7.99/mo). |
 | `default_image_name` | `Debian 12 - Docker` | Default OS image name (Docker pre-installed). |

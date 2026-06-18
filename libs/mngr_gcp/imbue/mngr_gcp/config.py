@@ -12,7 +12,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
 from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 
 # OAuth scope granting full access to all Google Cloud Platform APIs. Only
 # applied when ``service_account_email`` is set (attaching a service account to
@@ -75,7 +75,7 @@ def get_gcloud_compute_zone(concurrency_group: ConcurrencyGroup) -> str | None:
     return zone or None
 
 
-class GcpProviderConfig(VpsDockerProviderConfig):
+class GcpProviderConfig(OfflineCapableVpsProviderConfig):
     """Configuration for the GCP Compute Engine VPS Docker provider.
 
     Credentials are deliberately not stored in this config. Google
@@ -94,10 +94,10 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         default=ProviderBackendName("gcp"),
         description="Provider backend (always 'gcp' for this type)",
     )
-    project_id: str = Field(
-        default="",
+    project_id: str | None = Field(
+        default=None,
         description=(
-            "GCP project ID (a plain identifier, not a credential). When left empty, the project is "
+            "GCP project ID (a plain identifier, not a credential). When unset, the project is "
             "taken from Application Default Credentials (the active 'gcloud config set project' or the "
             "GOOGLE_CLOUD_PROJECT env var); set it explicitly to pin a specific project."
         ),
@@ -142,15 +142,6 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     subnetwork: str | None = Field(
         default=None,
         description="Optional explicit subnetwork (required for custom-mode VPCs); None lets GCE pick for auto-mode networks.",
-    )
-    allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=("0.0.0.0/0",),
-        description=(
-            "Inbound CIDRs for tcp/22 and tcp/<container_ssh_port>. An open range like 0.0.0.0/0 opens "
-            "to the internet (a warning is logged at prepare/create time); use e.g. ['203.0.113.4/32'] "
-            "to restrict to your own IP, or () for no ingress (no firewall rule is created and the "
-            "instance is unreachable from outside its VPC)."
-        ),
     )
     firewall_name: str = Field(
         default="mngr-gcp-ssh",

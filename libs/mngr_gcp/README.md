@@ -111,7 +111,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
-| `project_id` | gcloud/ADC default | GCP project ID (a plain identifier, not a credential). When left empty, the project is taken from Application Default Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env var); set it explicitly to pin a specific project. |
+| `project_id` | gcloud/ADC default | GCP project ID (a plain identifier, not a credential). When unset, the project is taken from Application Default Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env var); set it explicitly to pin a specific project. |
 | `default_region` | derived from zone | GCE region (e.g., 'us-west1'). Used only to validate the resolved zone; when unset, derived from the resolved zone. Set it to catch a mismatched default_zone typo. |
 | `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal). When unset, taken from the active 'gcloud config get compute/zone'. Must lie in default_region when both are set explicitly. |
 | `default_machine_type` | `e2-small` | GCE machine type. |
@@ -120,7 +120,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `boot_disk_type` | `pd-balanced` | Boot disk type. |
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |
 | `subnetwork` | `None` | Optional explicit subnetwork (required for custom-mode VPCs); None lets GCE pick for auto-mode networks. |
-| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDRs for tcp/22 and tcp/<container_ssh_port>. An open range like 0.0.0.0/0 opens to the internet (a warning is logged at prepare/create time); use e.g. ['203.0.113.4/32'] to restrict to your own IP, or () for no ingress (no firewall rule is created and the instance is unreachable from outside its VPC). |
+| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound (ingress) CIDR blocks allowed on tcp/22 and the container SSH port on the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own IP, or () for no ingress (no rule is created, leaving the instance unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replace-by-default across config layers (combining CIDRs across layers is never the intent). |
 | `firewall_target_tag` | `mngr-ssh` | Network tag bound to the firewall rule; every instance is tagged with it. |
 | `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. Required for the current mngr-from-developer-laptop SSH access model; for a more secure deployment, set to False and run mngr from a bastion inside the VPC. |
 | `service_account_email` | `None` | Optional service account email attached to launched instances. When None, GCE applies its normal default for an unspecified service account. |

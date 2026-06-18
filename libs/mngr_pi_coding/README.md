@@ -60,8 +60,8 @@ Tunables on the `pi-coding` agent type:
 | `sync_auth` | `true` | Share ~/.pi/agent/auth.json into the per-agent config dir. |
 | `sync_home_settings` | `true` | Share settings.json and resource dirs from ~/.pi/agent/ into the per-agent config dir. |
 | `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present. |
-| `version` | unset | Pin the pi version to install (`npm install -g @earendil-works/pi-coding-agent@<version>`); provisioning verifies the installed pi matches and errors on a mismatch. Default installs latest. |
-| `update_policy` | unset | Govern pi's startup version check: `NEVER` sets `PI_SKIP_VERSION_CHECK=1`, `AUTO` leaves it on, `ASK` behaves like `AUTO`. Unset resolves to `NEVER` (check disabled); set `AUTO` to re-enable it. |
+| `version` | unset | Pin the pi CLI version to install (e.g., '1.2.3'). When set, installation runs `npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed pi matches, erroring on a mismatch. When None (the default), installs the latest version. |
+| `update_policy` | unset | How to handle pi's startup version check. NEVER sets PI_SKIP_VERSION_CHECK=1 in the agent environment so pi does not phone home to compare against the latest release; AUTO leaves the check enabled. ASK has no interactive flow for pi and behaves like AUTO. When unset (the default), resolves to NEVER (check disabled) -- set AUTO to leave pi's startup version check enabled. (pi only notifies about updates -- it never self-replaces -- so this governs the startup check, not a background update.) |
 | `resume_session` | `true` | Resume this agent's pi session on start, so stop/start keeps context. Safe on first start (pi starts fresh when there is no recorded session yet). |
 | `emit_common_transcript` | `true` | Emit the transcript `mngr transcript` reads. The raw pi transcript is always captured; this gates only the common-envelope conversion. |
 | `emit_raw_transcript` | `true` | Capture the raw pi message stream. |

@@ -45,7 +45,7 @@ from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vultr.config import VultrProviderConfig
 
 # Commands categorized by their documentation location
@@ -733,8 +733,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         rows=(
             ConfigTableRow("default_region", "`us-east-1`"),
             ConfigTableRow("default_instance_type", "`t3.small`"),
-            ConfigTableRow("default_ami_id", '`""`'),
-            ConfigTableRow("default_ami_by_region", "(pinned Debian 12 amd64 per region)"),
+            ConfigTableRow("default_ami_id", "`None` (pinned Debian 12 amd64 per region)"),
             ConfigTableRow("security_group", '`AutoCreateSecurityGroup(name="mngr-aws")`'),
             ConfigTableRow("subnet_id", "`None`"),
             ConfigTableRow("vpc_id", "`None`"),
@@ -777,11 +776,11 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         description_header="Description",
         rows=(
             ConfigTableRow("endpoint", "`ovh-us`"),
-            ConfigTableRow("application_key", "`None` (env / `~/.ovh.conf`)"),
-            ConfigTableRow("application_secret", "`None` (env / `~/.ovh.conf`)"),
-            ConfigTableRow("consumer_key", "`None` (env / `~/.ovh.conf`)"),
-            ConfigTableRow("client_id", "`None` (env / `~/.ovh.conf`)"),
-            ConfigTableRow("client_secret", "`None` (env / `~/.ovh.conf`)"),
+            ConfigTableRow("application_key", "`None`"),
+            ConfigTableRow("application_secret", "`None`"),
+            ConfigTableRow("consumer_key", "`None`"),
+            ConfigTableRow("client_id", "`None`"),
+            ConfigTableRow("client_secret", "`None`"),
             ConfigTableRow("default_region", "`US-EAST-VA`"),
             ConfigTableRow("default_plan", "`vps-2025-model1`"),
             ConfigTableRow("default_image_name", "`Debian 12 - Docker`"),
@@ -800,15 +799,15 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         field_header="Field",
         description_header="Description",
         rows=(
-            ConfigTableRow("api_key", "`None` (falls back to `VULTR_API_KEY` env var)"),
+            ConfigTableRow("api_key", "`None`"),
             ConfigTableRow("default_region", "`ewr`"),
             ConfigTableRow("default_plan", "`vc2-2c-4gb`"),
-            ConfigTableRow("default_os_id", "2136"),
+            ConfigTableRow("default_os_id", "`2136`"),
         ),
     ),
     ConfigTable(
-        readme="libs/mngr_vps_docker/README.md",
-        config_cls=VpsDockerProviderConfig,
+        readme="libs/mngr_vps/README.md",
+        config_cls=VpsProviderConfig,
         field_header="Field",
         description_header="Description",
         rows=(
@@ -838,6 +837,8 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("sync_global_config", "`true`"),
             ConfigTableRow("symlink_auth", "`true`"),
             ConfigTableRow("auto_allow_permissions", "`false`"),
+            ConfigTableRow("version", "unset"),
+            ConfigTableRow("update_policy", "unset"),
             ConfigTableRow("emit_common_transcript", "`true`"),
         ),
     ),
@@ -851,6 +852,8 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("sync_auth", "`true`"),
             ConfigTableRow("sync_home_settings", "`true`"),
             ConfigTableRow("check_installation", "`true`"),
+            ConfigTableRow("version", "unset"),
+            ConfigTableRow("update_policy", "unset"),
             ConfigTableRow("resume_session", "`true`"),
             ConfigTableRow("emit_common_transcript", "`true`"),
             ConfigTableRow("emit_raw_transcript", "`true`"),

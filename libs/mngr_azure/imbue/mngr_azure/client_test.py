@@ -22,10 +22,10 @@ from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import make_azure_http_error
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 _SUBSCRIPTION = "sub-123"
 _REGION = "westus"
@@ -597,55 +597,6 @@ def test_start_instance_raises_when_the_operation_outlasts_the_timeout() -> None
 
 
 # =========================================================================
-# add_tags / remove_tags (server-side tag Merge/Delete, offline-discovery mirror)
-# =========================================================================
-
-
-def _self_vm_scope(vm_name: str) -> str:
-    return f"/subscriptions/{_SUBSCRIPTION}/resourceGroups/mngr/providers/Microsoft.Compute/virtualMachines/{vm_name}"
-
-
-def test_add_tags_records_merge_patch_with_scope_and_tags() -> None:
-    """add_tags issues a server-side tag Merge scoped to the VM with the given tags."""
-    resource = FakeResourceClient()
-    client = _make_client(resource=resource)
-    client.add_tags(VpsInstanceId("vm1"), {"mngr-agent-x": "v"})
-    assert len(resource.tags.updates) == 1
-    scope, parameters = resource.tags.updates[0]
-    assert scope == _self_vm_scope("vm1")
-    assert parameters.operation == "Merge"
-    assert parameters.properties.tags == {"mngr-agent-x": "v"}
-
-
-def test_add_tags_empty_is_noop() -> None:
-    """No tags means no tag-update call at all."""
-    resource = FakeResourceClient()
-    client = _make_client(resource=resource)
-    client.add_tags(VpsInstanceId("vm1"), {})
-    assert resource.tags.updates == []
-
-
-def test_remove_tags_records_delete_patch_with_keys() -> None:
-    """remove_tags issues a server-side tag Delete naming the keys to drop (values ignored)."""
-    resource = FakeResourceClient()
-    client = _make_client(resource=resource)
-    client.remove_tags(VpsInstanceId("vm1"), ["mngr-agent-x", "mngr-agent-y"])
-    assert len(resource.tags.updates) == 1
-    scope, parameters = resource.tags.updates[0]
-    assert scope == _self_vm_scope("vm1")
-    assert parameters.operation == "Delete"
-    assert set(parameters.properties.tags) == {"mngr-agent-x", "mngr-agent-y"}
-
-
-def test_remove_tags_empty_is_noop() -> None:
-    """No keys means no tag-update call."""
-    resource = FakeResourceClient()
-    client = _make_client(resource=resource)
-    client.remove_tags(VpsInstanceId("vm1"), [])
-    assert resource.tags.updates == []
-
-
-# =========================================================================
 # list power-state population (deallocated VM surfaces state="deallocated")
 # =========================================================================
 
@@ -679,6 +630,10 @@ def test_list_instances_does_not_request_instance_view_expand() -> None:
 # =========================================================================
 # ensure_self_deallocate_role / assign_self_deallocate_role (graceful fallback)
 # =========================================================================
+
+
+def _self_vm_scope(vm_name: str) -> str:
+    return f"/subscriptions/{_SUBSCRIPTION}/resourceGroups/mngr/providers/Microsoft.Compute/virtualMachines/{vm_name}"
 
 
 def test_ensure_self_deallocate_role_creates_role_and_returns_id() -> None:
