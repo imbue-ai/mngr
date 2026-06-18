@@ -179,14 +179,16 @@ def _ensure_state_bucket_best_effort(base: AwsProviderConfig, region: str | None
     if bucket is None:
         logger.warning(
             "Could not resolve a state-bucket name (AWS account id unavailable); skipping bucket setup. "
-            "Offline host state will fall back to the EC2 tag mirror."
+            "Offline host state will be unavailable (a stopped host cannot be listed or resumed) "
+            "until `mngr aws prepare` succeeds with sufficient permissions."
         )
         return None, False
     try:
         was_created = bucket.ensure_bucket()
     except S3StateBucketError as e:
         logger.warning(
-            "Failed to create the S3 state bucket {!r} (offline host state will fall back to the EC2 tag mirror): {}",
+            "Failed to create the S3 state bucket {!r}; offline host state will be unavailable "
+            "(a stopped host cannot be listed or resumed) until prepare succeeds: {}",
             bucket.bucket_name,
             e,
         )
@@ -495,8 +497,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         raise click.ClickException(str(e)) from e
     result = client.ensure_security_group()
     # Best-effort bucket setup: a missing S3/STS permission degrades to a
-    # warning so the SG prepare still succeeds (offline state then falls back
-    # to the EC2 tag mirror).
+    # warning so the SG prepare still succeeds (offline host state is then
+    # unavailable until prepare is re-run with sufficient permissions).
     state_bucket_name, was_bucket_created = _ensure_state_bucket_best_effort(base, opts.region)
     # Provision the bucket-write IAM identity (best-effort) when the offline
     # host_dir feature is enabled. The bucket-only steps above are unconditional,

@@ -23,10 +23,12 @@ class HostStateStore(MutableModel, ABC):
     that survives the host being stopped/unreachable, so ``mngr list`` /
     ``mngr start`` / ``mngr event`` etc. still work offline.
 
-    Two implementations back it, chosen by the provider: an object-storage bucket
-    (full records, no size limit) and the instance/VM tag mirror (compact, the
-    no-bucket fallback). Exposing both behind one interface lets the provider
-    select a store once and stop branching on bucket-vs-tags at every call site.
+    Every offline-capable provider selects exactly one implementation:
+    ``BucketHostStateStore`` over an object-storage bucket (AWS S3, Azure Blob),
+    the GCP instance-metadata store, or -- when a required bucket has not been
+    provisioned -- ``MissingBucketHostStateStore`` (writes no-op, reads raise an
+    actionable error). Exposing them behind one interface lets the provider select
+    a store once and stop branching at every call site.
 
     All methods are best-effort and idempotent: mirroring must never break the
     primary on-volume write/destroy path, and removals tolerate an already-absent
@@ -36,11 +38,11 @@ class HostStateStore(MutableModel, ABC):
 
     @abstractmethod
     def persist_host_record(self, record: VpsDockerHostRecord) -> None:
-        """Mirror the full host record. The tag store is a no-op (the instance's own tags carry it)."""
+        """Mirror the full host record."""
 
     @abstractmethod
     def delete_host_state(self, host_id: HostId) -> None:
-        """Remove all of the host's mirrored state. The tag store is a no-op (destroying the instance drops its tags)."""
+        """Remove all of the host's mirrored state."""
 
     @abstractmethod
     def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
@@ -56,12 +58,7 @@ class HostStateStore(MutableModel, ABC):
 
     @abstractmethod
     def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Reconstruct the host record from the mirror, or None when the host is unknown to the store.
-
-        The tag store reads the instance's own tags. The bucket store reads its
-        ``host_state.json``, falling back to the tag store when absent (so a
-        bucket-mode host created before the bucket existed is still reconstructed).
-        """
+        """Reconstruct the host record from the mirror, or None when the host is unknown to the store."""
 
 
 class HostDirBackend(MutableModel, ABC):
@@ -164,9 +161,6 @@ class BucketHostStateStore(HostStateStore):
     bucket: StateBucket
     bucket_error_type: type[MngrError]
     bucket_label: str
-    # Tag store consulted when the bucket has no ``host_state.json`` for a host
-    # (e.g. created before the bucket existed); None disables the fallback.
-    fallback: HostStateStore | None = None
 
     def persist_host_record(self, record: VpsDockerHostRecord) -> None:
         host_id = HostId(record.certified_host_data.host_id)
@@ -199,16 +193,7 @@ class BucketHostStateStore(HostStateStore):
         return self.bucket.list_agent_records(host_id)
 
     def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        record = self._read_bucket_host_record(host_id)
-        if record is None and self.fallback is not None:
-            # The bucket yielded no usable record (no host_state.json -- e.g. a host
-            # created before the bucket existed -- or a read error / malformed JSON):
-            # fall back to the tag store so it is still reconstructed from its tags.
-            return self.fallback.read_host_record(host_id)
-        return record
-
-    def _read_bucket_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Read+parse the host record from the bucket alone (no fallback). None on absent / error / malformed."""
+        """Read+parse the host record from the bucket's ``host_state.json``. None on absent / error / malformed."""
         try:
             record_json = self.bucket.read_host_record_json(host_id)
         except self.bucket_error_type as e:
@@ -221,3 +206,45 @@ class BucketHostStateStore(HostStateStore):
         except ValueError as e:
             logger.warning("Malformed host record for {} in {}: {}", host_id, self.bucket_label, e)
             return None
+
+
+class MissingBucketHostStateStore(HostStateStore):
+    """The selected store when a provider's required object-storage bucket is absent.
+
+    The offline mirror lives in the state bucket; with the instance-tag fallback
+    removed, there is nothing to mirror to until ``prepare`` provisions it. So
+    *writes* are no-ops -- a *running* host is still fully usable (creating /
+    labelling agents over SSH works; only the offline mirror is skipped) -- while
+    any *read* raises an actionable :class:`MngrError` pointing the operator at the
+    provider's prepare command, instead of silently making a stopped host vanish.
+
+    ``store_label`` names the missing store (e.g. "S3 state bucket") and
+    ``prepare_command`` is the command that creates it (e.g. ``mngr aws prepare``).
+    """
+
+    store_label: str
+    prepare_command: str
+
+    def _missing_store_error(self) -> MngrError:
+        return MngrError(
+            f"The {self.store_label} has not been provisioned, so offline host state is unavailable "
+            f"(a stopped host cannot be listed or resumed). Run `{self.prepare_command}` to create it."
+        )
+
+    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+        logger.debug("No {}; skipping offline host-record mirror (run `{}`)", self.store_label, self.prepare_command)
+
+    def delete_host_state(self, host_id: HostId) -> None:
+        pass
+
+    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        logger.debug("No {}; skipping offline agent-record mirror (run `{}`)", self.store_label, self.prepare_command)
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        pass
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        raise self._missing_store_error()
+
+    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        raise self._missing_store_error()

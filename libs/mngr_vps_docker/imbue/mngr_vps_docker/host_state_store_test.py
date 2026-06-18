@@ -4,13 +4,15 @@ from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 
+import pytest
+
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
-from imbue.mngr_vps_docker.host_state_store import HostStateStore
+from imbue.mngr_vps_docker.host_state_store import MissingBucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import NullHostDirBackend
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 
@@ -78,75 +80,62 @@ class _FakeBucket:
         raise NotImplementedError
 
 
-class _FakeFallbackStore(HostStateStore):
-    """A tag-store stand-in whose ``read_host_record`` returns a fixed record (or None)."""
-
-    record: VpsDockerHostRecord | None = None
-
-    def persist_host_record(self, record: VpsDockerHostRecord) -> None: ...
-
-    def delete_host_state(self, host_id: HostId) -> None: ...
-
-    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None: ...
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None: ...
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        return []
-
-    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        return self.record
+def _bucket_store(bucket: _FakeBucket) -> BucketHostStateStore:
+    return BucketHostStateStore(bucket=bucket, bucket_error_type=_FakeBucketError, bucket_label="fake bucket")
 
 
-def _bucket_store(bucket: _FakeBucket, fallback: HostStateStore | None) -> BucketHostStateStore:
-    return BucketHostStateStore(
-        bucket=bucket, bucket_error_type=_FakeBucketError, bucket_label="fake bucket", fallback=fallback
-    )
-
-
-def test_read_host_record_returns_bucket_record_without_consulting_fallback() -> None:
-    """A valid ``host_state.json`` is parsed and returned; the tag fallback is not used."""
+def test_read_host_record_returns_parsed_bucket_record() -> None:
+    """A valid ``host_state.json`` is parsed and returned."""
     host_id = HostId.generate()
     bucket_record = _host_record(host_id, "from-bucket")
-    fallback = _FakeFallbackStore(record=_host_record(host_id, "from-tags"))
-    store = _bucket_store(_FakeBucket(record_json=bucket_record.model_dump_json()), fallback)
+    store = _bucket_store(_FakeBucket(record_json=bucket_record.model_dump_json()))
     result = store.read_host_record(host_id)
     assert result is not None
     assert result.certified_host_data.host_name == "from-bucket"
 
 
-def test_read_host_record_falls_back_to_tags_when_bucket_record_absent() -> None:
-    """No ``host_state.json`` (e.g. a host created before the bucket existed) -> tag fallback."""
+def test_read_host_record_returns_none_when_bucket_record_absent() -> None:
+    """No ``host_state.json`` for the host -> a clean None (the host is unknown to the store)."""
+    store = _bucket_store(_FakeBucket(record_json=None))
+    assert store.read_host_record(HostId.generate()) is None
+
+
+def test_read_host_record_returns_none_when_bucket_record_malformed() -> None:
+    """A corrupt ``host_state.json`` is logged and treated as absent rather than crashing."""
+    store = _bucket_store(_FakeBucket(record_json="{not valid json"))
+    assert store.read_host_record(HostId.generate()) is None
+
+
+def test_read_host_record_returns_none_on_bucket_read_error() -> None:
+    """A bucket read failure is swallowed (logged) and returns None rather than raising."""
+    store = _bucket_store(_FakeBucket(raise_on_read=True))
+    assert store.read_host_record(HostId.generate()) is None
+
+
+def _missing_store() -> MissingBucketHostStateStore:
+    return MissingBucketHostStateStore(store_label="fake state bucket", prepare_command="mngr fake prepare")
+
+
+def test_missing_bucket_store_writes_are_no_ops() -> None:
+    """With no bucket, mirror writes are silently skipped so a running host stays usable."""
+    store = _missing_store()
     host_id = HostId.generate()
-    fallback = _FakeFallbackStore(record=_host_record(host_id, "from-tags"))
-    store = _bucket_store(_FakeBucket(record_json=None), fallback)
-    result = store.read_host_record(host_id)
-    assert result is not None
-    assert result.certified_host_data.host_name == "from-tags"
+    # None of these raise: creating/labelling an agent on a running host must not break.
+    store.persist_host_record(_host_record(host_id, "h"))
+    store.persist_agent_record(host_id, "agent-1", {"id": "agent-1", "name": "a1"})
+    store.remove_agent_record(host_id, "agent-1")
+    store.delete_host_state(host_id)
 
 
-def test_read_host_record_falls_back_to_tags_when_bucket_record_malformed() -> None:
-    """A corrupt ``host_state.json`` must still fall back to the tag store, not vanish."""
-    host_id = HostId.generate()
-    fallback = _FakeFallbackStore(record=_host_record(host_id, "from-tags"))
-    store = _bucket_store(_FakeBucket(record_json="{not valid json"), fallback)
-    result = store.read_host_record(host_id)
-    assert result is not None
-    assert result.certified_host_data.host_name == "from-tags"
+def test_missing_bucket_store_read_host_record_raises_actionable_error() -> None:
+    """An offline host-record read with no bucket raises an error pointing at prepare."""
+    store = _missing_store()
+    with pytest.raises(MngrError, match="mngr fake prepare"):
+        store.read_host_record(HostId.generate())
 
 
-def test_read_host_record_falls_back_to_tags_on_bucket_read_error() -> None:
-    """A bucket read failure degrades to the tag store rather than raising."""
-    host_id = HostId.generate()
-    fallback = _FakeFallbackStore(record=_host_record(host_id, "from-tags"))
-    store = _bucket_store(_FakeBucket(raise_on_read=True), fallback)
-    result = store.read_host_record(host_id)
-    assert result is not None
-    assert result.certified_host_data.host_name == "from-tags"
-
-
-def test_read_host_record_returns_none_when_bucket_empty_and_no_fallback() -> None:
-    """With no record and no fallback configured, the read is a clean None."""
-    host_id = HostId.generate()
-    store = _bucket_store(_FakeBucket(record_json=None), fallback=None)
-    assert store.read_host_record(host_id) is None
+def test_missing_bucket_store_list_agent_records_raises_actionable_error() -> None:
+    """An offline agent-listing read with no bucket raises an error pointing at prepare."""
+    store = _missing_store()
+    with pytest.raises(MngrError, match="fake state bucket"):
+        store.list_agent_records(HostId.generate())

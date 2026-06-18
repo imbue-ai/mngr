@@ -2,8 +2,7 @@ import json
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
+from functools import cached_property
 from typing import Any
 from typing import Final
 
@@ -20,8 +19,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import DiscoveredHost
@@ -39,6 +36,7 @@ from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
+from imbue.mngr_vps_docker.host_state_store import HostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
@@ -46,28 +44,31 @@ from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_u
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
+from imbue.mngr_vps_docker.instance import normalized_tags_to_dict
 from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
 from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
-# Per-agent metadata is mirrored into instance metadata as up to three items per
-# agent, keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the key),
-# so a STOPPED instance (no external IP, SSH unreachable) still surfaces its
-# agents in discovery and resolves by name. GCE *labels* can't hold this (they
-# lowercase and restrict to ``[a-z0-9_-]``, 63 chars), so unlike AWS (EC2 tags)
-# the GCP mirror lives in instance *metadata*, whose values are large/permissive.
+# GCP has no object-storage state bucket; the offline mirror lives in the
+# instance's own GCE *metadata*, which is large and permissive (256 KB per value,
+# 512 KB total) -- unlike GCE labels, which lowercase and restrict to
+# ``[a-z0-9_-]``, 63 chars. The full ``VpsDockerHostRecord`` JSON lives under
+# ``mngr-host-state`` and one JSON value per agent under ``mngr-agent-<agent_id>``,
+# so a STOPPED instance (no external IP, SSH unreachable) still surfaces its host
+# and agents in discovery and resolves by name. This is the GCP analog of the
+# AWS/Azure object-storage state bucket: both back the uniform ``HostStateStore``.
+HOST_STATE_METADATA_KEY: Final[str] = "mngr-host-state"
 AGENT_METADATA_PREFIX: Final[str] = "mngr-agent-"
-_AGENT_METADATA_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
 # GCE statuses in which the guest OS is down (so the SSH-based sweep can't see the
-# host) but the instance still exists and its agents must be reconstructed from
-# metadata. ``STOPPING`` is included so a host doesn't vanish from discovery
-# during the stop transition before it reaches the terminal ``TERMINATED``
-# (GCE's name for a stopped -- not deleted -- instance).
+# host) but the instance still exists and must be surfaced offline from metadata.
+# ``STOPPING`` is included so a host doesn't vanish from discovery during the stop
+# transition before it reaches the terminal ``TERMINATED`` (GCE's name for a
+# stopped -- not deleted -- instance).
 _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"STOPPING", "TERMINATED"})
 # ``mngr-host-name`` metadata holds ``mngr-<host_name>``; strip the prefix to
-# recover the host name when reconstructing a stopped host.
+# recover the host name when labelling a stopped host in discovery.
 _HOST_NAME_PREFIX: Final[str] = "mngr-"
 
 
@@ -342,33 +343,21 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
         return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
 
     # =========================================================================
-    # Offline metadata via instance metadata (so STOPPED hosts list + resolve by name)
+    # Offline discovery + the metadata-backed state store (so STOPPED hosts list
+    # and resolve by name without SSH, uniformly with the AWS/Azure buckets)
     # =========================================================================
 
-    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror an agent record into the instance's ``mngr-agent-<id>-*`` GCE metadata.
+    @cached_property
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror, backed by GCE instance metadata.
 
-        GCE metadata (not tags/labels) holds the per-agent mirror so a stopped
-        instance still surfaces its agents and resolves for ``mngr start``; the
-        shared persist envelope on ``OfflineCapableVpsDockerProvider`` handles the
-        authoritative on-volume write.
+        GCP has no object-storage state bucket; its metadata store is the GCP
+        analog (see ``_GceMetadataHostStateStore``), so the offline read/write
+        paths are uniform with the AWS/Azure ``BucketHostStateStore``. GCE metadata
+        is always available (no ``prepare`` step), so there is no missing-store
+        case here.
         """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            logger.warning("No GCE instance found for host {}; cannot persist agent metadata", host_id)
-            return
-        updates, delete_keys = self._agent_metadata_items(agent_id, agent_data, instance)
-        # One setMetadata round-trip (it is a whole-object read-modify-write) carries
-        # both the upserts and the stale deletes, unlike AWS's two tag calls.
-        self.gcp_client.set_instance_metadata(VpsInstanceId(instance["id"]), updates, delete_keys)
-
-    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        """Remove the agent's ``mngr-agent-<id>-*`` GCE metadata. Idempotent."""
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_METADATA_PREFIX}{agent_id}-{field}" for field in _AGENT_METADATA_FIELDS]
-        self.gcp_client.set_instance_metadata(VpsInstanceId(instance["id"]), {}, keys)
+        return _GceMetadataHostStateStore(provider=self)
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the GCE instance's OS is down (STOPPING or TERMINATED).
@@ -379,84 +368,10 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
         """
         return instance.get("state") in _HOST_DOWN_STATES
 
-    def _agent_metadata_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
-        """Render one agent field as a metadata-value string, or ``None`` if absent/empty.
-
-        ``name``/``type`` raw; ``labels`` as compact JSON (empty labels treated as
-        absent). Mirrors ``AwsProvider._agent_field_value``.
-        """
-        if field == "labels":
-            labels = agent_data.get("labels")
-            return json.dumps(labels, separators=(",", ":")) if labels else None
-        value = agent_data.get(field)
-        return None if value is None else str(value)
-
-    def _agent_metadata_items(
-        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
-    ) -> tuple[dict[str, str], list[str]]:
-        """Compute the ``mngr-agent-<id>-<field>`` metadata to set, and stale keys to delete.
-
-        ``persist_agent_data`` is an upsert sometimes called with a partial record, so
-        a field absent from ``agent_data`` means "unchanged" (left alone, NOT removed
-        -- deleting it would clobber the ``name`` offline resolve-by-name depends on).
-        A field present but rendering empty (e.g. ``labels={}``) is dropped and its
-        existing key deleted. GCE metadata values are large, so unlike AWS there is no
-        length cap. Mirrors ``AwsProvider._agent_field_tags``.
-        """
-        updates: dict[str, str] = {}
-        delete_keys: list[str] = []
-        existing = set(self._metadata_dict(instance))
-        for field in _AGENT_METADATA_FIELDS:
-            if field not in agent_data:
-                continue
-            key = f"{AGENT_METADATA_PREFIX}{agent_id}-{field}"
-            value = self._agent_metadata_value(field, agent_data)
-            if value is not None:
-                updates[key] = value
-                continue
-            # Present but empty (an explicit removal, e.g. labels={}): drop it and
-            # delete any existing key so no stale value lingers.
-            if key in existing:
-                delete_keys.append(key)
-        return updates, delete_keys
-
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` metadata."""
-        by_id: dict[str, dict] = {}
-        for key, value in self._metadata_dict(instance).items():
-            if not key.startswith(AGENT_METADATA_PREFIX):
-                continue
-            agent_id, sep, field = key[len(AGENT_METADATA_PREFIX) :].rpartition("-")
-            if not sep or field not in _AGENT_METADATA_FIELDS:
-                continue
-            record = by_id.setdefault(agent_id, {"id": agent_id})
-            if field == "labels":
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping unparseable agent labels metadata {!r}", key)
-                    continue
-                if not isinstance(parsed, dict):
-                    logger.warning("Skipping agent labels metadata {!r}: value is not a JSON object", key)
-                    continue
-                record["labels"] = parsed
-            else:
-                record[field] = value
-        return list(by_id.values())
-
     def _metadata_dict(self, instance: Mapping[str, Any]) -> dict[str, str]:
         """Return the instance's metadata dict from the normalized list shape."""
         metadata = instance.get("metadata", {})
         return dict(metadata) if isinstance(metadata, Mapping) else {}
-
-    def _label_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Turn the normalized ``["key=value", ...]`` label list into a dict (split on first ``=``)."""
-        labels: dict[str, str] = {}
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if sep:
-                labels[key] = value
-        return labels
 
     def _host_name_from_instance(self, instance: Mapping[str, Any]) -> HostName:
         """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id label)."""
@@ -465,11 +380,16 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
             return HostName(name[len(_HOST_NAME_PREFIX) :])
         if name:
             return HostName(name)
-        return HostName(self._label_dict_from_normalized(instance).get("mngr-host-id", "unknown"))
+        return HostName(normalized_tags_to_dict(instance).get("mngr-host-id", "unknown"))
 
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from an instance's labels + metadata, or None."""
-        host_id_str = self._label_dict_from_normalized(instance).get("mngr-host-id")
+        """Build a STOPPED-state DiscoveredHost from an instance's labels + metadata, or None.
+
+        Reads only the cheap identity label/metadata stamped at create (host id +
+        host name), never the metadata state record -- the full record is read from
+        the state store on demand.
+        """
+        host_id_str = normalized_tags_to_dict(instance).get("mngr-host-id")
         if host_id_str is None:
             return None
         return DiscoveredHost(
@@ -479,36 +399,93 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
             host_state=HostState.STOPPED,
         )
 
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a stopped instance."""
-        now = datetime.now(timezone.utc)
-        created_at = self._created_at_from_labels(self._label_dict_from_normalized(instance), host_id) or now
-        certified = CertifiedHostData(
-            host_id=str(host_id),
-            host_name=str(self._host_name_from_instance(instance)),
-            created_at=created_at,
-            updated_at=now,
-            stop_reason=HostState.STOPPED.value,
+
+class _GceMetadataHostStateStore(HostStateStore):
+    """Instance-metadata-backed mirror: full host + agent records live in GCE metadata.
+
+    The GCP analog of the AWS/Azure ``BucketHostStateStore``. GCP has no
+    object-storage state bucket; instead the full ``VpsDockerHostRecord`` JSON (key
+    ``mngr-host-state``) and one JSON value per agent (key ``mngr-agent-<id>``)
+    live in the instance's own GCE metadata, which is large and permissive enough
+    (256 KB per value, 512 KB total) to hold them -- unlike GCE labels. Exposing it
+    behind the same ``HostStateStore`` interface makes the offline read/write paths
+    uniform across all three providers.
+
+    Keyed by ``host_id``; the instance is resolved from the provider's cached
+    listing. All methods are best-effort and idempotent: a write resolves the live
+    instance and merges via ``set_instance_metadata`` (a whole-object
+    read-modify-write guarded by a fingerprint), and a read serves from the cached
+    listing's metadata with no extra GET.
+    """
+
+    provider: GcpProvider
+
+    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+        host_id = HostId(record.certified_host_data.host_id)
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            logger.warning("No GCE instance found for host {}; cannot mirror host record to metadata", host_id)
+            return
+        self.provider.gcp_client.set_instance_metadata(
+            VpsInstanceId(instance["id"]), {HOST_STATE_METADATA_KEY: record.model_dump_json()}
         )
-        return self._create_offline_host(VpsDockerHostRecord(certified_host_data=certified))
 
-    def _created_at_from_labels(self, labels: Mapping[str, str], host_id: HostId) -> datetime | None:
-        """Parse the ``mngr-created-at`` label (``%Y-%m-%dt%H-%M-%S``, UTC), or None on failure.
+    def delete_host_state(self, host_id: HostId) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return
+        agent_keys = [key for key in self.provider._metadata_dict(instance) if key.startswith(AGENT_METADATA_PREFIX)]
+        self.provider.gcp_client.set_instance_metadata(
+            VpsInstanceId(instance["id"]), {}, [HOST_STATE_METADATA_KEY, *agent_keys]
+        )
 
-        ``create_instance`` writes this label in GCE's restricted charset
-        (lowercased ``t`` separator, dashes for time), so reconstruct the UTC
-        datetime from that exact format. A malformed/externally-edited value yields
-        None (the caller falls back to now()).
-        """
-        raw = labels.get("mngr-created-at")
-        if not raw:
+    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            logger.warning("No GCE instance found for host {}; cannot mirror agent metadata", host_id)
+            return
+        self.provider.gcp_client.set_instance_metadata(
+            VpsInstanceId(instance["id"]), {f"{AGENT_METADATA_PREFIX}{agent_id}": json.dumps(dict(agent_data))}
+        )
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return
+        self.provider.gcp_client.set_instance_metadata(
+            VpsInstanceId(instance["id"]), {}, [f"{AGENT_METADATA_PREFIX}{agent_id}"]
+        )
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return []
+        records: list[dict] = []
+        for key, value in self.provider._metadata_dict(instance).items():
+            if not key.startswith(AGENT_METADATA_PREFIX):
+                continue
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as e:
+                logger.warning("Skipping unparseable agent metadata {!r}: {}", key, e)
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+            else:
+                logger.warning("Skipping agent metadata {!r}: value is not a JSON object", key)
+        return records
+
+    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return None
+        record_json = self.provider._metadata_dict(instance).get(HOST_STATE_METADATA_KEY)
+        if record_json is None:
             return None
         try:
-            return datetime.strptime(raw, "%Y-%m-%dt%H-%M-%S").replace(tzinfo=timezone.utc)
+            return VpsDockerHostRecord.model_validate_json(record_json)
         except ValueError as e:
-            logger.opt(exception=e).warning(
-                "Malformed mngr-created-at label {!r} on host {}; falling back to now()", raw, host_id
-            )
+            logger.warning("Malformed host record in GCE metadata for {}: {}", host_id, e)
             return None
 
 
