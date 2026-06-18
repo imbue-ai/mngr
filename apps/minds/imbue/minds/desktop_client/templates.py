@@ -547,11 +547,14 @@ _RECOVERY_STYLE: Final[str] = """\
       }
       .row { flex-shrink: 0; }
 
-      /* Primary action. The restart button is the page's focal point: full
-         width, prominent, directly under the message. Most users only ever
-         need this -- the troubleshooting disclosures below are for the rare
-         deep-debugging case. */
-      #recovery-host-btn {
+      /* Primary action. The restart and retry buttons are the page's focal
+         point: full width, prominent, directly under the message. They are
+         mutually exclusive (only one shows at a time, per the rendered tier)
+         and share this styling. Most users only ever need this -- the
+         troubleshooting disclosures below are for the rare deep-debugging
+         case. */
+      #recovery-host-btn,
+      #recovery-retry-btn {
         margin-top: 20px;
         flex-shrink: 0;
         width: 100%;
@@ -564,7 +567,8 @@ _RECOVERY_STYLE: Final[str] = """\
         font-weight: 600;
         cursor: pointer;
       }
-      #recovery-host-btn:hover { background: #3f3f46; }
+      #recovery-host-btn:hover,
+      #recovery-retry-btn:hover { background: #3f3f46; }
       #recovery-host-btn.secondary { background: #6b7280; }
       #recovery-host-btn.secondary:hover { background: #4b5563; }
 
