@@ -19,6 +19,7 @@ from pydantic import SecretStr
 
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.testing import VULTR_RELEASE_TESTS_OPT_IN
+from imbue.mngr_vultr.testing import VULTR_TEST_OS_ID
 
 _VULTR_API_KEY = os.environ.get("VULTR_API_KEY", "")
 
@@ -219,7 +220,7 @@ class TestVultrProviderLifecycle:
 @pytest.fixture()
 def vultr_release_client() -> VultrVpsClient:
     """Real Vultr API client for release-test read-only calls."""
-    return VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
+    return VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=VULTR_TEST_OS_ID)
 
 
 class TestVultrApiClient:
