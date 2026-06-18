@@ -508,6 +508,36 @@ def test_config_extend_writes_extend_suffixed_key(
     assert 'unset_vars__extend = ["FROM_EXTEND"]' in content, content
 
 
+def test_config_extend_settings_overrides_writes_mngr_merge(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """`mngr config extend` on a ``settings_overrides`` path writes the bare value plus a
+    `__mngr_merge` ``extend`` directive -- not a ``__extend`` suffix, which would leak into
+    the external CLI's settings.json as a junk key."""
+    monkeypatch.chdir(temp_git_repo)
+    result = cli_runner.invoke(
+        config,
+        [
+            "extend",
+            "agent_types.claude.settings_overrides.permissions.allow",
+            '["Bash(npm *)"]',
+            "--scope",
+            "project",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    content = (temp_git_repo / f".{mngr_test_root_name}" / "settings.toml").read_text()
+    assert "allow__extend" not in content, content
+    assert '"permissions.allow" = "extend"' in content, content
+    assert 'allow = ["Bash(npm *)"]' in content, content
+
+
 def test_config_set_with_extend_suffix_routes_to_extend(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

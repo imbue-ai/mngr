@@ -88,8 +88,33 @@ A dict field annotated `Annotated[dict[str, Any], SettingsPatchField()]`
 layer survive and same-key `__extend`s combine. The merge reads the marker off the
 pydantic field metadata, so core never hard-codes the field name. Because such a
 field can only grow (a higher layer adding keys is a superset), it is also **exempt
-from the assign-narrowing detector**. The only field carrying it today is
-`ClaudeAgentConfig.settings_overrides`.
+from the assign-narrowing detector**. The fields carrying it today are
+`ClaudeAgentConfig.settings_overrides` and `AntigravityAgentConfig.settings_overrides`.
+
+### The `__mngr_merge` surface for `settings_overrides`
+
+`settings_overrides` is folded into a file an external AI CLI reads (Claude Code's /
+antigravity's `settings.json`). That CLI does not understand the `__extend` / `__assign`
+leaf suffixes and would treat `permissions__extend` as a junk literal key, so the
+suffixes are **rejected** on this path. Instead, merge intent is declared in a single
+top-level `__mngr_merge` map (dotted key path -> `"extend"` | `"assign"`), which the
+external CLI silently ignores:
+
+```toml
+[agent_types.claude.settings_overrides.permissions]
+allow = ["Bash(npm *)"]
+[agent_types.claude.settings_overrides.__mngr_merge]
+"permissions.allow" = "extend"   # merge onto the base; "assign" replaces without the guard
+```
+
+`_desugar_settings_overrides` (`key_resolver.py`) rewrites this at config-load into the
+internal suffix form (the targeted leaf takes the operator's suffix; every ancestor takes
+`__extend` so the recursive merge reaches it), so the rest of the algebra is unchanged. A
+bare key (absent from the map) stays a narrowing-checked assign. The one-operator-per-path
+model intentionally drops the within-layer reset-then-add idiom (inexpressible in the clean
+JSON an external CLI reads). The provision-time fold (`overlay_merge.apply_settings_patch`,
+shared by both plugins) strips a stray `__mngr_merge` from the base (a no-op on the floor)
+and reports any narrowing with the exact `__mngr_merge` patch to add.
 
 ## Registries (`RegistryField`)
 
@@ -121,8 +146,9 @@ is only built at runtime. `resolve_extends` preserves them verbatim for a small
 registry of paths, each with a wired consumer (`key_resolver.py`):
 
 - `create_templates.<name>` -> `apply_create_template` (at `mngr create` time).
-- `agent_types.<name>.settings_overrides` -> `_build_settings_json`
-  (`mngr_claude/plugin.py`), folded against the provisioned home `settings.json`.
+- `agent_types.<name>.settings_overrides` -> `overlay_merge.apply_settings_patch`
+  (via `mngr_claude` / `mngr_antigravity`), folded against the provisioned base
+  `settings.json`. Markers here arrive desugared from the `__mngr_merge` surface (above).
 
 `__assign` preservation is scoped to `settings_overrides` only, because its consumer
 re-lifts the stored patch and honours the no-warn `Assign`; `create_templates` reads
@@ -155,4 +181,5 @@ The overlay's `narrowing_paths` does the detection (in `imbue.overlay.narrowing`
 
 Collected violations feed the flag-gated error: they raise unless
 `allow_settings_key_assignment_narrowing` is set (a transitional escape hatch;
-per-key, prefer `key__extend` to accumulate or `key__assign` to replace without warning).
+per-key, prefer `key__extend` to accumulate or `key__assign` to replace without warning --
+or, inside `settings_overrides`, the `__mngr_merge` map above).

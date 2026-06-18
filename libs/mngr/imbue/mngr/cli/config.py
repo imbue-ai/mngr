@@ -27,6 +27,8 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.field_markers import MNGR_MERGE_KEY
+from imbue.mngr.config.key_resolver import is_settings_overrides_path
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.pre_readers import get_local_config_path
@@ -613,14 +615,36 @@ def _config_extend_impl(ctx: click.Context, key: str, value: str, **kwargs: Any)
 
     doc = load_config_file_tomlkit(config_path)
     parsed_value = parse_scalar_value(value)
-    extend_key = f"{key}{EXTEND_SUFFIX}"
-    set_nested_value(doc, extend_key, parsed_value)
+    key_segments = tuple(key.split("."))
+    if is_settings_overrides_path(key_segments) and len(key_segments) > 3:
+        # settings_overrides expresses merge intent via the Claude-compatible `__mngr_merge`
+        # map, not the `__extend` suffix (which would leak into the external CLI's
+        # settings.json as a junk key). Write the bare value, then declare it `extend` in the
+        # root `__mngr_merge` map, keyed by the literal dotted path relative to the root
+        # (re-setting the whole map so an existing directive for another key is preserved).
+        set_nested_value(doc, key, parsed_value)
+        merge_path = f"{'.'.join(key_segments[:3])}.{MNGR_MERGE_KEY}"
+        relative = ".".join(key_segments[3:])
+        try:
+            existing_directives = _get_nested_value(dict(doc.unwrap()), merge_path)
+        except ConfigKeyNotFoundError:
+            existing_directives = {}
+        directives = (
+            {**existing_directives, relative: "extend"}
+            if isinstance(existing_directives, dict)
+            else {relative: "extend"}
+        )
+        set_nested_value(doc, merge_path, directives)
+        written_key = f"{merge_path}.{relative}"
+    else:
+        written_key = f"{key}{EXTEND_SUFFIX}"
+        set_nested_value(doc, written_key, parsed_value)
 
     # Validate by resolving the new extend against the current merged config.
     _validate_doc_after_set(doc, mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins)
 
     save_config_file(config_path, doc)
-    _emit_config_extend_result(key, extend_key, parsed_value, scope, config_path, output_opts)
+    _emit_config_extend_result(key, written_key, parsed_value, scope, config_path, output_opts)
 
 
 @config.command(name="extend")

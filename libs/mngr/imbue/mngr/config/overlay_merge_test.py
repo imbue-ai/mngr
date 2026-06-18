@@ -176,6 +176,18 @@ def test_narrowing_message_tailors_extend_example_to_the_narrowed_key() -> None:
     assert "permissions__extend = {allow__extend" in generic
 
 
+def test_narrowing_message_emits_mngr_merge_patch_for_claude_path() -> None:
+    """Given ``mngr_merge_paths`` (the Claude ``settings_overrides`` surface), the message
+    emits the exact ``__mngr_merge`` map for every narrowed path and never the internal
+    suffix form."""
+    message = build_settings_narrowing_message(
+        ["  permissions.allow", "  env"], mngr_merge_paths=["permissions.allow", "env"]
+    )
+    assert '__mngr_merge = {"permissions.allow" = "extend", "env" = "extend"}' in message
+    assert "__extend" not in message
+    assert '"assign"' in message
+
+
 # =============================================================================
 # Sub-model field-by-field carry-through (the core regression)
 # =============================================================================

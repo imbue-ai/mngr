@@ -40,6 +40,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
+from imbue.mngr.config.field_markers import MNGR_MERGE_KEY
 from imbue.mngr.config.field_markers import get_registry_field_names
 from imbue.mngr.config.field_markers import get_settings_patch_field_names
 from imbue.mngr.errors import ConfigParseError
@@ -47,6 +48,7 @@ from imbue.overlay.markers import StaticDict
 from imbue.overlay.markers import StaticList
 from imbue.overlay.markers import StaticTuple
 from imbue.overlay.markers import is_static_marker
+from imbue.overlay.node_merge import finalize
 from imbue.overlay.node_merge import lift
 from imbue.overlay.node_merge import lower
 from imbue.overlay.node_merge import merge_narrowing_allowed
@@ -498,29 +500,99 @@ def _extend_example(dotted_path: str) -> str:
     return expr
 
 
-def build_settings_narrowing_message(detail_lines: Sequence[str], *, example_key_path: str | None = None) -> str:
+def _mngr_merge_example(dotted_paths: Sequence[str]) -> str:
+    """Render the ``__mngr_merge`` map declaring every narrowed path as ``extend``.
+
+    This is the exact patch a user adds to their ``settings_overrides`` to get the
+    merge-across-layers behaviour native Claude already gives these keys: ``permissions.allow``
+    and ``env`` narrowing -> ``__mngr_merge = {"permissions.allow" = "extend", "env" = "extend"}``.
+    """
+    entries = ", ".join(f'"{path}" = "extend"' for path in dotted_paths)
+    return f"{MNGR_MERGE_KEY} = {{{entries}}}"
+
+
+def build_settings_narrowing_message(
+    detail_lines: Sequence[str],
+    *,
+    example_key_path: str | None = None,
+    mngr_merge_paths: Sequence[str] | None = None,
+) -> str:
     """Build the user-facing settings-narrowing error body shared by config-load and
     provisioning.
 
     ``detail_lines`` describe what narrowed -- the config loader names the assigning and
-    dropped-from scopes per key; the claude provision fold lists the dotted key paths.
-    The preamble and the remediation footer (the ``__extend`` / ``__assign`` operators and
-    the ``allow_settings_key_assignment_narrowing`` flag) are identical in both contexts,
-    so they live here rather than being duplicated per caller. ``example_key_path`` (a
-    narrowed dotted path) tailors the ``__extend`` example to the user's actual key so the
-    message shows exactly how to fix *their* config; it falls back to a generic example.
+    dropped-from scopes per key; the claude provision fold lists the dotted key paths. The
+    preamble and the ``allow_settings_key_assignment_narrowing`` escape hatch are identical
+    in both contexts, but the per-key remediation differs by surface:
+
+    - config-load (general mngr config) uses the ``__extend`` / ``__assign`` leaf suffixes;
+      ``example_key_path`` tailors the suffix example to the user's actual key.
+    - the Claude ``settings_overrides`` fold uses the Claude-compatible ``__mngr_merge`` map
+      (the suffixes are rejected there); pass ``mngr_merge_paths`` (every narrowed path) to
+      emit the exact ``__mngr_merge`` patch the user needs.
     """
-    example = (
-        _extend_example(example_key_path) if example_key_path else 'permissions__extend = {allow__extend = ["..."]}'
-    )
-    return (
+    preamble = (
         "Settings narrowing detected: a higher-precedence settings layer would assign over "
         "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
         "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
         "To opt into this assign-by-default behavior (and silence this error), set "
         "`allow_settings_key_assignment_narrowing = true` in your mngr config "
         "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
+    )
+    if mngr_merge_paths is not None:
+        return preamble + (
+            "To get the behavior native Claude Code applies here (merge across layers), declare "
+            "the affected keys as `extend` in the top-level `__mngr_merge` map of your "
+            f"`settings_overrides`:\n    {_mngr_merge_example(mngr_merge_paths)}\n"
+            'Use `"assign"` instead of `"extend"` to intentionally replace a key without this '
+            "error. (Vanilla Claude Code ignores `__mngr_merge`.)"
+        )
+    example = (
+        _extend_example(example_key_path) if example_key_path else 'permissions__extend = {allow__extend = ["..."]}'
+    )
+    return preamble + (
         "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
         f"key in the higher-precedence layer (e.g. `{example}`), "
         "or `__assign` to replace it intentionally without this error."
     )
+
+
+def apply_settings_patch(
+    base_data: Mapping[str, Any],
+    settings_overrides: Mapping[str, Any],
+    *,
+    allow_narrowing: bool,
+    base_description: str,
+) -> dict[str, Any]:
+    """Fold a desugared ``settings_overrides`` patch onto a concrete base settings dict.
+
+    Shared by the external-tool plugins (``mngr_claude``, ``mngr_antigravity``) that bake a
+    per-agent settings file: both fold the agent type's ``settings_overrides`` onto a base
+    (the user's synced home settings + the plugin's own additions) with identical semantics.
+
+    Drops a top-level ``__mngr_merge`` key from the base (the operator surface is a no-op on
+    the floor -- it merges onto nothing -- and the external tool ignores it, so it must not
+    leak into the written file), normalizes the base to a concrete patch, then folds the
+    override on top via the overlay typed-node algebra: a desugared ``key__extend`` merges
+    onto the base value (list concat / set union / recursive dict merge), a bare ``Default``
+    key assigns, and ``Assign`` / ``Static*`` suppress the narrowing otherwise recorded for a
+    dropped aggregate. ``settings_overrides`` arrives already desugared from its
+    ``__mngr_merge`` surface to the internal suffix form (``key_resolver``). ``finalize`` is
+    total, so no marker survives into the result.
+
+    Hard-errors (via ``build_settings_narrowing_message``, with the Claude-compatible
+    ``__mngr_merge`` remediation) when a bare override key at any depth drops a non-empty
+    aggregate from the base, unless ``allow_narrowing`` is set. ``base_description`` names the
+    side whose value would be dropped (e.g. the home ``settings.json`` path).
+    """
+    stripped_base = {key: value for key, value in base_data.items() if key != MNGR_MERGE_KEY}
+    base = finalize(lift(stripped_base))
+    merged, narrowings = merge_narrowing_allowed(lift(base), lift(dict(settings_overrides)))
+    if narrowings and not allow_narrowing:
+        detail_lines: list[str] = []
+        for path in narrowings:
+            detail_lines.append(f"  {path}")
+            detail_lines.append("      assigned by the agent type's `settings_overrides`")
+            detail_lines.append(f"      would drop a value from {base_description}")
+        raise ConfigParseError(build_settings_narrowing_message(detail_lines, mngr_merge_paths=narrowings))
+    return finalize(merged)

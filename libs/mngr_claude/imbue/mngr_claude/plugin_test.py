@@ -4823,6 +4823,28 @@ def test_build_settings_json_bare_override_narrows_raises() -> None:
     assert str(claude_dir / "settings.json") in message
 
 
+def test_build_settings_json_narrowing_error_emits_mngr_merge_remediation() -> None:
+    """The Claude provision narrowing error spells out the exact ``__mngr_merge`` patch the
+    user needs (Claude-compatible), not the internal ``__extend`` suffix, naming each
+    narrowed path.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}},
+    )
+    with pytest.raises(ConfigParseError) as exc_info:
+        _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    message = str(exc_info.value)
+    assert '__mngr_merge = {"permissions.allow" = "extend"}' in message
+    # The internal suffix form is never shown as remediation on the Claude path.
+    assert "allow__extend" not in message
+
+
 def test_build_settings_json_bare_override_narrows_allowed_with_escape_hatch() -> None:
     """The narrowing escape hatch lets a bare override replace the sibling aggregate."""
     claude_dir = Path.home() / ".claude"
@@ -4859,6 +4881,25 @@ def test_build_settings_json_normalizes_extend_marker_in_home_base() -> None:
     assert "permissions__extend" not in data
     assert data["permissions"] == {"allow": ["Bash(git *)"]}
     assert "__extend" not in content
+
+
+def test_build_settings_json_strips_mngr_merge_key_from_home_base() -> None:
+    """A ``__mngr_merge`` key a user placed in their home settings.json is dropped: it is a
+    no-op on the base (the floor merges onto nothing), and vanilla Claude ignores it, so it
+    must not leak into the generated settings.json.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(git *)"]}, "__mngr_merge": {"permissions.allow": "extend"}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert "__mngr_merge" not in data
+    assert data["permissions"] == {"allow": ["Bash(git *)"]}
 
 
 def test_build_settings_json_stacked_suffix_override_does_not_raise() -> None:

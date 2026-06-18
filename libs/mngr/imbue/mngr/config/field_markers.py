@@ -6,7 +6,20 @@ which import *from* it), so the marker types and their collectors can be shared 
 merge pipeline without a cycle.
 """
 
+from typing import Final
+
 from pydantic import BaseModel
+
+# Top-level key carrying the Claude-compatible merge-operator surface for a
+# ``SettingsPatchField`` patch (i.e. ``settings_overrides``). The patch is folded into a
+# Claude ``settings.json``, which a user may also feed to vanilla Claude Code; Claude does
+# not recognise the internal ``__extend`` / ``__assign`` leaf suffixes and would treat
+# them as junk literal keys, so on this path the merge intent is declared out-of-band in a
+# single ``__mngr_merge`` map (dotted key path -> "extend"|"assign") that vanilla Claude
+# silently ignores. ``key_resolver._desugar_settings_overrides`` rewrites it into the
+# internal suffix form. Lives in this leaf module so both ``key_resolver`` and
+# ``overlay_merge`` can import it without a cycle.
+MNGR_MERGE_KEY: Final[str] = "__mngr_merge"
 
 
 class SettingsPatchField:

@@ -47,6 +47,15 @@ parent_type = "antigravity"
 settings_overrides = { permissions = { allow = ["command(git)"], deny = ["command(rm -rf)"], ask = ["command(*)"] }, toolPermission = "proceed-in-sandbox", model = "Gemini 3.5 Flash (Medium)" }
 ```
 
+To merge onto the base rather than assign, declare the intent in `__mngr_merge` (see the `settings_overrides` field below):
+
+```toml
+[agent_types.readonly_agy.settings_overrides.permissions]
+allow = ["command(git)"]
+[agent_types.readonly_agy.settings_overrides.__mngr_merge]
+"permissions.allow" = "extend"   # or "assign"
+```
+
 Then create agents with your custom type:
 
 ```bash
@@ -55,7 +64,7 @@ mngr create my-agent readonly_agy
 
 ### Fields
 
-- `settings_overrides` (dict, default `{}`) -- a free-form blob merged last into the per-agent `settings.json` (mirrors `mngr_claude`'s field of the same name). Common keys:
+- `settings_overrides` (dict, default `{}`) -- a free-form blob merged last into the per-agent `settings.json` (mirrors `mngr_claude`'s field of the same name). Merge intent is declared in a top-level `__mngr_merge` map (dotted key path -> operator), which vanilla agy ignores: a bare key **assigns** (guarded so it errors rather than silently dropping a non-empty list/dict/set from the base, printing the exact `__mngr_merge` patch to add), `"extend"` **merges** onto the base (list concat / set union / recursive dict merge), and `"assign"` replaces without the guard. The `__extend`/`__assign` suffixes are rejected here (they would leak into `settings.json` as keys agy can't read). Common keys:
     - `permissions` -- `{allow, deny, ask}`, each a list of `action(target)` resources. Actions: `read_file`, `write_file`, `read_url`, `execute_url`, `command`, `unsandboxed`, `mcp`. Precedence is **Deny > Ask > Allow**. `command(...)` matches a token-prefix/regex with no path scoping; file/url targets must be **canonical** (on macOS `/tmp` -> `/private/tmp`) -- a wrong target fails open to Ask rather than erroring.
     - `toolPermission` -- the global default mode, e.g. `"proceed-in-sandbox"` or `"request-review"`.
     - `model` -- a display name exactly as listed by `agy models`, e.g. `"Gemini 3.5 Flash (Medium)"`.
