@@ -1440,7 +1440,7 @@ def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
         tmux=TmuxConfig(
             primary_window_name="non-default-window",
             attach_args=("-CC",),
-            user_config_path=Path("/tmp/non-default-tmux.conf"),
+            additional_config_path=Path("/tmp/non-default-tmux.conf"),
         ),
         is_remote_agent_installation_allowed=False,
         connect_command="non-default-connect",
@@ -1507,7 +1507,7 @@ def test_tmux_config_defaults() -> None:
     config = TmuxConfig()
     assert config.primary_window_name == "agent"
     assert config.attach_args == ()
-    assert config.user_config_path is None
+    assert config.additional_config_path is None
 
 
 def test_tmux_config_attach_args_accepts_string() -> None:

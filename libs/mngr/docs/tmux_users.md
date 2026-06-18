@@ -64,7 +64,7 @@ attach_args = ["-CC"]
 # An extra tmux config file sourced into every mngr session. Unlike the
 # auto-generated ~/.mngr/tmux.conf (which mngr overwrites), this file is yours
 # to edit and is never regenerated -- the stable place for session-specific config.
-user_config_path = "~/.mngr/tmux.user.conf"
+additional_config_path = "~/.mngr/tmux.user.conf"
 
 # Name of the window the agent runs in (default "agent"). mngr targets this
 # window by name, so it works no matter what `base-index` you set.
@@ -75,9 +75,9 @@ primary_window_name = "agent"
 
 Setting `attach_args = ["-CC"]` makes `mngr connect` (and `mngr create`/`start` when they attach) run `tmux -CC attach`, so iTerm2 renders your agent's tmux windows as native iTerm2 tabs/windows. This applies to both local and remote (SSH) agents. `-CC` is a tmux *client* flag, which is why it goes before the `attach` subcommand; other client flags such as `-u` (force UTF-8) or `-2` (force 256-color) work here too.
 
-### Extra session config (`user_config_path`)
+### Extra session config (`additional_config_path`)
 
-tmux loads your `~/.tmux.conf` itself when its server starts, so `mngr` does not re-source it (re-sourcing non-idempotent config on every agent start could corrupt your setup). The generated `~/.mngr/tmux.conf` holds only `mngr`'s own settings and is marked "do not edit" (it is rewritten each time an agent starts). To add tmux config that applies only to `mngr` sessions (custom status styling, keybindings, etc.), point `user_config_path` at a file and put your config there -- `mngr` sources it (if it exists) into every session and never touches it. For remote agents the path is resolved on the agent's host, so the file must exist there.
+tmux loads your `~/.tmux.conf` itself when its server starts, so `mngr` does not re-source it (re-sourcing non-idempotent config on every agent start could corrupt your setup). The generated `~/.mngr/tmux.conf` holds only `mngr`'s own settings and is marked "do not edit" (it is rewritten each time an agent starts). To add tmux config that applies only to `mngr` sessions (custom status styling, keybindings, etc.), point `additional_config_path` at a file and put your config there -- `mngr` sources it (if it exists) into every session and never touches it. For remote agents the path is resolved on the agent's host, so the file must exist there.
 
 ### tmux `base-index`
 

@@ -3161,17 +3161,17 @@ def _make_local_host_with_tmux_config(
     return provider.create_host(HostName(LOCAL_HOST_NAME))
 
 
-def test_host_create_host_tmux_config_sources_user_config_when_configured(
+def test_host_create_host_tmux_config_sources_additional_config_when_configured(
     temp_host_dir: Path,
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     active_concurrency_group: ConcurrencyGroup,
     mngr_test_prefix: str,
 ) -> None:
-    """A configured tmux.user_config_path is sourced (guarded by test -f) into the session config."""
-    user_config_path = "~/.mngr/tmux.user.conf"
+    """A configured tmux.additional_config_path is sourced (guarded by test -f) into the session config."""
+    additional_config_path = "~/.mngr/tmux.user.conf"
     host = _make_local_host_with_tmux_config(
-        TmuxConfig(user_config_path=Path(user_config_path)),
+        TmuxConfig(additional_config_path=Path(additional_config_path)),
         temp_host_dir,
         temp_profile_dir,
         plugin_manager,
@@ -3180,13 +3180,13 @@ def test_host_create_host_tmux_config_sources_user_config_when_configured(
     )
     content = host._create_host_tmux_config().read_text()
 
-    assert f"if-shell 'test -f {user_config_path}' 'source-file {user_config_path}'" in content
-    # Only the configured user_config_path is sourced; mngr never sources ~/.tmux.conf
+    assert f"if-shell 'test -f {additional_config_path}' 'source-file {additional_config_path}'" in content
+    # Only the configured additional_config_path is sourced; mngr never sources ~/.tmux.conf
     # (tmux loads that itself at server start).
     assert content.count("source-file") == 1
     assert "~/.tmux.conf" not in content
     # The path is interpolated unquoted so a leading ~ is expanded by the host shell/tmux.
-    assert f"'{user_config_path}'" not in content
+    assert f"'{additional_config_path}'" not in content
 
 
 # =========================================================================

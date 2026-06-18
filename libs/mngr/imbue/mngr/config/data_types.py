@@ -708,7 +708,7 @@ class TmuxConfig(FrozenModel):
         "connecting to an agent, i.e. ``tmux <attach_args> attach ...``. For example, "
         "['-CC'] enables iTerm2 control mode; '-u' / '-2' force UTF-8 / 256-color.",
     )
-    user_config_path: Path | None = Field(
+    additional_config_path: Path | None = Field(
         default=None,
         description="Path (on the agent's host) to an additional tmux config file sourced into "
         "every mngr session. Unlike the auto-generated ~/.mngr/tmux.conf, this file is never "

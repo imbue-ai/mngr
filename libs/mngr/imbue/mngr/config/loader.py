@@ -951,8 +951,8 @@ def _parse_tmux_config(raw_tmux: dict[str, Any], *, strict: bool = True, silent:
             cleaned_tmux["attach_args"] = tuple(attach_args)
     # Coerce the path to Path here: model_construct bypasses field validation, so
     # without this the field would hold a bare str despite its Path | None type.
-    if cleaned_tmux.get("user_config_path") is not None:
-        cleaned_tmux["user_config_path"] = Path(cleaned_tmux["user_config_path"])
+    if cleaned_tmux.get("additional_config_path") is not None:
+        cleaned_tmux["additional_config_path"] = Path(cleaned_tmux["additional_config_path"])
     return TmuxConfig.model_construct(**cleaned_tmux)
 
 

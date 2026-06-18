@@ -2700,16 +2700,16 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         # is distinct from ~/.tmux.conf, which tmux loads itself at server start;
         # mngr does not re-source that, to avoid re-running non-idempotent user
         # config on every agent creation.) The path is interpolated unquoted so a
-        # leading ~ is expanded by the host's shell and tmux; user_config_path is
-        # expected to be an absolute or ~-relative path without shell-special
+        # leading ~ is expanded by the host's shell and tmux; additional_config_path
+        # is expected to be an absolute or ~-relative path without shell-special
         # characters.
-        user_config_path = self.mngr_ctx.config.tmux.user_config_path
-        if user_config_path is not None:
-            user_config_str = str(user_config_path)
+        additional_config_path = self.mngr_ctx.config.tmux.additional_config_path
+        if additional_config_path is not None:
+            additional_config_str = str(additional_config_path)
             lines.extend(
                 [
                     "# Source the user's extra mngr tmux config if it exists",
-                    f"if-shell 'test -f {user_config_str}' 'source-file {user_config_str}'",
+                    f"if-shell 'test -f {additional_config_str}' 'source-file {additional_config_str}'",
                     "",
                 ]
             )
