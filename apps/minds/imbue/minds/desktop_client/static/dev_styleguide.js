@@ -1,3 +1,26 @@
+// Light/dark dev toggle. Flips the `.dark` class on <html> and persists the
+// choice to localStorage, which Base.jinja reads pre-paint -- so the choice
+// sticks across every minds page. This is a development affordance; the formal
+// light/dark UX (OS preference / in-app control) lands in a later stage.
+(function () {
+  var btn = document.getElementById('styleguide-theme-toggle');
+  if (!btn) return;
+  function syncLabel() {
+    var isDark = document.documentElement.classList.contains('dark');
+    btn.textContent = isDark ? 'Switch to light' : 'Switch to dark';
+  }
+  btn.addEventListener('click', function () {
+    var isDark = document.documentElement.classList.toggle('dark');
+    try {
+      localStorage.setItem('minds-theme', isDark ? 'dark' : 'light');
+    } catch (e) {
+      /* ignore */
+    }
+    syncLabel();
+  });
+  syncLabel();
+})();
+
 // Dev styleguide accent picker: choose a hex, watch every
 // --workspace-accent-driven swatch on the page update live. Mirrors the
 // real model (accents are user-picked #rrggbb hexes stored as an mngr

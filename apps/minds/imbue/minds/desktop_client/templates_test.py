@@ -759,20 +759,30 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
     assert 'name="styleguide-focus-ring-input"' in html
 
 
-def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
-    """Drift guard: every ``:root`` token in ``app.css`` must have a
-    matching ``data-token`` swatch in the styleguide template (and vice
-    versa). Failure means the catalog is out of sync with the live tokens.
+def test_dev_styleguide_token_swatches_enumerate_design_tokens() -> None:
+    """Drift guard: every design token in ``app.css`` must have a matching
+    ``data-token`` swatch in the styleguide template (and vice versa). Failure
+    means the catalog is out of sync with the live tokens.
+
+    Design tokens are the Tailwind color tokens registered in ``@theme``
+    (``--color-*``) plus the standalone ``--shadow-seam``. The raw value layer
+    (``--c-*``) and the runtime-set chrome variables (``--workspace-accent`` /
+    ``--titlebar-*``) are implementation detail behind the tokens and are
+    intentionally NOT surfaced.
     """
-    root_block = re.search(r":root\s*\{([^}]*)\}", _TOKENS_CSS_PATH.read_text(), re.DOTALL)
-    assert root_block is not None, "app.css must declare a :root block"
-    declared = {f"--{name}" for name in re.findall(r"--([a-z][a-z0-9-]*)\s*:", root_block.group(1))}
+    css = _TOKENS_CSS_PATH.read_text()
+    # ``--color-*: ...`` declarations only (the @theme token layer); the
+    # border-compat shim's ``var(--color-gray-200, ...)`` is a reference, not a
+    # declaration, so it is not matched.
+    declared = set(re.findall(r"(--color-[a-z0-9-]+)\s*:", css))
+    # Standalone :root design tokens that aren't part of the @theme color set.
+    declared |= {tok for tok in ("--shadow-seam",) if re.search(rf"{tok}\s*:", css)}
 
     html = render_dev_styleguide_page()
     surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', html))
 
     assert declared == surfaced, (
-        f"app.css :root declares {sorted(declared)} but the styleguide "
+        f"app.css design tokens {sorted(declared)} but the styleguide "
         f"surfaces {sorted(surfaced)}. Add or remove a "
         f'`data-token="--<name>"` swatch in templates/pages/DevStyleguide.jinja '
         f"to match."

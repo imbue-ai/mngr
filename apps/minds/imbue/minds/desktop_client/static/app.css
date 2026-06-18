@@ -23,13 +23,57 @@
 @source "../templates.py";
 
 /*
- * Design tokens (light + dark) land here in a later stage. Empty for now so
- * the stock Tailwind palette renders the chrome exactly as it did under the
- * Play CDN. In v4 each ``@theme`` entry both generates a utility and is
- * emitted as a ``:root`` custom property, which is what light/dark theming
- * will hang off of.
+ * ---------------------------------------------------------------------------
+ * Design tokens -- light / dark theming. Built in two layers so a theme swap
+ * is a single class on <html> with zero component changes:
+ *
+ *   1. VALUE LAYER (--c-*): the raw color for each token, per mode. Light
+ *      values on :root, dark values under .dark. This is the ONLY place a
+ *      value differs between modes, so both tables sit side by side and are
+ *      edited/compared together.
+ *   2. TOKEN LAYER (@theme inline): registers each --c-* as a Tailwind color
+ *      token, generating the utilities (text-primary, ...). ``inline`` makes
+ *      the generated utility resolve THROUGH var(--c-*) at runtime, so adding
+ *      / removing the ``.dark`` class on <html> reskins the whole app live.
+ *
+ * --- Text colors (Stage 1: text) ---
+ * Regular text contrasts the current surface; inverse text contrasts an
+ * inverted surface. Both are pure black / pure white at three alpha steps
+ * (primary 100%, secondary, tertiary) -- no hue. Regular and inverse mirror
+ * each other and swap black<->white between light and dark.
+ * ---------------------------------------------------------------------------
  */
-@theme {
+/* Light is the default (:root); ``.light`` re-asserts it so a subtree can be
+ * forced light even under a ``.dark`` ancestor (and vice versa) -- useful for
+ * mode-locked islands like the styleguide's side-by-side panels. */
+:root,
+.light {
+  /* regular text (on the default surface) -- black in light mode */
+  --c-primary: #000000;
+  --c-secondary: rgb(0 0 0 / 0.65);
+  --c-tertiary: rgb(0 0 0 / 0.45);
+  /* inverse text (on an inverted surface) -- white in light mode */
+  --c-inverse-primary: #ffffff;
+  --c-inverse-secondary: rgb(255 255 255 / 0.70);
+  --c-inverse-tertiary: rgb(255 255 255 / 0.50);
+}
+.dark {
+  /* regular text -- white in dark mode */
+  --c-primary: #ffffff;
+  --c-secondary: rgb(255 255 255 / 0.70);
+  --c-tertiary: rgb(255 255 255 / 0.50);
+  /* inverse text -- black in dark mode */
+  --c-inverse-primary: #000000;
+  --c-inverse-secondary: rgb(0 0 0 / 0.65);
+  --c-inverse-tertiary: rgb(0 0 0 / 0.45);
+}
+@theme inline {
+  --color-primary: var(--c-primary);
+  --color-secondary: var(--c-secondary);
+  --color-tertiary: var(--c-tertiary);
+  --color-inverse-primary: var(--c-inverse-primary);
+  --color-inverse-secondary: var(--c-inverse-secondary);
+  --color-inverse-tertiary: var(--c-inverse-tertiary);
 }
 
 /*

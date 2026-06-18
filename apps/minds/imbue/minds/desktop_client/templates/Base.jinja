@@ -29,6 +29,12 @@
 <head>
   <meta charset="UTF-8">
   <title>{{ title }}</title>
+  <script>
+    // Apply the persisted theme before first paint (no flash). The styleguide
+    // dev toggle writes localStorage['minds-theme'] = 'dark' | 'light'; the
+    // formal light/dark UX lands in a later stage. Absent flag => light.
+    try { if (localStorage.getItem('minds-theme') === 'dark') document.documentElement.classList.add('dark'); } catch (e) {}
+  </script>
   <link rel="stylesheet" href="/_static/app.min.css">
   {{ head }}
 </head>
