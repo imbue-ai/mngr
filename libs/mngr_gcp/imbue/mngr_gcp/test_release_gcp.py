@@ -472,24 +472,7 @@ class _GcpReleaseProfile(VpsCloudReleaseProfile):
 
 
 @pytest.mark.rsync
-@pytest.mark.parametrize(
-    "isolation",
-    [
-        IsolationMode.CONTAINER,
-        # xfail until mngr/bare-providers fixes GCP bare resume: after `--stop-host` (TERMINATE)
-        # the restarted instance is unreachable on port 22 -- the bare-GCP start path doesn't wait
-        # for sshd readiness on the new IP the way AWS bare does (AWS bare + GCP container both
-        # pass this path). Surfaced by this trip; reported to the `bare-providers` agent.
-        pytest.param(
-            IsolationMode.NONE,
-            marks=pytest.mark.xfail(
-                reason="mngr/bare-providers: GCP bare `start` after `--stop-host` cannot reconnect "
-                "SSH (port 22) on the restarted instance",
-                strict=False,
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
 def test_provider_release_trip1(
     isolation: IsolationMode,
     tmp_path: Path,
