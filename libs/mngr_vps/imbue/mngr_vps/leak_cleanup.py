@@ -59,7 +59,12 @@ class VpsReaperClient(Protocol):
     the shared ``VpsClientInterface``).
     """
 
-    def list_instances(self, tag: str | None = None) -> list[dict[str, Any]]: ...
+    # Declared with no arguments because the reaper only ever calls ``list_instances()`` with
+    # none. Providers name the optional filter parameter differently (Vultr ``tag``, the cloud
+    # trio ``provider_tag``), so constraining it here would make those clients fail to match this
+    # Protocol structurally; an implementation with an extra defaulted parameter still satisfies a
+    # zero-argument Protocol method.
+    def list_instances(self) -> list[dict[str, Any]]: ...
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None: ...
 
