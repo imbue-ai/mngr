@@ -3,3 +3,5 @@ Added `test_provider_release_trip1` to the Azure release suite: a single-boot fu
 Also added `test_provider_release_trip4` (error classification): a no-boot CLI trip asserting `mngr create` with no resolvable subscription surfaces the contract `ProviderUnavailableError`, and that a `--vps-*` build arg is rejected with the migration hint. Azure is the one provider with curated help text, so the trip asserts the guidance points at `az login` / the subscription setup steps.
 
 Also added `test_provider_release_trip2` (idle auto-shutdown contract), parametrized over container and bare isolation: it creates an idle host, polls until the Azure VM is deallocated (billing stops), then resumes via `mngr start` and asserts a pre-shutdown marker survived.
+
+Azure also opts into Trip 1's offline-host_dir read (`supports_offline_host_dir`): with `MNGR_RELEASE_TEST_OFFLINE_HOST_DIR=1`, the trip asserts a stopped host's host_dir marker is served from the Blob state bucket via `mngr file get --relative-to host`.

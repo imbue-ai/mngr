@@ -73,6 +73,13 @@ _CLOUD_POLL_INTERVAL_SECONDS: Final[float] = 10.0
 # survives a host stop/start (and a container re-realize) across every provider shape -- a
 # file in the container's own root would not survive a bare-vs-container or stop/start cycle.
 _MARKER_HOST_PATH: Final[str] = "/mngr/trip1-marker.txt"
+# host_dir-relative form of the Trip 1 marker (``_MARKER_HOST_PATH`` minus the ``/mngr`` mount),
+# used by the opt-in offline read (`mngr file get <host> <relpath>`).
+_MARKER_HOSTDIR_RELPATH: Final[str] = "trip1-marker.txt"
+# Opt-in gate for Trip 1's offline-host_dir read. Off by default so Trip 1 stays the lean
+# happy-path lifecycle; set to "1" to additionally assert that a stopped host's host_dir is
+# readable from the offline mirror.
+_OFFLINE_HOST_DIR_ENV_VAR: Final[str] = "MNGR_RELEASE_TEST_OFFLINE_HOST_DIR"
 
 # The Trip 2 marker lives under ``/mngr`` (the host_dir mount) so it survives the auto-shutdown
 # stop and the subsequent ``mngr start`` resume -- the same rationale as the Trip 1 marker.
@@ -105,6 +112,11 @@ class ProviderReleaseProfile(abc.ABC):
     supports_shutdown_hosts: bool
     supports_snapshots: bool
     snapshot_survives_destroy: bool
+    # Whether a stopped host's host_dir is readable from the offline mirror (captured to the state
+    # bucket at ``mngr stop``). True only for clouds with a real host_dir backend (AWS/Azure); GCP
+    # uses ``NullHostDirBackend`` and Modal has no ``--stop-host`` window, so both stay False.
+    # Read only by Trip 1's opt-in offline-host_dir step (gated by ``_OFFLINE_HOST_DIR_ENV_VAR``).
+    supports_offline_host_dir: bool = False
 
     # Capability boolean the harness branches Trip 2 (idle auto-shutdown) on.
     # ``resumes_after_auto_shutdown`` is whether the provider comes back from its idle
@@ -366,6 +378,31 @@ def run_provider_release_trip1(
                 poll_interval=_CLOUD_POLL_INTERVAL_SECONDS,
                 error_message="host compute did not stop (billing should halt) after `mngr stop --stop-host`",
             )
+            # Opt-in offline-host_dir read (kept out of the default happy path behind an env var so
+            # it never destabilizes Trip 1's core lifecycle). `mngr stop --stop-host` captured the
+            # host_dir to the state bucket, so while the host is genuinely stopped `mngr file get`
+            # must serve the marker from that offline mirror -- and must not start the host to do it.
+            if os.environ.get(_OFFLINE_HOST_DIR_ENV_VAR) == "1" and profile.supports_offline_host_dir:
+                # `--relative-to host` resolves the path against the host_dir (the captured volume);
+                # the default work-dir base is not served offline.
+                offline_read = _run_mngr(
+                    settings_dir,
+                    workspace,
+                    "file",
+                    "get",
+                    host_name,
+                    _MARKER_HOSTDIR_RELPATH,
+                    "--relative-to",
+                    "host",
+                    timeout=_LIFECYCLE_TIMEOUT_SECONDS,
+                )
+                assert marker_token in offline_read.stdout, (
+                    f"offline host_dir read did not serve the marker while the host was stopped:\n"
+                    f"{offline_read.stdout}"
+                )
+                assert profile.is_host_compute_stopped(handle), (
+                    "the offline host_dir read must not have started the host"
+                )
         else:
             refused = _run_mngr(
                 settings_dir, workspace, "stop", host_name, "--stop-host", timeout=_LIFECYCLE_TIMEOUT_SECONDS

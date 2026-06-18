@@ -524,6 +524,9 @@ class _AzureReleaseProfile(VpsCloudReleaseProfile):
     # at the subscription / `az login` setup steps instead of the generic "start Docker" guidance.
     has_curated_unavailable_help = True
     credential_setup_command = "az login"
+    # Azure captures host_dir to the Blob state bucket at `mngr stop`, so a stopped host's host_dir
+    # is readable offline (Trip 1's opt-in offline-host_dir step).
+    supports_offline_host_dir = True
 
     def __init__(self, client: AzureVpsClient, isolation: IsolationMode, subscription_id: str) -> None:
         super().__init__(client, isolation)
