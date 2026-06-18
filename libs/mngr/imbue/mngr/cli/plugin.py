@@ -130,12 +130,13 @@ def _gather_plugin_info(mngr_ctx: MngrContext) -> list[PluginInfo]:
             version = metadata.get("version")
             description = metadata.get("summary")
 
-        # A blocked plugin is never actually active, so report it as disabled
-        # even when config does not list it. Opt-in plugins (e.g.
-        # claude_subagent_proxy) are blocked in create_plugin_manager via
-        # read_disabled_plugins() but do not reach config.disabled_plugins, and
-        # pluggy still lists their name here with a None plugin object -- without
-        # this check they would be mislabeled enabled.
+        # pm is the ground truth for whether a plugin is active: a blocked plugin
+        # is never registered (pluggy still lists its name here with a None plugin
+        # object), so report it as disabled regardless of config. This catches
+        # blocks that config.disabled_plugins does not record -- e.g. command-default
+        # or create-template --disable-plugin, applied after load_config in
+        # setup_command_context -- without which such plugins would be mislabeled
+        # enabled.
         is_enabled = _is_plugin_enabled(name, mngr_ctx.config) and not pm.is_blocked(name)
 
         plugin_info_by_name[name] = PluginInfo(
