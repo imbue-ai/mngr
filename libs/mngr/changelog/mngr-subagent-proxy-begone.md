@@ -1,0 +1,1 @@
+Fixed `mngr plugin list` mislabeling opt-in plugins (e.g. `claude_subagent_proxy`) as `enabled=true` when they are actually blocked. The reported `enabled` state now reflects the plugin's real block state: opt-in plugins that were not explicitly enabled show `enabled=false`, while a plugin enabled via `[plugins.<name>] enabled = true` still shows `enabled=true`.
