@@ -2639,8 +2639,9 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         """Return the bucket-backed host_dir volume, with a light existence probe, or None.
 
         Delegates to the selected host_dir backend, which probes that the host's
-        ``host_dir/`` prefix has objects and, when empty, warns if the instance was
-        never granted the bucket-write identity. Returns None when unavailable.
+        ``host_dir/`` prefix has objects and returns None (nothing was captured
+        yet) when it is empty. Returns None when the feature is off or no bucket
+        exists.
         """
         host_id = host.id if isinstance(host, HostInterface) else host
         return self._host_dir_backend.volume(host_id)
