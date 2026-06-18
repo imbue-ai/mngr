@@ -164,7 +164,9 @@ class ProviderProbeError(FrozenModel):
     human-readable message (rendered on the unreachable page).
     """
 
-    exception_type: str = Field(description="Exception class name from `mngr list` errors[] (e.g. ProviderUnavailableError).")
+    exception_type: str = Field(
+        description="Exception class name from `mngr list` errors[] (e.g. ProviderUnavailableError)."
+    )
     message: str = Field(description="Human-readable error message to surface to the user.")
 
 
@@ -196,8 +198,7 @@ class HostHealthResponse(FrozenModel):
     provider_label: str = Field(
         default="",
         description=(
-            "Friendly provider name for the unreachable page title (e.g. 'Imbue Cloud'); "
-            "empty for non-provider tiers."
+            "Friendly provider name for the unreachable page title (e.g. 'Imbue Cloud'); empty for non-provider tiers."
         ),
     )
 
