@@ -130,46 +130,68 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
 def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
     """HUMAN mode emits one result sentence to stdout (no bare echo line)."""
     result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=True)
-    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.HUMAN)
+    _output_prepare_result(
+        result, "mngr-gcp-ssh", "test-project", "mngr-state-test-project", True, OutputFormat.HUMAN
+    )
     captured = capsys.readouterr()
-    assert captured.out == "Prepared GCP firewall rule mngr-gcp-ssh (tag mngr-ssh) in project test-project\n"
+    assert (
+        captured.out
+        == "Prepared GCP firewall rule mngr-gcp-ssh (tag mngr-ssh) in project test-project\n"
+        "Created GCS state bucket mngr-state-test-project in project test-project\n"
+    )
 
 
 def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
-    """JSON mode emits a structured object including the created signal."""
+    """JSON mode emits a structured object including the created signals (firewall + bucket)."""
     result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=False)
-    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    _output_prepare_result(
+        result, "mngr-gcp-ssh", "test-project", "mngr-state-test-project", False, OutputFormat.JSON
+    )
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload == {
         "firewall_name": "mngr-gcp-ssh",
         "target_tag": "mngr-ssh",
         "project_id": "test-project",
         "created": False,
+        "state_bucket_name": "mngr-state-test-project",
+        "state_bucket_created": False,
     }
 
 
 def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
     """JSONL mode emits a ``prepared`` event with the same fields."""
     result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=True)
-    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.JSONL)
+    _output_prepare_result(
+        result, "mngr-gcp-ssh", "test-project", "mngr-state-test-project", True, OutputFormat.JSONL
+    )
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["event"] == "prepared"
     assert payload["created"] is True
     assert payload["firewall_name"] == "mngr-gcp-ssh"
+    assert payload["state_bucket_name"] == "mngr-state-test-project"
+    assert payload["state_bucket_created"] is True
 
 
 def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=True when a rule was removed."""
-    _output_cleanup_result("mngr-gcp-ssh", "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    _output_cleanup_result(
+        "mngr-gcp-ssh", "mngr-gcp-ssh", "test-project", "mngr-state-test-project", OutputFormat.JSON
+    )
     payload = json.loads(capsys.readouterr().out.strip())
-    assert payload == {"firewall_name": "mngr-gcp-ssh", "project_id": "test-project", "deleted": True}
+    assert payload == {
+        "firewall_name": "mngr-gcp-ssh",
+        "project_id": "test-project",
+        "deleted": True,
+        "state_bucket_deleted": "mngr-state-test-project",
+    }
 
 
 def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=False on the idempotent no-op path."""
-    _output_cleanup_result(None, "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    _output_cleanup_result(None, "mngr-gcp-ssh", "test-project", None, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["deleted"] is False
+    assert payload["state_bucket_deleted"] is None
 
 
 def test_prepare_command_help_is_reachable() -> None:

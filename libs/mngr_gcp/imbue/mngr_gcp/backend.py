@@ -37,12 +37,14 @@ from imbue.mngr_gcp.client import ISOLATION_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
+from imbue.mngr_gcp.state_bucket import GcsStateBucket
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
 from imbue.mngr_vps.build_args import extract_presence_flag
 from imbue.mngr_vps.build_args import extract_single_value_arg
 from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
+from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
@@ -76,8 +78,10 @@ _HOST_NAME_PREFIX: Final[str] = "mngr-"
 # which on GCE lands the instance in ``TERMINATED`` (stopped, disk preserved, no
 # compute billing) -- there is no GCE analog to AWS's
 # ``InstanceInitiatedShutdownBehavior`` and none is needed (and no IAM/API call).
-# GCP does not sync host_dir to an object store, so it inherits the base no-op
-# ``NullHostDirBackend`` (the default ``_host_dir_backend``) and installs no sync daemon.
+# Offline host_dir is captured operator-side at ``mngr stop`` and uploaded to a GCS
+# state bucket (``GcsStateBucket``), so a stopped instance's host_dir is readable
+# without SSH; the host + agent records still live in GCE instance metadata (which
+# is large enough for those JSON blobs and always available with no prepare step).
 
 
 def _gcp_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
@@ -379,12 +383,71 @@ class GcpProvider(OfflineCapableVpsProvider):
     def _state_store(self) -> HostStateStore:
         """The external host/agent-record mirror, backed by GCE instance metadata.
 
-        GCP has no object-storage state bucket; its metadata store is the GCP analog
-        (see ``_GceMetadataHostStateStore``), so the offline read/write paths are
-        uniform with the AWS/Azure ``BucketHostStateStore``. GCE metadata is always
-        available (no ``prepare`` step), so there is no missing-store case here.
+        Unlike AWS/Azure, GCP keeps host + agent *records* in GCE instance metadata
+        (see ``_GceMetadataHostStateStore``): the records are small JSON blobs that
+        fit comfortably in metadata, which is always available with no ``prepare``
+        step. The GCS state bucket is used only for the offline ``host_dir`` mirror
+        (where the size limit *would* matter), via the bucket-backed
+        ``_host_dir_backend`` below.
         """
         return _GceMetadataHostStateStore(provider=self)
+
+    @cached_property
+    def _state_bucket(self) -> GcsStateBucket | None:
+        """Return the GCS state bucket when it actually exists, else None.
+
+        The bucket holds the offline ``host_dir`` mirror written by ``mngr stop``.
+        None means the bucket does not exist yet (``mngr gcp prepare`` was never
+        run) and ``_host_dir_backend`` falls back to the no-op backend. A storage
+        error while probing existence propagates rather than masquerading as
+        "absent". The existence probe runs at most once per provider lifetime
+        (cached). Mirrors ``AwsProvider._state_bucket`` / ``AzureProvider._state_bucket``.
+        """
+        return self._resolve_existing_state_bucket()
+
+    def _resolve_existing_state_bucket(self) -> GcsStateBucket | None:
+        """Build the configured/derived bucket and return it only if it exists.
+
+        Returns None only when the bucket genuinely does not exist. A
+        ``bucket_exists`` storage error propagates -- the offline host_dir feature
+        is opt-in (config flag), but when on the inability to check is an
+        operational failure, not a silent "no bucket".
+        """
+        bucket = self.gcp_config.build_state_bucket(
+            credentials=self.gcp_client.credentials,
+            project_id=self.gcp_client.project_id,
+            region=self._gcs_bucket_region(),
+        )
+        if not bucket.bucket_exists():
+            logger.debug(
+                "GCS state bucket {} does not exist; offline host_dir is unavailable "
+                "(run `mngr gcp prepare` to create it)",
+                bucket.bucket_name,
+            )
+            return None
+        return bucket
+
+    def _gcs_bucket_region(self) -> str:
+        """The region to anchor the GCS state bucket on.
+
+        GCS buckets are region-scoped (multi-region is possible but unnecessary
+        here). The bucket lives in the same region as the GCE instances writing to
+        it, so reads/writes from the operator's mngr CLI hit the closest endpoint.
+        Falls back to the zone's region when ``default_region`` is unset.
+        """
+        return self.gcp_config.default_region or self.gcp_client.zone.rsplit("-", 1)[0]
+
+    @cached_property
+    def _host_dir_backend(self) -> HostDirBackend:
+        """Select the offline host_dir backend once: bucket-backed when enabled + present, else no-op.
+
+        Delegates to the shared ``_select_bucket_host_dir_backend``, supplying the
+        resolved GCS bucket and the config's ``is_offline_host_dir_enabled`` flag.
+        Mirrors ``AwsProvider._host_dir_backend`` / ``AzureProvider._host_dir_backend``.
+        """
+        return self._select_bucket_host_dir_backend(
+            self._state_bucket, enabled=self.gcp_config.is_offline_host_dir_enabled
+        )
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the GCE instance's OS is down (STOPPING or TERMINATED).
