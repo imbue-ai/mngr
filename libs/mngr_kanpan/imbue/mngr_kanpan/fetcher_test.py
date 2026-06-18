@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -34,6 +35,7 @@ from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
 from imbue.mngr_kanpan.fetcher import load_field_cache
 from imbue.mngr_kanpan.fetcher import save_field_cache
+from imbue.mngr_kanpan.mock_data_source_test import make_fake_data_source
 from imbue.mngr_kanpan.plugin import _is_source_enabled
 from imbue.mngr_kanpan.plugin import kanpan_data_sources
 from imbue.mngr_kanpan.testing import make_agent_details
@@ -165,65 +167,6 @@ def test_compute_section_wrong_pr_type() -> None:
 # === _run_data_sources_parallel ===
 
 
-class _MockDataSource:
-    def __init__(
-        self, name: str, result: dict[AgentName, dict[str, FieldValue]], errors: list[str] | None = None
-    ) -> None:
-        self._name = name
-        self._result = result
-        self._errors: list[str] = errors or []
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def is_remote(self) -> bool:
-        return False
-
-    @property
-    def columns(self) -> dict[str, str]:
-        return {}
-
-    @property
-    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
-        return {}
-
-    def compute(
-        self,
-        agents: object,
-        cached_fields: object,
-        mngr_ctx: object,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
-        return self._result, self._errors
-
-
-class _FailingDataSource:
-    @property
-    def name(self) -> str:
-        return "failing"
-
-    @property
-    def is_remote(self) -> bool:
-        return False
-
-    @property
-    def columns(self) -> dict[str, str]:
-        return {}
-
-    @property
-    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
-        return {}
-
-    def compute(
-        self,
-        agents: object,
-        cached_fields: object,
-        mngr_ctx: object,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
-        raise RuntimeError("data source crashed")
-
-
 def test_run_data_sources_parallel_empty() -> None:
     results, errors = _run_data_sources_parallel([], (), {}, make_mngr_ctx())
     assert results == {}
@@ -233,22 +176,24 @@ def test_run_data_sources_parallel_empty() -> None:
 def test_run_data_sources_parallel_single_source() -> None:
     agent = AgentName("agent-1")
     pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 12, tzinfo=timezone.utc))
-    source = _MockDataSource("github", {agent: {"pr": pr}})
+    source = make_fake_data_source("github", {agent: {FIELD_PR: pr}})
     results, errors = _run_data_sources_parallel([source], (), {}, make_mngr_ctx())
-    assert "github" in results
-    assert agent in results["github"]
     assert errors == []
+    # The exact field object must round-trip through the parallel runner; a bug
+    # that returned {agent: {}} or dropped/replaced the value would fail here.
+    assert results["github"][agent][FIELD_PR] == pr
 
 
 def test_run_data_sources_parallel_source_with_errors() -> None:
-    source = _MockDataSource("github", {}, errors=["some error"])
+    source = make_fake_data_source("github", {}, errors=["some error"])
     results, errors = _run_data_sources_parallel([source], (), {}, make_mngr_ctx())
     assert "some error" in errors
 
 
 def test_run_data_sources_parallel_source_raises_exception() -> None:
-    source = _FailingDataSource()
+    source = make_fake_data_source("failing", raises=RuntimeError("data source crashed"))
     results, errors = _run_data_sources_parallel([source], (), {}, make_mngr_ctx())
+    assert "failing" not in results
     assert any("failing" in e and "failed" in e for e in errors)
 
 
@@ -256,12 +201,29 @@ def test_run_data_sources_parallel_multiple_sources() -> None:
     a1 = AgentName("a1")
     pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
     ci = CiField(status=CiStatus.SUCCESS, created=datetime(2026, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
-    s1 = _MockDataSource("github", {a1: {"pr": pr}})
-    s2 = _MockDataSource("git_info", {a1: {"ci": ci}})
+    s1 = make_fake_data_source("github", {a1: {FIELD_PR: pr}})
+    s2 = make_fake_data_source("git_info", {a1: {FIELD_CI: ci}})
     results, errors = _run_data_sources_parallel([s1, s2], (), {}, make_mngr_ctx())
-    assert "github" in results
-    assert "git_info" in results
     assert errors == []
+    # Each source's fields must come back under that source's own name (no
+    # crossed wires) with the exact field objects intact.
+    assert results["github"][a1][FIELD_PR] == pr
+    assert FIELD_CI not in results["github"][a1]
+    assert results["git_info"][a1][FIELD_CI] == ci
+    assert FIELD_PR not in results["git_info"][a1]
+
+
+def test_run_data_sources_parallel_partial_failure() -> None:
+    """When one source raises and another succeeds, the good fields are still
+    returned and the failure is surfaced as an error (not swallowed silently)."""
+    a1 = AgentName("a1")
+    pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 23, tzinfo=timezone.utc))
+    good = make_fake_data_source("github", {a1: {FIELD_PR: pr}})
+    bad = make_fake_data_source("git_info", raises=RuntimeError("boom"))
+    results, errors = _run_data_sources_parallel([good, bad], (), {}, make_mngr_ctx())
+    assert results["github"][a1][FIELD_PR] == pr
+    assert "git_info" not in results
+    assert any("git_info" in e and "failed" in e for e in errors)
 
 
 # === _get_local_work_dir ===
@@ -292,32 +254,32 @@ def test_get_local_work_dir_remote_agent() -> None:
 # === collect_data_sources ===
 
 
-def _make_mock_mngr_ctx(config: KanpanPluginConfig, sources: list[object]) -> MngrContext:
-    """Build a minimal mock MngrContext for collect_data_sources tests."""
-    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [sources])
-    pm = SimpleNamespace(hook=hook)
-    return SimpleNamespace(  # ty: ignore[invalid-return-type]
-        get_plugin_config=lambda name, cls: config,
-        pm=pm,
-    )
-
-
-def test_collect_data_sources_returns_all_enabled() -> None:
-    source = _MockDataSource("github", {})
-    ctx = _make_mock_mngr_ctx(KanpanPluginConfig(), [source])
-    sources = collect_data_sources(ctx)
-    assert any(s.name == "github" for s in sources)
+def test_collect_data_sources_returns_all_enabled(temp_mngr_ctx: MngrContext) -> None:
+    """Driving the real, registered plugin manager (via temp_mngr_ctx) returns
+    exactly the built-in kanpan data sources with their default config: no
+    duplicates and no unexpected extras."""
+    sources = collect_data_sources(temp_mngr_ctx)
+    names = sorted(s.name for s in sources)
+    assert names == ["git_info", "github", "repo_paths"]
 
 
 def test_collect_data_sources_skips_none_results() -> None:
-    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [None])
+    """collect_data_sources drops the None entries that hookimpls contribute when
+    they opt out, while keeping every real source returned by other hookimpls.
+
+    A real plugin manager never returns None per-source for the kanpan
+    built-ins, so the None-skipping branch is driven here with an explicit hook
+    fake that interleaves a None result with a populated one.
+    """
+    kept_a = make_fake_data_source("source_a", {})
+    kept_b = make_fake_data_source("source_b", {})
+    # The hook aggregates one result list per contributing hookimpl; here one
+    # hookimpl opted out (None) and two contributed real sources.
+    hook = SimpleNamespace(kanpan_data_sources=lambda **kw: [None, [kept_a], [kept_b]])
     pm = SimpleNamespace(hook=hook)
-    ctx: MngrContext = SimpleNamespace(  # ty: ignore[invalid-assignment]
-        get_plugin_config=lambda name, cls: KanpanPluginConfig(),
-        pm=pm,
-    )
+    ctx: MngrContext = SimpleNamespace(pm=pm)  # ty: ignore[invalid-assignment]
     sources = collect_data_sources(ctx)
-    assert sources == []
+    assert [s.name for s in sources] == ["source_a", "source_b"]
 
 
 # === plugin._is_source_enabled / kanpan_data_sources ===
@@ -412,7 +374,8 @@ def _make_mock_data_source(field_key: str, field_type: type[FieldValue]) -> Kanp
 
 
 def test_save_field_cache_writes_json(tmp_path: Path) -> None:
-    """save_field_cache creates a JSON file under profile_dir/kanpan/."""
+    """save_field_cache writes a JSON file whose contents include the serialized
+    agent key and field value (not merely that some file exists)."""
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     agent_name = AgentName("agent-1")
     cached: dict[AgentName, dict[str, FieldValue]] = {
@@ -420,7 +383,10 @@ def test_save_field_cache_writes_json(tmp_path: Path) -> None:
     }
     save_field_cache(ctx, cached)
     cache_file = tmp_path / "kanpan" / "field_cache.json"
-    assert cache_file.exists()
+    parsed = json.loads(cache_file.read_text())
+    assert str(agent_name) in parsed
+    assert parsed[str(agent_name)]["pr_count"]["value"] == "3"
+    assert parsed[str(agent_name)]["pr_count"]["kind"] == "string"
 
 
 def test_load_field_cache_returns_empty_when_no_file(tmp_path: Path) -> None:
@@ -589,13 +555,26 @@ def test_load_field_cache_drops_legacy_entries_missing_created(tmp_path: Path) -
     assert fresh.value == "new"
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses filesystem permissions, so the write would not fail",
+)
 def test_save_field_cache_swallows_errors(tmp_path: Path) -> None:
-    """save_field_cache does not raise even when the write fails."""
+    """save_field_cache does not raise when the write fails, and when it fails it
+    leaves no cache file behind (so the swallowed-failure path was truly taken)."""
     readonly_dir = tmp_path / "readonly"
     readonly_dir.mkdir()
-    readonly_dir.chmod(0o444)
-    ctx = make_mngr_ctx_with_profile_dir(readonly_dir / "subdir_that_cannot_exist")
+    readonly_dir.chmod(0o555)
+    cache_root = readonly_dir / "subdir_that_cannot_exist"
+    ctx = make_mngr_ctx_with_profile_dir(cache_root)
+    agent_name = AgentName("agent-1")
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        agent_name: {"status": StringField(value="x", created=datetime(2026, 1, 1, 0, 0, 24, tzinfo=timezone.utc))},
+    }
     try:
-        save_field_cache(ctx, {})
+        save_field_cache(ctx, cached)
+        # The unwritable parent means mkdir/mkstemp fails; the error is swallowed
+        # and no cache file is produced.
+        assert not (cache_root / "kanpan" / "field_cache.json").exists()
     finally:
         readonly_dir.chmod(0o755)

@@ -42,7 +42,7 @@ def test_cell_display_defaults() -> None:
 def test_field_value_base_display() -> None:
     fv = FieldValue(created=datetime(2024, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
     cell = fv.display()
-    assert isinstance(cell, CellDisplay)
+    assert cell.text == str(fv)
 
 
 def test_field_value_requires_created() -> None:
@@ -286,7 +286,23 @@ def test_deserialize_fields_basic() -> None:
 
 
 def test_deserialize_fields_unknown_keys_skipped() -> None:
-    raw = {"unknown_key": {"value": "test"}}
+    """A key absent from field_types is dropped by the key filter, before any
+    validation. The payload is a *valid* serialized PrField so that, had the
+    key been recognized, it would have validated cleanly -- this isolates the
+    key-filter drop from the validation drop (covered separately by
+    test_deserialize_fields_drops_invalid_payload_keeps_others).
+    """
+    valid_pr_payload = PrField(
+        number=99,
+        url="https://example.com/99",
+        is_draft=False,
+        title="t",
+        state=PrState.OPEN,
+        head_branch="b",
+        created=datetime(2024, 1, 1, 0, 0, 27, tzinfo=timezone.utc),
+    ).model_dump(mode="json")
+    # "pr" is in field_types; "unknown_key" is not, so the valid payload is skipped.
+    raw = {"unknown_key": valid_pr_payload}
     result = deserialize_fields(raw, {"pr": TypeAdapter(PrField)})
     assert result == {}
 

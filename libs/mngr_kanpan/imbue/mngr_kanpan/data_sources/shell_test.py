@@ -121,16 +121,28 @@ def test_compute_nonzero_exit_produces_error(test_cg: ConcurrencyGroup) -> None:
 
 
 def test_compute_timeout_produces_error(test_cg: ConcurrencyGroup) -> None:
-    """A command that exceeds the timeout produces an error."""
+    """A command that exceeds the timeout hits the ConcurrencyExceptionGroup branch.
+
+    This exercises shell.py's timeout branch: the concurrency group's `with`
+    block raises ConcurrencyExceptionGroup on exit (because the process did not
+    terminate in time), which appends the specific "timed out or failed"
+    message. That message is unique to the timeout branch -- an ordinary nonzero
+    exit (with no timeout) never produces it -- so asserting on it confirms the
+    timeout path actually ran rather than a launch failure or plain nonzero exit.
+    No field is produced because the killed process has a nonzero returncode.
+    """
     ds = ShellCommandDataSource(
         field_key="custom",
-        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="sleep 60"),
+        config=ShellCommandConfig(name="Custom", header="CUSTOM", command="sleep 36284"),
         timeout_seconds=0.1,
     )
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert any("Custom" in e for e in errors)
+    # The timeout branch emits exactly this message (see shell.py ~97); an
+    # ordinary nonzero exit alone would not, so this distinguishes the branches.
+    assert any("Shell 'Custom': 1 process(es) timed out or failed" in e for e in errors)
+    assert agent.name not in fields
 
 
 def test_compute_propagates_oldest_declared_input(test_cg: ConcurrencyGroup) -> None:

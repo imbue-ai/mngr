@@ -20,7 +20,6 @@ from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
@@ -31,7 +30,7 @@ from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
-from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
@@ -43,44 +42,29 @@ from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
 from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
+from imbue.mngr_kanpan.mock_data_source_test import make_fake_data_source
 
 
-class _FakeRemoteDataSource:
-    """A fake remote data source used in fetch_local_snapshot tests."""
+def _fake_remote_data_source() -> KanpanDataSource:
+    """A fake remote data source used in fetch_local_snapshot tests.
 
-    @property
-    def name(self) -> str:
-        return "fake_remote"
-
-    @property
-    def is_remote(self) -> bool:
-        return True
-
-    @property
-    def columns(self) -> dict[str, str]:
-        return {FIELD_REPO_PATH: "FAKE"}
-
-    @property
-    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
-        return {FIELD_REPO_PATH: TypeAdapter(RepoPathField)}
-
-    def compute(
-        self,
-        agents: tuple[AgentDetails, ...],
-        cached_fields: dict[AgentName, dict[str, FieldValue]],
-        mngr_ctx: MngrContext,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
-        return (
-            {
-                AgentName("git-local-agent"): {
-                    FIELD_REPO_PATH: RepoPathField(
-                        path="should/not/appear",
-                        created=datetime.now(tz=timezone.utc),
-                    )
-                }
-            },
-            [],
-        )
+    Its repo_path field carries a sentinel path that must never reach the board,
+    because fetch_local_snapshot skips remote sources.
+    """
+    return make_fake_data_source(
+        "fake_remote",
+        result={
+            AgentName("git-local-agent"): {
+                FIELD_REPO_PATH: RepoPathField(
+                    path="should/not/appear",
+                    created=datetime.now(tz=timezone.utc),
+                )
+            }
+        },
+        is_remote=True,
+        columns={FIELD_REPO_PATH: "FAKE"},
+        field_types={FIELD_REPO_PATH: TypeAdapter(RepoPathField)},
+    )
 
 
 @pytest.fixture
@@ -252,7 +236,7 @@ def test_fetch_local_snapshot_skips_remote_sources(
     create_test_agent_state(local_host, temp_git_repo, "git-local-agent")
     result = fetch_local_snapshot(
         temp_mngr_ctx,
-        [GitInfoDataSource(), _FakeRemoteDataSource()],
+        [GitInfoDataSource(), _fake_remote_data_source()],
         {},
     )
     entries = {e.name: e for e in result.snapshot.entries}

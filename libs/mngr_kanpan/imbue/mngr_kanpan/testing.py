@@ -12,6 +12,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_sources.github import PrField
@@ -53,6 +54,25 @@ def make_agent_details(
         host=make_host_details(provider_name),
         labels=labels or {},
         plugin=plugin or {},
+    )
+
+
+def make_discovered_agent(
+    certified_data: dict[str, Any] | None = None,
+    name: str = "offline-agent",
+    provider_name: str = "local",
+) -> DiscoveredAgent:
+    """Create a minimal DiscoveredAgent for testing offline field generators.
+
+    ``certified_data`` is the raw ``data.json`` contents (e.g.
+    ``{"plugin": {"kanpan": {"muted": True}}}``); it defaults to an empty dict.
+    """
+    return DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName(name),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data=certified_data or {},
     )
 
 
