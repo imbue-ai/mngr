@@ -4,6 +4,42 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+The agent now declares the `HasSessionPreservationMixin` capability mixin: its `on_destroy` session-preservation step was extracted into a `preserve_session_state` method, so preserving session/transcript files on destroy is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact. Behavior is unchanged.
+
+Also declares the `HasUnattendedModeMixin` capability (`is_unattended_enabled` reports the `auto_allow_permissions` config), so "can run unattended" is a code-detectable capability in the matrix.
+
+Also declares `HasPermissionPolicyMixin` (sandbox mode + approval policy) and `HasVersionManagementMixin` (the codex update policy).
+
+Also declares `HasAutoInstallMixin`: provisioning now checks whether the `codex` CLI is installed and installs it (`npm i -g @openai/codex`) if missing, gated by consent on local hosts and the remote-install config flag on remote hosts. The install-if-missing check runs before the existing best-effort update notifier. A new `check_installation` config field (default `True`) disables the check when set to `False`.
+
+Test-only: removed a fragile install-path provision test that crashed on CI, and added focused unit tests for the codex update flow and the CODEX_HOME-resolution error path (covering pre-existing codex plugin code) so the plugin clears the per-package coverage gate.
+
+The auto-allow permission apply-path (`approval_policy="never"`) now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
+
+`CodexAgent` now also declares `CliBackedAgentMixin`, marking it as wrapping a specific external CLI so the CLI-only capability-matrix rows scope to it positively (rather than by the absence of a command-runner marker). Behavior is unchanged.
+
+`CodexAgent` now implements the functional `reconcile_installed_version` contract (replacing the descriptive `get_version_policy`): it runs codex's existing network-free update check + `update_policy` action (`_maybe_check_for_codex_update`) at the same point in provisioning, so the update behavior is unchanged.
+
+Codex agents can now adopt an existing codex session at create time, so a fresh agent resumes that conversation instead of starting empty.
+
+The session to adopt is resolved from a session id (or an absolute rollout `.jsonl` path) across three stores: the user's native `~/.codex/sessions`, every live local mngr codex agent, and every preserved (destroyed) codex agent. An id matching in more than one store is rejected as ambiguous, with a clear message telling you to pass the full rollout path.
+
+On adoption, the resolved rollout store is copied into the new agent's `CODEX_HOME/sessions`, the recorded working directory inside the rollout (the `session_meta` and `turn_context` records) is rewritten to the new agent's work dir -- so `codex resume` does not pop the "Choose working directory to resume this session" modal -- and the adopted session id is written as the agent's resume pointer.
+
+This is driven by the central `mngr create --adopt <id>` flag (repeatable). `--adopt-session` is still accepted as an alias. The codex plugin now reads the values from the first-class `CreateAgentOptions.adopt_session` field rather than from `plugin_data["adopt_session"]`. A bad or ambiguous id is still caught up front (before any host or worktree is created) as a clean error rather than a traceback.
+
+Multiple `--adopt` values are now each copied into the new agent (their date-nested rollouts coexist, so all are available in codex's session switcher), and the last one named is the conversation actually resumed.
+
+Cloning a codex agent with `mngr create <new> codex --from <agent>` now resumes the source agent's conversation too: the clone transfers the source's native session store, resumes its most-recent rollout, and rebinds the recorded working directory to the clone's work dir (so no resume modal appears). `--adopt` and `--from` may now be combined -- every named session plus the clone is made available, and the clone's conversation is the one resumed. When a `--from` clone has no resumable codex session (no store, or a store with no rollout), the clone now warns and continues -- falling back to a fresh start, or to the last `--adopt` session if one was given -- since `--from` is fundamentally a workspace clone and carrying the session forward is a bonus.
+
+A failure to resolve the user's `CODEX_HOME` during provisioning now surfaces as a clean, user-facing error instead of an abrupt process exit.
+
+The codex common-transcript converter now records a tool invocation as a nested assistant `tool_calls` entry (sharing the same id as the paired `tool_result`). codex models a tool call as a standalone rollout item separate from the assistant's text, so previously the `function_call` item only labeled the later `tool_result` and the assistant turn carried no call -- diverging from the other agent ports and the canonical envelope, where the assistant message carries the call. codex's release test now forces a bash tool call (run unattended via `approval_policy=never`) so this is exercised end to end.
+
+The codex common-transcript converter now emits `finish_reason` instead of `stop_reason` on assistant records (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array. A codex assistant turn is either text-only or a single tool_call (codex models each call as its own rollout item), so `parts[]` holds that one segment and `parts_ordered` is true.
+
 ## 2026-06-16
 
 The codex background-tasks supervisor now also launches an optional usage writer (`codex_usage.sh`) when it's present in the agent's `commands/` dir -- installed by the new `imbue-mngr-codex-usage` package -- and restarts it if it dies, alongside the existing raw/common transcript watchers. No change for agents without the usage plugin installed.

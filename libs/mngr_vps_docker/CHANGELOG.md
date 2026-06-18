@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `OfflineCapableVpsDockerProvider`, a shared base for cloud providers (AWS/GCP/Azure) whose hosts can be stopped while their disk persists. Consolidates offline discovery and resolution (reconstructing stopped, SSH-unreachable hosts and their agents from the provider's instance listing), the stop/start lifecycle, instance lookup by host-id, SSH known_hosts rebinding, and the self-stopping idle watcher install behind a small set of per-provider hooks. No user-visible behavior change.
+
 ## [v0.1.9] - 2026-06-16
 
 ### Fixed

@@ -6,6 +6,26 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr imbue_cloud admin server order --option <planCode>` (repeatable) lets you order plans whose mandatory option families (e.g. bandwidth, vrack) offer more than one choice. Previously the cart build failed with "expected exactly one X option to auto-pick" on such plans (e.g. the `24sys*` SYS line). Single-offer families are still auto-selected; an `order` run without `--option` on an ambiguous plan now lists each family's offers and their monthly prices so you can re-run with the right values.
+- Added: `mngr imbue_cloud admin pool create --backend slice --max-concurrency N` (default 4) bounds slice-bake parallelism: bakes at most N at once and queues the rest, reporting progress as each completes. Keeps box contention low enough that each `mngr create` finishes within its per-create timeout (raised to 45 minutes for slices). After bakes finish, the slice backend reconciles lima VMs and **lima data disks** against the pool DB and reaps any orphan; the reap also runs on a top-level SIGTERM/SIGINT.
+
+### Changed
+
+- Changed: `mngr imbue_cloud admin pool destroy` is now backend-aware (mirroring the `--backend` branch in `pool create`). A `slice` row destroys its lima VM and data disk on the bare-metal box (freeing the slot) before the row is dropped; an `ovh_vps` row (including legacy rows written before the column existed) cancels its OVH VPS as before. Either teardown runs before the row delete, so a failure keeps the row and the operation stays retryable. `--skip-vps-cancel` still drops the row only, for any backend. Direct `admin pool destroy` of a slice requires `POOL_SSH_PRIVATE_KEY` (the `minds pool destroy` wrapper injects it from Vault).
+- Changed: `mngr imbue_cloud admin server prep` now pre-installs the pinned Docker Engine and `inotify-tools` into the staged golden slice image via `virt-customize` (adds a `libguestfs-tools` box dependency). Slice carves no longer download/install Docker per VM, which speeds up baking (especially in parallel) and removes a per-slice network dependency. `server prep` also now provisions a 32 GiB swapfile.
+- Changed: Corrected bare-metal slice sizing so a box's slot count reflects what it can realistically run (this also flows into `admin server pricing`). RAM overhead is now modeled in two parts (a per-machine host reserve and a per-VM overhead) so the guest gets its full advertised `memory_per_slice_gb`. Disk no longer overcommits: the reserve absorbs the GB-vs-GiB gap plus partition/filesystem overhead.
+- Changed: `mngr imbue_cloud admin pool create --backend slice` now requires `--server-id` (the bare-metal box to bake slices onto, from `admin server list`). Baking always targets an explicitly-chosen, ready server rather than auto-selecting one.
+
+### Removed
+
+- Removed: Dead `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` stubs from `LimaSliceVpsClient`, matching the slimmed-down `VpsClientInterface`. No user-facing behavior change: these methods only ever raised "unavailable".
+
+### Fixed
+
+- Fixed: Bare-metal box-prep bug that made every slice bake fail with `mkdir ~/.cache/lima: permission denied`. The prep script (run as root) staged the slice base image under the lima user's `~/.cache` but left `~/.cache` itself root-owned, so `limactl` (run as the lima user) could not create `~/.cache/lima`. Prep now creates and chowns the cache dir chain to the lima user, and repairs an already-root-owned `~/.cache` when re-run.
+
 ## [v0.1.5] - 2026-06-16
 
 ### Changed

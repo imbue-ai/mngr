@@ -1,1 +1,0 @@
-Removed superfluous `@pytest.mark.modal`/`@pytest.mark.rsync` marks from two transcript release tests (`test_transcript_assistant_only`, `test_tips_transcript_tail_assistant`). Both run entirely against a local command agent with a locally-seeded transcript, so they never invoke modal or rsync; the marks tripped the resource guard and failed the otherwise-passing tests.

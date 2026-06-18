@@ -1,3 +1,0 @@
-Added a design spec (`specs/common-transcript-standard/spec.md`) for tracking the OpenTelemetry GenAI semantic conventions in the agent-agnostic common-transcript schema instead of bespoke field names: a vocabulary alignment (`stop_reason` -> `finish_reason`) across all five emitters, and a universal ordered `parts[]` field that every emitter fills (with a `parts_ordered` flag marking antigravity's best-effort order), so the reader renders one uniform shape with no per-agent fallback.
-
-Recorded the change in the agent-plugin parity reference (`specs/agent-plugin-parity/spec.md`): a new "Ordered assistant parts[]" row in the capability matrix and a note in the transcript-capture dimension.
