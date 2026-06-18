@@ -56,6 +56,7 @@ from loguru import logger
 
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import run_mngr_subprocess
 
 # Generous bounds for real provisioning. The trip is one test, so a profile widens these via
 # its own ``@pytest.mark.timeout``; these only bound the individual subprocess calls / polls.
@@ -140,43 +141,33 @@ def _run_mngr(
     *args: str,
     timeout: float,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a ``mngr`` command against the test settings.toml, streaming output to a log file.
+    """Run a ``mngr`` command against the test settings.toml via the shared subprocess runner.
 
-    ``workspace`` is the cwd and must be inside a git repo (``mngr create`` reads the source
-    from the current checkout). Output is streamed to a file under ``settings_dir`` rather
-    than buffered, so a timed-out ``mngr create`` still yields its provisioning-phase output
-    for diagnosis. Per-provider credential preservation across the conftest HOME swap is
-    already handled by each provider's autouse ``setup_test_mngr_env`` fixture, so copying
-    the current environment is sufficient here.
+    Delegates to ``run_mngr_subprocess`` (the same helper the agent release harness uses), which
+    streams the command's output live to the test log so a timed-out ``mngr create`` is still
+    diagnosable. ``workspace`` is the cwd and must be inside a git repo (``mngr create`` reads
+    the source from the current checkout). Per-provider credential preservation across the
+    conftest HOME swap is already handled by each provider's autouse ``setup_test_mngr_env``
+    fixture, so copying the current environment is sufficient here.
+
+    ``run_mngr_subprocess`` returns stdout and stderr separately, but mngr writes its errors and
+    logs to stderr; the trip's assertions speak a single stream, so stderr is merged into the
+    returned ``stdout``. A timeout is surfaced as a non-zero (124) result rather than raised.
     """
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(settings_dir)
-    command = ["uv", "run", "mngr", *args]
-    log_path = settings_dir / f"mngr-{args[0] if args else 'cmd'}.log"
-    with log_path.open("w") as log_file:
-        process = subprocess.Popen(
-            command,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=str(workspace),
-            env=env,
+    try:
+        result = run_mngr_subprocess(*args, timeout=timeout, env=env, cwd=workspace)
+    except subprocess.TimeoutExpired:
+        # 124 is the GNU-coreutils ``timeout`` convention; the output already streamed to the log.
+        return subprocess.CompletedProcess(
+            args=("mngr", *args),
+            returncode=124,
+            stdout=f"`mngr {args[0] if args else 'cmd'}` timed out after {timeout}s (output streamed above)",
+            stderr="",
         )
-        try:
-            returncode = process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-            # 124 is the GNU-coreutils ``timeout`` convention.
-            returncode = 124
-    log_text = log_path.read_text()
     return subprocess.CompletedProcess(
-        args=command,
-        returncode=returncode,
-        stdout=log_text,
-        stderr=""
-        if returncode == 0
-        else ("see stdout (stderr merged)\n" + (f"timed out after {timeout}s\n" if returncode == 124 else "")),
+        args=result.args, returncode=result.returncode, stdout=result.stdout + result.stderr, stderr=""
     )
 
 
