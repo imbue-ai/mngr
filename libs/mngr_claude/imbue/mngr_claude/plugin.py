@@ -61,6 +61,7 @@ from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
+from imbue.mngr.hosts.host import write_json_dict_via_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
@@ -879,14 +880,12 @@ def _prompt_user_for_onboarding_completion() -> bool:
 def _claude_json_has_primary_api_key() -> bool:
     """Check if ~/.claude.json contains a non-empty primaryApiKey."""
     claude_json_path = find_user_claude_config()
-    if not claude_json_path.exists():
-        return False
     try:
-        config_data = json.loads(claude_json_path.read_text())
-        return bool(config_data.get("primaryApiKey"))
+        config_data = read_claude_config(claude_json_path)
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Could not read claude config at {}: {}", claude_json_path, e)
         return False
+    return bool(config_data.get("primaryApiKey"))
 
 
 def _read_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGroup) -> str | None:
@@ -1640,9 +1639,8 @@ class ClaudeCoreAgent(
         settings_path = get_managed_settings_path(self._get_agent_dir())
         # The plugin/claude/ parent may not exist yet (in use_env_config_dir
         # mode the per-agent config dir is not provisioned), so create it.
-        host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(settings_path.parent))}", timeout_seconds=5.0)
         with log_span("Configuring agent hooks in {}", settings_path):
-            host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
+            write_json_dict_via_host(host, settings_path, settings, make_parent=True)
 
     def _dismiss_start_dialogs(
         self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext

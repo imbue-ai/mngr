@@ -123,12 +123,10 @@ def resolve_shared_claude_config_dir() -> Path:
     unset, so ``use_env_config_dir=True`` effectively means "don't touch the
     config dir at all -- inherit whatever the parent shell would have used."
     The fallback path is shared (not per-agent), which is the whole point of
-    the flag.
+    the flag. Shared mode inherits the same ambient resolution as
+    ``get_claude_config_dir``.
     """
-    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    if env_dir:
-        return Path(env_dir)
-    return Path.home() / ".claude"
+    return get_claude_config_dir()
 
 
 def find_user_claude_config() -> Path:

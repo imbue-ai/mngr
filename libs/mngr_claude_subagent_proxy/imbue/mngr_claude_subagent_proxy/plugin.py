@@ -22,6 +22,7 @@ from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.host import read_json_dict_via_host
+from imbue.mngr.hosts.host import write_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
@@ -37,6 +38,8 @@ from imbue.mngr_claude_subagent_proxy import resources as _subagent_proxy_resour
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import guard_user_stop_hooks_against_proxy_children
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import guarded_settings_text
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import is_well_formed_command_entry
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import iter_user_stop_hook_commands
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
@@ -244,6 +247,24 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
     }
 
 
+def _unignored_relative_or_none(host: OnlineHostInterface, repo_path: Path, claude_subpath: Path) -> Path | None:
+    """Return the relative path if ``.claude/<claude_subpath>`` is NOT gitignored, else None.
+
+    Computes the gitignore status of the path once via the any-rule
+    ``check_path_gitignore_status`` and applies the single canonical accept
+    rule ``status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED)`` -- i.e.
+    the path is ignored, or the location is not a git repo (SKIP). When the path
+    is accepted, returns None; otherwise returns the computed relative path
+    (which reflects any ``.claude`` symlink resolution) so the caller can build
+    its own error message. ``check_path_gitignore_status`` never returns
+    ``ONLY_GLOBAL``, so this accept rule matches the prior ``is not NOT_IGNORED``.
+    """
+    status, relative = check_path_gitignore_status(host, repo_path, Path(".claude") / claude_subpath)
+    if status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED):
+        return None
+    return relative
+
+
 def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, claude_subpath: Path) -> None:
     """Refuse to write a provisioning artifact into a git-tracked worktree.
 
@@ -267,8 +288,8 @@ def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, 
     (not the input subpath's parent) is used so the suggestion reflects any
     symlink resolution -- e.g. ``.agents/...`` when ``.claude -> .agents``.
     """
-    status, relative = check_path_gitignore_status(host, work_dir, Path(".claude") / claude_subpath)
-    if status is not GitignoreStatus.NOT_IGNORED:
+    relative = _unignored_relative_or_none(host, work_dir, claude_subpath)
+    if relative is None:
         return
     raise UnignoredProxyArtifactError(
         f"'{relative}' is not gitignored in {work_dir}.\n"
@@ -291,9 +312,8 @@ def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path)
     path is not a git repository or if the .claude symlink target is outside the
     repo (since git won't track it).
     """
-    settings_subpath = Path(".claude") / "settings.local.json"
-    status, settings_relative = check_path_gitignore_status(host, repo_path, settings_subpath)
-    if status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED):
+    settings_relative = _unignored_relative_or_none(host, repo_path, Path("settings.local.json"))
+    if settings_relative is None:
         return
     raise PluginMngrError(
         f"'{settings_relative}' is not gitignored in {repo_path}.\n"
@@ -354,8 +374,7 @@ def _merge_hooks_into_settings(host: OnlineHostInterface, settings_path: Path, h
         logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
         return
     # Ensure the parent exists so this doesn't depend on mngr_claude creating it first.
-    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(settings_path.parent))}", timeout_seconds=5.0)
-    host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+    write_json_dict_via_host(host, settings_path, merged, make_parent=True)
 
 
 def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_dir: Path) -> None:
@@ -377,7 +396,7 @@ def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_d
         return
     if guard_user_stop_hooks_against_proxy_children(settings):
         _check_settings_local_gitignored(host, work_dir)
-        host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
+        write_json_dict_via_host(host, settings_path, settings)
 
 
 def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, hook_settings_path: Path) -> None:
@@ -441,10 +460,10 @@ def _guard_stop_hooks_in_file(host: OnlineHostInterface, path: Path) -> None:
     data = read_json_dict_via_host(host, path)
     if not data:
         return
-    if not guard_user_stop_hooks_against_proxy_children(data):
+    text = guarded_settings_text(data, path)
+    if text is None:
         return
-    logger.info("Wrapped Stop hooks in {} with MNGR_CLAUDE_SUBAGENT_PROXY_CHILD guard", path)
-    host.write_text_file(path, json.dumps(data, indent=2) + "\n")
+    host.write_text_file(path, text)
 
 
 def _discover_plugin_hooks_files() -> list[Path]:
@@ -508,12 +527,9 @@ def _is_known_safe_hook(hook_entry: dict[str, Any]) -> bool:
     if not isinstance(inner, list) or not inner:
         return False
     for cmd_entry in inner:
-        if not isinstance(cmd_entry, dict):
+        if not is_well_formed_command_entry(cmd_entry):
             return False
-        command = cmd_entry.get("command")
-        if not isinstance(command, str):
-            return False
-        if not any(marker in command for marker in MNGR_MANAGED_HOOK_MARKERS):
+        if not any(marker in cmd_entry["command"] for marker in MNGR_MANAGED_HOOK_MARKERS):
             return False
     return True
 
@@ -726,7 +742,7 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
         return
     _check_settings_local_gitignored(host, work_dir)
     logger.info("Stripped user-configured hooks from spawned subagent settings at {}", settings_path)
-    host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
+    write_json_dict_via_host(host, settings_path, settings)
 
 
 _SUBAGENT_MAP_DIRNAME: Final[str] = "subagent_map"
