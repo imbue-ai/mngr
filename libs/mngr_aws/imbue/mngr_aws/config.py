@@ -3,14 +3,18 @@ from typing import Final
 from typing import Literal
 
 import boto3
+from botocore.exceptions import BotoCoreError
+from botocore.exceptions import ClientError
+from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.config.data_types import ScalarStrTuple
-from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_aws.state_bucket import S3StateBucket
+from imbue.mngr_aws.state_bucket import S3StateHostIdentity
+from imbue.mngr_vps.config import PublicIpVpsProviderConfig
 
 
 class AwsConfigError(MngrError, ValueError):
@@ -73,7 +77,7 @@ DEFAULT_AMI_BY_REGION: Final[dict[str, str]] = {
 }
 
 
-class AwsProviderConfig(VpsDockerProviderConfig):
+class AwsProviderConfig(PublicIpVpsProviderConfig):
     """Configuration for the AWS EC2 VPS Docker provider.
 
     Credentials are deliberately not stored in this config. boto3's default
@@ -82,6 +86,11 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     Modal provider convention and the broader project preference: do not
     handle credentials in mngr configs when an SDK can do it for us.
     """
+
+    # Cache for the resolved AWS account id (from sts:GetCallerIdentity), used
+    # to derive the default state-bucket name. Cached so repeated bucket
+    # resolution does not re-hit STS.
+    _cached_account_id: str | None = PrivateAttr(default=None)
 
     backend: ProviderBackendName = Field(
         default=ProviderBackendName("aws"),
@@ -124,23 +133,6 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="VPC ID. Only used to scope auto-created security group lookups.",
     )
-    allowed_ssh_cidrs: ScalarStrTuple = Field(
-        default=ScalarTuple(("0.0.0.0/0",)),
-        description=(
-            "Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the "
-            "auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. "
-            "('203.0.113.4/32',) to restrict, or () for no ingress. A warning is logged "
-            "when the effective range is 0.0.0.0/0 or empty."
-        ),
-    )
-    associate_public_ip: bool = Field(
-        default=True,
-        description=(
-            "Assign a public IPv4 address to the instance. Required for the current "
-            "mngr-from-developer-laptop SSH access model. For a more secure deployment, "
-            "set to False and run mngr from a bastion or via Session Manager."
-        ),
-    )
     root_volume_size_gb: int = Field(
         default=30,
         description="Size of the root EBS volume in GB.",
@@ -152,6 +144,22 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     iam_instance_profile: str | None = Field(
         default=None,
         description="Optional IAM instance profile name attached to launched instances.",
+    )
+    state_bucket_name: str | None = Field(
+        default=None,
+        description=(
+            "S3 bucket where mngr stores a stopped instance's state so it is readable without "
+            "starting the instance. When None, named 'mngr-state-<account_id>-<region>'. Without a "
+            "bucket, mngr falls back to EC2 tags, which hold less and cap the number of agents."
+        ),
+    )
+    is_offline_host_dir_enabled: bool = Field(
+        default=True,
+        description=(
+            "When on (default), a stopped instance's host_dir is readable without starting it, so "
+            "`mngr event` / `mngr transcript` / `mngr file` work against it. `mngr aws prepare` sets "
+            "up the access it needs. Set False to turn it off."
+        ),
     )
     terminate_on_shutdown: bool = Field(
         default=False,
@@ -199,3 +207,57 @@ class AwsProviderConfig(VpsDockerProviderConfig):
             "default_ami_by_region (Debian 12 amd64 AMIs are typically what you want; see the "
             "Debian AMI finder at https://wiki.debian.org/Cloud/AmazonEC2Image)."
         )
+
+    def resolve_state_bucket_name(self, session: boto3.Session, region: str | None = None) -> str | None:
+        """Return the effective state-bucket name, or None when it can't be resolved.
+
+        ``state_bucket_name`` wins when set. Otherwise derive
+        ``mngr-state-<account_id>-<region>`` (lowercased, DNS-valid), resolving
+        the account id from ``sts:GetCallerIdentity`` (cached). Returns None when
+        the account id can't be fetched (e.g. missing STS permission) so callers
+        degrade to the no-bucket path rather than failing.
+
+        ``region`` overrides the region embedded in the derived name (the runtime
+        path passes nothing and uses ``default_region``); the operator CLI passes
+        the same ``effective_region`` it builds the bucket in, so the name and the
+        bucket's actual region always agree.
+        """
+        if self.state_bucket_name:
+            return self.state_bucket_name
+        account_id = self._resolve_account_id(session)
+        if account_id is None:
+            return None
+        return f"mngr-state-{account_id}-{region or self.default_region}".lower()
+
+    def _resolve_account_id(self, session: boto3.Session) -> str | None:
+        """Return the AWS account id (cached), or None when STS can't be reached."""
+        if self._cached_account_id is not None:
+            return self._cached_account_id
+        try:
+            identity = session.client("sts", region_name=self.default_region).get_caller_identity()
+        except (ClientError, BotoCoreError) as e:
+            logger.warning("Could not resolve AWS account id via sts:GetCallerIdentity: {}", e)
+            return None
+        account_id = identity.get("Account")
+        if not account_id:
+            return None
+        self._cached_account_id = account_id
+        return account_id
+
+    def build_state_bucket(self, session: boto3.Session) -> S3StateBucket | None:
+        """Build an ``S3StateBucket`` when a bucket name is configured/derivable, else None."""
+        bucket_name = self.resolve_state_bucket_name(session)
+        if bucket_name is None:
+            return None
+        return S3StateBucket(session=session, region=self.default_region, bucket_name=bucket_name)
+
+    def build_host_identity(self, session: boto3.Session) -> S3StateHostIdentity | None:
+        """Build the bucket-write ``S3StateHostIdentity`` when a bucket name is resolvable, else None.
+
+        The identity name is derived from the state-bucket name, so it shares the
+        bucket's per-region (or operator-overridden) scope.
+        """
+        bucket_name = self.resolve_state_bucket_name(session)
+        if bucket_name is None:
+            return None
+        return S3StateHostIdentity(session=session, region=self.default_region, bucket_name=bucket_name)

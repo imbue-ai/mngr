@@ -13,6 +13,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import TagLimitExceededError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
@@ -28,9 +29,11 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.host_store import VpsHostConfig
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -109,26 +112,6 @@ def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber
 
 def _describe_instances_response(instances: list[dict]) -> dict:
     return {"Reservations": [{"Instances": instances}]}
-
-
-def _seed_stopped_host_record(provider: AwsProvider, host_id: HostId) -> None:
-    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits.
-
-    The agent-data hooks call ``super()`` first (the authoritative on-volume
-    store) and only fall back to / additionally write EC2 tags. For a *stopped*
-    host the base raises ``HostNotFoundError`` (no reachable ``vps_ip``); seeding
-    such a record makes the base short-circuit immediately without any SSH or
-    discovery sweep, so these tag-path tests exercise the stopped-host fallback
-    without standing up a fake VPS.
-    """
-    certified = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="myhost",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        stop_reason=HostState.STOPPED.value,
-    )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
 
 
 def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
@@ -268,7 +251,7 @@ def test_persist_agent_data_writes_per_field_agent_tags(temp_mngr_ctx: MngrConte
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     stubber.add_response(
         "describe_instances",
         _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
@@ -299,7 +282,7 @@ def test_persist_agent_data_writes_labels_in_their_own_tag(temp_mngr_ctx: MngrCo
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     stubber.add_response(
         "describe_instances",
         _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
@@ -326,6 +309,58 @@ def test_persist_agent_data_writes_labels_in_their_own_tag(temp_mngr_ctx: MngrCo
         stubber.deactivate()
 
 
+def test_persist_agent_data_translates_tag_limit_to_actionable_error(temp_mngr_ctx: MngrContext) -> None:
+    """Hitting EC2's 50-tag ceiling surfaces a TagLimitExceededError pointing at the S3 state bucket.
+
+    Many agents on one host can exhaust the tag mirror; rather than failing
+    obscurely the provider tells the user to run ``mngr aws prepare`` (the bucket
+    has no tag ceiling and supersedes the mirror once it exists).
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    seed_stopped_host_record(provider, host_id)
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
+    )
+    stubber.add_client_error(
+        "create_tags",
+        service_error_code="TagLimitExceeded",
+        service_message="The maximum number of tags for this resource has been reached.",
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(TagLimitExceededError, match="mngr aws prepare"):
+            provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "a1", "type": "command"})
+    finally:
+        stubber.deactivate()
+
+
+def test_persist_agent_data_reraises_non_tag_limit_api_error(temp_mngr_ctx: MngrContext) -> None:
+    """A create-tags failure that is not the tag-limit case propagates unchanged (not remapped)."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    seed_stopped_host_record(provider, host_id)
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
+    )
+    stubber.add_client_error(
+        "create_tags",
+        service_error_code="UnauthorizedOperation",
+        service_message="You are not authorized to perform this operation.",
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(VpsApiError, match="UnauthorizedOperation") as exc_info:
+            provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "a1", "type": "command"})
+        assert not isinstance(exc_info.value, TagLimitExceededError)
+    finally:
+        stubber.deactivate()
+
+
 def _reachable_provider_with_record(temp_mngr_ctx: MngrContext, host_id: HostId) -> AwsProvider:
     """Build a provider with a cached *reachable* (vps_ip set) record for ``host_id``.
 
@@ -341,7 +376,7 @@ def _reachable_provider_with_record(temp_mngr_ctx: MngrContext, host_id: HostId)
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+    provider._host_record_cache[host_id] = VpsHostRecord(
         certified_host_data=certified,
         vps_ip="1.2.3.4",
         config=VpsHostConfig(
@@ -661,10 +696,10 @@ def _normalized_instance(tag_pairs: dict[str, str]) -> dict:
     return {"id": "i-1", "tags": [f"{k}={v}" for k, v in tag_pairs.items()]}
 
 
-def test_agent_field_tags_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -> None:
     """name/type/labels each map to their own mngr-agent-<id>-<field> tag; the id is in the key."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    set_tags, delete_keys = provider._agent_field_tags(
+    set_tags, delete_keys = provider._agent_field_items(
         "agent-1",
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}},
         _normalized_instance({"mngr-host-id": "h"}),
@@ -677,7 +712,7 @@ def test_agent_field_tags_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -
     assert delete_keys == []
 
 
-def test_agent_field_tags_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
     """An agent with absent or empty labels gets no -labels tag."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance({})
@@ -685,16 +720,16 @@ def test_agent_field_tags_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None
         {"id": "agent-1", "name": "a1", "type": "command"},
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {}},
     ):
-        set_tags, _ = provider._agent_field_tags("agent-1", agent_data, instance)
+        set_tags, _ = provider._agent_field_items("agent-1", agent_data, instance)
         assert "mngr-agent-agent-1-labels" not in set_tags
 
 
-def test_agent_field_tags_drops_oversized_labels_with_warning(
+def test_agent_field_items_drops_oversized_labels_with_warning(
     temp_mngr_ctx: MngrContext, log_warnings: list[str]
 ) -> None:
     """Labels too large for a 256-char tag are dropped (name/type kept) with a warning, not a failure."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    set_tags, _ = provider._agent_field_tags(
+    set_tags, _ = provider._agent_field_items(
         "agent-1",
         {"id": "agent-1", "name": "a1", "type": "command", "labels": {"k": "x" * 300}},
         _normalized_instance({}),
@@ -703,7 +738,7 @@ def test_agent_field_tags_drops_oversized_labels_with_warning(
     assert any("exceeds the" in w and "labels" in w for w in log_warnings), log_warnings
 
 
-def test_agent_field_tags_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
     """When an update carries empty labels (an explicit removal), the stale -labels tag is deleted."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     instance = _normalized_instance(
@@ -713,14 +748,14 @@ def test_agent_field_tags_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx
             "mngr-agent-agent-1-labels": '{"env":"prod"}',
         }
     )
-    set_tags, delete_keys = provider._agent_field_tags(
+    set_tags, delete_keys = provider._agent_field_items(
         "agent-1", {"id": "agent-1", "name": "a1", "type": "command", "labels": {}}, instance
     )
     assert "mngr-agent-agent-1-labels" not in set_tags
     assert delete_keys == ["mngr-agent-agent-1-labels"]
 
 
-def test_agent_field_tags_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
+def test_agent_field_items_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
     """A partial persist (e.g. only id+type) must NOT delete the agent's existing name/labels tags.
 
     Regression: persist_agent_data is an upsert sometimes called with a partial
@@ -736,7 +771,7 @@ def test_agent_field_tags_preserves_absent_fields_on_partial_update(temp_mngr_ct
             "mngr-agent-agent-1-labels": '{"env":"prod"}',
         }
     )
-    set_tags, delete_keys = provider._agent_field_tags("agent-1", {"id": "agent-1", "type": "claude"}, instance)
+    set_tags, delete_keys = provider._agent_field_items("agent-1", {"id": "agent-1", "type": "claude"}, instance)
     assert set_tags == {"mngr-agent-agent-1-type": "claude"}
     # name and labels are absent from this update, so their tags are left untouched.
     assert delete_keys == []

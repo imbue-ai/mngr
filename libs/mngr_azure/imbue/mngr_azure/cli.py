@@ -20,7 +20,6 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
-from typing import assert_never
 
 import click
 from azure.core.exceptions import AzureError
@@ -29,17 +28,21 @@ from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.cli.output_helpers import OperatorResultPart
+from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
+from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_azure.state_bucket import BlobStateBucketError
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
+from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
+from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
 
 class _AzureOperatorCliOptions(CommonCliOptions):
@@ -61,40 +64,30 @@ class _AzurePrepareCliOptions(_AzureOperatorCliOptions):
     allowed_ssh_cidrs: tuple[str, ...]
 
 
+class _AzureCleanupCliOptions(_AzureOperatorCliOptions):
+    force: bool
+
+
 def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AzureProviderConfig:
     """Return the user's ``[providers.<provider_name>]`` block, or class defaults.
 
     The operator commands need to create / delete the resource group, vnet,
     subnet, and NSG using the same names the runtime ``mngr create --provider
-    <provider_name>`` path will later resolve. Class defaults
-    (``AzureProviderConfig()``) are a fallback for the first-run case where the
-    user has not yet pinned a provider block; if their settings.toml *does*
-    configure the named provider, we honor it.
-
-    When the looked-up config is not an ``AzureProviderConfig`` (e.g. the user
-    pointed ``[providers.azure]`` at a non-Azure backend), fall back to class
-    defaults rather than erroring -- the operator command's CLI options
-    (``--subscription-id`` / ``--region`` / ``--resource-group``) can still drive
-    an Azure-targeted run. A warning is emitted in this case so the user notices
-    their ``--provider`` selection did not have the intended effect (a silent
-    fallback to class defaults would otherwise create the resource group with the
-    default name in the default region with no visible signal). The missing-block
-    case is silent because that is the expected first-run shape. Mirrors
-    ``mngr_aws.cli._resolve_provider_config``.
+    <provider_name>`` path will later resolve. Thin wrapper over the shared
+    ``resolve_provider_config`` (see it for the {configured / wrong-backend /
+    missing} contract).
     """
-    config = mngr_ctx.config.providers.get(ProviderInstanceName(provider_name))
-    if isinstance(config, AzureProviderConfig):
-        return config
-    if config is not None:
-        logger.warning(
-            "Provider {!r} is configured but is not an Azure backend (got {}); "
-            "falling back to AzureProviderConfig class defaults. Pass "
-            "--subscription-id / --region / --resource-group to override, or point "
-            "--provider at an Azure-backed block.",
-            provider_name,
-            type(config).__name__,
-        )
-    return AzureProviderConfig()
+    return resolve_provider_config(
+        mngr_ctx,
+        provider_name,
+        config_cls=AzureProviderConfig,
+        default_factory=AzureProviderConfig,
+        cloud_label="an Azure backend",
+        override_hint=(
+            "Pass --subscription-id / --region / --resource-group to override, or "
+            "point --provider at an Azure-backed block."
+        ),
+    )
 
 
 def _build_operator_client(
@@ -137,82 +130,259 @@ def _build_operator_client(
     )
 
 
+def _refuse_cleanup_if_vms_exist(client: AzureVpsClient) -> None:
+    """Raise ``ManagedResourcesExistError`` when any mngr-managed VM still exists.
+
+    Run first by ``mngr azure cleanup``, before any teardown, so a still-running
+    VM aborts the whole cleanup (storage account + identity + RG) and strands
+    nothing. Split out so the refusal is unit-testable against a stubbed client.
+    """
+    vms = client.list_mngr_managed_vms()
+    refuse_if_managed_resources_exist(
+        [str(vm["id"]) for vm in vms],
+        summary=", ".join(str(vm["id"]) for vm in vms),
+        resource_noun="VM",
+        scope_description=f"resource group {client.resource_group}",
+        cleanup_command="mngr azure cleanup",
+    )
+
+
 def _perform_cleanup(client: AzureVpsClient) -> str | None:
     """Core of ``mngr azure cleanup``: refuse if VMs exist, else delete the RG.
 
     Returns the deleted resource group name, or ``None`` when there was nothing
-    to delete. Raises ``AzureProviderError`` (an ``MngrError``, so it renders as a
-    clean CLI message) when any mngr-managed VM still exists, so cleanup never
-    strands a running agent. Split from the click callback so the refuse/delete
-    decision is unit-testable against a stubbed client, without the click runtime
-    or real credentials.
+    to delete. Raises ``ManagedResourcesExistError`` (an ``MngrError``, so it
+    renders as a clean CLI message) when any mngr-managed VM still exists, so
+    cleanup never strands a running agent. Split from the click callback so the
+    refuse/delete decision is unit-testable against a stubbed client, without the
+    click runtime or real credentials.
     """
-    vms = client.list_mngr_managed_vms()
-    if vms:
-        summary = ", ".join(str(vm["id"]) for vm in vms)
-        raise AzureProviderError(
-            f"Refusing to clean up resource group {client.resource_group}: {len(vms)} mngr-managed "
-            f"VM(s) still exist: {summary}. Destroy them first with `mngr destroy <agent>`, then "
-            "re-run `mngr azure cleanup`."
-        )
+    _refuse_cleanup_if_vms_exist(client)
     return client.delete_managed_resource_group()
 
 
-def _output_prepare_result(result: AzureNetworkPrepareResult, output_format: OutputFormat) -> None:
+def _build_state_bucket(base: AzureProviderConfig, client: AzureVpsClient) -> BlobStateBucket:
+    """Build the Blob state bucket for the operator commands from the resolved subscription.
+
+    The storage-account name is always derivable (``mngrst<hash>`` from the
+    subscription + resource group), so this never returns None -- unlike AWS,
+    which needs an STS call to learn the account id. The bucket's region /
+    resource group track the operator client's, so it lands alongside the network.
+    """
+    return BlobStateBucket(
+        credential=base.get_credential(),
+        subscription_id=client.subscription_id,
+        resource_group=client.resource_group,
+        region=client.region,
+        account_name=base.resolve_state_storage_account_name(client.subscription_id),
+    )
+
+
+def _ensure_state_bucket_best_effort(bucket: BlobStateBucket) -> tuple[str | None, bool]:
+    """Ensure the state account + container exist, returning ``(account_name, was_created)``.
+
+    Best-effort for ``mngr azure prepare``: a missing-permission / API failure is
+    logged at WARNING and surfaces as ``(None, False)`` so the network prepare
+    still succeeds even when the operator's credential cannot manage storage.
+    """
+    try:
+        was_created = bucket.ensure_bucket()
+    except BlobStateBucketError as e:
+        logger.warning(
+            "Failed to create the Azure state storage account {!r} (offline host state will fall back to the "
+            "VM tag mirror): {}",
+            bucket.account_name,
+            e,
+        )
+        return None, False
+    return bucket.account_name, was_created
+
+
+def _perform_state_bucket_cleanup(bucket: BlobStateBucket, *, force: bool) -> str | None:
+    """Delete the state storage account, refusing while any managed-host state remains.
+
+    Returns the deleted account name, or ``None`` when none existed. Unless
+    ``force`` is set, raises ``AzureProviderError`` when the account still
+    holds ``hosts/`` state. By the time this runs the VM-exists check has already
+    passed, so any remaining state is *orphaned* offline state (a host whose VM
+    is gone but whose ``delete_host_state`` never ran, or one deleted outside
+    mngr) -- deleting it silently could drop offline records the operator still
+    wants, so we refuse and let ``--force`` opt into deleting it. Split out
+    so the refuse/delete decision is unit-testable.
+    """
+    if not bucket.account_exists():
+        return None
+    if not force and bucket.container_exists() and bucket.has_any_host_state():
+        raise AzureProviderError(
+            f"Refusing to delete Azure state storage account {bucket.account_name!r}: it still holds offline "
+            "host state (from hosts that are no longer running VMs). Re-run with `--force` to delete "
+            "the account and the remaining state."
+        )
+    bucket.delete_bucket()
+    return bucket.account_name
+
+
+def _build_host_identity(base: AzureProviderConfig, client: AzureVpsClient) -> BlobStateHostIdentity:
+    """Build the bucket-write managed-identity helper for the operator commands.
+
+    The identity name is derived from the state-account name (itself derived from
+    subscription + resource group), so it shares the bucket's scope and tracks the
+    operator client's subscription / region / resource group.
+    """
+    return BlobStateHostIdentity(
+        credential=base.get_credential(),
+        subscription_id=client.subscription_id,
+        resource_group=client.resource_group,
+        region=client.region,
+        account_name=base.resolve_state_storage_account_name(client.subscription_id),
+    )
+
+
+def _provision_host_identity(identity: BlobStateHostIdentity) -> str | None:
+    """Provision the bucket-write managed identity best-effort, returning its name or None.
+
+    A permission/API failure degrades to a WARNING so the network + bucket prepare
+    still succeed -- offline host_dir just won't work until prepare is re-run with
+    sufficient role-assignment permissions. Mirrors
+    ``mngr_aws.cli._provision_host_identity``.
+    """
+    try:
+        identity.ensure_host_identity()
+    except BlobStateHostIdentityError as e:
+        logger.warning(
+            "Failed to provision the host-dir managed identity {!r} (offline host_dir reads will be "
+            "unavailable until prepare is re-run with sufficient permissions): {}",
+            identity.identity_name,
+            e,
+        )
+        return None
+    return identity.identity_name
+
+
+def _provision_host_identity_for_prepare(
+    base: AzureProviderConfig, client: AzureVpsClient, *, was_account_set_up: bool
+) -> str | None:
+    """Provision the host-dir identity during prepare best-effort, gating on the state account.
+
+    The identity's Storage Blob Data Contributor role assignment is scoped to the
+    state account, so provisioning is only meaningful once that account is set up.
+    When the account setup was skipped (``was_account_set_up`` is False), degrades
+    to a WARNING and returns None. Called only when ``is_offline_host_dir_enabled``
+    is set.
+    """
+    if not was_account_set_up:
+        logger.warning(
+            "Cannot provision the host-dir managed identity: the state storage account could not be set up "
+            "(its Storage Blob Data Contributor role assignment is scoped to that account). Re-run with "
+            "sufficient Microsoft.Storage permissions."
+        )
+        return None
+    return _provision_host_identity(_build_host_identity(base, client))
+
+
+def _perform_host_identity_cleanup(identity: BlobStateHostIdentity) -> str | None:
+    """Delete the bucket-write managed identity, best-effort. Returns its name or None.
+
+    Idempotent: a missing identity is a no-op. A permission/API failure is logged
+    at WARNING and swallowed so it never blocks the rest of ``mngr azure cleanup``
+    (the RG + bucket teardown still proceed). Mirrors
+    ``mngr_aws.cli._perform_host_identity_cleanup``.
+    """
+    if not identity.host_identity_exists():
+        return None
+    try:
+        identity.delete_host_identity()
+    except BlobStateHostIdentityError as e:
+        logger.warning(
+            "Failed to delete the host-dir managed identity {!r}; skipping it: {}", identity.identity_name, e
+        )
+        return None
+    return identity.identity_name
+
+
+def _output_prepare_result(
+    result: AzureNetworkPrepareResult,
+    state_account_name: str | None,
+    was_bucket_created: bool,
+    host_identity_name: str | None,
+    output_format: OutputFormat,
+) -> None:
     """Emit the result of ``mngr azure prepare`` in the requested format.
 
-    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
-    ``prepared`` event. The structured forms carry ``created`` so a caller can
-    tell a first-run create from an idempotent no-op. Mirrors ``mngr gcp prepare``.
+    HUMAN: one (or two) result lines to stdout. JSON: a single object. JSONL: a
+    ``prepared`` event. The structured forms carry ``created`` (network) and
+    ``state_storage_account_name`` / ``state_bucket_created`` (None when the
+    bucket setup was skipped, e.g. missing storage permissions). Mirrors
+    ``mngr aws prepare``.
     """
-    data = {
-        "resource_group": result.resource_group,
-        "region": result.region,
-        "created": result.was_created,
-    }
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(data)
-        case OutputFormat.JSONL:
-            emit_event("prepared", data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            write_human_line("Prepared Azure resource group {} in region {}", result.resource_group, result.region)
-        case _ as unreachable:
-            assert_never(unreachable)
+    account_verb = "Created" if was_bucket_created else "Reused existing"
+    emit_operator_result(
+        "prepared",
+        [
+            OperatorResultPart.shown(
+                f"Prepared Azure resource group {result.resource_group} in region {result.region}",
+                resource_group=result.resource_group,
+                region=result.region,
+                created=result.was_created,
+            ),
+            OperatorResultPart.shown_if(
+                state_account_name,
+                f"{account_verb} Azure state storage account {state_account_name} in region {result.region}",
+                state_storage_account_name=state_account_name,
+                state_bucket_created=was_bucket_created,
+            ),
+            OperatorResultPart.shown_if(
+                host_identity_name,
+                f"Provisioned host-dir managed identity {host_identity_name}",
+                host_identity_name=host_identity_name,
+            ),
+        ],
+        output_format,
+    )
 
 
 def _output_cleanup_result(
     deleted_resource_group: str | None,
     subscription_id: str,
     region: str,
+    deleted_account_name: str | None,
+    deleted_host_identity_name: str | None,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr azure cleanup`` in the requested format.
 
-    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
-    ``cleaned_up`` event. ``deleted`` is False when the resource group was
-    already absent (idempotent no-op). Mirrors ``mngr gcp cleanup``.
+    HUMAN: one (or more) result lines to stdout. JSON: a single object. JSONL: a
+    ``cleaned_up`` event. ``deleted`` is False when the resource group was already
+    absent; ``state_storage_account_deleted`` carries the deleted account name (or
+    None when none existed / setup was skipped); ``host_identity_deleted`` carries
+    the deleted managed-identity name (or None when none existed). Mirrors
+    ``mngr aws cleanup``.
     """
-    data = {
-        "resource_group": deleted_resource_group,
-        "subscription_id": subscription_id,
-        "region": region,
-        "deleted": deleted_resource_group is not None,
-    }
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(data)
-        case OutputFormat.JSONL:
-            emit_event("cleaned_up", data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            if deleted_resource_group is None:
-                write_human_line(
-                    "Nothing to clean up: no mngr-owned resource group in subscription {}.", subscription_id
-                )
-            else:
-                write_human_line("Cleaned up Azure resource group {} in region {}", deleted_resource_group, region)
-        case _ as unreachable:
-            assert_never(unreachable)
+    emit_operator_result(
+        "cleaned_up",
+        [
+            OperatorResultPart.shown(
+                f"Cleaned up Azure resource group {deleted_resource_group} in region {region}"
+                if deleted_resource_group is not None
+                else f"Nothing to clean up: no mngr-owned resource group in subscription {subscription_id}.",
+                resource_group=deleted_resource_group,
+                subscription_id=subscription_id,
+                region=region,
+                deleted=deleted_resource_group is not None,
+            ),
+            OperatorResultPart.shown_if(
+                deleted_account_name,
+                f"Deleted Azure state storage account {deleted_account_name} in region {region}",
+                state_storage_account_deleted=deleted_account_name,
+            ),
+            OperatorResultPart.shown_if(
+                deleted_host_identity_name,
+                f"Deleted host-dir managed identity {deleted_host_identity_name}",
+                host_identity_deleted=deleted_host_identity_name,
+            ),
+        ],
+        output_format,
+    )
 
 
 @click.group(name="azure")
@@ -303,7 +473,25 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # self-deallocate is then disabled but `mngr stop`/`start` still work, so this
     # never fails prepare.
     client.ensure_self_deallocate_role()
-    _output_prepare_result(result, output_opts.output_format)
+    # Best-effort: create the state storage account + container that hold the full
+    # host record and per-agent records (so a deallocated VM's state is readable
+    # offline, with no 256-char tag limit). A missing storage permission degrades
+    # to a warning so the network prepare still succeeds (offline state then falls
+    # back to the VM tag mirror).
+    state_account_name, was_bucket_created = _ensure_state_bucket_best_effort(_build_state_bucket(base, client))
+    # Provision the bucket-write managed identity (best-effort) when the offline
+    # host_dir feature is enabled. The bucket-only steps above are unconditional,
+    # so flipping is_offline_host_dir_enabled on and re-running prepare adds just
+    # the identity. The identity's role assignment is scoped to the state account,
+    # so it is only meaningful when the account was set up.
+    host_identity_name = None
+    if base.is_offline_host_dir_enabled:
+        host_identity_name = _provision_host_identity_for_prepare(
+            base, client, was_account_set_up=state_account_name is not None
+        )
+    _output_prepare_result(
+        result, state_account_name, was_bucket_created, host_identity_name, output_opts.output_format
+    )
 
 
 @azure_cli_group.command(name="cleanup")
@@ -337,6 +525,16 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     default=None,
     help="Resource group to delete. Defaults to the resolved provider config's resource_group.",
 )
+@optgroup.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Also delete the state storage account when it still holds offline host state left over from "
+        "hosts that no longer exist as VMs (otherwise cleanup refuses to delete a non-empty account)."
+    ),
+)
 @add_common_options
 @click.pass_context
 def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
@@ -352,7 +550,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="azure cleanup",
-        command_class=_AzureOperatorCliOptions,
+        command_class=_AzureCleanupCliOptions,
     )
     base = _resolve_provider_config(mngr_ctx, opts.provider)
     try:
@@ -362,9 +560,30 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         # (an MngrError) propagates with its specific type.
         raise AzureProviderError(str(e)) from e
 
-    # _perform_cleanup raises AzureProviderError when a VM still exists, and
+    # Refuse the whole cleanup (delete nothing) while any mngr-managed VM still
+    # exists, BEFORE tearing down its storage account / identity / role
+    # assignment -- a running VM must abort cleanup so its offline state and write
+    # identity are never stranded.
+    _refuse_cleanup_if_vms_exist(client)
+    # No VMs remain: tear down the storage account while it holds no host state
+    # (its own refusal mirrors the VM check, as defense in depth). The storage
+    # account lives in the resource group, so it is deleted first (its own
+    # delete, before the RG cascade).
+    deleted_account_name = _perform_state_bucket_cleanup(_build_state_bucket(base, client), force=opts.force)
+    # Delete the bucket-write managed identity (best-effort, idempotent) before the
+    # RG cascade. The RG delete would reap it anyway, but the explicit delete keeps
+    # cleanup well-defined when the identity outlives a partial prior cleanup.
+    deleted_host_identity_name = _perform_host_identity_cleanup(_build_host_identity(base, client))
+    # _perform_cleanup raises ManagedResourcesExistError when a VM still exists, and
     # delete_managed_resource_group raises VpsApiError when the group lacks the
     # managed-by=mngr tag. Both are MngrErrors, so they render as clean CLI
     # messages; let them propagate with their specific type.
     deleted_resource_group = _perform_cleanup(client)
-    _output_cleanup_result(deleted_resource_group, client.subscription_id, client.region, output_opts.output_format)
+    _output_cleanup_result(
+        deleted_resource_group,
+        client.subscription_id,
+        client.region,
+        deleted_account_name,
+        deleted_host_identity_name,
+        output_opts.output_format,
+    )

@@ -2,9 +2,9 @@
 
 Azure provider backend plugin for mngr. Runs agents in Docker containers on Azure Virtual Machines.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -39,6 +39,10 @@ vnet_name = "mngr-vnet"
 subnet_name = "mngr-subnet"
 nsg_name = "mngr-nsg"
 
+# Optional override for the offline-state storage account (default: a derived
+# 'mngrst<hash>' from subscription + resource group). 3-24 lowercase alphanumeric.
+state_storage_account_name = "mngrstmyteam"
+
 # Inbound CIDRs for tcp/22 and the container SSH port on the NSG. Defaults to
 # the wide-open '0.0.0.0/0' (fail-open, matching the AWS / GCP providers; a
 # warning is logged -- tighten for production). SSH auth is key-only (passwords
@@ -58,10 +62,12 @@ Azure nests every resource in a *resource group*, and a fresh subscription has n
 default vnet. `mngr azure prepare` does the one-time privileged setup: it
 registers the `Microsoft.Compute` / `Microsoft.Network` / `Microsoft.Storage`
 resource providers and creates the resource group, vnet, subnet, and NSG (tagged
-`managed-by=mngr`). After it succeeds, `mngr create --provider azure` needs only
-VM/NIC/IP-create permissions, not the network-management permissions that build the
-vnet/subnet/NSG — it just resolves the existing subnet, so you can run it with
-limited credentials.
+`managed-by=mngr`). It also creates a private **state storage account + Blob
+container** (the "state bucket"; see "Offline state storage account" below) that
+holds mngr's control-plane state. After it succeeds, `mngr create --provider
+azure` needs only VM/NIC/IP-create permissions, not the network-management
+permissions that build the vnet/subnet/NSG — it just resolves the existing subnet,
+so you can run it with limited credentials.
 
 ```bash
 mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
@@ -94,11 +100,79 @@ mngr azure prepare --provider azure-west   # uses that block's region / RG / CID
 The safe inverse of `prepare`. Deletes the mngr-owned resource group (cascading
 its vnet/subnet/NSG), but **refuses** while any mngr-managed VM still exists in
 the group (destroy those first with `mngr destroy <agent>`), and only deletes a
-group it owns (tagged `managed-by=mngr`). Idempotent.
+group it owns (tagged `managed-by=mngr`). It also deletes the state storage
+account; because the VM check above has already passed, any remaining state is
+**orphaned** offline state (from hosts no longer running as VMs), so it
+**refuses** to delete a non-empty account rather than silently dropping records
+you may still want -- pass `--force` to delete the account and its
+remaining state. Idempotent.
 
 ```bash
 mngr azure cleanup
 ```
+
+### Offline state storage account
+
+`mngr azure prepare` creates a private Azure Storage account and a `mngr-state`
+Blob container holding mngr's control-plane state — the full host record and the
+per-agent records — keyed by host id. The mngr host machine writes these with
+**your own Azure credentials** (no keys stored on the box) whenever it writes
+state (on create and on stop), so a **deallocated** VM's full state is readable
+without SSH. This replaces the VM-tag mirror, which (a) silently dropped
+per-agent `labels` larger than the 256-char Azure tag value limit and (b) could
+only reconstruct a lossy subset of the host record while the VM was stopped.
+
+The storage-account name defaults to a deterministic `mngrst<hash>` derived from
+your subscription + resource group (storage-account names are globally unique,
+3–24 lowercase alphanumeric); override it with `state_storage_account_name` in
+`[providers.azure]`. The container is always `mngr-state`.
+
+Blob data-plane access uses AAD (the same `DefaultAzureCredential` the provider
+already uses), so to read/write host state you need the **`Storage Blob Data
+Contributor`** role on the state storage account, in addition to the
+storage-account create/delete permission `prepare`/`cleanup` use
+(`Microsoft.Storage/storageAccounts/write` + `delete`). A missing storage
+permission during `prepare` is **not fatal**: it degrades to a warning, the
+network prepare still succeeds, and offline state falls back to the VM-tag
+mirror. Existing deployments that never re-ran the new `prepare` keep working on
+that fallback.
+
+### Offline `host_dir` (on by default)
+
+A deallocated VM's `host_dir` is also readable without SSH, so `mngr event` /
+`mngr transcript` work against a stopped agent. When `is_offline_host_dir_enabled`
+is on (the default) and the state bucket exists, an on-box systemd oneshot + timer daemon
+syncs the VM's `host_dir` to the state container's `hosts/<host_id>/host_dir/`
+prefix every 60s, and once more on `mngr stop` just before the VM deallocates
+(so the offline copy is current). The sync runs `azcopy sync` authenticating as
+the VM's managed identity via MSI (`--auth-mode login`; no storage keys on the
+box), excluding large transient caches (`*.tmp`, `__pycache__`, `node_modules`).
+Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to disable it
+(offline host metadata still works via the bucket).
+
+The instance-push needs a cloud identity, which `prepare` provisions
+**best-effort** when `is_offline_host_dir_enabled` is on (the default):
+
+```bash
+mngr azure prepare   # provisions the identity best-effort; warns + continues if permissions are denied
+```
+
+`prepare` provisions a **user-assigned managed identity** plus a **`Storage Blob
+Data Contributor`** role assignment scoped to **just the state storage account**
+(least privilege -- never the resource group or subscription). Any missing-
+permission / API failure downgrades to a **warning** (the network + bucket
+prepare still succeed; only offline `host_dir` is unavailable until `prepare` is
+re-run with sufficient permissions). Set `is_offline_host_dir_enabled = false` in
+`[providers.azure]` to skip the identity entirely. `mngr azure cleanup` deletes
+the identity. `mngr create` attaches it to the VM when the feature is on and the
+identity exists (an operator-supplied identity takes precedence).
+
+Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write`
++ `Microsoft.Authorization/roleAssignments/write` (Owner or User Access
+Administrator). When offline `host_dir` is requested for a host whose VM has no
+attached managed identity, mngr logs a non-fatal diagnostic pointing at
+`mngr azure prepare` (with sufficient permissions) rather than returning an empty
+volume.
 
 ### Quota note
 
@@ -154,7 +228,8 @@ halts compute billing (an OS-level shutdown would only power it off — "Stopped
 paused agent costs only disk storage. `mngr start` re-allocates it. The public IP
 is static, so it and the SSH host keys survive the stop (no known_hosts rebind on
 resume). A deallocated VM still shows in `mngr list` and resolves by name (offline
-discovery via VM tags). `mngr destroy` deletes the VM, and the NIC, public IP and
+discovery reads its state from the state storage account, or the VM tag mirror as
+a fallback). `mngr destroy` deletes the VM, and the NIC, public IP and
 OS disk are reaped automatically via their `delete_option=Delete` (no orphaned
 resources).
 
@@ -176,7 +251,7 @@ size has no capacity in the region right now; pick another size with
   Azure has no per-key resource. Cloud-init also forwards the key into root's
   `authorized_keys`, so mngr's root SSH works.
 - **Image:** Debian 12 by default (matching the other mngr providers; runs
-  cloud-init with the Azure datasource, so the shared `mngr_vps_docker` bootstrap
+  cloud-init with the Azure datasource, so the shared `mngr_vps` bootstrap
   works unchanged). Configurable via `image_publisher` / `image_offer` /
   `image_sku` / `image_version`.
 - **No snapshot workflow:** the Azure client exposes no managed-disk-snapshot surface (the speculative `create_snapshot` / `list_snapshots` / `delete_snapshot` client methods are not part of `VpsClientInterface`). Restore from a fresh `mngr create` instead.
@@ -185,16 +260,19 @@ size has no capacity in the region right now; pick another size with
   eviction, matching AWS spot's terminate-on-reclaim.
 - VMs are tagged `mngr-provider`, `mngr-host-id`, `mngr-created-at`,
   `managed-by=mngr`, and `mngr-host-name`; discovery filters the resource group's
-  VM list by `mngr-provider`. Per-agent records are mirrored into VM tags
-  (`mngr-agent-<id>-<field>`) so a deallocated VM still lists its agents and
-  resolves by name; offline discovery reconstructs deallocated/stopped VMs from
-  those tags (the VM list is fetched with `expand=instanceView` to read power
-  state).
+  VM list by `mngr-provider`. Offline discovery reconstructs deallocated/stopped
+  VMs from those index tags and reads their full host record + per-agent records
+  from the **state storage account** (see "Offline state storage account") when
+  it exists. When it does not (older `prepare` / no storage permission), it falls
+  back to the per-agent VM-tag mirror (`mngr-agent-<id>-<field>`), which is
+  capped at the 256-char Azure tag value limit. Either way, power state for a
+  not-SSH-reachable VM is confirmed with a per-VM `get_instance_status` call
+  (Azure rejects `expand=instanceView` on a resource-group VM list).
 - **Stop/start = deallocate/start:** `mngr stop` deallocates the VM
   (`virtual_machines.begin_deallocate`) to halt compute billing; `mngr start`
   re-allocates it (`begin_start`). The static public IP and on-disk SSH host keys
   persist, so resume needs no IP/known_hosts fixup. Mirrors `mngr_aws`/`mngr_gcp`;
-  the shared `mngr_vps_docker` base is untouched.
+  the shared `mngr_vps` base is untouched.
 - **Idle self-deallocate (managed identity):** each VM is created with a
   system-assigned managed identity. The in-container idle watcher touches a
   sentinel; a host-side systemd path unit runs a script that uses the VM's IMDS

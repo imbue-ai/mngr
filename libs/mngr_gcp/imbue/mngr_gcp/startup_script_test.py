@@ -1,9 +1,9 @@
 """Tests for GCE startup-script generation."""
 
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
-from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
-from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_VERSION
-from imbue.mngr_vps_docker.host_setup import PINNED_GVISOR_RELEASE
+from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps.host_setup import PINNED_DOCKER_VERSION
+from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
 
 _SAMPLE_PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nline-one\nline-two\n-----END OPENSSH PRIVATE KEY-----"
 _SAMPLE_PUBLIC_KEY = "ssh-ed25519 AAAATESTKEY comment"

@@ -55,8 +55,8 @@ from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 pytestmark = [
     pytest.mark.release,
@@ -68,7 +68,9 @@ pytestmark = [
 ]
 
 
-def _write_release_settings(settings_dir: Path, *, terminate_on_shutdown: bool = True) -> None:
+def _write_release_settings(
+    settings_dir: Path, *, terminate_on_shutdown: bool = True, isolation: str | None = None
+) -> None:
     """Write the release-test ``settings.toml`` into ``settings_dir``.
 
     Shared by the prepare fixture and the per-test settings fixture so both the
@@ -90,7 +92,12 @@ def _write_release_settings(settings_dir: Path, *, terminate_on_shutdown: bool =
     ``mngr/config/pre_readers.py``); it is *not* a project root that gets a
     ``.<root_name>/`` subdirectory appended. So the file is written directly
     into ``settings_dir``.
+
+    ``isolation`` selects the placement shape: ``None`` leaves the default
+    (Docker container); ``"NONE"`` writes ``isolation = "NONE"`` so the bare
+    (no-container) realizer runs the agent directly on the EC2 instance's OS.
     """
+    isolation_line = f'isolation = "{isolation}"\n' if isolation is not None else ""
     (settings_dir / "settings.toml").write_text(
         # Opt this config past the pytest guard: the subprocess inherits
         # ``PYTEST_CURRENT_TEST`` and refuses to load any config that does not
@@ -98,6 +105,7 @@ def _write_release_settings(settings_dir: Path, *, terminate_on_shutdown: bool =
         "is_allowed_in_pytest = true\n"
         "\n[providers.aws]\n"
         'backend = "aws"\n'
+        f"{isolation_line}"
         # Auto-shutdown via cloud-init if pytest is killed before the per-test
         # cleanup runs. With terminate_on_shutdown=true the shutdown terminates
         # the instance (self-cleaning); with false it stops it (resumable), and
@@ -210,6 +218,31 @@ def aws_resumable_idle_settings_dir(tmp_path: Path, _aws_release_test_security_g
     requires it, and the conftest session-end scanner reaps a stopped leak).
     """
     _write_release_settings(tmp_path, terminate_on_shutdown=False)
+    yield tmp_path
+
+
+@pytest.fixture()
+def aws_bare_test_settings_dir(tmp_path: Path, _aws_release_test_security_group_prepared: None) -> Iterator[Path]:
+    """Like ``aws_test_settings_dir`` but with ``isolation = "NONE"`` (bare placement).
+
+    Exercises the no-Docker shape: the agent runs directly on the EC2 instance's
+    OS, reached at ``<ip>:22`` as root, with no container. Uses the default
+    ``terminate_on_shutdown = true`` (ephemeral / self-cleaning at the time cap).
+    """
+    _write_release_settings(tmp_path, isolation="NONE")
+    yield tmp_path
+
+
+@pytest.fixture()
+def aws_bare_resumable_settings_dir(tmp_path: Path, _aws_release_test_security_group_prepared: None) -> Iterator[Path]:
+    """Bare placement (``isolation = "NONE"``) with ``terminate_on_shutdown = false``.
+
+    The bare stop/start and idle-auto-stop tests need a *resumable* instance: a
+    bare agent's idle poweroff (``shutdown -P now``) must STOP the EC2 instance so
+    ``mngr start`` can resume it, which requires ``InstanceInitiatedShutdownBehavior
+    = stop``.
+    """
+    _write_release_settings(tmp_path, terminate_on_shutdown=False, isolation="NONE")
     yield tmp_path
 
 
@@ -534,6 +567,200 @@ def test_provider_idle_watcher_auto_stops_then_resumes(
         result = _run_mngr(settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-idle-stop")
         assert result.returncode == 0, f"post-resume exec failed: {result.stderr}\n{result.stdout}"
         assert "alive-after-idle-stop" in result.stdout
+    finally:
+        _run_mngr(settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
+        if instance_id is not None:
+            _terminate_instance_best_effort(aws_release_client, VpsInstanceId(instance_id))
+
+
+# =============================================================================
+# Bare placement (isolation=NONE): the agent runs on the EC2 instance's OS,
+# no Docker container. Mirrors the container lifecycle tests above.
+# =============================================================================
+
+
+@pytest.mark.rsync
+def test_bare_provider_lifecycle_create_exec_and_destroy(
+    aws_bare_test_settings_dir: Path,
+    temp_git_repo: Path,
+) -> None:
+    """A bare host comes up reachable, with the agent on the VM's OS (no container).
+
+    The bare-specific assertions prove the no-Docker shape end to end: the agent
+    shell is the EC2 instance's root (``/var/lib/mngr-host`` -- the bare host
+    store -- exists, and there is no ``/.dockerenv``), and the mngr host_dir
+    symlink (``/mngr``) still works.
+    """
+    agent_name = f"{AWS_TEST_NAME_PREFIX}bare-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        aws_bare_test_settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--",
+        "sleep",
+        "99999",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
+
+    try:
+        result = _run_mngr(aws_bare_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-bare-aws")
+        assert result.returncode == 0, f"Exec failed: {result.stderr}"
+        assert "hello-from-bare-aws" in result.stdout
+
+        # The mngr host_dir symlink works on the bare VM.
+        result = _run_mngr(
+            aws_bare_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists"
+        )
+        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
+        assert "exists" in result.stdout
+
+        # Bare-specific: the agent shell is the VM's root, not a container.
+        # /var/lib/mngr-host (the bare host store) exists and /.dockerenv does not.
+        result = _run_mngr(
+            aws_bare_test_settings_dir,
+            temp_git_repo,
+            "exec",
+            agent_name,
+            "test -d /var/lib/mngr-host && test ! -e /.dockerenv && echo bare-confirmed",
+        )
+        assert result.returncode == 0, f"bare-shape check failed: {result.stderr}\n{result.stdout}"
+        assert "bare-confirmed" in result.stdout, f"expected a bare (non-container) host: {result.stdout}"
+
+        result = _run_mngr(aws_bare_test_settings_dir, temp_git_repo, "list")
+        assert result.returncode == 0, f"List failed: {result.stderr}"
+        assert agent_name in result.stdout
+        assert "aws" in result.stdout
+    finally:
+        _run_mngr(aws_bare_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
+
+
+@pytest.mark.rsync
+def test_bare_provider_stop_host_stops_ec2_instance_and_start_resumes(
+    aws_bare_resumable_settings_dir: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+) -> None:
+    """For a bare host, ``mngr stop --stop-host`` stops the EC2 instance; ``mngr start`` resumes it.
+
+    A bare host has no container, so stop *is* the instance stop. This asserts the
+    instance reaches ``stopped`` after ``--stop-host`` and ``running`` after
+    ``start``, and that a post-resume ``exec`` works -- proving the on-disk bare
+    state (under ``/var/lib/mngr-host``) survived and the agent rebound to the
+    instance's fresh public IP at port 22.
+    """
+    agent_name = f"{AWS_TEST_NAME_PREFIX}bare-sh-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        aws_bare_resumable_settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--",
+        "sleep",
+        "99999",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+
+    instance_id: str | None = None
+    try:
+        instance_id = _find_test_instance_id(aws_release_client)
+        assert instance_id is not None, "could not find the created EC2 instance (pytest-launched tag)"
+        vps_instance_id = VpsInstanceId(instance_id)
+
+        result = _run_mngr(aws_bare_resumable_settings_dir, temp_git_repo, "stop", agent_name, "--stop-host")
+        assert result.returncode == 0, f"stop --stop-host failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.HALTED, (
+            "EC2 instance should be stopped (HALTED) after `mngr stop --stop-host` on a bare host"
+        )
+
+        result = _run_mngr(aws_bare_resumable_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
+        assert result.returncode == 0, f"start failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.ACTIVE, (
+            "EC2 instance should be running (ACTIVE) after `mngr start`"
+        )
+
+        result = _run_mngr(
+            aws_bare_resumable_settings_dir, temp_git_repo, "exec", agent_name, "echo bare-alive-after-host-restart"
+        )
+        assert result.returncode == 0, f"post-resume exec failed: {result.stderr}\n{result.stdout}"
+        assert "bare-alive-after-host-restart" in result.stdout
+    finally:
+        _run_mngr(aws_bare_resumable_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
+        if instance_id is not None:
+            _terminate_instance_best_effort(aws_release_client, VpsInstanceId(instance_id))
+
+
+@pytest.mark.rsync
+def test_bare_provider_idle_watcher_auto_stops_then_resumes(
+    aws_bare_resumable_settings_dir: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+) -> None:
+    """A bare host's idle watcher self-stops the EC2 instance; ``mngr start`` resumes it.
+
+    The bare agent runs as the VM's root, so its idle ``shutdown.sh`` powers the
+    machine off directly (``shutdown -P now``) -- no in-container sentinel or
+    host-side systemd watcher. With ``terminate_on_shutdown = false`` the idle
+    poweroff STOPS (not terminates) the instance, so we poll EC2 until it is
+    ``stopped`` (proving bare idle-auto-stop end to end), then resume and confirm a
+    working post-resume command.
+    """
+    settings_dir = aws_bare_resumable_settings_dir
+    agent_name = f"{AWS_TEST_NAME_PREFIX}bare-idle-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--idle-timeout",
+        "45",
+        "--",
+        "sleep",
+        "99999",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+
+    instance_id: str | None = None
+    try:
+        instance_id = _find_test_instance_id(aws_release_client)
+        assert instance_id is not None, "could not find the created EC2 instance (pytest-launched tag)"
+        vps_instance_id = VpsInstanceId(instance_id)
+
+        wait_for(
+            lambda: aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.HALTED,
+            timeout=360.0,
+            poll_interval=10.0,
+            error_message=(
+                f"EC2 instance {vps_instance_id} did not auto-stop on idle within 360s "
+                "(the bare host's idle shutdown should have powered it off)"
+            ),
+        )
+
+        result = _run_mngr(settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
+        assert result.returncode == 0, f"start after auto-stop failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.ACTIVE, (
+            "EC2 instance should be running again after `mngr start`"
+        )
+
+        result = _run_mngr(settings_dir, temp_git_repo, "exec", agent_name, "echo bare-alive-after-idle-stop")
+        assert result.returncode == 0, f"post-resume exec failed: {result.stderr}\n{result.stdout}"
+        assert "bare-alive-after-idle-stop" in result.stdout
     finally:
         _run_mngr(settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
         if instance_id is not None:

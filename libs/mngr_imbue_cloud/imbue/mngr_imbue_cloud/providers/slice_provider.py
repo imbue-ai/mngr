@@ -27,23 +27,23 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
+from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 # region/plan are meaningless for a locally-carved lima VM, but the shared
-# VpsDockerProvider finalize path persists them, so use stable placeholders.
+# VpsProvider finalize path persists them, so use stable placeholders.
 # Region falls back to this only if the owning bare-metal server's region is
 # unknown; the slice bake always passes the real region via ``slice_region``.
 _FALLBACK_SLICE_REGION: str = "lima"
 _SLICE_PLAN: str = "slice"
 
 
-class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
-    """Config for the slice provider: a VpsDockerProvider whose 'VPS' is a local lima VM."""
+class SliceVpsDockerProviderConfig(VpsProviderConfig):
+    """Config for the slice provider: a VpsProvider whose 'VPS' is a local lima VM."""
 
     backend: ProviderBackendName = Field(default=ProviderBackendName("imbue_cloud_slice"))
     box_public_address: str = Field(
@@ -94,8 +94,8 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
     slice_port_range_end: int | None = Field(default=None, description="Box host-port range end (no default)")
 
 
-class SliceVpsDockerProvider(VpsDockerProvider):
-    """A VpsDockerProvider whose 'VPS' is a lima VM we run on a bare-metal box.
+class SliceVpsDockerProvider(VpsProvider):
+    """A VpsProvider whose 'VPS' is a lima VM we run on a bare-metal box.
 
     The bake runs from wherever ``mngr create`` is invoked (the operator's laptop,
     like an OVH bake): ``create_host`` carves the VM by driving limactl over SSH on
@@ -152,7 +152,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         # Slices have no region/plan flags (the VM is carved locally), so this
-        # mirrors MinimalVpsDockerProvider: extract git-depth, pass the rest
+        # mirrors MinimalVpsProvider: extract git-depth, pass the rest
         # through as docker build args. Region is the owning server's region.
         args = list(build_args or ())
         git_depth, args = extract_git_depth(args)
@@ -198,7 +198,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
     ) -> Host:
         """Provision a slice VM and bake the shared vps_docker container onto it.
 
-        Mirrors ``VpsDockerProvider.create_host`` but, instead of ordering a VPS
+        Mirrors ``VpsProvider.create_host`` but, instead of ordering a VPS
         and uploading an SSH key, carves a lima VM (the LimaSliceVpsClient does
         not support cloud ordering) and reaches it via box-forwarded ports.
         """

@@ -1,9 +1,7 @@
-import json
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
+from functools import cached_property
 from typing import Any
 from typing import Final
 
@@ -16,61 +14,117 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.errors import TagLimitExceededError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import extract_presence_flag
-from imbue.mngr_vps_docker.instance import extract_single_value_arg
-from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_aws.state_bucket import S3StateBucket
+from imbue.mngr_aws.state_bucket import S3StateBucketError
+from imbue.mngr_aws.state_bucket import S3StateHostIdentity
+from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
+from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_single_value_arg
+from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.host_state_store import HostDirBackend
+from imbue.mngr_vps.host_state_store import NullHostDirBackend
+from imbue.mngr_vps.instance_offline import BucketHostDirBackend
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_SCRIPT_PATH
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
+from imbue.mngr_vps.instance_offline import HostDirSyncInstallPlan
+from imbue.mngr_vps.instance_offline import TagMirrorVpsProvider
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.systemd import render_systemd_unit
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
-# Per-agent metadata is mirrored onto the instance as up to three EC2 tags per
-# agent, keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the key,
-# not a value), so a *stopped* instance (no public IP, SSH unreachable) still
-# surfaces its agents in discovery and resolves by name. ``name``/``type`` are
-# stored raw; ``labels`` as compact JSON. One tag per field (rather than one
-# packed tag per agent) gives ``labels`` the full 256-char value budget; a field
-# whose value still overflows is dropped, not failed.
-AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
-_AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
-_MAX_TAG_VALUE_LEN: Final[int] = 256
 # EC2 allows 50 (non-``aws:``) tags per resource. When a host has so many agents
-# that mirroring another would exceed this, we surface a NotImplementedError
-# (which the CLI turns into an "open an issue" prompt) rather than failing
-# obscurely -- the S3-backed agent store is the planned fix for many-agent hosts.
+# that mirroring another would exceed this, we surface an actionable
+# TagLimitExceededError pointing at the S3 state bucket (which has no such
+# ceiling) rather than failing obscurely.
 _AWS_MAX_TAGS_PER_INSTANCE: Final[int] = 50
 # EC2 states in which the host OS is down (so the SSH-based sweep can't see the
 # host) but the instance still exists and its agents must be reconstructed from
 # tags. ``stopping`` is included so a host doesn't vanish from discovery during
 # the (seconds-long) stop transition before it reaches the terminal ``stopped``.
 _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
-# The ``Name`` tag is set to ``mngr-<host_name>`` at launch; strip the prefix to
-# recover the host name when reconstructing a stopped host from tags.
-_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
+# The host name is mirrored into the EC2 ``Name`` tag (as ``mngr-<host_name>``).
+_HOST_NAME_TAG_KEY: Final[str] = "Name"
+
+# The self-stopping idle watcher (in-container sentinel + host-side systemd
+# ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
+# The AWS oneshot ``.service`` powers the instance off (``shutdown -P now``); EC2
+# then applies the instance's ``InstanceInitiatedShutdownBehavior`` -- ``stop``
+# (resumable idle-pause, the default) or ``terminate`` -- so no IAM role or awscli
+# is needed on the box. See the README "Implementation details".
+
+# Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
+# The selected ``_S3HostDirBackend`` owns the install / before-pause sequence; it
+# supplies the ``aws s3 sync`` service body and awscli install. When
+# ``is_offline_host_dir_enabled`` is on and a state bucket is present, the create
+# path attaches the prepare-provisioned IAM instance profile, then the backend installs
+# a systemd oneshot ``.service`` + ``.timer`` pair that runs
+# ``aws s3 sync <host_dir_on_outer>/ s3://<bucket>/hosts/<id>/host_dir/ --delete``
+# every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` using the instance profile's IMDS
+# credentials (no long-lived keys on the box). The same oneshot is also triggered
+# once on graceful stop so the offline copy is current. Offline reads are served
+# from the bucket by the operator's credentials via ``get_volume_for_host``.
+# host_dir can contain large transient build artifacts; exclude the obvious ones
+# so a periodic full-tree sync stays cheap. Conservative -- only mngr-irrelevant
+# caches that never need to be read offline.
+_HOST_DIR_SYNC_EXCLUDES: Final[tuple[str, ...]] = ("*.tmp", "*/__pycache__/*", "*/node_modules/*")
+
+
+def _build_host_dir_sync_command(host_dir_on_outer: str, sync_target_uri: str) -> str:
+    """Build the ``aws s3 sync ... --delete`` command the oneshot service runs.
+
+    Syncs the per-host ``host_dir`` tree to ``hosts/<id>/host_dir/`` in the
+    bucket, with ``--delete`` so a removed file is removed offline too, and a few
+    excludes for large transient caches. Uses the instance profile's IMDS
+    credentials implicitly (no creds on the command line).
+    """
+    excludes = " ".join(f'--exclude "{pattern}"' for pattern in _HOST_DIR_SYNC_EXCLUDES)
+    return f'aws s3 sync "{host_dir_on_outer}/" "{sync_target_uri}" --delete {excludes}'.rstrip()
+
+
+def _build_host_dir_sync_service_unit() -> str:
+    """Build the oneshot systemd ``.service`` that pushes host_dir to the bucket once.
+
+    Triggered periodically by the paired ``.timer`` and once on graceful stop.
+    ``Type=oneshot`` so a stop-time ``systemctl start`` blocks until the sync
+    completes (the offline copy is current before the instance powers off).
+    ``ExecStart`` runs the installed ``HOST_DIR_SYNC_SCRIPT_PATH`` script rather than an
+    inline ``/bin/sh -c``, so the embedded host_dir path and S3 URI avoid systemd's +
+    the shell's nested quoting.
+    """
+    return render_systemd_unit(
+        {
+            "Unit": [("Description", "Sync this host's host_dir to the mngr S3 state bucket for offline reads")],
+            "Service": [("Type", "oneshot"), ("ExecStart", HOST_DIR_SYNC_SCRIPT_PATH)],
+        }
+    )
+
+
+def _build_awscli_install_command() -> str:
+    """Build the best-effort awscli install command (apt; no-op if already present).
+
+    Installs Debian's ``awscli`` (v1) -- sufficient for ``aws s3 sync`` with IMDS
+    instance-profile credentials -- only when ``aws`` is not already on PATH, so
+    a re-run or a baked AMI is a no-op.
+    """
+    return "command -v aws >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y awscli)"
 
 
 class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
@@ -105,13 +159,74 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AwsProvider(OfflineCapableVpsDockerProvider):
+class AwsProvider(TagMirrorVpsProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     aws_client: AwsVpsClient = Field(frozen=True, description="EC2 API client")
     aws_config: AwsProviderConfig = Field(frozen=True, description="AWS-specific configuration")
+
+    def _host_name_key(self) -> str:
+        return _HOST_NAME_TAG_KEY
+
+    def _host_identity(self) -> S3StateHostIdentity | None:
+        """Return the bucket-write IAM host identity (uncached), or None when unresolvable.
+
+        Built fresh each call (it is cheap and used only at create / on rare
+        diagnostics), scoped to the same state-bucket name as ``_state_bucket``.
+        """
+        return self.aws_config.build_host_identity(self.aws_client.session)
+
+    @cached_property
+    def _state_bucket(self) -> S3StateBucket | None:
+        """Return the S3 state bucket when it actually exists, else None.
+
+        When present, the bucket is the source of truth for agent records and the
+        offline host record (replacing the EC2 tag mirror); when None
+        (no bucket configured/derivable, or one whose name resolves but does not
+        yet exist because ``mngr aws prepare`` was never run), mngr falls back to
+        the per-agent tag mirror. The existence probe runs at most once per
+        provider lifetime (cached).
+        """
+        return self._resolve_existing_state_bucket()
+
+    def _resolve_existing_state_bucket(self) -> S3StateBucket | None:
+        """Build the configured/derived bucket and return it only if it exists."""
+        bucket = self.aws_config.build_state_bucket(self.aws_client.session)
+        if bucket is None:
+            return None
+        try:
+            if not bucket.bucket_exists():
+                logger.debug(
+                    "S3 state bucket {} does not exist; using the EC2 tag mirror "
+                    "(run `mngr aws prepare` to create it)",
+                    bucket.bucket_name,
+                )
+                return None
+        except S3StateBucketError as e:
+            logger.warning("Could not check S3 state bucket {}; falling back to EC2 tags: {}", bucket.bucket_name, e)
+            return None
+        return bucket
+
+    def _bucket_error_type(self) -> type[MngrError]:
+        return S3StateBucketError
+
+    def _bucket_label(self) -> str:
+        return "S3 state bucket"
+
+    @cached_property
+    def _host_dir_backend(self) -> HostDirBackend:
+        """Select the offline host_dir backend once: bucket-backed when enabled + present, else no-op.
+
+        The only place ``is_offline_host_dir_enabled`` and ``_state_bucket``
+        presence are tested together; every host_dir call site dispatches through
+        the selected backend instead of re-deriving the condition.
+        """
+        bucket = self._state_bucket
+        if self.aws_config.is_offline_host_dir_enabled and bucket is not None:
+            return _S3HostDirBackend(provider=self, bucket=bucket)
+        return NullHostDirBackend()
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List EC2 instances tagged with this provider's name."""
@@ -218,15 +333,9 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
         except handler reverses any SSH key upload that may have happened
         before this raise, so the missing-AMI failure leaves no leaked state.
         """
-        match parsed:
-            case ParsedAwsBuildOptions(ami_id_override=ami_id_override, spot=spot):
-                pass
-            case _:
-                raise MngrError(
-                    f"AwsProvider._create_vps_instance expected ParsedAwsBuildOptions, "
-                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
-                    "non-AWS shape; _parse_build_args must return ParsedAwsBuildOptions."
-                )
+        aws_parsed = self._require_parsed(parsed, ParsedAwsBuildOptions)
+        ami_id_override = aws_parsed.ami_id_override
+        spot = aws_parsed.spot
         if ami_id_override:
             effective_ami_id = ami_id_override
         else:
@@ -243,118 +352,93 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
             tags=tags,
             ami_id_override=effective_ami_id,
             spot=spot,
+            iam_instance_profile_override=self._host_dir_sync_instance_profile(),
         )
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return public IPs of EC2 instances tagged with this provider's name.
+    def _host_dir_sync_instance_profile(self) -> str | None:
+        """Return the prepare-provisioned instance-profile name to attach at create, or None.
 
-        Credentials are guaranteed to be resolvable here: ``build_provider_instance``
-        raises ``ProviderUnavailableError`` when ``config.get_session()`` fails, so any
-        AwsProvider that reaches this point has working credentials. The shared
-        ``VpsClientInterface`` base method that calls this is invoked for both
-        listing and create-host flows, so AWS does not need a separate
-        ``_credentials_configured`` override.
+        Delegates to the selected host_dir backend (the no-op backend returns None
+        when the feature is off or no bucket exists). The operator-supplied
+        ``iam_instance_profile`` (set on the client) takes precedence over this in
+        ``create_instance``. Attaching a profile requires create credentials to
+        hold iam:PassRole.
         """
-        instances = self._list_instances_cached()
-        vps_ips: list[str] = []
-        for instance in instances:
-            main_ip = instance.get("main_ip", "")
-            if main_ip:
-                vps_ips.append(main_ip)
-        return vps_ips
+        return self._host_dir_backend.create_identity()
+
+    # The shared ``KeyValueMirrorVpsProvider._list_provider_vps_hostnames``
+    # (cached listing -> non-empty main_ip) covers AWS unchanged: a stopped EC2
+    # instance loses its ephemeral IP and is excluded by the non-empty IP check.
 
     # =========================================================================
-    # Native EC2 stop/start + idle-watcher hooks (for OfflineCapableVpsDockerProvider)
+    # Native EC2 stop/start (idle-pause + resume) -- the base
+    # OfflineCapableVpsProvider owns the orchestration; here we supply only the
+    # EC2-specific cloud-API hooks.
     # =========================================================================
 
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
-        """Stop the EC2 instance; the EBS root volume and all on-disk state survive."""
         with log_span("Stopping EC2 instance"):
             self.aws_client.stop_instance(instance_id)
 
     def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
-        """Start the EC2 instance and return its fresh public IP (a stop/start reassigns it)."""
         with log_span("Starting EC2 instance"):
             return self.aws_client.start_instance(instance_id)
 
-    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
-        """Idle action: power the host off; EC2 then applies InstanceInitiatedShutdownBehavior."""
-        return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
+    # =========================================================================
+    # Self-stopping idle watcher (in-container sentinel + host-side systemd)
+    # =========================================================================
+
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        # EC2 supports stop/start, and the bare idle path self-stops the instance
+        # via InstanceInitiatedShutdownBehavior, so bare placement is supported.
+        return True
+
+    def _provider_instance_kind(self) -> str:
+        return "EC2 instance"
+
+    # The base ``OfflineCapableVpsProvider`` owns the idle-watcher install (the
+    # in-container sentinel ``shutdown.sh``, the host-side systemd ``.path``/
+    # ``.service`` pair, and the bare poweroff). AWS's ``.service`` body is the
+    # default ``shutdown -P now`` (EC2 then applies its
+    # ``InstanceInitiatedShutdownBehavior``), so AWS overrides none of those hooks.
 
     # =========================================================================
     # Offline metadata via EC2 tags (so STOPPED hosts list + resolve by name)
     # =========================================================================
 
-    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
-        """Persist an agent's record on the host volume *and* mirror it into an EC2 tag.
-
-        The base ``VpsDockerProvider`` writes the agent record to the on-volume
-        host store (``agents/<id>.json``), which is the authoritative source the
-        SSH-based discovery reads for *running* hosts -- so this override must
-        keep doing that (via ``super()``) or running AWS hosts would list with no
-        agents. *Additionally*, it mirrors a compact record into an EC2 tag so a
-        *stopped* instance (whose volume is unreadable) still surfaces its agents
-        and resolves for ``mngr start``. Called on agent create and on every
-        ``data.json`` update, so it is an idempotent upsert.
-
-        The on-volume write is best-effort: when the instance is stopped the base
-        raises ``HostNotFoundError`` (no reachable ``vps_ip``), in which case only
-        the tag is written -- exactly the path an offline ``mngr label`` needs.
-        """
-        try:
-            super().persist_agent_data(host_id, agent_data)
-        except HostNotFoundError:
-            # Host stopped / unreachable: the on-volume store can't be written,
-            # but the tag mirror below still must be (e.g. offline `mngr label`).
-            logger.debug("Host {} unreachable; persisting agent data to EC2 tags only", host_id)
-        agent_id = agent_data.get("id")
-        if agent_id is None:
-            logger.warning("Cannot mirror agent data to EC2 tags without an id (name={!r})", agent_data.get("name"))
-            return
+    def _persist_agent_to_tags(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        """Mirror an agent record into per-field EC2 tags (no-bucket fallback)."""
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             logger.warning("No EC2 instance found for host {}; cannot persist agent tags", host_id)
             return
-        set_tags, delete_keys = self._agent_field_tags(str(agent_id), agent_data, instance)
+        set_tags, delete_keys = self._agent_field_items(agent_id, agent_data, instance)
         try:
             self.aws_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
         except VpsApiError as e:
             # EC2 caps a resource at 50 (non-aws:) tags. Hitting it means the host
-            # has more agents than the tag mirror can hold; surface it as a
-            # NotImplementedError so the CLI offers to open an issue rather than
-            # failing obscurely. (Updating an existing agent overwrites its keys,
-            # so this only fires when a *new* agent's tags don't fit.)
+            # has more agents than the tag mirror can hold; surface an actionable
+            # TagLimitExceededError pointing at the S3 state bucket, which has no
+            # such ceiling, rather than failing obscurely.
             if "TagLimitExceeded" in str(e):
-                raise NotImplementedError(
-                    f"The AWS host for agent {agent_id!r} has reached EC2's {_AWS_MAX_TAGS_PER_INSTANCE}-tag-per-"
-                    "instance limit, so this agent can't be mirrored to tags for stopped-host listing and "
-                    "resume-by-name. Running this many agents on a single AWS host isn't supported yet -- please "
-                    "open an issue at https://github.com/imbue-ai/mngr/issues so we can prioritize the planned "
-                    "S3-backed agent store."
+                raise TagLimitExceededError(
+                    self.name,
+                    limit=_AWS_MAX_TAGS_PER_INSTANCE,
+                    remediation=(
+                        f"The AWS host for agent {agent_id!r} has more agents than EC2 tags can mirror for "
+                        "stopped-host listing and resume-by-name. Run `mngr aws prepare` to create an S3 state "
+                        "bucket (no tag ceiling); the provider uses it automatically once it exists. To pin a "
+                        "specific bucket name first, run "
+                        f"`mngr config set --scope user providers.{self.name}.state_bucket_name <name>`."
+                    ),
                 ) from e
             raise
         if delete_keys:
             self.aws_client.remove_tags(VpsInstanceId(instance["id"]), delete_keys)
 
-    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>-*`` tags.
-
-        Mirrors ``persist_agent_data``: the base removes the authoritative
-        on-volume record (best-effort -- ``HostNotFoundError`` when the instance
-        is stopped) and this override additionally drops the agent's per-field EC2
-        tags, so a destroyed agent stops appearing in both running- and
-        stopped-host discovery. ``DeleteTags`` is idempotent, so deleting a field
-        key the agent never had is a harmless no-op.
-        """
-        try:
-            super().remove_persisted_agent_data(host_id, agent_id)
-        except HostNotFoundError:
-            logger.debug("Host {} unreachable; removing agent data from EC2 tags only", host_id)
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
-        self.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
+    def _remove_instance_tags(self, instance: Mapping[str, Any], keys: Sequence[str]) -> None:
+        self.aws_client.remove_tags(VpsInstanceId(instance["id"]), list(keys))
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the EC2 instance's OS is down (stopping or stopped).
@@ -367,147 +451,84 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
         """
         return instance.get("state") in _HOST_DOWN_STATES
 
-    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
-        """Render one agent field as a tag-value string, or ``None`` if absent/empty.
 
-        ``name``/``type`` are stored raw; ``labels`` as compact JSON (empty labels
-        are treated as absent so no ``-labels`` tag is written).
-        """
-        if field == "labels":
-            labels = agent_data.get("labels")
-            return json.dumps(labels, separators=(",", ":")) if labels else None
-        value = agent_data.get(field)
-        return None if value is None else str(value)
+class _S3HostDirBackend(BucketHostDirBackend):
+    """Bucket-backed offline host_dir for AWS: instance-profile + ``aws s3 sync`` to the S3 state bucket.
 
-    def _agent_field_tags(
-        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
-    ) -> tuple[dict[str, str], list[str]]:
-        """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
+    Selected only when offline host_dir is on and the state bucket exists, so
+    ``self.bucket`` is always present here and no method re-tests it. The
+    offline-read + final-sync flow is inherited from ``BucketHostDirBackend``;
+    this supplies the AWS-specific identity, sync-daemon install, and probes.
+    """
 
-        Returns ``(tags_to_set, keys_to_delete)``. ``persist_agent_data`` is an
-        upsert that is sometimes called with a *partial* record (e.g. an update
-        carrying only ``id``/``type``), so a field absent from ``agent_data`` means
-        "unchanged" -- it is left alone, NOT removed (deleting it would clobber the
-        ``name`` tag that offline resolve-by-name depends on). A field that *is*
-        present but renders empty (e.g. ``labels={}``, an explicit removal) or
-        overflows the 256-char tag limit (realistically only ``labels``) is dropped
-        and its existing tag, if any, is deleted so no stale value lingers. The
-        agent id is carried in the tag *key*, not a value.
-        """
-        set_tags: dict[str, str] = {}
-        delete_keys: list[str] = []
-        for field in _AGENT_TAG_FIELDS:
-            if field not in agent_data:
-                continue
-            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
-            value = self._agent_field_value(field, agent_data)
-            if value is not None and len(value) <= _MAX_TAG_VALUE_LEN:
-                set_tags[key] = value
-                continue
-            # Present but empty (an explicit removal, e.g. labels={}) or too large
-            # for a single tag: drop it, and delete any existing tag so no stale
-            # value lingers. Only oversized values warrant a warning.
-            if value is not None:
-                logger.warning(
-                    "Agent {} {} ({} chars) exceeds the {}-char EC2 tag limit; omitted from the "
-                    "stopped-host tag mirror",
-                    agent_data.get("name", agent_id),
-                    field,
-                    len(value),
-                    _MAX_TAG_VALUE_LEN,
-                )
-            delete_keys.append(key)
-        existing = set(self._tag_dict_from_normalized(instance))
-        return set_tags, [key for key in delete_keys if key in existing]
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` tags.
+    provider: AwsProvider
+    bucket: S3StateBucket
+    bucket_error_type: type[MngrError] = S3StateBucketError
 
-        Groups the per-field tags by agent id (recovered from the tag key, split on
-        the final ``-`` so ids may themselves contain dashes), and rebuilds one
-        dict per agent. A malformed/externally-edited ``-labels`` tag (not valid
-        JSON, or not a JSON object) is skipped for that field with a warning rather
-        than crashing the discovery sweep.
-        """
-        by_id: dict[str, dict] = {}
-        for key, value in self._tag_dict_from_normalized(instance).items():
-            if not key.startswith(AGENT_TAG_PREFIX):
-                continue
-            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
-            if not sep or field not in _AGENT_TAG_FIELDS:
-                continue
-            record = by_id.setdefault(agent_id, {"id": agent_id})
-            if field == "labels":
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping unparseable agent labels tag {!r}", key)
-                    continue
-                if not isinstance(parsed, dict):
-                    logger.warning("Skipping agent labels tag {!r}: value is not a JSON object", key)
-                    continue
-                record["labels"] = parsed
-            else:
-                record[field] = value
-        return list(by_id.values())
+    def _sync_unit_name(self) -> str:
+        return HOST_DIR_SYNC_UNIT_NAME
 
-    def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
-        tags: dict[str, str] = {}
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if sep:
-                tags[key] = value
-        return tags
+    def _pause_action(self) -> str:
+        return "stop"
 
-    def _host_name_from_tags(self, tags: Mapping[str, str]) -> HostName:
-        """Recover the host name from the ``Name=mngr-<host_name>`` tag (fallback: host_id)."""
-        name_tag = tags.get("Name", "")
-        if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
-            return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
-        if name_tag:
-            return HostName(name_tag)
-        return HostName(tags.get("mngr-host-id", "unknown"))
+    def _cloud_label(self) -> str:
+        return "AWS"
 
-    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from an instance's tags, or None if not a mngr host."""
-        tags = self._tag_dict_from_normalized(instance)
-        host_id_str = tags.get("mngr-host-id")
-        if host_id_str is None:
+    def create_identity(self) -> str | None:
+        identity = self.provider._host_identity()
+        if identity is None:
             return None
-        return DiscoveredHost(
-            host_id=HostId(host_id_str),
-            host_name=self._host_name_from_tags(tags),
-            provider_name=self.name,
-            host_state=HostState.STOPPED,
+        try:
+            if not identity.host_identity_exists():
+                logger.warning(
+                    "host_dir sync is on but the bucket-write IAM identity {} does not exist; launching "
+                    "without it (re-run `mngr aws prepare` with sufficient IAM to enable offline host_dir)",
+                    identity.identity_name,
+                )
+                return None
+        except S3StateHostIdentityError as e:
+            logger.warning(
+                "Could not check the bucket-write IAM identity {}; launching without it: {}",
+                identity.identity_name,
+                e,
+            )
+            return None
+        return identity.identity_name
+
+    def _build_install_plan(self, host_id: HostId) -> HostDirSyncInstallPlan | None:
+        host_dir_on_outer = self.provider._realizer.host_dir_path_on_outer(host_id)
+        sync_target_uri = host_dir_sync_target_for(self.bucket.bucket_name, host_id)
+        return HostDirSyncInstallPlan(
+            install_command=_build_awscli_install_command(),
+            sync_command=_build_host_dir_sync_command(str(host_dir_on_outer), sync_target_uri),
+            service_unit=_build_host_dir_sync_service_unit(),
+            sync_target_uri=sync_target_uri,
         )
 
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
-        tags = self._tag_dict_from_normalized(instance)
-        created_at_raw = tags.get("mngr-created-at")
-        now = datetime.now(timezone.utc)
-        created_at = now
-        if created_at_raw:
-            try:
-                created_at = datetime.fromisoformat(created_at_raw)
-            except ValueError as e:
-                # mngr writes this tag at launch, so a parse failure means the tag
-                # was externally edited/corrupted: surface it rather than silently
-                # using now() (which would misreport a long-stopped host as fresh).
-                logger.opt(exception=e).warning(
-                    "Malformed mngr-created-at tag {!r} on host {}; falling back to now()",
-                    created_at_raw,
-                    host_id,
-                )
-        certified = CertifiedHostData(
-            host_id=str(host_id),
-            host_name=str(self._host_name_from_tags(tags)),
-            created_at=created_at,
-            updated_at=now,
-            stop_reason=HostState.STOPPED.value,
-        )
-        return self._create_offline_host(VpsDockerHostRecord(certified_host_data=certified))
+    def _warn_if_identity_missing(self, host_id: HostId) -> None:
+        """Warn when an empty host_dir prefix is explained by the instance having no IAM profile.
+
+        Detects the missing-identity case directly from cloud state: an instance
+        with no attached IAM instance profile could never push host_dir, which is
+        why the prefix is empty. Best-effort -- any probe failure is swallowed.
+        """
+        try:
+            instance = self.provider._find_instance_for_host(host_id)
+            if instance is None:
+                return
+            profile_arn = self.provider.aws_client.get_instance_iam_profile_arn(VpsInstanceId(instance["id"]))
+        except MngrError as e:
+            logger.debug("Could not check IAM profile for host {} while diagnosing empty host_dir: {}", host_id, e)
+            return
+        if profile_arn is None:
+            logger.warning(
+                "Host {}'s instance has no attached IAM instance profile, so its host_dir was never "
+                "pushed to the bucket and is not readable offline. Re-run `mngr aws prepare` "
+                "with sufficient IAM, then recreate the host so it picks up the profile.",
+                host_id,
+            )
 
 
 class AwsProviderBackend(ProviderBackendInterface):

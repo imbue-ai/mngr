@@ -1,0 +1,37 @@
+Added an optional S3 state bucket that holds mngr's control-plane state (the full host record and per-agent records) so a stopped instance's state is readable without SSH and without the 256-char EC2 tag limit.
+
+- `mngr aws prepare` now also creates (idempotently) a private, encrypted S3 state bucket, named `mngr-state-<account_id>-<region>` by default or overridable via the new `state_bucket_name` provider config field. Bucket setup is best-effort: a missing S3/STS permission degrades to a warning so the security-group prepare still succeeds.
+
+- `mngr aws cleanup` now also deletes the state bucket. Since it runs after the refuse-while-instances-exist check, any state left in the bucket is orphaned (hosts no longer present as instances), so cleanup refuses to delete a non-empty bucket rather than silently dropping offline records; pass the new `--force` flag to delete the bucket and its remaining state.
+
+- When a state bucket is configured, the per-agent `mngr-agent-<id>-*` EC2 tags are no longer written; agent records and the full offline host record live in the bucket instead. This removes both the silent 256-char `labels` drop and the `TagLimitExceeded` failure at EC2's 50-tag ceiling. Without a configured bucket, the EC2 tag mirror is retained unchanged as a graceful fallback. If the tag mirror does hit EC2's 50-tag ceiling (no bucket configured), mngr now raises an actionable `TagLimitExceededError` that points you at `mngr aws prepare` to create the state bucket, instead of the previous `NotImplementedError` that prompted you to open a GitHub issue.
+
+- A stopped host's full `VpsDockerHostRecord` is now reconstructed from the bucket (instead of the lossy tag subset) for `mngr list` / `mngr start` when a bucket is present.
+
+Added an offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled` provider config field). A stopped instance's `host_dir` is now readable without SSH, so `mngr event` / `mngr transcript` work against a paused host.
+
+- When `is_offline_host_dir_enabled` is on, `mngr aws prepare` provisions (best-effort) a least-privilege IAM role + instance profile that lets an instance push its `host_dir` to the bucket. A missing-permission/API failure (or a bucket that could not be set up -- the identity's inline policy is scoped to the bucket, so it is meaningless without one) downgrades to a warning so the security group + bucket prepare still succeed; offline host_dir just won't work until prepare is re-run with sufficient IAM. The inline policy grants only `s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` on the bucket's `hosts/*` prefix and `s3:ListBucket` on the bucket. Set `is_offline_host_dir_enabled = false` in `[providers.<name>]` to skip the identity entirely.
+
+- `mngr aws cleanup` now also deletes the host-dir IAM identity (role + instance profile), best-effort and idempotent, after the bucket.
+
+- At host create, when the feature is on and the identity exists, the provisioned instance profile is attached so an on-box systemd daemon can `aws s3 sync` `host_dir` to `s3://<bucket>/hosts/<host_id>/host_dir/` every ~60s (and once on graceful stop) via IMDS credentials. The operator-supplied `iam_instance_profile`, if set, takes precedence. Attaching a profile at create requires `iam:PassRole`.
+
+- Offline `host_dir` reads use the operator's credentials (no instance identity needed to read). When the feature is on but a host's instance has no attached IAM profile (so it never pushed its `host_dir`), `get_volume_for_host` logs a clear warning pointing at re-running `mngr aws prepare` rather than silently returning an empty volume.
+
+Internal refactor (no behavior change): `AwsProvider` now extends the shared `TagMirrorVpsDockerProvider` and consumes the shared `state_keys` layout, generic `BucketHostStateStore`, and hoisted instance-lookup / path helpers, rather than carrying AWS-local copies. The duplicate-`mngr-host-id` ambiguous-match error is now phrased provider-neutrally.
+
+Internal refactor (no behavior change): `AwsProvider` no longer overrides `discover_hosts_and_agents` / `list_persisted_agent_data_for_host`; it now implements only the shared `_offline_agent_dicts_for` hook (reading the S3 bucket or EC2 tag mirror via `_state_store`). Validated end-to-end on real EC2 (create / stop / list-while-stopped / start).
+
+Internal refactor (no behavior change): `AwsProvider` no longer overrides `persist_agent_data` / `remove_persisted_agent_data` / `_persist_host_record_externally` / `_delete_host_record_externally`; the shared envelope lives on the base and the `_state_store`-backed steps live on `TagMirrorVpsDockerProvider`. AWS keeps only `_state_store`, `_persist_agent_to_tags` (the EC2-tag write the tag store uses), and provider specifics. Validated on real EC2.
+
+Internal refactor (no behavior change): the offline `host_dir` machinery (identity-for-create, sync-daemon install, final-sync-before-stop, volume reads, and the missing-identity diagnostic) now lives in a selected-once `_S3HostDirBackend` (or the no-op `NullHostDirBackend` when the feature is off or no bucket exists), the sibling of `_state_store`. `AwsProvider` no longer re-tests `is_offline_host_dir_enabled` / `_state_bucket` at each host_dir call site, and its `get_volume_*` / `to_offline_host` / `_sync_host_dir_before_pause` are inherited from `TagMirrorVpsDockerProvider`.
+
+Internal refactor (no behavior change): `S3StateBucket` now extends the shared `BaseStateBucket`, keeping only the S3 client, the raw object primitives, error translation, and the bucket lifecycle; the record marshalling / key layout / offline-read volume are inherited.
+
+Internal refactor (no behavior change): `mngr aws prepare`'s host-dir identity provisioning now threads the already-resolved state-bucket name into `_resolve_and_provision_host_identity` (instead of a `was_bucket_set_up` bool), removing a redundant bucket-name re-resolution and an unreachable None-handling branch in `_provision_host_identity`.
+
+Internal refactor (no behavior change): `mngr aws prepare` / `cleanup` output now declares its result as a list of `OperatorResultPart`s (each pairing structured fields with its human line, via `shown` / `shown_if`) and hands them to the shared `emit_operator_result` helper, which owns the JSON / JSONL / human format dispatch -- replacing the separate `data` dict and inline human-line block.
+
+Test-only: moved the duplicated moto `aws_session` / `aws_mock` fixtures into `mngr_aws`'s `conftest.py` (one definition instead of three), and tightened two state-bucket backend tests to assert the exact tag write / the absence of a misleading missing-identity warning.
+
+Internal refactor (no behavior change): the AWS state bucket / host-identity now tag resources via the shared `state_keys.MANAGED_BY_TAG_KEY` / `MANAGED_BY_TAG_VALUE` constants instead of raw `managed-by=mngr` literals.

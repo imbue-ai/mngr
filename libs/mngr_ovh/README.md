@@ -2,7 +2,7 @@
 
 OVH Cloud VPS provider backend plugin for mngr. Runs agents in Docker containers on OVH classic VPS instances (e.g. `vps-2025-model1` with 1 vCPU / 8 GB RAM / 80 GB SSD at ~$7.99/mo).
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -51,7 +51,7 @@ mngr ovh list --all     # include untagged VPSes too -- useful for sanity-checki
 
 ## OVH-specific configuration
 
-These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
+These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 
 | Field | Default | Description |
 |-------|---------|-------------|

@@ -53,7 +53,7 @@ function runEnvSetup(onProgress) {
       'imbue-mngr-lima',
       'imbue-mngr-modal',
       'imbue-mngr-ovh',
-      'imbue-mngr-vps-docker',
+      'imbue-mngr-vps',
       'imbue-common',
       'concurrency-group',
       'resource-guards',

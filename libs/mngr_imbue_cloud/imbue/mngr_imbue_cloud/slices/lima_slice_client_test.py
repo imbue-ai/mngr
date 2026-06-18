@@ -3,7 +3,7 @@ import pytest
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import parse_listening_ports
 from imbue.mngr_lima.errors import LimaCommandError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 # Note: provision_slice_vm / destroy_instance / get_instance_status drive limactl
 # over SSH against a real box and are exercised by the live slice smoke test, not

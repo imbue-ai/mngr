@@ -135,3 +135,37 @@ def test_get_subscription_id_raises_when_unresolvable(monkeypatch: pytest.Monkey
 def test_get_credential_returns_default_azure_credential() -> None:
     config = AzureProviderConfig(subscription_id="sub-123")
     assert isinstance(config.get_credential(), DefaultAzureCredential)
+
+
+def test_resolve_state_storage_account_name_derives_valid_name() -> None:
+    config = AzureProviderConfig(subscription_id="sub-123", resource_group="mngr")
+    name = config.resolve_state_storage_account_name("sub-123")
+    assert name.startswith("mngrst")
+    assert 3 <= len(name) <= 24
+    assert name.isalnum() and name.islower()
+
+
+def test_resolve_state_storage_account_name_is_deterministic_per_scope() -> None:
+    config = AzureProviderConfig(subscription_id="sub-123", resource_group="mngr")
+    first = config.resolve_state_storage_account_name("sub-123")
+    second = config.resolve_state_storage_account_name("sub-123")
+    assert first == second
+    # A different subscription or resource group yields a different account name.
+    other_sub = config.resolve_state_storage_account_name("sub-999")
+    other_rg = AzureProviderConfig(resource_group="other").resolve_state_storage_account_name("sub-123")
+    assert first != other_sub
+    assert first != other_rg
+
+
+def test_resolve_state_storage_account_name_honors_explicit_override() -> None:
+    config = AzureProviderConfig(subscription_id="sub-123", state_storage_account_name="mngrstmyteam")
+    assert config.resolve_state_storage_account_name("sub-123") == "mngrstmyteam"
+
+
+def test_build_state_bucket_uses_resolved_name_and_scope() -> None:
+    config = AzureProviderConfig(subscription_id="sub-123", resource_group="mngr", default_region="westus")
+    bucket = config.build_state_bucket("sub-123")
+    assert bucket.account_name == config.resolve_state_storage_account_name("sub-123")
+    assert bucket.subscription_id == "sub-123"
+    assert bucket.resource_group == "mngr"
+    assert bucket.region == "westus"
