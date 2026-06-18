@@ -34,6 +34,7 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.overlay_merge import build_settings_narrowing_message
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
@@ -128,6 +129,18 @@ def test_merge_models_via_overlay_rejects_mismatched_types() -> None:
     """
     with pytest.raises(ConfigParseError, match="Cannot merge"):
         merge_models_via_overlay(AgentTypeConfig(), _MngrClaudeLikeConfig())
+
+
+def test_narrowing_message_tailors_extend_example_to_the_narrowed_key() -> None:
+    """The narrowing message's ``__extend`` example is adapted to the user's actual key so
+    it shows how to fix their config; a nested path nests the suffix, and it falls back to a
+    generic example when no key is given."""
+    top = build_settings_narrowing_message(["  work_dir_extra_paths"], example_key_path="work_dir_extra_paths")
+    assert "work_dir_extra_paths__extend = ..." in top
+    nested = build_settings_narrowing_message(["  permissions.allow"], example_key_path="permissions.allow")
+    assert "permissions__extend = {allow__extend = ...}" in nested
+    generic = build_settings_narrowing_message(["  something"])
+    assert "permissions__extend = {allow__extend" in generic
 
 
 # =============================================================================

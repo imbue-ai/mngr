@@ -571,7 +571,7 @@ def _apply_settings_overrides(
             detail_lines.append(f"  {path}")
             detail_lines.append("      assigned by the agent type's `settings_overrides`")
             detail_lines.append(f"      would drop a value from {base_description}")
-        raise ConfigParseError(build_settings_narrowing_message(detail_lines))
+        raise ConfigParseError(build_settings_narrowing_message(detail_lines, example_key_path=narrowings[0]))
     return finalize(merged)
 
 
