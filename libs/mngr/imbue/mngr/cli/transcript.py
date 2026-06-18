@@ -56,8 +56,9 @@ def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ct
     # Resolve through the parent_type chain (and aliases) so a config-defined
     # subtype (a custom [agent_types.X] whose parent_type is e.g. 'claude') maps
     # to its parent's class, rather than failing a flat class-registry lookup.
-    # An unresolvable type raises here (UnknownAgentTypeError), which is correct:
-    # if we cannot resolve the type we do not know how to read it, so block.
+    # A type we cannot resolve raises here (UnknownAgentTypeError, or MngrError if
+    # its plugin is disabled), which is correct: if we cannot resolve the type we
+    # do not know how to read it, so block rather than fall through to discovery.
     resolved = resolve_agent_type(agent_type, mngr_ctx.config)
     if issubclass(resolved.agent_class, HasCommonTranscriptMixin):
         return
