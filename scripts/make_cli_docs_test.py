@@ -1,7 +1,9 @@
 import os
+from pathlib import Path
 
 import pytest
 
+from scripts.make_cli_docs import build_alias_doc
 from scripts.make_cli_docs import get_relative_link
 
 # Importing make_cli_docs sets MNGR_LOAD_ALL_PLUGINS=1 process-wide at import time (it
@@ -20,6 +22,14 @@ def test_get_relative_link_resolves_known_command() -> None:
 def test_get_relative_link_resolves_cross_category_command() -> None:
     # "file" is a SECONDARY_COMMAND, "create" is PRIMARY; link goes up and over.
     assert get_relative_link("file", "create") == "../primary/create.md"
+
+
+def test_build_alias_doc_generates_doc_for_registered_alias(tmp_path: Path) -> None:
+    # "clone" is a registered alias; its doc is built entirely from CommandHelpMetadata.
+    output_file, content = build_alias_doc("clone", tmp_path)
+    assert output_file == tmp_path / "aliases" / "clone.md"
+    assert content.startswith("<!-- This file is auto-generated.")
+    assert "# mngr clone" in content
 
 
 def test_get_relative_link_raises_on_unresolvable_ref() -> None:
