@@ -24,6 +24,17 @@ the profile declares (so it never imports ``mngr_vps``, which depends on ``mngr`
 provider's own test file owns the ``IsolationMode`` parametrization and the settings.toml
 shape, constructing one profile per (provider, isolation) pair.
 
+Future trips (not yet implemented). This module currently ships Trip 1 only. Still owed,
+per ``specs/provider-release-tests.md``: Trip 1b (N agents per host), Trip 2 (idle
+auto-shutdown), Trip 3 (snapshot survives destroy), Trip 4 (error classification), AND a
+dedicated **offline host_dir** trip -- create with ``is_offline_host_dir_enabled=True``, write
+a file into the host_dir, take the host offline (``stop --stop-host``), and assert that file is
+readable *through the offline host_dir mirror* (the state bucket / metadata), not by reaching
+the live host. Trip 1's ``stop-host`` -> ``start`` path already reads the offline host *record*
+incidentally (that is what surfaced the Azure operator blob-RBAC gap), but nothing yet verifies
+an offline host_dir *file* read end to end, which is the actual user-visible promise of the
+offline-host_dir feature.
+
 These tests are not run in CI (release-marked) and cost real money; run a provider's test
 manually with credentials present, e.g.::
 
@@ -239,8 +250,10 @@ def run_provider_release_trip1(
             "99999",
             timeout=_CREATE_TIMEOUT_SECONDS,
         )
+        # returncode is the authoritative cross-provider success signal; the human-readable
+        # wording of a successful create differs by provider (e.g. Modal does not print
+        # "successfully"), so don't assert on it.
         assert create.returncode == 0, f"create failed:\n{create.stdout}"
-        assert "successfully" in create.stdout.lower(), f"unexpected create output:\n{create.stdout}"
 
         # 2. The cloud resource exists and is discoverable by name (proves tagging / identity).
         handle = profile.find_launched_host_handle(host_name)
