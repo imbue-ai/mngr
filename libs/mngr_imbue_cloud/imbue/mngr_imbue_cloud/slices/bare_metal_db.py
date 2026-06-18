@@ -55,6 +55,13 @@ _SELECT_SLICE_INSTANCE_NAMES_SQL: Final[str] = (
     "WHERE bare_metal_server_id = %s AND backend_kind = 'slice' AND lima_instance_name IS NOT NULL"
 )
 
+# Sibling of the instance-name query, for reconciling the box's lima data disks
+# against the DB and reaping orphan disks (disks with no row).
+_SELECT_SLICE_DISK_NAMES_SQL: Final[str] = (
+    "SELECT lima_disk_name FROM pool_hosts "
+    "WHERE bare_metal_server_id = %s AND backend_kind = 'slice' AND lima_disk_name IS NOT NULL"
+)
+
 
 @pure
 def build_bare_metal_server_insert_values(server: BareMetalServer) -> tuple[Any, ...]:
@@ -203,6 +210,13 @@ def fetch_slice_instance_names_for_server(conn: Any, server_id: BareMetalServerD
     """Return the lima_instance_name of every slice pool_hosts row for ``server_id`` (any status)."""
     with conn.cursor() as cur:
         cur.execute(_SELECT_SLICE_INSTANCE_NAMES_SQL, (str(server_id),))
+        return {row[0] for row in cur.fetchall() if row[0]}
+
+
+def fetch_slice_disk_names_for_server(conn: Any, server_id: BareMetalServerDbId) -> set[str]:
+    """Return the lima_disk_name of every slice pool_hosts row for ``server_id`` (any status)."""
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_SLICE_DISK_NAMES_SQL, (str(server_id),))
         return {row[0] for row in cur.fetchall() if row[0]}
 
 

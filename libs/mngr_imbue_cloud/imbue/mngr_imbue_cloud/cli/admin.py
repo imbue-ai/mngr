@@ -500,6 +500,16 @@ def _create_single_pool_host(
     ),
 )
 @click.option(
+    "--server-id",
+    "server_id",
+    default=None,
+    help=(
+        "[slice only, required] The bare_metal_servers row id to bake the slices onto (from "
+        "`admin server list`). Slice baking targets an explicitly-chosen, ready box -- it never "
+        "auto-selects one."
+    ),
+)
+@click.option(
     "--dry-run",
     "is_dry_run",
     is_flag=True,
@@ -543,6 +553,7 @@ def pool_create(
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    server_id: str | None,
     is_dry_run: bool,
     max_concurrency: int,
     is_deferred_install_wait_skipped: bool,
@@ -569,9 +580,17 @@ def pool_create(
             )
         if not is_recycle_enabled:
             fail_with_json("--no-recycle is not applicable to --backend slice", error_class="UsageError")
+        if not server_id:
+            fail_with_json(
+                "--server-id is required for --backend slice (the bare-metal box to bake onto; "
+                "see `mngr imbue_cloud admin server list`)",
+                error_class="UsageError",
+            )
     elif backend == "ovh_vps":
         if is_dry_run:
             fail_with_json("--dry-run is only supported for --backend slice", error_class="UsageError")
+        if server_id is not None:
+            fail_with_json("--server-id is only supported for --backend slice", error_class="UsageError")
         if not management_public_key_file:
             fail_with_json("--management-public-key-file is required for --backend ovh_vps", error_class="UsageError")
         # Validate ``--tag`` shapes up front so we don't bake the first host and
@@ -596,8 +615,11 @@ def pool_create(
         ) as bake_source:
             attributes = merge_bake_identity_attributes(parsed_attributes, bake_source)
             if backend == "slice":
+                # ``server_id`` presence is enforced above for the slice backend.
+                assert server_id is not None
                 allocate_slices(
                     count=count,
+                    server_id=server_id,
                     lease_attributes=attributes,
                     region=region,
                     workspace_dir=bake_source.workspace_dir,

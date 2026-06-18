@@ -129,6 +129,7 @@ def build_create_admin_args(
     is_recycle_enabled: bool,
     is_dry_run: bool,
     is_deferred_install_wait_skipped: bool,
+    server_id: str | None = None,
     max_concurrency: int | None = None,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
@@ -153,8 +154,9 @@ def build_create_admin_args(
     activated minds env's ``secrets.toml`` (which the deploy wrote).
 
     ``--no-recycle`` (when ``is_recycle_enabled`` is False) is ovh_vps-only;
-    ``--dry-run`` (when ``is_dry_run`` is True) and ``--max-concurrency`` (when
-    non-None) are slice-only; both are forwarded only when set.
+    ``--server-id`` (the explicitly-chosen bare-metal box), ``--dry-run`` (when
+    ``is_dry_run`` is True), and ``--max-concurrency`` (when non-None) are
+    slice-only; each is forwarded only when set.
     """
     args = [
         "create",
@@ -185,6 +187,8 @@ def build_create_admin_args(
         args.extend(["--mngr-source", mngr_source])
     if backend == _BACKEND_OVH_VPS and not is_recycle_enabled:
         args.append("--no-recycle")
+    if backend == _BACKEND_SLICE and server_id is not None:
+        args.extend(["--server-id", server_id])
     if backend == _BACKEND_SLICE and is_dry_run:
         args.append("--dry-run")
     if backend == _BACKEND_SLICE and max_concurrency is not None:
@@ -574,6 +578,7 @@ def _run_slice_pool_create(
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    server_id: str | None,
     is_dry_run: bool,
     is_deferred_install_wait_skipped: bool,
     max_concurrency: int | None,
@@ -582,8 +587,8 @@ def _run_slice_pool_create(
 
     Rejects the ovh_vps-only flags up front (clearer than silently dropping them):
     slices authorize the pool key from the tier's Vault entry at carve time and
-    never recycle an OVH VPS. The slice backend picks the ready bare-metal box with
-    the most free slots (see ``mngr imbue_cloud admin server``).
+    never recycle an OVH VPS. Slice baking targets the explicitly-chosen
+    ``--server-id`` bare-metal box (see ``mngr imbue_cloud admin server list``).
     """
     if management_public_key_file is not None:
         raise click.UsageError(
@@ -592,6 +597,11 @@ def _run_slice_pool_create(
         )
     if not is_recycle_enabled:
         raise click.UsageError("--no-recycle is not applicable to --backend slice")
+    if not server_id:
+        raise click.UsageError(
+            "--server-id is required for --backend slice (the bare-metal box to bake onto; "
+            "see `mngr imbue_cloud admin server list`)"
+        )
     try:
         pool_private_key = read_pool_private_key_from_vault(env_name)
     except VaultReadError as exc:
@@ -612,6 +622,7 @@ def _run_slice_pool_create(
         database_url=database_url,
         mngr_source=mngr_source,
         is_recycle_enabled=is_recycle_enabled,
+        server_id=server_id,
         is_dry_run=is_dry_run,
         is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
         max_concurrency=max_concurrency,
@@ -721,6 +732,15 @@ def pool() -> None:
     ),
 )
 @click.option(
+    "--server-id",
+    "server_id",
+    default=None,
+    help=(
+        "[slice only, required] The bare_metal_servers row id to bake the slices onto (from "
+        "`mngr imbue_cloud admin server list`). Slice baking targets an explicitly-chosen, ready box."
+    ),
+)
+@click.option(
     "--dry-run",
     "is_dry_run",
     is_flag=True,
@@ -761,6 +781,7 @@ def pool_create(
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    server_id: str | None,
     is_dry_run: bool,
     max_concurrency: int | None,
     is_deferred_install_wait_skipped: bool,
@@ -780,6 +801,8 @@ def pool_create(
         raise click.UsageError("--dry-run is only supported for --backend slice")
     if backend == _BACKEND_OVH_VPS and max_concurrency is not None:
         raise click.UsageError("--max-concurrency is only supported for --backend slice")
+    if backend == _BACKEND_OVH_VPS and server_id is not None:
+        raise click.UsageError("--server-id is only supported for --backend slice")
     effective_database_url = resolve_host_pool_dsn(env_name, database_url)
     if backend == _BACKEND_SLICE:
         _run_slice_pool_create(
@@ -795,6 +818,7 @@ def pool_create(
             database_url=effective_database_url,
             mngr_source=mngr_source,
             is_recycle_enabled=is_recycle_enabled,
+            server_id=server_id,
             is_dry_run=is_dry_run,
             is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
             max_concurrency=max_concurrency,
