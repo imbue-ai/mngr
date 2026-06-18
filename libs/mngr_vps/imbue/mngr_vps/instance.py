@@ -2299,7 +2299,9 @@ class VpsProvider(BaseProviderInstance):
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
-            return host_store.list_persisted_agent_data()
+            records = host_store.list_persisted_agent_data()
+        logger.debug("Read {} persisted agent record(s) for host {}", len(records), host_id)
+        return records
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         host_record = self._find_host_record(host_id)
