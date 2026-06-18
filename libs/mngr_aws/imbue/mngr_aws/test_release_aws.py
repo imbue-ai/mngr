@@ -790,9 +790,9 @@ class _AwsReleaseProfile(VpsCloudReleaseProfile):
     provider_name = "aws"
     name_prefix = AWS_TEST_NAME_PREFIX
 
-    # Trip 4: AWS does not yet curate the missing-credential help text -- it falls through to the
-    # generic "start Docker" guidance rather than pointing at ``aws configure`` (spec divergence).
-    has_curated_unavailable_help = False
+    # Trip 4: AWS curates the missing-credential help text toward `aws configure` (the spec's
+    # divergence was fixed in this PR -- see `_aws_unavailable_error` in mngr_aws/backend.py).
+    has_curated_unavailable_help = True
     credential_setup_command = "aws configure"
 
     def __init__(self, client: AwsVpsClient, isolation: IsolationMode) -> None:

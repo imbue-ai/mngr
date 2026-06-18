@@ -362,6 +362,23 @@ class AwsProvider(OfflineCapableVpsProvider):
         return instance.get("state") in _HOST_DOWN_STATES
 
 
+def _aws_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
+    """Build a ``ProviderUnavailableError`` with AWS-specific, actionable help text.
+
+    The generic ``ProviderUnavailableError`` help text tells the user to "start Docker", which is
+    wrong advice for an AWS credential failure -- so we curate the guidance toward resolving the
+    boto3 credential chain.
+    """
+    help_text = (
+        "AWS could not be reached. Check, in order:\n"
+        "  - credentials: run `aws configure` (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, "
+        "or AWS_PROFILE);\n"
+        "  - one-time setup: run `mngr aws prepare` if you have not yet.\n"
+        f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
+    )
+    return ProviderUnavailableError(name, reason, user_help_text=help_text)
+
+
 class AwsProviderBackend(ProviderBackendInterface):
     """Backend for creating AWS EC2 VPS Docker provider instances."""
 
@@ -428,7 +445,7 @@ class AwsProviderBackend(ProviderBackendInterface):
         try:
             session = config.get_session()
         except (ValueError, BotoCoreError) as e:
-            raise ProviderUnavailableError(name, str(e)) from e
+            raise _aws_unavailable_error(name, str(e)) from e
 
         aws_client = AwsVpsClient(
             session=session,

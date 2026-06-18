@@ -157,13 +157,12 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
     # no resumable stopped state, so Trip 2 asserts the termination only and skips the resume.
     resumes_after_auto_shutdown = False
 
-    # Trip 4 (error classification). On the `mngr create` path Modal's bootstrap surfaces a plain
-    # ``MngrError`` ("Modal is not authorized") -- NOT the contract ``ProviderUnavailableError``
-    # (spec divergence), so ``raises_contract_unavailable_error`` is False. That message *does*
-    # point at the provider-correct ``uvx modal token set``, so the help-text check passes. Modal
-    # has its own build-arg parser (no shared ``--vps-*`` migration check), so that scenario is
-    # skipped.
-    raises_contract_unavailable_error = False
+    # Trip 4 (error classification). On the `mngr create` path Modal's bootstrap now raises the
+    # contract ``ProviderUnavailableError`` (the spec's wrong-error-class divergence was fixed in
+    # this PR -- see mngr_modal/backend.py), with curated help pointing at ``uvx modal token set``.
+    # Modal has its own build-arg parser (no shared ``--vps-*`` migration check), so that scenario
+    # is skipped.
+    raises_contract_unavailable_error = True
     has_curated_unavailable_help = True
     supports_vps_migration_arg_check = False
     credential_setup_command = "uvx modal token set"

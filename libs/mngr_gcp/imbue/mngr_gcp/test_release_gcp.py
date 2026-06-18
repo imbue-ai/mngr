@@ -453,10 +453,9 @@ class _GcpReleaseProfile(VpsCloudReleaseProfile):
     provider_name = "gcp"
     name_prefix = GCP_TEST_NAME_PREFIX
 
-    # Trip 4: GCP does not yet curate the missing-credential help text -- it falls through to the
-    # generic "start Docker" guidance rather than pointing at the ADC login command (spec
-    # divergence).
-    has_curated_unavailable_help = False
+    # Trip 4: GCP curates the missing-credential help text toward the ADC login command (the
+    # spec's divergence was fixed in this PR -- see `_gcp_unavailable_error` in mngr_gcp/backend.py).
+    has_curated_unavailable_help = True
     credential_setup_command = "gcloud auth application-default login"
 
     def __init__(self, client: GcpVpsClient, isolation: IsolationMode, project: str) -> None:
