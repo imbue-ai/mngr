@@ -19,3 +19,5 @@ Began the light/dark design-token system, starting with text colors:
 - The dev styleguide (`/_dev/styleguide`) gains a light/dark toggle (persisted in `localStorage`, honored app-wide via a pre-paint script in `Base.jinja`) and a "Text color tokens" section showing both modes side by side.
 
 - Migrated the on-light text call sites off the raw zinc ramp to these tokens (`text-zinc-900/800/700` → `text-primary`, `-600/-500` → `text-secondary`, `-400` → `text-tertiary`) across templates, vanilla JS, and the shared button/input class constants. On-dark / inverse text (e.g. log boxes, the primary button label) is intentionally left until the chrome and button stages.
+
+Added themeable border tokens (next design-system category): `border-subtle` / `border-default` / `border-strong` (Figma's 10% / 16% / 25% alpha), pure black in light and pure white in dark. Stood up in the styleguide (both modes); call-site migration off the raw zinc borders follows.

@@ -56,6 +56,10 @@
   --c-inverse-primary: #ffffff;
   --c-inverse-secondary: rgb(255 255 255 / 0.70);
   --c-inverse-tertiary: rgb(255 255 255 / 0.50);
+  /* borders -- black at three alpha steps in light mode (Figma 10/16/25%) */
+  --c-border-subtle: rgb(0 0 0 / 0.10);
+  --c-border-default: rgb(0 0 0 / 0.16);
+  --c-border-strong: rgb(0 0 0 / 0.25);
 }
 .dark {
   /* regular text -- white in dark mode */
@@ -66,6 +70,10 @@
   --c-inverse-primary: #000000;
   --c-inverse-secondary: rgb(0 0 0 / 0.65);
   --c-inverse-tertiary: rgb(0 0 0 / 0.45);
+  /* borders -- white at the same alpha steps in dark mode */
+  --c-border-subtle: rgb(255 255 255 / 0.10);
+  --c-border-default: rgb(255 255 255 / 0.16);
+  --c-border-strong: rgb(255 255 255 / 0.25);
 }
 @theme inline {
   --color-primary: var(--c-primary);
@@ -74,6 +82,10 @@
   --color-inverse-primary: var(--c-inverse-primary);
   --color-inverse-secondary: var(--c-inverse-secondary);
   --color-inverse-tertiary: var(--c-inverse-tertiary);
+  /* borders: utilities border-subtle / border-default / border-strong */
+  --color-subtle: var(--c-border-subtle);
+  --color-default: var(--c-border-default);
+  --color-strong: var(--c-border-strong);
 }
 
 /*
