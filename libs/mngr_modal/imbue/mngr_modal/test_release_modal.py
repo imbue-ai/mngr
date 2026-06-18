@@ -258,6 +258,7 @@ def _modal_release_alignment(
 
 
 @pytest.mark.release
+@pytest.mark.modal
 @pytest.mark.timeout(1200)
 @pytest.mark.skipif(
     not (_modal_credentials_available() and MODAL_RELEASE_TESTS_OPT_IN),
