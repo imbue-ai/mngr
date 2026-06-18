@@ -371,7 +371,11 @@ def test_discover_surfaces_stopped_instance_but_offline_read_raises_without_buck
 
 
 def test_offline_discovered_host_from_instance_yields_stopped_host(temp_mngr_ctx: MngrContext) -> None:
-    """A stopped instance with ``mngr-host-id`` + ``Name`` tags yields a STOPPED DiscoveredHost with that name."""
+    """A stopped instance with ``mngr-host-id`` + ``Name`` tags yields a STOPPED DiscoveredHost with that name.
+
+    Exercises the shared ``OfflineCapableVpsProvider._offline_discovered_host_from_instance``
+    default through AWS's ``_host_name_tag_key()`` hook (``Name``).
+    """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     instance = _normalized_instance({"mngr-host-id": str(host_id), "Name": "mngr-myhost"})

@@ -37,10 +37,12 @@ from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
 from imbue.mngr_vps.host_state_store import StateBucket
+from imbue.mngr_vps.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import attempt_cloud_resource_teardown
@@ -400,6 +402,32 @@ class OfflineCapableVpsProvider(VpsProvider):
         """Start the cloud instance and return its SSH address (a fresh IP, or the static one)."""
         ...
 
+    def _add_known_hosts_for_ip(
+        self, ip: str, *, vps_public_key: str | None, container_public_key: str | None
+    ) -> None:
+        """Add ``ip`` to the VPS (port 22) and container known_hosts with the given host keys.
+
+        The shared add half of the resume known_hosts rebind: each endpoint is added
+        only when its public key is present, so a caller with a key from one side
+        only (e.g. a record missing the container key) skips the absent one. Both
+        rebind paths -- ``_rebind_known_hosts`` (record-sourced keys) and
+        ``_rebind_known_hosts_pre_connect`` (locally-held keys) -- go through here.
+        """
+        if vps_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._vps_known_hosts_path(),
+                hostname=ip,
+                port=22,
+                public_key=vps_public_key,
+            )
+        if container_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._container_known_hosts_path(),
+                hostname=ip,
+                port=self.config.container_ssh_port,
+                public_key=container_public_key,
+            )
+
     def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
         """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
 
@@ -412,20 +440,11 @@ class OfflineCapableVpsProvider(VpsProvider):
         if old_ip is not None and old_ip != new_ip:
             remove_host_from_known_hosts(self._vps_known_hosts_path(), old_ip, 22)
             remove_host_from_known_hosts(self._container_known_hosts_path(), old_ip, self.config.container_ssh_port)
-        if record.ssh_host_public_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path=self._vps_known_hosts_path(),
-                hostname=new_ip,
-                port=22,
-                public_key=record.ssh_host_public_key,
-            )
-        if record.container_ssh_host_public_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path=self._container_known_hosts_path(),
-                hostname=new_ip,
-                port=self.config.container_ssh_port,
-                public_key=record.container_ssh_host_public_key,
-            )
+        self._add_known_hosts_for_ip(
+            new_ip,
+            vps_public_key=record.ssh_host_public_key,
+            container_public_key=record.container_ssh_host_public_key,
+        )
 
     def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
         """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
@@ -439,17 +458,10 @@ class OfflineCapableVpsProvider(VpsProvider):
         data mngr controls. Providers whose IP is stable across a pause override
         this to a no-op.
         """
-        add_host_to_known_hosts(
-            known_hosts_path=self._vps_known_hosts_path(),
-            hostname=new_ip,
-            port=22,
-            public_key=self._get_vps_host_keypair()[1],
-        )
-        add_host_to_known_hosts(
-            known_hosts_path=self._container_known_hosts_path(),
-            hostname=new_ip,
-            port=self.config.container_ssh_port,
-            public_key=self._get_container_host_keypair()[1],
+        self._add_known_hosts_for_ip(
+            new_ip,
+            vps_public_key=self._get_vps_host_keypair()[1],
+            container_public_key=self._get_container_host_keypair()[1],
         )
 
     def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
@@ -697,6 +709,36 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         return NullHostDirBackend()
 
+    def _select_bucket_store(
+        self, bucket: StateBucket | None, *, store_label: str, prepare_command: str
+    ) -> HostStateStore:
+        """Build the ``BucketHostStateStore`` for ``bucket``, or raise when it is absent.
+
+        Shared by the object-storage providers (AWS S3, Azure Blob): their
+        ``_state_store`` cached property resolves its own bucket type and delegates
+        here. The bucket is required -- when ``None`` (not yet provisioned), this
+        raises the actionable ``missing_state_bucket_error`` pointing at
+        ``prepare_command`` -- so every persist / remove / list / read fails loudly
+        and uniformly. ``store_label`` names the store in errors (e.g. "S3 state
+        bucket"). GCP overrides ``_state_store`` with its metadata store and never
+        calls this.
+        """
+        if bucket is None:
+            raise missing_state_bucket_error(store_label, prepare_command)
+        return BucketHostStateStore(bucket=bucket, bucket_label=store_label)
+
+    def _select_bucket_host_dir_backend(self, bucket: StateBucket | None, *, enabled: bool) -> HostDirBackend:
+        """Select the offline ``host_dir`` backend once: bucket-backed when enabled + present, else no-op.
+
+        Shared by the object-storage providers: the only place the feature flag and
+        bucket presence are tested together, so every host_dir call site dispatches
+        through the selected backend instead of re-deriving the condition. ``enabled``
+        is the provider config's ``is_offline_host_dir_enabled``.
+        """
+        if enabled and bucket is not None:
+            return BucketHostDirBackend(provider=self, bucket=bucket)
+        return NullHostDirBackend()
+
     def _capture_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
         """Capture host_dir to the bucket before the instance pauses (operator-driven).
 
@@ -799,18 +841,39 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         _ = self._state_store
 
-    @abstractmethod
+    def _host_name_tag_key(self) -> str:
+        """The instance tag/label key holding the host name (as ``mngr-<host_name>``).
+
+        Default is ``Name`` (the AWS EC2 ``Name`` tag); Azure overrides it with its
+        own host-name tag key. Read by the shared
+        ``_offline_discovered_host_from_instance`` to label a STOPPED host. GCP
+        overrides ``_offline_discovered_host_from_instance`` itself (its identity is
+        metadata-encoded), so this hook is unused there.
+        """
+        return "Name"
+
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED ``DiscoveredHost`` from an instance's identity tags/labels/metadata.
 
-        Returns ``None`` when the instance is not a mngr host. Raises ``ValueError``
-        when the instance carries a mngr host identity that is malformed (a
-        corrupt/externally-edited host-id or name). Reads only the cheap cached
-        listing (host id + name), never the state store, so a discovery sweep stays
-        cheap; the full record is reconstructed from the store only on demand
-        (``to_offline_host``).
+        The shared default reads the cheap ``mngr-*`` identity tags a stopped
+        instance still carries (host id + the ``_host_name_tag_key()`` name tag) from
+        the normalized tag list -- never the state store -- so a discovery sweep
+        stays cheap; the full record is reconstructed from the store only on demand
+        (``to_offline_host``). Returns ``None`` when the instance is not a mngr host.
+        Raises ``ValueError`` when the instance carries a mngr host identity that is
+        malformed (a corrupt/externally-edited host-id or name). GCP overrides this
+        to read its metadata-encoded identity instead.
         """
-        ...
+        tags = normalized_tags_to_dict(instance)
+        host_id_str = tags.get("mngr-host-id")
+        if host_id_str is None:
+            return None
+        return DiscoveredHost(
+            host_id=HostId(host_id_str),
+            host_name=host_name_from_tags(tags, self._host_name_tag_key()),
+            provider_name=self.name,
+            host_state=HostState.STOPPED,
+        )
 
     @abstractmethod
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
@@ -882,8 +945,9 @@ class OfflineCapableVpsProvider(VpsProvider):
         that via ``super()``. That write is best-effort: a *stopped* host raises
         ``HostNotFoundError`` (no reachable ``vps_ip``), in which case only the
         offline mirror is written, so e.g. an offline ``mngr label`` still updates
-        the record a stopped host lists from. ``_mirror_agent_record`` is the only
-        per-provider step (instance tags/metadata, or an external store).
+        the record a stopped host lists from. ``_mirror_agent_record`` writes the
+        agent record to the provider's external ``_state_store`` (an object-storage
+        bucket for AWS/Azure, instance metadata for GCP).
         """
         try:
             super().persist_agent_data(host_id, agent_data)
@@ -1008,8 +1072,8 @@ class OfflineCapableVpsProvider(VpsProvider):
 
         For a running host the SSH/volume-backed base reads the authoritative
         on-volume records; for a stopped host it raises ``HostNotFoundError`` and
-        we fall back to the offline source (instance tags/metadata, or an external
-        store for providers that have one).
+        we fall back to the offline source: the provider's external ``_state_store``
+        (an object-storage bucket for AWS/Azure, instance metadata for GCP).
         """
         try:
             return super().list_persisted_agent_data_for_host(host_id)

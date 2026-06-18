@@ -65,3 +65,5 @@ now carry a `mngr-isolation` tag stamped at create (alongside `mngr-host-id` /
 `mngr-provider`), so discovery reads the host's placement from the cloud API
 without SSH and probes it with the matching realizer. Pre-existing hosts have no
 tag and default to container, preserving prior behavior.
+
+Behavior-preserving dedup against the shared offline layer. The Azure `_state_store` / `_host_dir_backend` cached properties are now thin wrappers over the shared `OfflineCapableVpsProvider._select_bucket_store` / `_select_bucket_host_dir_backend` (supplying only the resolved Blob bucket, its label, and `mngr azure prepare`). The near-identical `_offline_discovered_host_from_instance` is dropped in favor of the shared default; Azure now sets only the `mngr-host-name` host-name tag key via the new `_host_name_tag_key()` hook. No user-visible behavior change.
