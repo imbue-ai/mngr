@@ -275,6 +275,28 @@ def test_build_create_admin_args_slice_forwards_dry_run() -> None:
     assert "--dry-run" in args
 
 
+def test_build_create_admin_args_slice_forwards_server_id() -> None:
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_SLICE,
+        count=1,
+        region="US-WEST-OR",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+        server_id="feb11eae-a20a-4d9e-a0a3-ce06a526956c",
+    )
+    assert args[args.index("--server-id") + 1] == "feb11eae-a20a-4d9e-a0a3-ce06a526956c"
+
+
 def test_build_create_admin_args_omits_dry_run_for_ovh_backend() -> None:
     """--dry-run is slice-only; the ovh_vps path must never forward it."""
     args = build_create_admin_args(

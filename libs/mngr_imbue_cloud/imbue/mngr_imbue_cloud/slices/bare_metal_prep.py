@@ -101,7 +101,17 @@ sudo -u {lima_service_user} bash -lc 'command -v uv >/dev/null 2>&1 || curl -fsS
 #    user that limactl reads it as. Referenced via file:// so VM boots never hit the
 #    Debian mirror. To re-stage with a new customization, delete the image and re-run.
 img={base_image_path}
-install -d -m 755 -o {lima_service_user} -g {lima_service_user} "$(dirname "$img")"
+# Create the image dir AND its parent (the user's ~/.cache) owned by the lima user.
+# This script runs as root, so a freshly-created ~/.cache would be root-owned --
+# which blocks `limactl` (run as the lima user) from creating ~/.cache/lima and fails
+# every VM start. `install -d` only sets ownership on the leaf it's given, so create
+# the whole chain and chown it (chown also repairs a ~/.cache left root-owned by an
+# earlier prep run, since mkdir -p won't change an existing dir's ownership).
+image_dir="$(dirname "$img")"
+cache_dir="$(dirname "$image_dir")"
+mkdir -p "$image_dir"
+chown {lima_service_user}:{lima_service_user} "$cache_dir" "$image_dir"
+chmod 755 "$cache_dir" "$image_dir"
 if [ ! -f "$img" ]; then
     curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors --retry-connrefused -o "$img.tmp" {slice_base_image_url}
     qemu-img info "$img.tmp" >/dev/null
