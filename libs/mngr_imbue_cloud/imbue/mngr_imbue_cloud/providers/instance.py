@@ -123,6 +123,7 @@ from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provide
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
+from imbue.mngr_vps_docker.container_setup import docker_inspect_running
 from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
@@ -921,14 +922,47 @@ class ImbueCloudProvider(BaseProviderInstance):
     def get_host(
         self,
         host: HostId | HostName,
-    ) -> Host:
-        leased = self._list_leased_hosts_cached()
-        for entry in leased:
-            if isinstance(host, HostId) and entry.host_id == str(host):
-                return self._build_host_object(entry)
-            if isinstance(host, HostName) and entry.host_name == str(host):
-                return self._build_host_object(entry)
+    ) -> HostInterface:
+        """Resolve a leased host, returning an offline host when its container is stopped.
+
+        Mirrors ``VpsDockerProvider.get_host``: a leased host whose inner
+        container is stopped must surface as an ``OfflineHost`` so that
+        ``ensure_host_started`` routes ``mngr start`` through ``start_host``
+        (which re-bootstraps the container's SSH). Returning an online ``Host``
+        unconditionally -- as this did before -- makes the start command skip
+        ``start_host`` and SSH straight into the dead container, leaving a
+        stopped leased mind unrecoverable.
+        """
+        for entry in self._list_leased_hosts_cached():
+            is_match = (isinstance(host, HostId) and entry.host_id == str(host)) or (
+                isinstance(host, HostName) and entry.host_name == str(host)
+            )
+            if is_match:
+                host_id = HostId(entry.host_id)
+                if self._is_container_running(host_id):
+                    return self._build_host_object(entry)
+                return self.to_offline_host(host_id)
         raise HostNotFoundError(self.name, host)
+
+    def _is_container_running(self, host_id: HostId) -> bool:
+        """Return True iff the leased container is running on its outer VPS.
+
+        Probed over the outer root SSH, which works independently of the
+        container's own sshd. When the per-host key is not on this machine
+        (e.g. the host was leased elsewhere), the outer cannot be opened, so we
+        cannot prove the container is down and report it as running -- preserving
+        the prior always-online behavior for that path. A container that no
+        longer exists (lease torn down out from under us) reports as not running.
+        """
+        private_key_path, _ = self._host_keypair_paths(host_id)
+        if not private_key_path.exists():
+            return True
+        with self.outer_host_for(host_id) as outer:
+            assert outer is not None
+            container_id = self._resolve_container_id_on_outer(outer, host_id)
+            if container_id is None:
+                return False
+            return docker_inspect_running(outer, container_id)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Build an OfflineHost from the connector's lease metadata.
@@ -1889,9 +1923,15 @@ class ImbueCloudProvider(BaseProviderInstance):
         self,
         host: HostInterface | HostId,
     ) -> Any:
+        # Build the online host object directly from the lease rather than via
+        # get_host: the connector is needed regardless of the container's
+        # running state, and get_host now returns an OfflineHost (which has no
+        # connector) for a stopped container.
         host_id = host.id if isinstance(host, HostInterface) else host
-        host_obj = self.get_host(host_id)
-        return host_obj.connector.host
+        leased = self._find_leased(host_id)
+        if leased is None:
+            raise HostNotFoundError(self.name, host_id)
+        return self._build_host_object(leased).connector.host
 
 
 def _rm_tree(path: Path) -> None:
