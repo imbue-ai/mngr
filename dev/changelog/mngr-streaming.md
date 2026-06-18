@@ -1,0 +1,1 @@
+Updated the agent-capability-doc generator's test (`scripts/make_agent_capabilities_doc_test.py`) for the live-output mixin unification: its TUI-snapshot fixture now inherits `SupportsLiveOutputMixin` directly, since the `HasStreamingSnapshotMixin` it used was removed when the TUI snapshot and headless streaming surfaces were unified onto one `live_output` capability.
