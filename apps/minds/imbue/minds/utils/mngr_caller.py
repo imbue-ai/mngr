@@ -24,11 +24,13 @@ inherit the dynamic ``sys.path`` additions that pytest makes for test modules.
 """
 
 import contextlib
+import functools
 import io
 import os
 import sys
 import threading
 import traceback
+import urllib.request
 from collections.abc import Mapping
 from collections.abc import Sequence
 from multiprocessing.connection import Connection
@@ -61,6 +63,72 @@ _TERMINATE_JOIN_SECONDS: Final[float] = 5.0
 
 # Sentinel returncode used when a call is terminated for exceeding its timeout.
 _TIMEOUT_RETURNCODE: Final[int] = -1
+
+
+# Parent-resolved macOS proxy state handed to each child: the
+# ``urllib.request._get_proxies()`` result (scheme -> proxy URL) and the
+# ``urllib.request._get_proxy_settings()`` result (the raw settings dict
+# ``proxy_bypass`` consumes). ``None`` off macOS, where neither is fork-unsafe.
+_MacosProxyState = tuple[dict[str, str], dict[str, object]] | None
+
+
+@functools.cache
+def _resolve_macos_proxy_state() -> _MacosProxyState:
+    """Resolve macOS system-proxy state in the (fork-safe) parent process.
+
+    On macOS, ``urllib.request`` reaches the system proxy configuration through
+    two ``_scproxy`` C functions -- ``_get_proxies()`` (used by
+    ``getproxies()``/``getproxies_macosx_sysconf()``) and ``_get_proxy_settings()``
+    (used by ``proxy_bypass()``/``proxy_bypass_macosx_sysconf()``). Both call into
+    SystemConfiguration -> CoreFoundation -> libdispatch, which is NOT fork-safe:
+    invoking either from a forkserver child (forked without a following ``exec``)
+    segfaults (SIGSEGV via ``dispatch_apply``) before the child can return its
+    result -- exactly how the ``mngr message`` permission nudge was silently
+    dropped on macOS, because ``mngr`` startup makes an HTTP request whose client
+    calls ``proxy_bypass()``.
+
+    We therefore resolve both values HERE, in the long-lived parent process, which
+    was started via ``exec`` (not forked without exec) and so can call into
+    SystemConfiguration safely. (Doing so does not poison the forkserver: it is a
+    separate long-lived process, started before the first call, and CF state in
+    this parent does not propagate to it.) The result is handed to each child via
+    :func:`_neutralize_macos_proxy_lookup` so the child never probes the OS.
+
+    Cached because proxy configuration is effectively static for a process's
+    lifetime and each lookup is a SystemConfiguration syscall. Returns ``None``
+    off macOS, where these ``_scproxy`` functions do not exist and the proxy
+    lookup is already fork-safe.
+    """
+    if sys.platform != "darwin":
+        return None
+    # ``_get_proxies`` / ``_get_proxy_settings`` are darwin-only ``_scproxy``
+    # bindings that typeshed does not model.
+    proxies = urllib.request._get_proxies()  # ty: ignore[unresolved-attribute]
+    settings = urllib.request._get_proxy_settings()  # ty: ignore[unresolved-attribute]
+    return (dict(proxies), dict(settings))
+
+
+def _neutralize_macos_proxy_lookup(proxy_state: _MacosProxyState) -> None:
+    """Replace the fork-unsafe ``_scproxy`` calls with parent-resolved values.
+
+    Runs inside the throwaway forkserver child before the ``mngr`` CLI starts. It
+    overwrites ``urllib.request._get_proxies`` and
+    ``urllib.request._get_proxy_settings`` -- the two ``_scproxy`` C entry points
+    that segfault a forked-without-exec child -- with constant functions returning
+    the values the parent already resolved (see :func:`_resolve_macos_proxy_state`).
+    Every higher-level path (``getproxies()``, ``proxy_bypass()``) then keeps its
+    exact semantics (environment variables still take precedence) without ever
+    calling into SystemConfiguration.
+
+    Mutating module state like this in the long-lived backend would be
+    unacceptable, but this child is discarded after the single call. A no-op off
+    macOS (``proxy_state is None``).
+    """
+    if proxy_state is None:
+        return
+    proxies, settings = proxy_state
+    urllib.request._get_proxies = lambda: dict(proxies)  # ty: ignore[unresolved-attribute]
+    urllib.request._get_proxy_settings = lambda: dict(settings)  # ty: ignore[unresolved-attribute]
 
 
 class MngrCallResult(MutableModel):
@@ -97,6 +165,7 @@ def _run_mngr_cli_in_child(
     conn: Connection,
     argv: tuple[str, ...],
     env_overrides: Mapping[str, str],
+    macos_proxy_state: _MacosProxyState,
 ) -> None:
     """Run ``mngr <argv>`` in this forked child and send the result back over ``conn``.
 
@@ -104,10 +173,19 @@ def _run_mngr_cli_in_child(
     here is instant. All of mngr's global-state mutation (loguru, ``sys.argv``,
     stdout/stderr) is confined to this throwaway process, so it never affects
     the minds backend.
+
+    ``macos_proxy_state`` is the parent-resolved macOS system-proxy state;
+    installing it here keeps mngr's startup proxy lookup off the fork-unsafe
+    ``_scproxy`` path that would otherwise segfault this child (see
+    :func:`_neutralize_macos_proxy_lookup`).
     """
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
     returncode = 0
+    # Must run before the CLI starts: mngr's startup hooks make an HTTP request,
+    # whose client probes the system proxy, and on macOS that probe is fork-unsafe
+    # in this forked-without-exec child.
+    _neutralize_macos_proxy_lookup(macos_proxy_state)
     os.environ.update(env_overrides)
     sys.argv = ["mngr", *argv]
     # This inline import is the whole point of the forkserver: importing
@@ -225,7 +303,9 @@ class MngrCaller(MutableModel):
         try:
             child = context.Process(
                 target=_run_mngr_cli_in_child,
-                args=(send_conn, tuple(argv), dict(env_overrides or {})),
+                # ``_resolve_macos_proxy_state`` MUST be evaluated here in the
+                # parent: the same lookup inside the forked child segfaults on macOS.
+                args=(send_conn, tuple(argv), dict(env_overrides or {}), _resolve_macos_proxy_state()),
                 name="mngr-call",
             )
             child.start()

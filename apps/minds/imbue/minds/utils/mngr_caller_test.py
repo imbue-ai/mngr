@@ -1,5 +1,7 @@
 import multiprocessing.forkserver
 import multiprocessing.resource_tracker
+import sys
+import urllib.request
 from collections.abc import Iterator
 
 import pytest
@@ -7,6 +9,8 @@ import pytest
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
+from imbue.minds.utils.mngr_caller import _neutralize_macos_proxy_lookup
+from imbue.minds.utils.mngr_caller import _resolve_macos_proxy_state
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +51,42 @@ def test_call_result_defaults() -> None:
     assert result.stdout == ""
     assert result.stderr == ""
     assert result.is_timed_out is False
+
+
+def test_resolve_macos_proxy_state_matches_platform() -> None:
+    # macOS must resolve a (proxies, settings) pair from _scproxy in the parent;
+    # everywhere else the proxy lookup is already fork-safe, so there is nothing
+    # to resolve and the child neutralization is skipped.
+    state = _resolve_macos_proxy_state()
+    if sys.platform == "darwin":
+        assert state is not None
+        proxies, settings = state
+        assert isinstance(proxies, dict)
+        assert isinstance(settings, dict)
+    else:
+        assert state is None
+
+
+def test_neutralize_macos_proxy_lookup_is_noop_for_none() -> None:
+    # The off-macOS / nothing-to-install path must not raise.
+    _neutralize_macos_proxy_lookup(None)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="exercises the macOS _scproxy neutralization")
+def test_neutralize_macos_proxy_lookup_replaces_scproxy_entry_points() -> None:
+    # After neutralization, the macOS proxy lookups return the injected state and
+    # never call into SystemConfiguration (the call that segfaults a fork child).
+    sentinel_proxies = {"http": "http://proxy.example:8080"}
+    sentinel_settings: dict[str, object] = {"exclude_simple": True}
+    saved_get_proxies = urllib.request._get_proxies  # ty: ignore[unresolved-attribute]
+    saved_get_proxy_settings = urllib.request._get_proxy_settings  # ty: ignore[unresolved-attribute]
+    try:
+        _neutralize_macos_proxy_lookup((sentinel_proxies, sentinel_settings))
+        assert urllib.request.getproxies_macosx_sysconf() == sentinel_proxies  # ty: ignore[unresolved-attribute]
+        assert urllib.request._get_proxy_settings() == sentinel_settings  # ty: ignore[unresolved-attribute]
+    finally:
+        urllib.request._get_proxies = saved_get_proxies  # ty: ignore[unresolved-attribute]
+        urllib.request._get_proxy_settings = saved_get_proxy_settings  # ty: ignore[unresolved-attribute]
 
 
 # These two tests start a real multiprocessing forkserver and preload

@@ -21,11 +21,26 @@ class RecordingMngrCaller(MngrCaller):
     Avoids forking a real forkserver child (which would import the full ``mngr``
     CLI), so tests stay fast and deterministic while still being able to assert
     on the argv the caller was invoked with.
+
+    The default result models a *successful* ``mngr message`` delivery (exit 0
+    with a ``message_sent`` event on stdout) so that
+    :meth:`MngrMessageSender.deliver` reports success and its verify-and-retry
+    loop completes on the first attempt. Tests exercising failure or retry pass
+    explicit results via :attr:`result` / :attr:`results`.
     """
 
     result: MngrCallResult = Field(
-        default_factory=lambda: MngrCallResult(returncode=0),
-        description="Canned result returned by every call.",
+        default_factory=lambda: MngrCallResult(
+            returncode=0, stdout='{"event": "message_sent", "agent": "recorded"}\n'
+        ),
+        description="Result returned for each call once ``results`` is exhausted (or for every call if ``results`` is empty).",
+    )
+    results: tuple[MngrCallResult, ...] = Field(
+        default=(),
+        description=(
+            "Optional per-call results returned in order; calls past the last one fall back to ``result``. "
+            "Lets a test model a call that fails then succeeds on retry."
+        ),
     )
     _calls: list[list[str]] = PrivateAttr(default_factory=list)
     _called_event: threading.Event = PrivateAttr(default_factory=threading.Event)
@@ -36,8 +51,11 @@ class RecordingMngrCaller(MngrCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
     ) -> MngrCallResult:
+        call_index = len(self._calls)
         self._calls.append(list(argv))
         self._called_event.set()
+        if call_index < len(self.results):
+            return self.results[call_index]
         return self.result
 
     @property

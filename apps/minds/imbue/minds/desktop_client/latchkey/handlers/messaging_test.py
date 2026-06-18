@@ -21,26 +21,13 @@ def test_stdout_reports_delivered_ignores_non_json_and_error_events() -> None:
     assert stdout_reports_message_delivered(stdout) is False
 
 
-def test_try_send_builds_message_argv(root_concurrency_group: ConcurrencyGroup) -> None:
-    caller = RecordingMngrCaller()
-    sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
-
-    assert sender.try_send("some-agent", "hello") is True
-    # The text must go through ``-m`` and the target after ``--`` so it is not
-    # parsed as a second agent identifier.
-    assert caller.calls == [["message", "-m", "hello", "--", "some-agent"]]
-
-
-def test_try_send_returns_false_on_nonzero_exit(root_concurrency_group: ConcurrencyGroup) -> None:
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="agent missing"))
-    sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
-
-    assert sender.try_send("missing-agent", "hello") is False
-
-
-def test_send_does_not_raise_on_failure(root_concurrency_group: ConcurrencyGroup) -> None:
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="agent missing"))
-    sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
+def test_send_does_not_raise_when_delivery_never_succeeds(root_concurrency_group: ConcurrencyGroup) -> None:
+    # Exit 0 with no message_sent event => never "delivered"; with a zero retry
+    # budget the background loop makes one attempt, logs, and gives up.
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=""))
+    sender = MngrMessageSender(
+        mngr_caller=caller, concurrency_group=root_concurrency_group, delivery_retry_budget_seconds=0.0
+    )
 
     # Fire-and-forget: dispatching an eventually-failing send must not raise.
     sender.send(AgentId(), "hello")
@@ -48,7 +35,9 @@ def test_send_does_not_raise_on_failure(root_concurrency_group: ConcurrencyGroup
     assert caller.called_event.wait(5.0)
 
 
-def test_send_dispatches_on_concurrency_group_thread(root_concurrency_group: ConcurrencyGroup) -> None:
+def test_send_dispatches_verified_delivery_on_concurrency_group_thread(
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
     caller = RecordingMngrCaller()
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
     agent_id = AgentId()
@@ -57,7 +46,44 @@ def test_send_dispatches_on_concurrency_group_thread(root_concurrency_group: Con
     sender.send(agent_id, "hello")
 
     assert caller.called_event.wait(5.0)
-    assert caller.calls == [["message", "-m", "hello", "--", str(agent_id)]]
+    # send now verifies delivery via the structured (jsonl) output, and the
+    # default recording result reports a successful delivery, so it stops after
+    # one attempt.
+    assert caller.calls == [["message", "--format", "jsonl", "-m", "hello", "--", str(agent_id)]]
+
+
+def test_deliver_with_retries_succeeds_after_transient_failures(
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    delivered = MngrCallResult(returncode=0, stdout='{"event": "message_sent", "agent": "assistant"}\n')
+    # First two calls fail (a crashed child reports exit 1 / no message_sent
+    # event); the third delivers.
+    caller = RecordingMngrCaller(
+        result=delivered,
+        results=(MngrCallResult(returncode=1, stderr="boom"), MngrCallResult(returncode=1, stderr="boom"), delivered),
+    )
+    sender = MngrMessageSender(
+        mngr_caller=caller,
+        concurrency_group=root_concurrency_group,
+        delivery_retry_budget_seconds=5.0,
+        delivery_retry_wait_seconds=0.0,
+    )
+
+    assert sender._deliver_with_retries("assistant", "hello") is True
+    assert len(caller.calls) == 3
+
+
+def test_deliver_with_retries_gives_up_when_budget_exhausted(
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="boom"))
+    sender = MngrMessageSender(
+        mngr_caller=caller, concurrency_group=root_concurrency_group, delivery_retry_budget_seconds=0.0
+    )
+
+    # A zero budget still runs exactly one attempt before giving up.
+    assert sender._deliver_with_retries("assistant", "hello") is False
+    assert len(caller.calls) == 1
 
 
 def test_deliver_uses_jsonl_output_and_reports_delivered(root_concurrency_group: ConcurrencyGroup) -> None:

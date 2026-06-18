@@ -75,6 +75,11 @@ def _wait_for_recorded_mngr_argvs(handler: LatchkeyPermissionGrantHandler, timeo
     return caller.calls
 
 
+def _message_text(argv: list[str]) -> str:
+    """Return the message body passed to ``mngr message`` (the value after ``-m``)."""
+    return argv[argv.index("-m") + 1]
+
+
 def _read_recording(report_path: Path) -> list[dict[str, list[str] | str]]:
     """Parse the JSONL recording emitted by the fake latchkey binary."""
     if not report_path.exists():
@@ -633,7 +638,7 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
     mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
-    assert "denied" in argv[2].lower()
+    assert "denied" in _message_text(argv).lower()
 
 
 def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: Path) -> None:
@@ -768,8 +773,9 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
-    assert "denied" in argv[2].lower()
-    assert "not-in-catalog-scope" in argv[2]
+    message_text = _message_text(argv)
+    assert "denied" in message_text.lower()
+    assert "not-in-catalog-scope" in message_text
 
 
 def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Path) -> None:
