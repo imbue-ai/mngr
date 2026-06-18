@@ -14,7 +14,6 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DiscoveredHost
@@ -24,6 +23,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
@@ -103,6 +103,10 @@ class _ResumeMirrorProvider(OfflineCapableVpsProvider):
         raise _MirrorCalled
 
     # -- abstract hooks not exercised by the resume path under test --------------
+    @property
+    def _state_store(self) -> HostStateStore:
+        raise AssertionError("not exercised by this test")
+
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
         raise AssertionError("not exercised by this test")
 
@@ -113,18 +117,6 @@ class _ResumeMirrorProvider(OfflineCapableVpsProvider):
         raise AssertionError("not exercised by this test")
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
-        raise AssertionError("not exercised by this test")
-
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        raise AssertionError("not exercised by this test")
-
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        raise AssertionError("not exercised by this test")
-
-    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        raise AssertionError("not exercised by this test")
-
-    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
         raise AssertionError("not exercised by this test")
 
 

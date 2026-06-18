@@ -4,6 +4,7 @@ from datetime import datetime
 from datetime import timezone
 
 import boto3
+import pytest
 from botocore.stub import Stubber
 
 from imbue.mngr.config.data_types import MngrContext
@@ -18,7 +19,9 @@ from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.state_bucket import S3StateBucket
+from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.testing import seed_stopped_host_record
 
@@ -128,48 +131,6 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(
     assert offline.certified_host_data.host_name == "recovered-host"
 
 
-def test_to_offline_host_falls_back_to_tags_when_bucket_record_absent(
-    aws_mock: None, temp_mngr_ctx: MngrContext
-) -> None:
-    """Bucket mode but no host_state.json yet: to_offline_host reconstructs from the instance's own tags.
-
-    Covers the bucket store's tag fallback -- a bucket-mode host created before
-    the bucket existed has no ``host_state.json``, so the offline reconstruction
-    must fall back to the EC2 tag mirror rather than 404.
-    """
-    provider, stubber = _build_bucket_provider(temp_mngr_ctx)
-    host_id = HostId.generate()
-    # Nothing is written to the bucket for this host, so the bucket read misses
-    # and the tag fallback (reconstruction from the instance's own tags) runs.
-    stubber.add_response(
-        "describe_instances",
-        {
-            "Reservations": [
-                {
-                    "Instances": [
-                        {
-                            "InstanceId": "i-1",
-                            "State": {"Name": "stopped"},
-                            "Tags": [
-                                {"Key": "mngr-host-id", "Value": str(host_id)},
-                                {"Key": "Name", "Value": "mngr-myhost"},
-                                {"Key": "mngr-created-at", "Value": "2026-01-01T00:00:00+00:00"},
-                            ],
-                        }
-                    ]
-                }
-            ]
-        },
-    )
-    stubber.activate()
-    try:
-        offline = provider.to_offline_host(host_id)
-    finally:
-        stubber.deactivate()
-    assert offline.id == host_id
-    assert str(offline.get_certified_data().host_name) == "myhost"
-
-
 def test_bucket_mode_remove_agent_clears_bucket_record(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
     provider, stubber = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
@@ -199,75 +160,10 @@ def test_delete_host_externally_removes_bucket_state(aws_mock: None, temp_mngr_c
     assert bucket.has_any_host_state() is False
 
 
-def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
-    """Without a bucket name (and no STS), the provider falls back to the EC2 tag mirror.
-
-    ``state_bucket_name=None`` plus an STS failure (no moto active, dummy creds)
-    yields ``_state_bucket is None``, so ``persist_agent_data`` takes the tag
-    path: it looks up the instance via ``describe_instances`` and upserts tags.
-    """
-    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-x", auto_shutdown_seconds=3600)
-    session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
-    ec2 = session.client("ec2", region_name="us-east-1")
-    stubber = Stubber(ec2)
-    client = _StubbedAwsVpsClient(
-        session=session,
-        region="us-east-1",
-        ami_id="ami-x",
-        security_group=ExistingSecurityGroup(id="sg-x"),
-        stubbed_ec2_client=ec2,
-    )
-    provider = AwsProvider(
-        name=ProviderInstanceName("aws-test"),
-        host_dir=config.host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        config=config,
-        vps_client=client,
-        aws_client=client,
-        aws_config=config,
-    )
-    # Pre-seed the no-bucket resolution into the cached_property (account id unresolvable -> None).
-    provider.__dict__["_state_bucket"] = None
-
-    host_id = HostId.generate()
-    agent_id = AgentId.generate()
-    seed_stopped_host_record(provider, host_id)
-    stubber.add_response(
-        "describe_instances",
-        {
-            "Reservations": [
-                {
-                    "Instances": [
-                        {
-                            "InstanceId": "i-1",
-                            "State": {"Name": "stopped"},
-                            "Tags": [{"Key": "mngr-host-id", "Value": str(host_id)}],
-                        }
-                    ]
-                }
-            ]
-        },
-    )
-    # Assert the exact tag write (the Stubber validates expected_params), not just
-    # that some create_tags happened -- this pins the agent record to the tag mirror.
-    stubber.add_response(
-        "create_tags",
-        {},
-        expected_params={
-            "Resources": ["i-1"],
-            "Tags": [
-                {"Key": f"mngr-agent-{agent_id}-name", "Value": "alpha"},
-                {"Key": f"mngr-agent-{agent_id}-type", "Value": "claude"},
-            ],
-        },
-    )
-    stubber.activate()
-    try:
-        provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
-    finally:
-        stubber.deactivate()
-    # All queued responses consumed => the tag path ran (describe + create_tags).
-    stubber.assert_no_pending_responses()
+def test_state_store_is_bucket_store_when_bucket_present(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
+    """With a state bucket configured, ``_state_store`` is the bucket-backed store (the sole offline store)."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
+    assert isinstance(provider._state_store, BucketHostStateStore)
 
 
 # =============================================================================
@@ -374,10 +270,18 @@ def test_host_dir_sync_instance_profile_returned_when_identity_exists(
     assert provider._host_dir_sync_instance_profile() == identity.identity_name
 
 
-def test_host_dir_sync_instance_profile_none_when_identity_absent(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """No attachment (None) when the identity was never provisioned by prepare."""
+def test_host_dir_sync_instance_profile_raises_when_identity_absent(
+    aws_mock: None, temp_mngr_ctx: MngrContext
+) -> None:
+    """create_identity raises when the identity was never provisioned by prepare.
+
+    With the bucket required and host_dir sync on, an instance that cannot attach
+    the bucket-write identity is a create-time setup failure, so the create path
+    raises rather than silently launching without offline host_dir.
+    """
     provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
-    assert provider._host_dir_sync_instance_profile() is None
+    with pytest.raises(S3StateHostIdentityError, match="does not exist"):
+        provider._host_dir_sync_instance_profile()
 
 
 def test_host_dir_sync_instance_profile_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:

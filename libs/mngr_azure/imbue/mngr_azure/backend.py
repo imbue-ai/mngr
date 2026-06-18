@@ -23,7 +23,9 @@ from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure import hookimpl
@@ -32,7 +34,6 @@ from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.client import HOST_NAME_TAG_KEY
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.state_bucket import BlobStateBucket
-from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_sync_target_for
@@ -46,16 +47,18 @@ from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
+from imbue.mngr_vps.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps.host_store import VpsHostRecord
-from imbue.mngr_vps.instance_offline import AGENT_TAG_FIELDS
-from imbue.mngr_vps.instance_offline import AGENT_TAG_PREFIX
 from imbue.mngr_vps.instance_offline import BucketHostDirBackend
-from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_INTERVAL_SECONDS
+from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_SCRIPT_PATH
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_UNIT_NAME
-from imbue.mngr_vps.instance_offline import TagMirrorVpsProvider
-from imbue.mngr_vps.instance_offline import build_host_dir_sync_timer_unit
+from imbue.mngr_vps.instance_offline import HostDirSyncInstallPlan
+from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.instance_offline import host_name_from_tags
+from imbue.mngr_vps.instance_offline import normalized_tags_to_dict
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.systemd import render_systemd_unit
 
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 
@@ -117,23 +120,29 @@ def _build_host_dir_sync_command(host_dir_on_outer: str, blob_prefix_url: str) -
     )
 
 
-def _build_host_dir_sync_service_unit(host_dir_on_outer: str, blob_prefix_url: str, identity_client_id: str) -> str:
+def _build_host_dir_sync_service_unit(identity_client_id: str) -> str:
     """Build the oneshot systemd ``.service`` that pushes host_dir to the bucket once.
 
     Triggered periodically by the paired ``.timer`` and once on graceful stop.
     ``Type=oneshot`` so a stop-time ``systemctl start`` blocks until the sync
     completes (the offline copy is current before the VM deallocates). The MSI
-    login env pins azcopy to the bucket-write user-assigned identity.
+    login env pins azcopy to the bucket-write user-assigned identity. ``ExecStart``
+    runs the installed ``HOST_DIR_SYNC_SCRIPT_PATH`` script rather than an inline
+    ``/bin/sh -c``, so the embedded host_dir path and blob URL avoid systemd's + the
+    shell's nested quoting.
     """
-    command = _build_host_dir_sync_command(host_dir_on_outer, blob_prefix_url)
-    return (
-        "[Unit]\n"
-        "Description=Sync this host's host_dir to the mngr Azure Blob state bucket for offline reads\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        "Environment=AZCOPY_AUTO_LOGIN_TYPE=MSI\n"
-        f"Environment=AZCOPY_MSI_CLIENT_ID={identity_client_id}\n"
-        f"ExecStart=/bin/sh -c '{command}'\n"
+    return render_systemd_unit(
+        {
+            "Unit": [
+                ("Description", "Sync this host's host_dir to the mngr Azure Blob state bucket for offline reads")
+            ],
+            "Service": [
+                ("Type", "oneshot"),
+                ("Environment", "AZCOPY_AUTO_LOGIN_TYPE=MSI"),
+                ("Environment", f"AZCOPY_MSI_CLIENT_ID={identity_client_id}"),
+                ("ExecStart", HOST_DIR_SYNC_SCRIPT_PATH),
+            ],
+        }
     )
 
 
@@ -158,12 +167,11 @@ def _build_azcopy_install_command() -> str:
 
 def _build_idle_watcher_service_unit() -> str:
     """Build the oneshot systemd ``.service`` that runs the self-deallocate script when idle."""
-    return (
-        "[Unit]\n"
-        "Description=Deallocate this Azure VM when mngr signals the host is idle\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart={_DEALLOCATE_SCRIPT_PATH}\n"
+    return render_systemd_unit(
+        {
+            "Unit": [("Description", "Deallocate this Azure VM when mngr signals the host is idle")],
+            "Service": [("Type", "oneshot"), ("ExecStart", _DEALLOCATE_SCRIPT_PATH)],
+        }
     )
 
 
@@ -258,7 +266,7 @@ class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AzureProvider(TagMirrorVpsProvider):
+class AzureProvider(OfflineCapableVpsProvider):
     """Azure-specific provider that discovers hosts via the VM list in the resource group."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -266,64 +274,59 @@ class AzureProvider(TagMirrorVpsProvider):
     azure_client: AzureVpsClient = Field(frozen=True, description="Azure VM API client")
     azure_config: AzureProviderConfig = Field(frozen=True, description="Azure-specific configuration")
 
-    def _host_name_key(self) -> str:
-        return HOST_NAME_TAG_KEY
-
     @cached_property
     def _state_bucket(self) -> BlobStateBucket | None:
         """Return the Blob state bucket when account + container actually exist, else None.
 
-        When present, the bucket is the source of truth for agent records and the
-        offline host record (replacing the VM tag mirror); when None (the
-        storage account / container do not yet exist because ``mngr azure prepare``
-        was never run, or the subscription can't be resolved), mngr falls back to
-        the per-agent tag mirror. The existence probe runs at most once per
-        provider lifetime (cached). Mirrors ``AwsProvider._state_bucket``.
+        The bucket is the sole source of truth for agent records and the offline
+        host record. None means the account/container do not exist yet (``mngr
+        azure prepare`` was never run) or the subscription can't be resolved;
+        ``_state_store`` then raises an actionable error. A storage error while
+        probing existence propagates rather than masquerading as "absent". The
+        existence probe runs at most once per provider lifetime (cached). Mirrors
+        ``AwsProvider._state_bucket``.
         """
         return self._resolve_existing_state_bucket()
 
     def _resolve_existing_state_bucket(self) -> BlobStateBucket | None:
-        """Build the configured/derived bucket and return it only if it exists."""
+        """Build the configured/derived bucket and return it only if it exists.
+
+        Returns None only when the bucket genuinely does not exist (or the
+        subscription is unresolvable). An ``account_exists`` / ``container_exists``
+        storage error propagates -- the bucket is required, so an inability to
+        check is an operational failure, not a silent "no bucket".
+        """
         try:
             subscription_id = self.azure_config.get_subscription_id()
         except ValueError as e:
-            logger.debug("Could not resolve subscription for the Blob state bucket; using the VM tag mirror: {}", e)
+            logger.debug("Could not resolve subscription for the Blob state bucket: {}", e)
             return None
         bucket = self.azure_config.build_state_bucket(subscription_id)
-        try:
-            if not (bucket.account_exists() and bucket.container_exists()):
-                logger.debug(
-                    "Azure state account/container {}/{} does not exist; using the VM tag mirror "
-                    "(run `mngr azure prepare` to create it)",
-                    bucket.account_name,
-                    bucket.container_name,
-                )
-                return None
-        except BlobStateBucketError as e:
-            logger.warning(
-                "Could not check Azure state bucket {}; falling back to VM tags: {}", bucket.account_name, e
+        if not (bucket.account_exists() and bucket.container_exists()):
+            logger.debug(
+                "Azure state account/container {}/{} does not exist; offline host state is unavailable "
+                "(run `mngr azure prepare` to create it)",
+                bucket.account_name,
+                bucket.container_name,
             )
             return None
         return bucket
 
     @cached_property
     def _state_store(self) -> HostStateStore:
-        """The external host/agent-record mirror: the Blob bucket when present, else the VM tag mirror.
+        """The external host/agent-record mirror: the Blob bucket, or raise when it is absent.
 
-        Selecting one store here lets the persist / remove / list / read paths
-        below stop branching on bucket-vs-tags. Offline ``host_dir`` reads are a
-        separate, bucket-only feature and stay keyed off ``_state_bucket``. Mirrors
-        ``AwsProvider._state_store``.
+        Selecting one store here lets the persist / remove / list / read paths stop
+        branching on bucket presence. The bucket is required: when it does not
+        exist, accessing this property raises an actionable error pointing at
+        ``mngr azure prepare`` (so create / label / offline reads all fail loudly
+        and uniformly). Offline ``host_dir`` reads are a separate, bucket-only
+        feature keyed off ``_state_bucket``. Mirrors ``AwsProvider._state_store``.
         """
         bucket = self._state_bucket
-        if bucket is not None:
-            return BucketHostStateStore(
-                bucket=bucket,
-                bucket_error_type=BlobStateBucketError,
-                bucket_label="Azure state bucket",
-                fallback=_VmTagHostStateStore(provider=self),
-            )
-        return _VmTagHostStateStore(provider=self)
+        if bucket is None:
+            raise missing_state_bucket_error("Azure state bucket", "mngr azure prepare")
+        return BucketHostStateStore(bucket=bucket, bucket_label="Azure state bucket")
 
     @cached_property
     def _host_dir_backend(self) -> HostDirBackend:
@@ -458,15 +461,7 @@ class AzureProvider(TagMirrorVpsProvider):
         than the shared ``self.vps_client`` interface so the Azure-only ``spot``
         kwarg is statically visible.
         """
-        match parsed:
-            case ParsedAzureBuildOptions(spot=spot):
-                pass
-            case _:
-                raise MngrError(
-                    f"AzureProvider._create_vps_instance expected ParsedAzureBuildOptions, "
-                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
-                    "non-Azure shape; _parse_build_args must return ParsedAzureBuildOptions."
-                )
+        spot = self._require_parsed(parsed, ParsedAzureBuildOptions).spot
         return self.azure_client.create_instance(
             label=label,
             region=parsed.region,
@@ -488,32 +483,10 @@ class AzureProvider(TagMirrorVpsProvider):
         """
         return self._host_dir_backend.create_identity()
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return public IPs of Azure VMs tagged with this provider's name.
-
-        Credentials are guaranteed resolvable here: ``build_provider_instance``
-        raises ``ProviderUnavailableError`` when ``config.get_subscription_id()``
-        fails, so any AzureProvider that reaches this point has a subscription.
-
-        Note: Azure allocates the public IP ``Static``, so a *deallocated* VM keeps
-        its IP (unlike a stopped GCE/EC2 instance, which loses its ephemeral IP and
-        is thus naturally excluded by the ``if main_ip`` check below). We
-        deliberately do NOT special-case deallocated VMs out here: the shared
-        discovery probe applies a bounded SSH connect timeout (pyinfra's
-        ``CONNECT_TIMEOUT``, 10s), so an unreachable VM fails fast and is surfaced
-        offline -- the same path a crashed-but-still-"running" host takes. The
-        deallocated host is then reconstructed from tags in
-        ``discover_hosts_and_agents``. This keeps discovery uniform (no
-        power-state-specific branch) at the cost of one bounded timeout when a
-        paused VM is present.
-        """
-        instances = self._list_instances_cached()
-        vps_ips: list[str] = []
-        for instance in instances:
-            main_ip = instance.get("main_ip", "")
-            if main_ip:
-                vps_ips.append(main_ip)
-        return vps_ips
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
+    # (cached listing -> non-empty main_ip) covers Azure: a *deallocated* VM keeps
+    # its Static IP, so it is still listed and then fails fast over the bounded SSH
+    # connect timeout before being reconstructed offline -- see that base method.
 
     # =========================================================================
     # Deallocate/start (idle-pause + resume) -- the base OfflineCapableVpsProvider
@@ -560,11 +533,7 @@ class AzureProvider(TagMirrorVpsProvider):
         in ``_post_finalize_steps`` still applies). There is no sentinel on the bare
         path, so the script is built with ``None``.
         """
-        shutdown_script = _build_self_deallocate_script(None)
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+        self._write_shutdown_script(host, _build_self_deallocate_script(None))
 
     def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
         """Azure override: the oneshot ``.service`` runs the installed ARM self-deallocate script.
@@ -625,20 +594,26 @@ class AzureProvider(TagMirrorVpsProvider):
             raise MngrError(f"Azure self-deallocate role assignment failed: {e}") from e
 
     # =========================================================================
-    # Offline metadata (so DEALLOCATED hosts list + resolve by name): the Blob
-    # state bucket when configured, else the VM tag mirror.
+    # Offline discovery (so DEALLOCATED hosts list + resolve by name from the bucket)
     # =========================================================================
 
-    def _persist_agent_to_tags(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror an agent record into per-field VM tags (no-bucket fallback)."""
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            logger.warning("No Azure VM found for host {}; cannot persist agent tags", host_id)
-            return
-        set_tags, delete_keys = self._agent_field_items(agent_id, agent_data, instance)
-        self.azure_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
-        if delete_keys:
-            self.azure_client.remove_tags(VpsInstanceId(instance["id"]), delete_keys)
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        """Build a STOPPED-state DiscoveredHost from a deallocated VM's ``mngr-*`` tags, or None.
+
+        Reads only the cheap identity tags stamped at create (host id +
+        ``mngr-host-name``), never the bucket -- the full record is read from the
+        state store on demand.
+        """
+        tags = normalized_tags_to_dict(instance)
+        host_id_str = tags.get("mngr-host-id")
+        if host_id_str is None:
+            return None
+        return DiscoveredHost(
+            host_id=HostId(host_id_str),
+            host_name=host_name_from_tags(tags, HOST_NAME_TAG_KEY),
+            provider_name=self.name,
+            host_state=HostState.STOPPED,
+        )
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the VM is halted (stopped/deallocated, and their in-flight transitions).
@@ -655,41 +630,6 @@ class AzureProvider(TagMirrorVpsProvider):
         return self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) == VpsInstanceStatus.HALTED
 
 
-class _VmTagHostStateStore(HostStateStore):
-    """Tag-backed host-state mirror: the VM's own tags are the store (no-bucket fallback).
-
-    Compact (256-char per value) and keyed off the live VM, so the host record /
-    agent records are reconstructed from the VM's ``mngr-*`` tags. Delegates the
-    tag I/O to the owning provider, which resolves VMs from its cached listing.
-    """
-
-    provider: AzureProvider
-
-    def persist_host_record(self, record: VpsHostRecord) -> None:
-        # The VM's own create/stop tags carry the host record; nothing extra to write.
-        pass
-
-    def delete_host_state(self, host_id: HostId) -> None:
-        # Destroying the VM drops its tags, so there is no separate state to delete.
-        pass
-
-    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        self.provider._persist_agent_to_tags(host_id, agent_id, agent_data)
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        instance = self.provider._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in AGENT_TAG_FIELDS]
-        self.provider.azure_client.remove_tags(VpsInstanceId(instance["id"]), keys)
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        return self.provider._agent_dicts_from_tags(host_id)
-
-    def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
-        return self.provider._host_record_from_instance_tags(host_id)
-
-
 class _BlobHostDirBackend(BucketHostDirBackend):
     """Bucket-backed offline host_dir for Azure: managed-identity + ``azcopy sync`` to the Blob bucket.
 
@@ -704,7 +644,6 @@ class _BlobHostDirBackend(BucketHostDirBackend):
 
     provider: AzureProvider
     bucket: BlobStateBucket
-    bucket_error_type: type[MngrError] = BlobStateBucketError
 
     def _sync_unit_name(self) -> str:
         return HOST_DIR_SYNC_UNIT_NAME
@@ -712,53 +651,52 @@ class _BlobHostDirBackend(BucketHostDirBackend):
     def _pause_action(self) -> str:
         return "deallocate"
 
-    def create_identity(self) -> str | None:
+    def _cloud_label(self) -> str:
+        return "Azure"
+
+    def create_identity(self) -> str:
+        """The bucket-write managed-identity resource id to attach at launch.
+
+        Raises when the identity is missing or cannot be resolved (a
+        ``host_identity_exists`` storage error propagates): with host_dir sync on,
+        a VM launched without it could never push its host_dir, so this is a
+        create-time setup failure. Set ``is_offline_host_dir_enabled = false`` to
+        skip it.
+        """
         identity = self.provider._host_identity()
         if identity is None:
-            return None
-        try:
-            if not identity.host_identity_exists():
-                logger.warning(
-                    "host_dir sync is on but the bucket-write managed identity {} does not exist; launching "
-                    "without it (re-run `mngr azure prepare` with sufficient permissions to enable offline host_dir)",
-                    identity.identity_name,
-                )
-                return None
-        except BlobStateHostIdentityError as e:
-            logger.warning(
-                "Could not check the bucket-write managed identity {}; launching without it: {}",
-                identity.identity_name,
-                e,
+            raise BlobStateHostIdentityError(
+                "host_dir sync is on but the bucket-write managed identity could not be resolved; re-run "
+                "`mngr azure prepare` with sufficient permissions, or set is_offline_host_dir_enabled = false."
             )
-            return None
+        if not identity.host_identity_exists():
+            raise BlobStateHostIdentityError(
+                f"host_dir sync is on but the bucket-write managed identity {identity.identity_name} does not "
+                "exist; re-run `mngr azure prepare` with sufficient permissions to enable offline host_dir, "
+                "or set is_offline_host_dir_enabled = false."
+            )
         return identity.resource_id()
 
-    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
+    def _build_install_plan(self, host_id: HostId) -> HostDirSyncInstallPlan | None:
         # azcopy authenticates as the VM's user-assigned managed identity via MSI;
-        # without it the sync would just 403, so skip the install when it is absent
-        # (a sub-decision within bucket mode, distinct from the bucket-vs-fallback
-        # selection).
+        # without it the sync would just 403. With host_dir sync on, a missing
+        # identity is a create-time setup failure (per the launch contract), so
+        # raise rather than skip the install.
         identity = self.provider._host_identity()
         identity_client_id = identity.get_host_identity_client_id() if identity is not None else None
         if identity_client_id is None:
-            logger.warning(
-                "host_dir sync is on but the bucket-write managed identity for host {} is absent; skipping "
-                "the sync daemon install (re-run `mngr azure prepare` with sufficient permissions)",
-                host_id,
+            raise BlobStateHostIdentityError(
+                f"host_dir sync is on but the bucket-write managed identity for host {host_id} is absent; re-run "
+                "`mngr azure prepare` with sufficient permissions, or set is_offline_host_dir_enabled = false."
             )
-            return
         host_dir_on_outer = str(self.provider._realizer.host_dir_path_on_outer(host_id))
         blob_prefix_url = host_dir_sync_target_for(self.bucket.account_name, self.bucket.container_name, host_id)
-        service_unit = _build_host_dir_sync_service_unit(host_dir_on_outer, blob_prefix_url, identity_client_id)
-        timer_unit = build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
-        with log_span("Installing Azure host_dir sync daemon"):
-            with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
-                outer.execute_idempotent_command(_build_azcopy_install_command(), timeout_seconds=300.0)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
-        logger.info("Azure host_dir sync daemon installed for host {} (target {})", host_id, blob_prefix_url)
+        return HostDirSyncInstallPlan(
+            install_command=_build_azcopy_install_command(),
+            sync_command=_build_host_dir_sync_command(host_dir_on_outer, blob_prefix_url),
+            service_unit=_build_host_dir_sync_service_unit(identity_client_id),
+            sync_target_uri=blob_prefix_url,
+        )
 
     def _warn_if_identity_missing(self, host_id: HostId) -> None:
         """Warn when an empty host_dir prefix is explained by the VM having no managed identity.

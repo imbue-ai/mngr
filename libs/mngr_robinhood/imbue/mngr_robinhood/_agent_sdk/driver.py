@@ -635,7 +635,11 @@ def _build_stream_synthesizer(session: LiveSession) -> StreamEventSynthesizer | 
     host = session.host
     if agent is None or host is None:
         return None
-    return StreamEventSynthesizer(host=host, buffer_path=agent.get_stream_buffer_path())
+    return StreamEventSynthesizer(
+        host=host,
+        buffer_path=agent.get_live_output_path(),
+        reader=agent.make_live_output_reader(),
+    )
 
 
 def _build_turn_result_message(session: LiveSession, turn_messages: Sequence[Message], duration_ms: int) -> Message:

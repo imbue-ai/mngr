@@ -3,6 +3,8 @@ from pathlib import Path
 from pydantic import Field
 
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.data_types import ScalarStrTuple
+from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
@@ -10,7 +12,7 @@ from imbue.mngr_vps.primitives import IsolationMode
 
 
 class VpsProviderConfig(ProviderInstanceConfig):
-    """Base configuration for VPS Docker providers."""
+    """Base configuration for VPS providers (container or bare placement)."""
 
     isolation: IsolationMode = Field(
         default=IsolationMode.CONTAINER,
@@ -127,5 +129,49 @@ class VpsProviderConfig(ProviderInstanceConfig):
             "btrfs loop file at provisioning time. Loop file size is computed as "
             "``free_gb - outer_disk_reserved_gb``; ``VpsProvisioningError`` is raised when "
             "the result is not positive."
+        ),
+    )
+
+
+class OfflineCapableVpsProviderConfig(VpsProviderConfig):
+    """Config base for cloud VPS providers with a managed SSH-ingress rule.
+
+    Carries the SSH-ingress allow-list shared by the AWS / Azure / GCP providers,
+    each of which threads it into the security group / NSG / firewall rule that
+    ``mngr <cloud> prepare`` creates. ``associate_public_ip`` (whether to give the
+    instance a public IP) is *not* lifted here because GCP names its equivalent
+    field ``associate_external_ip``; see ``PublicIpVpsProviderConfig`` for the
+    AWS/Azure-only field.
+    """
+
+    allowed_ssh_cidrs: ScalarStrTuple = Field(
+        default=ScalarTuple(("0.0.0.0/0",)),
+        description=(
+            "Inbound (ingress) CIDR blocks allowed on tcp/22 and the container SSH port on "
+            "the security group / NSG / firewall rule the provider's `prepare` command "
+            "creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to "
+            "restrict to your own IP, or () for no ingress (no rule is created, leaving the "
+            "instance unreachable from outside its network). A warning is logged when the "
+            "effective range is 0.0.0.0/0 or empty. Replace-by-default across config layers "
+            "(combining CIDRs across layers is never the intent)."
+        ),
+    )
+
+
+class PublicIpVpsProviderConfig(OfflineCapableVpsProviderConfig):
+    """Config base for the AWS / Azure providers (which share ``associate_public_ip``).
+
+    GCP deliberately does not inherit this: its equivalent field is named
+    ``associate_external_ip`` (GCE terminology), so collapsing the two would change
+    the TOML key GCP accepts. GCP extends ``OfflineCapableVpsProviderConfig``
+    directly and declares ``associate_external_ip`` itself.
+    """
+
+    associate_public_ip: bool = Field(
+        default=True,
+        description=(
+            "Assign a public IPv4 address to the instance. Required for the current "
+            "mngr-from-developer-laptop SSH access model. For a more secure deployment, set "
+            "to False and run mngr from a bastion inside the network."
         ),
     )

@@ -1,10 +1,14 @@
-"""Tests for the AzureProvider's Blob-state-bucket vs tag agent-data behavior."""
+"""Tests for the AzureProvider's Blob-state-bucket agent-data and offline-host behavior."""
 
 from datetime import datetime
 from datetime import timezone
 from types import SimpleNamespace
 
+import pytest
+
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -14,6 +18,7 @@ from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_azure.backend import AzureProvider
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.testing import FakeAuthorizationClient
 from imbue.mngr_azure.testing import FakeBlobStorageBackend
 from imbue.mngr_azure.testing import FakeComputeClient
@@ -32,10 +37,10 @@ _ACCOUNT_NAME = "mngrststateacct1234"
 def _build_bucket_provider(mngr_ctx: MngrContext) -> tuple[AzureProvider, FakeComputeClient]:
     """Build an AzureProvider whose ``_state_bucket`` resolves to a fake-backed Blob bucket.
 
-    The fake compute client is left with an empty VM list: a bucket-mode test must
-    make NO VM tag calls, so a stray ``add_tags`` would have to find a VM (and
-    finding none would log/return rather than write), but the assertions verify the
-    data round-trips through the bucket regardless.
+    With a bucket present ``_state_store`` is the bucket-backed store, so agent and
+    host records round-trip through the in-memory backend. The fake compute client
+    is left with an empty VM list (the bucket is the sole offline store -- there is
+    no VM tag mirror).
     """
     config = AzureProviderConfig(
         subscription_id="sub-123", auto_shutdown_seconds=3600, state_storage_account_name=_ACCOUNT_NAME
@@ -76,9 +81,9 @@ def _build_bucket_provider(mngr_ctx: MngrContext) -> tuple[AzureProvider, FakeCo
     return provider, compute
 
 
-def test_bucket_mode_persists_agent_to_bucket_and_writes_no_vm_tags(temp_mngr_ctx: MngrContext) -> None:
-    """With a state bucket configured, agent data goes to the bucket; no VM tag write is attempted."""
-    provider, compute = _build_bucket_provider(temp_mngr_ctx)
+def test_bucket_mode_persists_agent_to_bucket(temp_mngr_ctx: MngrContext) -> None:
+    """With a state bucket configured, agent data round-trips through the bucket (no size limit)."""
+    provider, _compute = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     seed_stopped_host_record(provider, host_id)
@@ -90,7 +95,7 @@ def test_bucket_mode_persists_agent_to_bucket_and_writes_no_vm_tags(temp_mngr_ct
 
     by_id = {r["id"]: r for r in records}
     assert str(agent_id) in by_id
-    # The >256-char labels blob (which the tag mirror would drop) survives in the bucket.
+    # A >256-char labels blob (too large for any tag) survives in the bucket.
     assert by_id[str(agent_id)]["labels"] == big_labels
 
 
@@ -120,32 +125,18 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(temp_mngr
     assert offline.certified_host_data.host_name == "recovered-host"
 
 
-def test_to_offline_host_falls_back_to_tags_when_bucket_record_absent(temp_mngr_ctx: MngrContext) -> None:
-    """Bucket mode but no host_state.json yet: to_offline_host reconstructs from the VM's own tags.
+def test_to_offline_host_raises_when_bucket_record_absent(temp_mngr_ctx: MngrContext) -> None:
+    """Bucket mode but no host_state.json: to_offline_host re-raises HostNotFoundError.
 
-    Covers the bucket store's tag fallback -- a bucket-mode host created before
-    the bucket existed has no ``host_state.json``, so the offline reconstruction
-    must fall back to the VM tag mirror rather than 404.
+    The VM tag mirror was removed, so the bucket is the sole offline source: a
+    host whose record is missing from the bucket cannot be reconstructed.
     """
-    provider, compute = _build_bucket_provider(temp_mngr_ctx)
+    provider, _compute = _build_bucket_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    # Nothing is written to the bucket for this host, so the bucket read misses
-    # and the tag fallback (reconstruction from the VM's own tags) runs.
-    compute.virtual_machines.list_result = [
-        SimpleNamespace(
-            name="vm-1",
-            tags={
-                "mngr-provider": "azure-test",
-                "mngr-host-id": str(host_id),
-                "mngr-host-name": "mngr-myhost",
-                "mngr-created-at": "2026-01-01T00:00:00+00:00",
-            },
-            instance_view=None,
-        )
-    ]
-    offline = provider.to_offline_host(host_id)
-    assert offline.id == host_id
-    assert str(offline.get_certified_data().host_name) == "myhost"
+    # Nothing is written to the bucket for this host, so the bucket read misses and
+    # the (SSH-unreachable) host cannot be reconstructed offline.
+    with pytest.raises(HostNotFoundError):
+        provider.to_offline_host(host_id)
 
 
 def test_bucket_mode_remove_agent_clears_bucket_record(temp_mngr_ctx: MngrContext) -> None:
@@ -173,12 +164,15 @@ def test_delete_host_externally_removes_bucket_state(temp_mngr_ctx: MngrContext)
     assert bucket.has_any_host_state() is False
 
 
-def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
-    """Without a resolved bucket, the provider falls back to the VM tag mirror.
+def test_no_bucket_persist_agent_data_raises_prepare_pointer_without_writing_vm_tags(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Without a resolved bucket, the agent-record mirror raises -- and writes no VM tag patch.
 
-    Pre-seeding ``_state_bucket`` with None takes ``persist_agent_data`` down the
-    tag path: it looks up the VM via the fake compute list and upserts tags, which
-    the fake resource client records.
+    The VM tag mirror was removed and the bucket is required: with no bucket,
+    ``_state_store`` raises the actionable prepare-pointer error, so the write fails
+    loudly. Pre-seeding ``_state_bucket`` with None must NOT take the persist down
+    any tag path -- the fake resource client records no Merge patch before the raise.
     """
     config = AzureProviderConfig(subscription_id="sub-123", auto_shutdown_seconds=3600)
     compute = FakeComputeClient()
@@ -216,9 +210,10 @@ def test_no_bucket_uses_tag_path(temp_mngr_ctx: MngrContext) -> None:
             instance_view=None,
         )
     ]
-    provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
-    # The tag path ran: a server-side tag Merge patch was recorded.
-    assert len(resource.tags.updates) == 1
+    with pytest.raises(MngrError, match="mngr azure prepare"):
+        provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
+    # No tag path: no server-side tag Merge patch was recorded.
+    assert resource.tags.updates == []
 
 
 # =============================================================================
@@ -365,9 +360,16 @@ def test_host_dir_sync_identity_resource_id_returned_when_identity_exists(temp_m
     assert resource_id.endswith(f"/userAssignedIdentities/mngrid-{_ACCOUNT_NAME}")
 
 
-def test_host_dir_sync_identity_resource_id_none_when_identity_absent(temp_mngr_ctx: MngrContext) -> None:
+def test_host_dir_sync_identity_resource_id_raises_when_identity_absent(temp_mngr_ctx: MngrContext) -> None:
+    """With host_dir sync on but the managed identity not provisioned, the launch path raises.
+
+    The identity is required infrastructure for offline host_dir, so a VM launched
+    without it is a create-time setup failure rather than a silently unreadable
+    offline host_dir later.
+    """
     provider, _compute = _build_provider_with_identity(temp_mngr_ctx, identity_exists=False)
-    assert provider._host_dir_sync_identity_resource_id() is None
+    with pytest.raises(BlobStateHostIdentityError, match="mngr azure prepare"):
+        provider._host_dir_sync_identity_resource_id()
 
 
 def test_host_dir_sync_identity_resource_id_none_when_feature_disabled(temp_mngr_ctx: MngrContext) -> None:

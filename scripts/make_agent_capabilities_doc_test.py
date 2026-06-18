@@ -9,11 +9,11 @@ from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
-from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
 from imbue.mngr.providers.registry import reset_backend_registry
 from scripts.make_agent_capabilities_doc import AGENT_CAPABILITIES
 from scripts.make_agent_capabilities_doc import AgentCapability
@@ -39,9 +39,9 @@ class _FakeTranscriptAgent(CliBackedAgentMixin, HasCommonTranscriptMixin): ...
 class _FakeStreamingHeadlessAgent(CliBackedAgentMixin, StreamingHeadlessAgentMixin): ...
 
 
-# A CLI-backed agent that publishes a streaming snapshot (HasStreamingSnapshotMixin extends
-# SupportsLiveOutputMixin), so it has live output and is not headless.
-class _FakeTuiSnapshotAgent(CliBackedAgentMixin, HasStreamingSnapshotMixin): ...
+# A CLI-backed TUI agent that publishes a streaming snapshot (it supports live output via the
+# snapshot surface of SupportsLiveOutputMixin), so it has live output and is not headless.
+class _FakeTuiSnapshotAgent(CliBackedAgentMixin, SupportsLiveOutputMixin): ...
 
 
 # A CLI-backed agent that can adopt an existing session.

@@ -1,4 +1,3 @@
-import base64
 import os
 import re
 import shlex
@@ -33,6 +32,7 @@ from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_vps.errors import ContainerSetupError
 from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.host_setup import build_remote_script_command
 from imbue.mngr_vps.host_store import AGENTS_SUBPATH
 
 # Label constants (same scheme as Docker provider)
@@ -225,15 +225,35 @@ def is_btrfs_progs_installed_on_outer(outer: OuterHostInterface) -> bool:
     return result.success
 
 
+def _run_provisioning_step(
+    outer: OuterHostInterface,
+    command: str,
+    *,
+    error_prefix: str,
+    timeout_seconds: float,
+) -> str:
+    """Run one provisioning command on the outer; raise ``VpsProvisioningError`` on failure, else return stdout.
+
+    Collapses the repeated "execute, then raise with the command's stderr on
+    failure" shape used by the outer btrfs/dir/systemd provisioning steps.
+    ``error_prefix`` is the human-readable description of the step ("Failed to
+    create outer dir X"); the failure message appends ``: stderr=<stderr>``.
+    """
+    result = outer.execute_idempotent_command(command, timeout_seconds=timeout_seconds)
+    if not result.success:
+        raise VpsProvisioningError(f"{error_prefix}: stderr={result.stderr.strip()!r}")
+    return result.stdout
+
+
 def install_btrfs_progs_on_outer(outer: OuterHostInterface) -> None:
     """Install btrfs-progs on the outer via apt-get; raise VpsProvisioningError on failure."""
     command = (
         "DEBIAN_FRONTEND=noninteractive apt-get update && "
         "DEBIAN_FRONTEND=noninteractive apt-get install -y btrfs-progs"
     )
-    result = outer.execute_idempotent_command(command, timeout_seconds=300.0)
-    if not result.success:
-        raise VpsProvisioningError(f"Failed to install btrfs-progs on outer: stderr={result.stderr.strip()!r}")
+    _run_provisioning_step(
+        outer, command, error_prefix="Failed to install btrfs-progs on outer", timeout_seconds=300.0
+    )
 
 
 def get_outer_free_disk_gb(outer: OuterHostInterface, path: Path) -> int:
@@ -426,16 +446,6 @@ def _build_start_container_script(container_name: str) -> str:
     return _START_CONTAINER_SCRIPT_TEMPLATE.replace("__CONTAINER_NAME__", shlex.quote(container_name))
 
 
-def _remote_sh_command(script: str) -> str:
-    """Wrap a shell script so it survives transport to the remote shell verbatim.
-
-    Base64-encodes the script and decodes it remotely before piping to sh,
-    sidestepping any quoting pitfalls from the multi-line recovery script.
-    """
-    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    return f"echo {encoded} | base64 -d | sh"
-
-
 def start_container(outer: OuterHostInterface, container_name: str) -> None:
     """Start a stopped container, recovering from stale gVisor (runsc) overlay state.
 
@@ -444,11 +454,11 @@ def start_container(outer: OuterHostInterface, container_name: str) -> None:
     normal start is just one ``docker start``; the cleanup only triggers on the
     gVisor self-overlay filestore collision. Raises ``MngrError`` if the
     container still fails to start. Shared by every docker-based provider
-    (vps_docker / ovh / lima), all of which run the agent container under runsc.
+    (mngr_vps / ovh / lima), all of which run the agent container under runsc.
     """
     script = _build_start_container_script(container_name)
     result = outer.execute_idempotent_command(
-        _remote_sh_command(script), timeout_seconds=_START_CONTAINER_TIMEOUT_SECONDS
+        build_remote_script_command(script), timeout_seconds=_START_CONTAINER_TIMEOUT_SECONDS
     )
     if not result.success:
         raise MngrError(f"docker start {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
@@ -594,15 +604,8 @@ def enable_snapshot_helper_unit(outer: OuterHostInterface) -> None:
     re-reads unit files (no effect if nothing changed) and ``enable --now``
     is a no-op when the unit is already enabled + active.
     """
-    result = outer.execute_idempotent_command(
-        f"systemctl daemon-reload && systemctl enable --now {OUTER_HELPER_SERVICE_NAME}",
-        timeout_seconds=20.0,
-    )
-    if not result.success:
-        raise VpsProvisioningError(
-            f"systemctl daemon-reload && systemctl enable --now "
-            f"{OUTER_HELPER_SERVICE_NAME} failed: stderr={result.stderr.strip()!r}"
-        )
+    command = f"systemctl daemon-reload && systemctl enable --now {OUTER_HELPER_SERVICE_NAME}"
+    _run_provisioning_step(outer, command, error_prefix=f"{command} failed", timeout_seconds=20.0)
 
 
 def write_outer_file(
@@ -619,9 +622,12 @@ def write_outer_file(
 
 def ensure_outer_dir(outer: OuterHostInterface, path: Path) -> None:
     """`mkdir -p` on the outer; raises VpsProvisioningError on failure."""
-    result = outer.execute_idempotent_command(f"mkdir -p {shlex.quote(str(path))}", timeout_seconds=10.0)
-    if not result.success:
-        raise VpsProvisioningError(f"Failed to create outer dir {path}: stderr={result.stderr.strip()!r}")
+    _run_provisioning_step(
+        outer,
+        f"mkdir -p {shlex.quote(str(path))}",
+        error_prefix=f"Failed to create outer dir {path}",
+        timeout_seconds=10.0,
+    )
 
 
 def create_bind_volume_on_outer(
@@ -712,66 +718,51 @@ def prepare_btrfs_on_outer(
                     f"Need free > reserved. Lower outer_disk_reserved_gb or use a larger VPS plan."
                 )
         with log_span("Allocating btrfs loop file at {} ({}GB)", loop_file_path, loop_file_size_gb):
-            mkdir_result = outer.execute_idempotent_command(
+            _run_provisioning_step(
+                outer,
                 f"mkdir -p {shlex.quote(str(loop_file_path.parent))}",
+                error_prefix=f"Failed to create parent dir {loop_file_path.parent} for btrfs loop file",
                 timeout_seconds=10.0,
             )
-            if not mkdir_result.success:
-                raise VpsProvisioningError(
-                    f"Failed to create parent dir {loop_file_path.parent} for btrfs loop file: "
-                    f"stderr={mkdir_result.stderr.strip()!r}"
-                )
-            allocate_result = outer.execute_idempotent_command(
+            _run_provisioning_step(
+                outer,
                 f"fallocate -l {loop_file_size_gb}G {shlex.quote(str(loop_file_path))}",
+                error_prefix=f"Failed to fallocate btrfs loop file at {loop_file_path}",
                 timeout_seconds=120.0,
             )
-            if not allocate_result.success:
-                raise VpsProvisioningError(
-                    f"Failed to fallocate btrfs loop file at {loop_file_path}: "
-                    f"stderr={allocate_result.stderr.strip()!r}"
-                )
-            mkfs_result = outer.execute_idempotent_command(
+            _run_provisioning_step(
+                outer,
                 f"mkfs.btrfs {shlex.quote(str(loop_file_path))}",
+                error_prefix=f"Failed to mkfs.btrfs on {loop_file_path}",
                 timeout_seconds=180.0,
             )
-            if not mkfs_result.success:
-                raise VpsProvisioningError(
-                    f"Failed to mkfs.btrfs on {loop_file_path}: stderr={mkfs_result.stderr.strip()!r}"
-                )
 
     with log_span("Mounting btrfs loop file at {}", btrfs_mount_path):
-        mkdir_mount_result = outer.execute_idempotent_command(
+        _run_provisioning_step(
+            outer,
             f"mkdir -p {shlex.quote(str(btrfs_mount_path))}",
+            error_prefix=f"Failed to create btrfs mount path {btrfs_mount_path}",
             timeout_seconds=10.0,
         )
-        if not mkdir_mount_result.success:
-            raise VpsProvisioningError(
-                f"Failed to create btrfs mount path {btrfs_mount_path}: stderr={mkdir_mount_result.stderr.strip()!r}"
-            )
         if not is_path_mounted_on_outer(outer, btrfs_mount_path):
-            mount_result = outer.execute_idempotent_command(
+            _run_provisioning_step(
+                outer,
                 f"mount -o loop {shlex.quote(str(loop_file_path))} {shlex.quote(str(btrfs_mount_path))}",
+                error_prefix=f"Failed to loop-mount {loop_file_path} at {btrfs_mount_path}",
                 timeout_seconds=30.0,
             )
-            if not mount_result.success:
-                raise VpsProvisioningError(
-                    f"Failed to loop-mount {loop_file_path} at {btrfs_mount_path}: "
-                    f"stderr={mount_result.stderr.strip()!r}"
-                )
 
     if not is_fstab_entry_present_on_outer(outer, loop_file_path):
         with log_span("Appending fstab entry for {}", loop_file_path):
             fstab_line = f"{loop_file_path}  {btrfs_mount_path}  btrfs  loop,defaults  0 0"
             # echo + >> is the simplest idempotency-safe form here once the grep
             # above has confirmed the line is absent (no risk of duplicating).
-            append_result = outer.execute_idempotent_command(
+            _run_provisioning_step(
+                outer,
                 f"echo {shlex.quote(fstab_line)} >> /etc/fstab",
+                error_prefix=f"Failed to append fstab entry for {loop_file_path}",
                 timeout_seconds=10.0,
             )
-            if not append_result.success:
-                raise VpsProvisioningError(
-                    f"Failed to append fstab entry for {loop_file_path}: stderr={append_result.stderr.strip()!r}"
-                )
 
     ensure_btrfs_subvolume_on_outer(outer, subvolume_path)
     return subvolume_path
@@ -786,14 +777,12 @@ def ensure_btrfs_subvolume_on_outer(outer: OuterHostInterface, subvolume_path: P
     if check_directory_exists_on_outer(outer, subvolume_path):
         return
     with log_span("Creating btrfs subvolume {}", subvolume_path):
-        create_subvol_result = outer.execute_idempotent_command(
+        _run_provisioning_step(
+            outer,
             f"btrfs subvolume create {shlex.quote(str(subvolume_path))}",
+            error_prefix=f"Failed to create btrfs subvolume at {subvolume_path}",
             timeout_seconds=30.0,
         )
-        if not create_subvol_result.success:
-            raise VpsProvisioningError(
-                f"Failed to create btrfs subvolume at {subvolume_path}: stderr={create_subvol_result.stderr.strip()!r}"
-            )
 
 
 def delete_btrfs_subvolume_on_outer(outer: OuterHostInterface, subvolume_path: Path) -> None:

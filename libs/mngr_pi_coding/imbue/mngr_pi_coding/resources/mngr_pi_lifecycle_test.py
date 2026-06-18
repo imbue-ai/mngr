@@ -203,6 +203,11 @@ def test_common_transcript_records_for_each_role(tmp_path: Path) -> None:
     assert records[1]["tool_calls"] == [
         {"tool_call_id": "c1", "tool_name": "bash", "input_preview": '{"command":"ls"}'}
     ]
+    # parts preserve the source order of the text and tool_call blocks.
+    assert records[1]["parts"] == [
+        {"type": "text", "content": "ok"},
+        {"type": "tool_call", "tool_call_id": "c1", "tool_name": "bash", "input_preview": '{"command":"ls"}'},
+    ]
     assert records[1]["usage"] == {
         "input_tokens": 7,
         "output_tokens": 3,

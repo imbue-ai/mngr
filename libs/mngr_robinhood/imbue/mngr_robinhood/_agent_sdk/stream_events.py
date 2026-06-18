@@ -10,8 +10,11 @@ event *shapes* conform to claude's native stream; only the text content is appro
 approximation the CLI streaming already ships). ``usage`` is zeroed -- the authoritative usage and
 ``total_cost_usd`` stay on the transcript-derived ``ResultMessage``.
 
-The synthesizer is intentionally decoupled from the driver's ``LiveSession`` (it takes the live
-``session_id`` / ``model`` per call) so this module has no import cycle with ``driver``.
+The text-delta extraction (diffing successive snapshots, holding back the volatile final line) is
+delegated to the agent's :class:`LiveOutputReader`; this module only wraps the resulting deltas in
+the event framing. The synthesizer is intentionally decoupled from the driver's ``LiveSession`` (it
+takes the live ``session_id`` / ``model`` per call) so this module has no import cycle with
+``driver``.
 """
 
 from pathlib import Path
@@ -27,14 +30,13 @@ from pydantic import SkipValidation
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr_claude.stream_json import content_block_start_event
 from imbue.mngr_claude.stream_json import content_block_stop_event
 from imbue.mngr_claude.stream_json import message_delta_event
 from imbue.mngr_claude.stream_json import message_start_event
 from imbue.mngr_claude.stream_json import message_stop_event
 from imbue.mngr_claude.stream_json import text_delta_event
-from imbue.mngr_robinhood.stream_buffer import buffer_body
-from imbue.mngr_robinhood.stream_buffer import compute_stream_delta
 
 # stop_reason stamped on the synthesized message_delta at clean turn completion. mngr cannot observe
 # claude's real stop_reason at stream time; end_turn is the overwhelmingly common terminal value and
@@ -56,8 +58,7 @@ class StreamEventSynthesizer(MutableModel):
 
     host: SkipValidation[OnlineHostInterface] = Field(description="Host to read the stream_buffer file from")
     buffer_path: Path = Field(description="Absolute path to the agent's stream_buffer file")
-    emitted_body: str = Field(default="", description="Body text already wrapped as content_block_delta events")
-    last_content: str = Field(default="", description="Most recent non-empty buffer snapshot (for the final flush)")
+    reader: LiveOutputReader = Field(description="Extracts text deltas from successive buffer snapshots")
     is_message_open: bool = Field(default=False, description="Whether message_start framing has been emitted")
     message_id: str = Field(default="", description="Synthesized id of the in-progress message, when open")
 
@@ -74,26 +75,22 @@ class StreamEventSynthesizer(MutableModel):
         except (FileNotFoundError, OSError, MngrError):
             # The buffer may not exist yet (watcher still starting up); benign.
             return []
-        if buffer_body(content).strip():
-            self.last_content = content
-        return self._wrap_delta(content, session_id, model, is_flush=False)
+        return self._wrap_deltas(self.reader.feed(content), session_id, model)
 
     def finalize(self, session_id: str, model: str) -> list[StreamEvent]:
         """Emit the held-back final delta plus closing framing for a cleanly-completed turn."""
         if not session_id:
             return []
-        events = self._wrap_delta(self.last_content, session_id, model, is_flush=True)
+        events = self._wrap_deltas(self.reader.finalize(), session_id, model)
         events.extend(self._close_framing(session_id))
         return events
 
-    def _wrap_delta(self, content: str, session_id: str, model: str, is_flush: bool) -> list[StreamEvent]:
-        delta, self.emitted_body = compute_stream_delta(content, self.emitted_body, is_flush)
-        if not delta:
-            return []
+    def _wrap_deltas(self, deltas: list[str], session_id: str, model: str) -> list[StreamEvent]:
         events: list[StreamEvent] = []
-        if not self.is_message_open:
-            events.extend(self._open_framing(session_id, model))
-        events.append(self._event(session_id, text_delta_event(delta)))
+        for delta in deltas:
+            if not self.is_message_open:
+                events.extend(self._open_framing(session_id, model))
+            events.append(self._event(session_id, text_delta_event(delta)))
         return events
 
     def _open_framing(self, session_id: str, model: str) -> list[StreamEvent]:

@@ -12,6 +12,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import TypeVar
 from typing import assert_never
 
 from loguru import logger
@@ -111,6 +112,7 @@ from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import IsolationMode
@@ -119,6 +121,8 @@ from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
 from imbue.mngr_vps.primitives import VPS_SSH_KEY_NAME
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.vps_client import VpsClientInterface
+
+ParsedVpsBuildOptionsT = TypeVar("ParsedVpsBuildOptionsT", bound=ParsedVpsBuildOptions)
 
 
 class _VpsDiscoveryData(FrozenModel):
@@ -446,13 +450,11 @@ class VpsProvider(BaseProviderInstance):
     # =========================================================================
     # Host Store
     # =========================================================================
-    # The store is opened via ``open_host_store(outer, volume_name)`` (free
-    # function in ``host_store``) which resolves the volume's bind-source path
-    # via ``docker volume inspect --format '{{.Options.device}}'`` -- the docker
-    # named volume is a bind-options entry pointing at the per-host btrfs
-    # subvolume, so ``Options.device`` (not the unused ``Mountpoint``
-    # placeholder under ``/var/lib/docker/volumes``) is the real on-disk path.
-    # This used to be the per-user state container.
+    # The substrate opens the store via ``self._realizer.open_host_store(outer,
+    # host_id)``; where the ``host_state.json`` + ``agents/`` layout physically
+    # lives is the realizer's concern (the container realizer resolves the
+    # per-host docker volume's bind-source path; the bare realizer points at a
+    # fixed root-disk directory).
 
     # =========================================================================
     # Host Object Construction
@@ -528,8 +530,7 @@ class VpsProvider(BaseProviderInstance):
                     updated = existing.model_copy_update(
                         to_update(existing.field_ref().certified_host_data, certified_data)
                     )
-                    host_store.write_host_record(updated)
-                    self._persist_host_record_externally(updated)
+                    self._write_and_mirror(host_store, updated)
         except MngrError as e:
             logger.warning("Failed to sync certified data to VPS host volume: {}", e)
 
@@ -798,6 +799,24 @@ class VpsProvider(BaseProviderInstance):
             except (HostConnectionError, MngrError) as e:
                 logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
 
+    def _require_parsed(
+        self, parsed: ParsedVpsBuildOptions, expected_cls: type[ParsedVpsBuildOptionsT]
+    ) -> ParsedVpsBuildOptionsT:
+        """Narrow ``parsed`` to the provider's expected build-options subclass, or raise uniformly.
+
+        Each provider's ``_create_vps_instance`` override needs the concrete
+        per-provider build options (e.g. ``ParsedAwsBuildOptions``) so its extra
+        knobs are statically visible. ``_parse_build_args`` always returns that
+        shape, so a mismatch indicates the parser hook returned the wrong type.
+        """
+        if isinstance(parsed, expected_cls):
+            return parsed
+        raise MngrError(
+            f"{type(self).__name__}._create_vps_instance expected {expected_cls.__name__}, "
+            f"got {type(parsed).__name__}. This indicates the parser hook returned a mismatched "
+            f"shape; _parse_build_args must return {expected_cls.__name__}."
+        )
+
     def _create_vps_instance(
         self,
         parsed: ParsedVpsBuildOptions,
@@ -1014,8 +1033,7 @@ class VpsProvider(BaseProviderInstance):
             container_id=handle.container_id,
         )
         host_store = self._realizer.open_host_store(outer, host_id)
-        host_store.write_host_record(host_record)
-        self._persist_host_record_externally(host_record)
+        self._write_and_mirror(host_store, host_record)
 
         # Cache so that persist_agent_data (called moments later) can find
         # the record without re-querying the Vultr API, which would return
@@ -1038,8 +1056,12 @@ class VpsProvider(BaseProviderInstance):
         the flow lets the VPS auto-decommission instead of leaking
         a still-billing orphan.
 
-        Default no-op. Must not raise; any errors should be caught and
-        logged by the override.
+        Default no-op. An override may raise only when ``create_host``'s
+        cleanup can reverse the partially-created host (e.g. the offline
+        host_dir-sync install in ``OfflineCapableVpsProvider``, where a setup
+        failure must fail create); an override whose side effect is NOT undone
+        by that cleanup (e.g. OVH un-cancellation, which would leak a
+        still-billing VPS) must instead catch and log its own errors.
         """
 
     def _persist_host_record_externally(self, record: VpsHostRecord) -> None:
@@ -1051,6 +1073,17 @@ class VpsProvider(BaseProviderInstance):
         ``write_host_record``. Default no-op, so providers without an external
         store are unaffected.
         """
+
+    def _write_and_mirror(self, host_store: VpsHostStore, record: VpsHostRecord) -> None:
+        """Write the authoritative on-volume record *and* mirror it to the external store.
+
+        Every on-volume ``write_host_record`` must be paired with
+        ``_persist_host_record_externally`` so the offline mirror never lags the
+        on-volume record (a past bug let the two drift apart). Routing both through
+        this one method makes that pairing structural.
+        """
+        host_store.write_host_record(record)
+        self._persist_host_record_externally(record)
 
     def _delete_host_record_externally(self, host_id: HostId) -> None:
         """Remove a host's record from the external store, if any.
@@ -1073,6 +1106,18 @@ class VpsProvider(BaseProviderInstance):
             timeout_seconds=self.config.ssh_connect_timeout,
         )
 
+    def _write_shutdown_script(self, host: Host, script_text: str) -> None:
+        """Write ``script_text`` as the agent's executable ``commands/shutdown.sh``.
+
+        The idle watcher runs ``commands/shutdown.sh``; only its contents vary by
+        placement/provider (container PID-1 signal, VM poweroff, sentinel touch, or
+        ARM deallocate), so the mkdir/write/chmod plumbing lives here once.
+        """
+        commands_dir = host.host_dir / "commands"
+        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
+        host.write_file(commands_dir / "shutdown.sh", script_text.encode())
+        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+
     def _create_shutdown_script(self, host: Host) -> None:
         """Create the shutdown script the idle watcher runs to stop the host.
 
@@ -1081,11 +1126,7 @@ class VpsProvider(BaseProviderInstance):
         providers whose container path must stop the whole instance override this
         (sentinel + host-side watcher), early-returning here for the bare case.
         """
-        shutdown_script = f"#!/bin/bash\n{self._realizer.idle_shutdown_command}\n"
-        commands_dir = host.host_dir / "commands"
-        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
-        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+        self._write_shutdown_script(host, f"#!/bin/bash\n{self._realizer.idle_shutdown_command}\n")
 
     @abstractmethod
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
@@ -1144,12 +1185,8 @@ class VpsProvider(BaseProviderInstance):
             data_updates = [to_update(certified.field_ref().updated_at, datetime.now(timezone.utc))]
             if stop_reason is not None:
                 data_updates.append(to_update(certified.field_ref().stop_reason, stop_reason.value))
-            updated_data = certified.model_copy_update(*data_updates)
-            updated_record = host_record.model_copy_update(
-                to_update(host_record.field_ref().certified_host_data, updated_data)
-            )
-            host_store.write_host_record(updated_record)
-            self._persist_host_record_externally(updated_record)
+            updated_record = host_record.with_certified_updates(*data_updates)
+            self._write_and_mirror(host_store, updated_record)
 
         self._host_record_cache[host_id] = updated_record
         logger.info("Host {} stopped", host_id)
@@ -1965,18 +2002,14 @@ class VpsProvider(BaseProviderInstance):
             existing_snapshots = host_record.certified_host_data.snapshots
             updated_snapshots = list(existing_snapshots) + [snapshot_record]
             certified = host_record.certified_host_data
-            updated_data = certified.model_copy_update(
+            updated_record = host_record.with_certified_updates(
                 to_update(certified.field_ref().snapshots, updated_snapshots),
                 to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
-            )
-            updated_record = host_record.model_copy_update(
-                to_update(host_record.field_ref().certified_host_data, updated_data)
             )
 
             # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
             host_store = self._realizer.open_host_store(outer, host_id)
-            host_store.write_host_record(updated_record)
-            self._persist_host_record_externally(updated_record)
+            self._write_and_mirror(host_store, updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
         return snapshot_id
@@ -2034,12 +2067,9 @@ class VpsProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
 
         certified = host_record.certified_host_data
-        updated_data = certified.model_copy_update(
+        updated_record = host_record.with_certified_updates(
             to_update(certified.field_ref().host_name, str(name)),
             to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
-        )
-        updated_record = host_record.model_copy_update(
-            to_update(host_record.field_ref().certified_host_data, updated_data)
         )
 
         if host_record.vps_ip is not None:
@@ -2050,8 +2080,7 @@ class VpsProvider(BaseProviderInstance):
                 )
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
                 host_store = self._realizer.open_host_store(outer, host_id)
-                host_store.write_host_record(updated_record)
-                self._persist_host_record_externally(updated_record)
+                self._write_and_mirror(host_store, updated_record)
 
         return self.get_host(host_id)
 

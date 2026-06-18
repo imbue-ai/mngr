@@ -1,6 +1,8 @@
+import json
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
+from functools import cached_property
 from typing import Any
 from typing import Final
 
@@ -19,13 +21,17 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import HOST_ID_METADATA_KEY
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
@@ -36,25 +42,32 @@ from imbue.mngr_vps.build_args import extract_presence_flag
 from imbue.mngr_vps.build_args import extract_single_value_arg
 from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
-from imbue.mngr_vps.instance_offline import KeyValueMirrorVpsProvider
+from imbue.mngr_vps.host_state_store import HostStateStore
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
-# Per-agent metadata is mirrored into instance metadata as up to three items per
-# agent, keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the key),
-# so a STOPPED instance (no external IP, SSH unreachable) still surfaces its
-# agents in discovery and resolves by name. GCE *labels* can't hold this (they
-# lowercase and restrict to ``[a-z0-9_-]``, 63 chars), so unlike AWS (EC2 tags)
-# the GCP mirror lives in instance *metadata*, whose values are large/permissive.
+# GCP has no object-storage state bucket; the offline mirror lives in the
+# instance's own GCE *metadata*, which is large and permissive (256 KB per value,
+# 512 KB total) -- unlike GCE labels, which lowercase and restrict to
+# ``[a-z0-9_-]``, 63 chars. The full ``VpsHostRecord`` JSON lives under
+# ``mngr-host-state`` and one JSON value per agent under ``mngr-agent-<agent_id>``,
+# so a STOPPED instance (no external IP, SSH unreachable) still surfaces its host
+# and agents in discovery and resolves by name. This is the GCP analog of the
+# AWS/Azure object-storage state bucket: both back the uniform ``HostStateStore``.
+HOST_STATE_METADATA_KEY: Final[str] = "mngr-host-state"
 AGENT_METADATA_PREFIX: Final[str] = "mngr-agent-"
-_AGENT_METADATA_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
 # GCE statuses in which the guest OS is down (so the SSH-based sweep can't see the
-# host) but the instance still exists and its agents must be reconstructed from
-# metadata. ``STOPPING`` is included so a host doesn't vanish from discovery
-# during the stop transition before it reaches the terminal ``TERMINATED``
-# (GCE's name for a stopped -- not deleted -- instance).
+# host) but the instance still exists and must be surfaced offline from metadata.
+# ``STOPPING`` is included so a host doesn't vanish from discovery during the stop
+# transition before it reaches the terminal ``TERMINATED`` (GCE's name for a
+# stopped -- not deleted -- instance).
 _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"STOPPING", "TERMINATED"})
+# ``mngr-host-name`` metadata holds ``mngr-<host_name>``; strip the prefix to
+# recover the host name when labelling a stopped host in discovery.
+_HOST_NAME_PREFIX: Final[str] = "mngr-"
 
 # The self-stopping idle watcher (in-container sentinel + host-side systemd
 # ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
@@ -125,7 +138,7 @@ class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class GcpProvider(KeyValueMirrorVpsProvider):
+class GcpProvider(OfflineCapableVpsProvider):
     """GCP-specific provider that discovers hosts via the GCE instances.list API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -243,15 +256,9 @@ class GcpProvider(KeyValueMirrorVpsProvider):
         ``image`` kwargs are statically visible, mirroring
         ``AwsProvider._create_vps_instance``.
         """
-        match parsed:
-            case ParsedGcpBuildOptions(spot=spot, image=image):
-                pass
-            case _:
-                raise MngrError(
-                    f"GcpProvider._create_vps_instance expected ParsedGcpBuildOptions, "
-                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
-                    "non-GCP shape; _parse_build_args must return ParsedGcpBuildOptions."
-                )
+        gcp_parsed = self._require_parsed(parsed, ParsedGcpBuildOptions)
+        spot = gcp_parsed.spot
+        image = gcp_parsed.image
         return self.gcp_client.create_instance(
             label=label,
             region=parsed.region,
@@ -298,20 +305,9 @@ class GcpProvider(KeyValueMirrorVpsProvider):
             timeout_seconds=timeout_seconds,
         )
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return external IPs of GCE instances labeled with this provider's name.
-
-        Credentials are guaranteed to be resolvable here: ``build_provider_instance``
-        raises ``ProviderUnavailableError`` when ``config.get_credentials_and_resolved_project()``
-        fails, so any GcpProvider that reaches this point has working credentials.
-        """
-        instances = self._list_instances_cached()
-        vps_ips: list[str] = []
-        for instance in instances:
-            main_ip = instance.get("main_ip", "")
-            if main_ip:
-                vps_ips.append(main_ip)
-        return vps_ips
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
+    # (cached listing -> non-empty main_ip) covers GCP unchanged: a stopped GCE
+    # instance loses its external IP and is excluded by the non-empty IP check.
 
     # =========================================================================
     # Native GCE stop/start (idle-pause + resume) -- the base
@@ -346,42 +342,30 @@ class GcpProvider(KeyValueMirrorVpsProvider):
     # overrides none of those hooks. GCP does not sync host_dir to an object store,
     # so ``_host_dir_backend`` stays the base ``NullHostDirBackend`` and nothing is installed.
 
+    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
+        """Match on the host id stored verbatim in instance metadata (GCE labels cannot hold a raw mngr host id)."""
+        wanted = str(host_id)
+        return [
+            instance
+            for instance in self._list_instances_cached()
+            if self._metadata_dict(instance).get(HOST_ID_METADATA_KEY) == wanted
+        ]
+
     # =========================================================================
-    # Offline metadata via instance metadata (so STOPPED hosts list + resolve by name)
+    # Offline discovery + the metadata-backed state store (so STOPPED hosts list
+    # and resolve by name without SSH, uniformly with the AWS/Azure buckets)
     # =========================================================================
 
-    def _offline_kv_map(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Return the instance's GCE metadata dict (the offline mirror) from the normalized list shape."""
-        metadata = instance.get("metadata", {})
-        return dict(metadata) if isinstance(metadata, Mapping) else {}
+    @cached_property
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror, backed by GCE instance metadata.
 
-    def _host_name_key(self) -> str:
-        return HOST_NAME_METADATA_KEY
-
-    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror an agent record into the instance's ``mngr-agent-<id>-*`` GCE metadata.
-
-        GCE metadata (not tags/labels) holds the per-agent mirror so a stopped
-        instance still surfaces its agents and resolves for ``mngr start``; the
-        shared persist envelope on ``OfflineCapableVpsProvider`` handles the
-        authoritative on-volume write.
+        GCP has no object-storage state bucket; its metadata store is the GCP analog
+        (see ``_GceMetadataHostStateStore``), so the offline read/write paths are
+        uniform with the AWS/Azure ``BucketHostStateStore``. GCE metadata is always
+        available (no ``prepare`` step), so there is no missing-store case here.
         """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            logger.warning("No GCE instance found for host {}; cannot persist agent metadata", host_id)
-            return
-        updates, delete_keys = self._agent_field_items(agent_id, agent_data, instance)
-        # One setMetadata round-trip (it is a whole-object read-modify-write) carries
-        # both the upserts and the stale deletes, unlike AWS's two tag calls.
-        self.gcp_client.set_instance_metadata(VpsInstanceId(instance["id"]), updates, delete_keys)
-
-    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        """Remove the agent's ``mngr-agent-<id>-*`` GCE metadata. Idempotent."""
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_METADATA_PREFIX}{agent_id}-{field}" for field in _AGENT_METADATA_FIELDS]
-        self.gcp_client.set_instance_metadata(VpsInstanceId(instance["id"]), {}, keys)
+        return _GceMetadataHostStateStore(provider=self)
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the GCE instance's OS is down (STOPPING or TERMINATED).
@@ -391,6 +375,127 @@ class GcpProvider(KeyValueMirrorVpsProvider):
         SSH-unreachable.
         """
         return instance.get("state") in _HOST_DOWN_STATES
+
+    def _metadata_dict(self, instance: Mapping[str, Any]) -> dict[str, str]:
+        """Return the instance's metadata dict from the normalized list shape."""
+        metadata = instance.get("metadata", {})
+        return dict(metadata) if isinstance(metadata, Mapping) else {}
+
+    def _host_name_from_instance(self, instance: Mapping[str, Any]) -> HostName:
+        """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id metadata)."""
+        metadata = self._metadata_dict(instance)
+        name = metadata.get(HOST_NAME_METADATA_KEY, "")
+        if name.startswith(_HOST_NAME_PREFIX):
+            return HostName(name[len(_HOST_NAME_PREFIX) :])
+        if name:
+            return HostName(name)
+        return HostName(metadata.get(HOST_ID_METADATA_KEY, "unknown"))
+
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        """Build a STOPPED-state DiscoveredHost from an instance's metadata, or None.
+
+        Reads only the cheap identity metadata stamped at create (host id +
+        host name), never the metadata state record -- the full record is read from
+        the state store on demand.
+        """
+        host_id_str = self._metadata_dict(instance).get(HOST_ID_METADATA_KEY)
+        if host_id_str is None:
+            return None
+        return DiscoveredHost(
+            host_id=HostId(host_id_str),
+            host_name=self._host_name_from_instance(instance),
+            provider_name=self.name,
+            host_state=HostState.STOPPED,
+        )
+
+
+class _GceMetadataHostStateStore(HostStateStore):
+    """Instance-metadata-backed mirror: full host + agent records live in GCE metadata.
+
+    The GCP analog of the AWS/Azure ``BucketHostStateStore``. GCP has no
+    object-storage state bucket; instead the full ``VpsHostRecord`` JSON (key
+    ``mngr-host-state``) and one JSON value per agent (key ``mngr-agent-<id>``)
+    live in the instance's own GCE metadata, which is large and permissive enough
+    (256 KB per value, 512 KB total) to hold them -- unlike GCE labels. Exposing it
+    behind the same ``HostStateStore`` interface makes the offline read/write paths
+    uniform across all three providers.
+
+    Keyed by ``host_id``; the instance is resolved from the provider's cached
+    listing. All methods are best-effort and idempotent: a write resolves the live
+    instance and merges via ``set_instance_metadata`` (a whole-object
+    read-modify-write guarded by a fingerprint), and a read serves from the cached
+    listing's metadata with no extra GET.
+    """
+
+    provider: "GcpProvider"
+
+    def persist_host_record(self, record: VpsHostRecord) -> None:
+        host_id = HostId(record.certified_host_data.host_id)
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            logger.warning("No GCE instance found for host {}; cannot mirror host record to metadata", host_id)
+            return
+        self.provider.gcp_client.set_instance_metadata(
+            VpsInstanceId(instance["id"]), {HOST_STATE_METADATA_KEY: record.model_dump_json()}
+        )
+
+    def delete_host_state(self, host_id: HostId) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return
+        agent_keys = [key for key in self.provider._metadata_dict(instance) if key.startswith(AGENT_METADATA_PREFIX)]
+        self.provider.gcp_client.set_instance_metadata(
+            VpsInstanceId(instance["id"]), {}, [HOST_STATE_METADATA_KEY, *agent_keys]
+        )
+
+    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            logger.warning("No GCE instance found for host {}; cannot mirror agent metadata", host_id)
+            return
+        self.provider.gcp_client.set_instance_metadata(
+            VpsInstanceId(instance["id"]), {f"{AGENT_METADATA_PREFIX}{agent_id}": json.dumps(dict(agent_data))}
+        )
+
+    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return
+        self.provider.gcp_client.set_instance_metadata(
+            VpsInstanceId(instance["id"]), {}, [f"{AGENT_METADATA_PREFIX}{agent_id}"]
+        )
+
+    def list_agent_records(self, host_id: HostId) -> list[dict]:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return []
+        records: list[dict] = []
+        for key, value in self.provider._metadata_dict(instance).items():
+            if not key.startswith(AGENT_METADATA_PREFIX):
+                continue
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as e:
+                logger.warning("Skipping unparseable agent metadata {!r}: {}", key, e)
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+            else:
+                logger.warning("Skipping agent metadata {!r}: value is not a JSON object", key)
+        return records
+
+    def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
+        instance = self.provider._find_instance_for_host(host_id)
+        if instance is None:
+            return None
+        record_json = self.provider._metadata_dict(instance).get(HOST_STATE_METADATA_KEY)
+        if record_json is None:
+            return None
+        try:
+            return VpsHostRecord.model_validate_json(record_json)
+        except ValueError as e:
+            logger.warning("Malformed host record in GCE metadata for {}: {}", host_id, e)
+            return None
 
 
 class GcpProviderBackend(ProviderBackendInterface):
