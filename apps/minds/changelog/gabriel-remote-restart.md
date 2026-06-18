@@ -1,3 +1,5 @@
 Workspace recovery now understands remote (Imbue Cloud) minds, not just local docker/lima ones. When the recovery probe finds that the workspace's provider is unreachable -- your network is down, Imbue Cloud is having an outage, or (locally) the docker daemon is stopped -- it shows a dedicated "Can't connect to ..." page with a Retry button and no restart option, because a restart routes through that same unreachable backend and cannot help. The page reconnects automatically (with a backed-off poll) once the provider is reachable again.
 
 When the provider is reachable but rejects the request for another reason (expired login, no account configured), recovery now shows a plain "Can't reach your workspace" message with the reason instead of offering a restart that cannot fix an auth/account problem.
+
+The destructive "Restart workspace" action now re-checks the workspace one last time immediately before it stops the container, and silently returns you to your workspace if it has recovered on its own (e.g. a connectivity blip that cleared) -- so a transient hiccup can no longer cost you a live container and the in-progress work in its agents.

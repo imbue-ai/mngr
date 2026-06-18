@@ -2902,6 +2902,27 @@ def _await_system_interface_ready(
     return False
 
 
+def _probe_interface_once(agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str) -> bool:
+    """Single probe of the system interface through the plugin; True iff it answers 200.
+
+    Unlike ``_await_system_interface_ready`` (which polls until a deadline), this
+    asks exactly once -- used as the pre-stop re-confirmation gate, where we want
+    a snapshot of "is the interface answering *right now*", not a wait.
+    """
+    with make_workspace_probe_client(
+        preauth_cookie=preauth_cookie,
+        probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+    ) as probe_client:
+        status = probe_workspace_through_plugin(
+            mngr_forward_port=mngr_forward_port,
+            preauth_cookie=preauth_cookie,
+            agent_id=agent_id,
+            probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+            client=probe_client,
+        )
+    return status == 200
+
+
 class _RestartWorkerFailureHandler(MutableModel):
     """Callable ``on_failure`` hook for the restart worker thread.
 
@@ -2958,6 +2979,31 @@ def _run_restart_sequence(
 
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+
+    # Pre-stop re-confirmation for the destructive host restart: a host restart
+    # bounces the live container (interrupting every agent on it), so just before
+    # tearing it down we re-probe the interface one last time. If it answers now,
+    # the workspace recovered on its own between landing on the recovery page and
+    # the user (or auto-dispatch) committing to a restart -- e.g. a connectivity
+    # blip that cleared -- so we abort the restart and silently return the user to
+    # their still-healthy workspace rather than destroying live work for nothing.
+    # Only the destructive `--stop-host` path is gated: the surgical restart and
+    # the plain `mngr start` (skip_stop, container already fully stopped) have no
+    # live container to protect. Requires a usable plugin route to probe through;
+    # without one we cannot re-confirm and fall through to the stop as before.
+    if (
+        is_host_restart
+        and not skip_stop
+        and mngr_forward_port != 0
+        and mngr_forward_preauth_cookie
+        and _probe_interface_once(workspace_agent_id, mngr_forward_port, mngr_forward_preauth_cookie)
+    ):
+        logger.info(
+            "Pre-stop re-probe for {} found the interface healthy; aborting destructive host restart",
+            workspace_agent_id,
+        )
+        tracker.record_probe_success(workspace_agent_id)
+        return
 
     if skip_stop:
         logger.info("Skipping stop step for {} ({}): container already fully stopped", workspace_agent_id, tier_label)

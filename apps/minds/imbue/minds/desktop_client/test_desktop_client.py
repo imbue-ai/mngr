@@ -2,8 +2,13 @@ import json
 import os
 import queue
 import subprocess
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
+from http.server import BaseHTTPRequestHandler
+from http.server import HTTPServer
 from pathlib import Path
 
 import httpx
@@ -2675,6 +2680,106 @@ def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Pat
     invocations = _read_fake_mngr_invocations(mngr_binary)
     assert any(line.startswith("start ") for line in invocations)
     assert not any(line.startswith("stop ") for line in invocations)
+
+
+class _ProbeRequestHandler(BaseHTTPRequestHandler):
+    """Answers 503 for the first ``fail_count`` requests, then 200 (a recovering interface)."""
+
+    fail_count: int = 0
+    request_count: int = 0
+    lock: threading.Lock = threading.Lock()
+
+    def do_GET(self) -> None:
+        with type(self).lock:
+            type(self).request_count += 1
+            attempt = type(self).request_count
+        self.send_response(503 if attempt <= type(self).fail_count else 200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args  # silence the default per-request stderr logging
+
+
+@contextmanager
+def _probe_server(fail_count: int = 0) -> Iterator[int]:
+    """Run a local HTTP server (503 for the first ``fail_count`` GETs, then 200); yield its port."""
+    handler_cls = type(
+        "_ScopedProbeHandler",
+        (_ProbeRequestHandler,),
+        {"fail_count": fail_count, "request_count": 0, "lock": threading.Lock()},
+    )
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_run_restart_sequence_aborts_destructive_restart_when_interface_recovers(tmp_path: Path) -> None:
+    """Pre-stop re-confirmation: if the interface answers right before the destructive stop,
+    the host restart is aborted (no stop/start runs) and the agent is returned to HEALTHY --
+    a blip that cleared must not cost the user their live container.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+
+    with _probe_server(fail_count=0) as port, ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=port,
+            mngr_forward_preauth_cookie="cookie",
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    invocations = _read_fake_mngr_invocations(mngr_binary)
+    assert not any(line.startswith("stop ") for line in invocations), invocations
+    assert not any(line.startswith("start ") for line in invocations), invocations
+
+
+def test_run_restart_sequence_proceeds_when_interface_still_down_at_reprobe(tmp_path: Path) -> None:
+    """The pre-stop gate must not over-abort: if the interface is still down at the re-probe,
+    the destructive restart proceeds (stop + start run) and recovery is awaited as normal.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+
+    # First GET (the pre-stop re-probe) 503 -> proceed; subsequent GETs (the
+    # post-start readiness wait) 200 -> recover, so the test stays fast.
+    with _probe_server(fail_count=1) as port, ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=port,
+            mngr_forward_preauth_cookie="cookie",
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    invocations = _read_fake_mngr_invocations(mngr_binary)
+    assert any(line.startswith("stop ") for line in invocations), invocations
+    assert any(line.startswith("start ") for line in invocations), invocations
 
 
 def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> None:
