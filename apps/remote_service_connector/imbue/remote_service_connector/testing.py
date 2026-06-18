@@ -45,10 +45,13 @@ class FakeCloudflareOps:
         self.access_apps: dict[str, dict[str, Any]] = {}
         self.access_policies: dict[str, list[dict[str, Any]]] = {}
         self.kv_store: dict[str, str] = {}
+        # Created Access service tokens, keyed by token id, so list/delete round-trip.
+        self.service_tokens: dict[str, dict[str, Any]] = {}
         self._next_tunnel_id = 1
         self._next_record_id = 1
         self._next_access_app_id = 1
         self._next_policy_id = 1
+        self._next_service_token_id = 1
         # R2 state
         self.account_id = "test-account"
         self.buckets: dict[str, dict[str, Any]] = {}
@@ -167,20 +170,22 @@ class FakeCloudflareOps:
         self.kv_store.pop(key, None)
 
     def create_service_token(self, name: str) -> dict[str, Any]:
-        token_id = f"svc-token-{self._next_policy_id}"
-        self._next_policy_id += 1
-        return {
+        token_id = f"svc-token-{self._next_service_token_id}"
+        self._next_service_token_id += 1
+        token = {
             "id": token_id,
             "client_id": f"client-{token_id}",
             "client_secret": f"secret-{token_id}",
             "name": name,
         }
+        self.service_tokens[token_id] = token
+        return token
 
     def list_service_tokens(self) -> list[dict[str, Any]]:
-        return []
+        return list(self.service_tokens.values())
 
     def delete_service_token(self, token_id: str) -> None:
-        pass
+        self.service_tokens.pop(token_id, None)
 
     # -- R2 bucket + token operations --
 
