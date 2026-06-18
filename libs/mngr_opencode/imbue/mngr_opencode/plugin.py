@@ -202,7 +202,12 @@ def _adopt_search_db_paths(mngr_ctx: MngrContext) -> list[Path]:
 
 
 class OpenCodeAgentConfig(AgentTypeConfig):
-    """Config for the opencode agent type."""
+    """Config for the opencode agent type.
+
+    Adds only the ``command`` default; merging is handled by
+    ``AgentTypeConfig.merge_with`` (assign-by-default, with ``field__extend``
+    for additive behavior), so no override is needed or wanted here.
+    """
 
     command: CommandString = Field(
         default=CommandString("opencode"),

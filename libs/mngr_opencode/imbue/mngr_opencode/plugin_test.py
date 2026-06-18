@@ -83,6 +83,33 @@ def test_opencode_agent_config_merge_with_replaces_cli_args_and_overrides() -> N
     assert str(merged.command) == "opencode"
 
 
+def test_merge_with_preserves_base_fields_absent_from_override() -> None:
+    """Fields set on the base but not on the override survive the merge.
+
+    Guards against the prior bug where a custom merge_with dropped every field
+    except parent_type/cli_args/command, silently discarding a user's env /
+    extra_provision_command settings.
+    """
+    base = OpenCodeAgentConfig(env=("FOO=bar",), extra_provision_command=("echo hi",))
+    override = OpenCodeAgentConfig(cli_args=("--x",))
+
+    merged = base.merge_with(override)
+
+    assert merged.env == ("FOO=bar",)
+    assert merged.extra_provision_command == ("echo hi",)
+    assert merged.cli_args == ("--x",)
+
+
+def test_merge_with_override_command_wins() -> None:
+    """An explicitly-set command on the override replaces the base command."""
+    base = OpenCodeAgentConfig()
+    override = OpenCodeAgentConfig(command=CommandString("opencode-custom"))
+
+    merged = base.merge_with(override)
+
+    assert str(merged.command) == "opencode-custom"
+
+
 def test_opencode_agent_config_merge_with_rejects_other_type() -> None:
     class _OtherConfig(OpenCodeAgentConfig):
         pass
