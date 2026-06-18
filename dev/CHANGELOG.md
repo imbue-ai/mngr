@@ -15,12 +15,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: Updated `specs/agent-plugin-parity/spec.md` (new "Ordered assistant parts[]" row, transcript-capture note) and updated `specs/agent-plugin-parity/capability-mixins.md` to match what shipped (the three-state `Y`/`-`/`n/a` matrix with the code-derived `CapabilityScope` model, the positive `CliBackedAgentMixin` kind marker, the unified `live_output` capability, and the `session_resume` capability).
-- Changed: Updated the agent-capability-doc generator's test (`scripts/make_agent_capabilities_doc_test.py`) to expect the `session_resume` capability on every interactive agent (not just claude) and to use `SupportsLiveOutputMixin` in its TUI-snapshot fixture after the `HasStreamingSnapshotMixin` removal.
 - Changed: The `just destroy-pool-host` recipe comment now documents that teardown mirrors the row's backend — cancelling the OVH VPS for an `ovh_vps` row, or destroying the lima VM (freeing the box slot) for a `slice` row — and that `--skip-vps-cancel` is for when the underlying machine is already gone.
-
-### Removed
-
-- Removed: Throwaway synthetic-base doc (`dev/agent-mixins-synthetic-base.md`); the synthetic base branch is no longer needed.
 
 ## 2026-06-16
 
