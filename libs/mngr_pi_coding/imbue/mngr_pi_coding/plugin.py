@@ -19,7 +19,7 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
-from imbue.mngr.agents.update_policy import resolve_update_policy
+from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -565,11 +565,7 @@ class PiCodingAgent(
         env_vars["MNGR_PI_AGENT_TYPE"] = _PI_AGENT_TYPE
         env_vars["MNGR_PI_EMIT_COMMON_TRANSCRIPT"] = "1" if self.agent_config.emit_common_transcript else "0"
         env_vars["MNGR_PI_EMIT_RAW_TRANSCRIPT"] = "1" if self.agent_config.emit_raw_transcript else "0"
-        # pi has no interactive update flow, so ASK falls back to AUTO (is_ask_capable=False).
-        effective_policy = resolve_update_policy(
-            self.agent_config.update_policy, is_unattended=not host.is_local, is_ask_capable=False
-        )
-        if effective_policy is AgentUpdatePolicy.NEVER:
+        if is_self_update_disabled(self.agent_config.update_policy, is_unattended=not host.is_local):
             env_vars.setdefault(_PI_SKIP_VERSION_CHECK_ENV_VAR, "1")
 
     def _get_lifecycle_extension_path(self) -> Path:

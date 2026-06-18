@@ -68,7 +68,7 @@ from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_di
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
-from imbue.mngr.agents.update_policy import resolve_update_policy
+from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -681,14 +681,8 @@ class OpenCodeAgent(
         if self.agent_config.sync_global_config:
             user_config_path = host_home.joinpath(*_USER_CONFIG_RELATIVE_PATH)
             base_config = read_opencode_config(host, user_config_path)
-        # opencode has no interactive update flow, so ASK falls back to AUTO (is_ask_capable=False).
         # Unattended is keyed off the host, matching the other agent plugins.
-        disable_auto_update = (
-            resolve_update_policy(
-                self.agent_config.update_policy, is_unattended=not host.is_local, is_ask_capable=False
-            )
-            is AgentUpdatePolicy.NEVER
-        )
+        disable_auto_update = is_self_update_disabled(self.agent_config.update_policy, is_unattended=not host.is_local)
         per_agent_config = build_opencode_config(
             base_config,
             self.agent_config.config_overrides,

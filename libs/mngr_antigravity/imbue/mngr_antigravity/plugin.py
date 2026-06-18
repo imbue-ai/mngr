@@ -111,7 +111,7 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
-from imbue.mngr.agents.update_policy import resolve_update_policy
+from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -646,11 +646,7 @@ class AntigravityAgent(
         replace the installed build. setdefault leaves an explicit user value alone.
         """
         env_vars[_ANTIGRAVITY_APP_DATA_DIR_ENV_VAR] = str(get_antigravity_cli_dir(self._get_agy_home_dir()))
-        # agy has no interactive update flow, so ASK falls back to AUTO (is_ask_capable=False).
-        effective_policy = resolve_update_policy(
-            self.agent_config.update_policy, is_unattended=not host.is_local, is_ask_capable=False
-        )
-        if effective_policy is AgentUpdatePolicy.NEVER:
+        if is_self_update_disabled(self.agent_config.update_policy, is_unattended=not host.is_local):
             env_vars.setdefault(_ANTIGRAVITY_DISABLE_AUTO_UPDATE_ENV_VAR, "true")
 
     def _get_conversation_ids_file_path(self) -> Path:

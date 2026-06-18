@@ -129,17 +129,25 @@ def test_is_pinned_version_present(version_output: str, pinned: str, expected: b
     assert is_pinned_version_present(version_output, pinned) is expected
 
 
-def _version_probe_host(tmp_path: Path, *, stdout: str, success: bool = True) -> Any:
+def _version_probe_host(tmp_path: Path, *, stdout: str = "", stderr: str = "", success: bool = True) -> Any:
     return _RecordingHost(
         host_dir=tmp_path,
         is_local=True,
-        result_by_substring={"--version": CommandResult(stdout=stdout, stderr="", success=success)},
+        result_by_substring={"--version": CommandResult(stdout=stdout, stderr=stderr, success=success)},
     )
 
 
 def test_verify_pinned_cli_version_passes_on_match(tmp_path: Path) -> None:
     host = _version_probe_host(tmp_path, stdout="fakecli 1.2.3")
     verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="1.2.3")
+
+
+def test_verify_pinned_cli_version_reads_version_from_stderr(tmp_path: Path) -> None:
+    # Some CLIs (e.g. pi) print --version to stderr; both streams must be inspected.
+    host = _version_probe_host(tmp_path, stdout="", stderr="0.74.2")
+    verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="0.74.2")
+    with pytest.raises(AgentInstallationError, match="version mismatch"):
+        verify_pinned_cli_version(host, command=_BINARY, binary_name=_BINARY, pinned_version="0.74.3")
 
 
 def test_verify_pinned_cli_version_passes_on_prerelease_pin(tmp_path: Path) -> None:

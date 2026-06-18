@@ -38,7 +38,7 @@ from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
-from imbue.mngr.agents.update_policy import resolve_update_policy
+from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
@@ -529,16 +529,6 @@ def _build_settings_json(
     return json.dumps(data, indent=2) + "\n"
 
 
-def _is_claude_auto_update_disabled(update_policy: AgentUpdatePolicy | None, *, is_unattended: bool) -> bool:
-    """Whether Claude Code's auto-updater should be disabled for this agent.
-
-    claude has no interactive update flow, so ASK falls back to AUTO
-    (``is_ask_capable=False``). Only a resolved NEVER disables the updater.
-    """
-    effective = resolve_update_policy(update_policy, is_unattended=is_unattended, is_ask_capable=False)
-    return effective is AgentUpdatePolicy.NEVER
-
-
 def _build_claude_json(
     *,
     work_dir: Path,
@@ -559,7 +549,7 @@ def _build_claude_json(
     Returns the dict so callers can do further modifications (e.g. keychain merge)
     before serializing.
     """
-    disable_auto_update = _is_claude_auto_update_disabled(config.update_policy, is_unattended=ctx.is_unattended)
+    disable_auto_update = is_self_update_disabled(config.update_policy, is_unattended=ctx.is_unattended)
     if sync_local:
         local_config = read_claude_config(find_user_claude_config())
         data: dict[str, Any] = (
@@ -1530,7 +1520,7 @@ class ClaudeCoreAgent(
         if not config.use_env_config_dir:
             env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
             env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
-            if _is_claude_auto_update_disabled(config.update_policy, is_unattended=not host.is_local):
+            if is_self_update_disabled(config.update_policy, is_unattended=not host.is_local):
                 env_vars.setdefault("DISABLE_AUTOUPDATER", "1")
 
     def get_lifecycle_state(self) -> AgentLifecycleState:

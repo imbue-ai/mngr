@@ -51,3 +51,20 @@ def resolve_update_policy(
     if is_unattended:
         return AgentUpdatePolicy.NEVER
     return AgentUpdatePolicy.ASK if is_ask_capable else AgentUpdatePolicy.NEVER
+
+
+def is_self_update_disabled(
+    configured: AgentUpdatePolicy | None,
+    *,
+    is_unattended: bool,
+    is_ask_capable: bool = False,
+) -> bool:
+    """Whether the CLI's self-updater should be disabled for this agent.
+
+    True iff the resolved policy is ``NEVER``. ``is_ask_capable`` defaults to False
+    because the agents that disable via a single mechanism (env var / config key)
+    have no interactive update flow, so ``ASK`` falls back to ``AUTO`` for them.
+    """
+    return resolve_update_policy(configured, is_unattended=is_unattended, is_ask_capable=is_ask_capable) is (
+        AgentUpdatePolicy.NEVER
+    )

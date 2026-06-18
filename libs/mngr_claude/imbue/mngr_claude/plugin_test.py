@@ -89,7 +89,6 @@ from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
-from imbue.mngr_claude.plugin import _is_claude_auto_update_disabled
 from imbue.mngr_claude.plugin import _parse_claude_version_output
 from imbue.mngr_claude.plugin import _provision_local_credentials
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
@@ -5273,17 +5272,6 @@ def test_modify_env_vars_respects_explicit_disable_autoupdater(
     agent.modify_env_vars(host, env_vars)
 
     assert env_vars["DISABLE_AUTOUPDATER"] == "0"
-
-
-def test_is_claude_auto_update_disabled_defaults_to_disabled() -> None:
-    """Unset policy disables the updater by default (claude has no ask flow), attended or not."""
-    assert _is_claude_auto_update_disabled(None, is_unattended=True) is True
-    assert _is_claude_auto_update_disabled(None, is_unattended=False) is True
-    assert _is_claude_auto_update_disabled(AgentUpdatePolicy.NEVER, is_unattended=False) is True
-    # Explicit AUTO opts back into the auto-updater, even unattended.
-    assert _is_claude_auto_update_disabled(AgentUpdatePolicy.AUTO, is_unattended=True) is False
-    # ASK has no interactive flow for claude, so it behaves like AUTO.
-    assert _is_claude_auto_update_disabled(AgentUpdatePolicy.ASK, is_unattended=False) is False
 
 
 def test_generate_claude_json_autoupdates_follows_disable_flag() -> None:

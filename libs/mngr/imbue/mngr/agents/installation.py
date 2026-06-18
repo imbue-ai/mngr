@@ -62,10 +62,15 @@ def verify_pinned_cli_version(
     and lacks the pin. When the probe fails or yields no output (e.g. the CLI is
     absent or has no ``--version``), logs at debug and returns rather than aborting
     provisioning.
+
+    Both stdout and stderr are inspected because not every CLI prints its version
+    to stdout -- pi, for one, writes ``--version`` to stderr -- and the streams are
+    combined in code rather than via a shell ``2>&1`` so the result does not depend
+    on how a given host executes the command.
     """
-    probe = f"{command} --version 2>/dev/null"
+    probe = f"{command} --version"
     result = host.execute_idempotent_command(probe, timeout_seconds=_VERSION_PROBE_TIMEOUT_SECONDS)
-    output = result.stdout.strip() if result.success else ""
+    output = f"{result.stdout}\n{result.stderr}".strip() if result.success else ""
     if not output:
         logger.debug("Could not determine installed {} version; skipping version pin check.", binary_name)
         return
