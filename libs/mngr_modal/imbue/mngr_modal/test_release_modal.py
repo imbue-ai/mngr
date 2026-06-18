@@ -38,6 +38,7 @@ Run manually:
 
 import os
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
@@ -52,6 +53,7 @@ from imbue.mngr.primitives import UserId
 from imbue.mngr.providers.provider_release_testing import ProviderReleaseProfile
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
 from imbue.mngr.utils.testing import delete_modal_environment
 from imbue.mngr.utils.testing import delete_modal_volumes_in_environment
@@ -146,6 +148,18 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
     # destroy and can seed a fresh `mngr create --snapshot`.
     snapshot_survives_destroy = True
 
+    # Trip 4 (error classification). On the `mngr create` path Modal's bootstrap surfaces a plain
+    # ``MngrError`` ("Modal is not authorized") -- NOT the contract ``ProviderUnavailableError``
+    # (spec divergence), so ``raises_contract_unavailable_error`` is False. That message *does*
+    # point at the provider-correct ``uvx modal token set``, so the help-text check passes. Modal
+    # has its own build-arg parser (no shared ``--vps-*`` migration check), so that scenario is
+    # skipped.
+    raises_contract_unavailable_error = False
+    has_curated_unavailable_help = True
+    supports_vps_migration_arg_check = False
+    credential_setup_command = "uvx modal token set"
+    unavailable_error_substring = "modal is not authorized"
+
     def __init__(self, provider: ModalProviderInstance, user_id: str, app_name: str) -> None:
         self._provider = provider
         self._user_id = user_id
@@ -161,6 +175,12 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
 
     def create_extra_args(self) -> Sequence[str]:
         return ()
+
+    def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
+        # The autouse `_load_modal_test_credentials` fixture loads the token into these env vars
+        # (HOME is swapped, so `~/.modal.toml` is already hidden). Blanking them makes Modal's
+        # bootstrap auth fail, surfacing the "Modal is not authorized" MngrError.
+        return {"MODAL_TOKEN_ID": "", "MODAL_TOKEN_SECRET": ""}
 
     def _live_sandbox_object_id(self) -> str | None:
         """Return the object id of this trip's single live sandbox, or None.
@@ -294,6 +314,26 @@ def test_provider_release_trip3(
 ) -> None:
     provider, user_id, app_name = _modal_release_alignment
     run_provider_release_trip3(
+        _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+@pytest.mark.release
+@pytest.mark.modal
+@pytest.mark.skipif(
+    not (_modal_credentials_available() and MODAL_RELEASE_TESTS_OPT_IN),
+    reason="Modal credentials or MNGR_MODAL_RELEASE_TESTS=1 not set",
+)
+def test_provider_release_trip4(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    _modal_release_alignment: tuple[ModalProviderInstance, str, str],
+) -> None:
+    # No-boot CLI error-classification trip: no ``rsync`` mark (it never provisions a sandbox).
+    provider, user_id, app_name = _modal_release_alignment
+    run_provider_release_trip4(
         _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
         tmp_path,
         temp_git_repo,

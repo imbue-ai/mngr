@@ -46,6 +46,14 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
     # dies with `destroy_host`; so a VPS-family snapshot is not portable.
     snapshot_survives_destroy = False
 
+    # Trip 4 (error classification). All three clouds raise the contract
+    # ``ProviderUnavailableError`` ("is not available") when credentials are unresolvable, and all
+    # route ``--vps-*`` build args through the shared migration check. Curated help text and the
+    # exact credential-unresolvable env differ per provider, so subclasses override those.
+    raises_contract_unavailable_error = True
+    supports_vps_migration_arg_check = True
+    unavailable_error_substring = "is not available"
+
     def __init__(self, client: VpsClientInterface, isolation: IsolationMode) -> None:
         self._client = client
         self._isolation = isolation

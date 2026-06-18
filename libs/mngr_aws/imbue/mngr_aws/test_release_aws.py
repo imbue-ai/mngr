@@ -38,6 +38,7 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -48,6 +49,7 @@ from botocore.exceptions import ClientError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.client import AwsVpsClient
@@ -787,6 +789,11 @@ class _AwsReleaseProfile(VpsCloudReleaseProfile):
     provider_name = "aws"
     name_prefix = AWS_TEST_NAME_PREFIX
 
+    # Trip 4: AWS does not yet curate the missing-credential help text -- it falls through to the
+    # generic "start Docker" guidance rather than pointing at ``aws configure`` (spec divergence).
+    has_curated_unavailable_help = False
+    credential_setup_command = "aws configure"
+
     def __init__(self, client: AwsVpsClient, isolation: IsolationMode) -> None:
         super().__init__(client, isolation)
         self._aws_client = client
@@ -801,6 +808,22 @@ class _AwsReleaseProfile(VpsCloudReleaseProfile):
 
     def create_extra_args(self) -> Sequence[str]:
         return ()
+
+    def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
+        # Drop the frozen ``AWS_*`` creds the conftest exported and point the config/credentials
+        # files at a path that does not exist, then disable IMDS so boto3's chain resolves nothing
+        # -- ``AwsProviderConfig.get_session`` then raises ``AwsConfigError`` -> the contract
+        # ``ProviderUnavailableError``. ``AWS_EC2_METADATA_DISABLED`` stops a slow IMDS probe (and
+        # any instance-role fallback) on a CI runner with an attached role.
+        return {
+            "AWS_ACCESS_KEY_ID": None,
+            "AWS_SECRET_ACCESS_KEY": None,
+            "AWS_SESSION_TOKEN": None,
+            "AWS_PROFILE": None,
+            "AWS_SHARED_CREDENTIALS_FILE": "/nonexistent/aws/credentials",
+            "AWS_CONFIG_FILE": "/nonexistent/aws/config",
+            "AWS_EC2_METADATA_DISABLED": "true",
+        }
 
     def find_launched_host_handle(self, host_name: str) -> str | None:
         return find_handle_by_launched_label(self._aws_client.list_instances(), AWS_PYTEST_LAUNCHED_TAG)
@@ -831,6 +854,18 @@ def test_provider_release_trip3(
 ) -> None:
     run_provider_release_trip3(
         _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
+    )
+
+
+def test_provider_release_trip4(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+) -> None:
+    # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
+    # isolation-agnostic) and no ``rsync`` mark (it never provisions a host).
+    run_provider_release_trip4(
+        _AwsReleaseProfile(client=aws_release_client, isolation=IsolationMode.CONTAINER), tmp_path, temp_git_repo
     )
 
 

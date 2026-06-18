@@ -42,6 +42,7 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -50,6 +51,7 @@ import pytest
 
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.testing import GCP_DEFAULT_REGION
@@ -450,6 +452,12 @@ class _GcpReleaseProfile(VpsCloudReleaseProfile):
     provider_name = "gcp"
     name_prefix = GCP_TEST_NAME_PREFIX
 
+    # Trip 4: GCP does not yet curate the missing-credential help text -- it falls through to the
+    # generic "start Docker" guidance rather than pointing at the ADC login command (spec
+    # divergence).
+    has_curated_unavailable_help = False
+    credential_setup_command = "gcloud auth application-default login"
+
     def __init__(self, client: GcpVpsClient, isolation: IsolationMode, project: str) -> None:
         super().__init__(client, isolation)
         self._gcp_client = client
@@ -467,6 +475,20 @@ class _GcpReleaseProfile(VpsCloudReleaseProfile):
 
     def create_extra_args(self) -> Sequence[str]:
         return ()
+
+    def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
+        # Point ADC's well-known-file resolution at an empty location and clear every project /
+        # key env var so ``google.auth.default()`` finds nothing and raises
+        # ``DefaultCredentialsError`` (a ``GoogleAuthError``) -> the contract
+        # ``ProviderUnavailableError``. The conftest pins ``CLOUDSDK_CONFIG`` to the real gcloud
+        # dir, so overriding it to a nonexistent path is what actually hides ADC.
+        return {
+            "CLOUDSDK_CONFIG": "/nonexistent/gcloud/config",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/nonexistent/gcloud/adc.json",
+            "GOOGLE_CLOUD_PROJECT": None,
+            "GCLOUD_PROJECT": None,
+            "MNGR_GCP_PROJECT": None,
+        }
 
     def find_launched_host_handle(self, host_name: str) -> str | None:
         return find_handle_by_launched_label(self._gcp_client.list_instances(), GCP_PYTEST_LAUNCHED_LABEL)
@@ -499,6 +521,22 @@ def test_provider_release_trip3(
 ) -> None:
     run_provider_release_trip3(
         _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
+    )
+
+
+def test_provider_release_trip4(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    gcp_release_client: GcpVpsClient,
+    gcp_release_test_project: str,
+) -> None:
+    # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
+    # isolation-agnostic) and no ``rsync`` mark (it never provisions a host). No firewall-prepare
+    # dependency either -- nothing is created.
+    run_provider_release_trip4(
+        _GcpReleaseProfile(gcp_release_client, IsolationMode.CONTAINER, gcp_release_test_project),
+        tmp_path,
+        temp_git_repo,
     )
 
 

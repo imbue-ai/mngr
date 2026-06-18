@@ -24,10 +24,9 @@ the profile declares (so it never imports ``mngr_vps``, which depends on ``mngr`
 provider's own test file owns the ``IsolationMode`` parametrization and the settings.toml
 shape, constructing one profile per (provider, isolation) pair.
 
-Future trips (not yet implemented). This module currently ships Trip 1 only. Still owed,
+Future trips (not yet implemented). This module ships Trip 1, Trip 3, and Trip 4. Still owed,
 per ``specs/provider-release-tests.md``: Trip 1b (N agents per host), Trip 2 (idle
-auto-shutdown), Trip 3 (snapshot survives destroy), Trip 4 (error classification), AND a
-dedicated **offline host_dir** trip -- create with ``is_offline_host_dir_enabled=True``, write
+auto-shutdown), AND a dedicated **offline host_dir** trip -- create with ``is_offline_host_dir_enabled=True``, write
 a file into the host_dir, take the host offline (``stop --stop-host``), and assert that file is
 readable *through the offline host_dir mirror* (the state bucket / metadata), not by reaching
 the live host. Trip 1's ``stop-host`` -> ``start`` path already reads the offline host *record*
@@ -47,6 +46,7 @@ from __future__ import annotations
 import abc
 import os
 import subprocess
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -102,6 +102,40 @@ class ProviderReleaseProfile(abc.ABC):
     supports_snapshots: bool
     snapshot_survives_destroy: bool
 
+    # Capability booleans the harness branches Trip 4 (error classification) on.
+    # ``has_curated_unavailable_help`` is whether the provider's missing-credential error carries
+    # *curated*, provider-correct help text (mentioning ``credential_setup_command``); only Azure
+    # does today, so the rest assert the documented divergence (the generic "start Docker" text, or
+    # Modal's wrong error class) instead. ``raises_contract_unavailable_error`` is whether the
+    # missing-credential error is the contract ``ProviderUnavailableError`` ("is not available")
+    # rather than a provider-specific class (Modal raises ``ModalAuthError``); the divergent
+    # providers assert their own surfaced message via ``unavailable_error_substring``.
+    # ``supports_vps_migration_arg_check`` is whether a ``--vps-*`` build arg is rejected with the
+    # shared migration error (the VPS family does; Modal has its own arg parser, so it skips that
+    # scenario). ``credential_setup_command`` is the provider-correct setup command the curated
+    # help text should point at (e.g. ``"az login"``); only meaningful when curated.
+    has_curated_unavailable_help: bool
+    raises_contract_unavailable_error: bool
+    supports_vps_migration_arg_check: bool
+    credential_setup_command: str
+    # The stable user-facing substring the missing-credential error surfaces through the CLI.
+    unavailable_error_substring: str
+
+    @abc.abstractmethod
+    def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
+        """Return env overrides that make this provider's credentials unresolvable (None removes a var)."""
+
+    def write_credentials_unresolvable_settings(self, settings_dir: Path) -> None:
+        """Write the Trip 4 missing-credential settings.toml; defaults to the normal settings.
+
+        Most providers make credentials unresolvable purely via env overrides
+        (``make_credentials_unresolvable_env``). Azure resolves its subscription from settings /
+        env / the ``az`` CLI, and only a *missing subscription* reliably raises its curated
+        unavailable error without a network call, so it overrides this to write a settings.toml
+        with no ``subscription_id``.
+        """
+        self.write_settings(settings_dir)
+
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
         """Return a skip reason if the provider can't run here (missing creds / opt-in), else None."""
@@ -144,6 +178,7 @@ def _run_mngr(
     workspace: Path,
     *args: str,
     timeout: float,
+    env_overrides: Mapping[str, str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a ``mngr`` command against the test settings.toml via the shared subprocess runner.
 
@@ -154,12 +189,22 @@ def _run_mngr(
     conftest HOME swap is already handled by each provider's autouse ``setup_test_mngr_env``
     fixture, so copying the current environment is sufficient here.
 
+    ``env_overrides`` mutates the copied environment before the call: a string value sets the
+    var, and ``None`` removes it. Trip 4 uses this to make a provider's credentials
+    *unresolvable* (e.g. dropping the ``AWS_*`` vars the conftest froze in) so the
+    missing-credential error path can be exercised without touching the real account.
+
     ``run_mngr_subprocess`` returns stdout and stderr separately, but mngr writes its errors and
     logs to stderr; the trip's assertions speak a single stream, so stderr is merged into the
     returned ``stdout``. A timeout is surfaced as a non-zero (124) result rather than raised.
     """
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(settings_dir)
+    for key, value in (env_overrides or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     try:
         result = run_mngr_subprocess(*args, timeout=timeout, env=env, cwd=workspace)
     except subprocess.TimeoutExpired:
@@ -361,6 +406,156 @@ def run_provider_release_trip1(
             _run_mngr(settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
         if handle is not None:
             profile.force_strand_host(handle)
+
+
+# A build arg using the dropped shared ``--vps-*`` prefix. Every VPS-family provider's build-arg
+# parser routes this through ``raise_if_vps_migration_arg``, which raises an ``MngrError`` whose
+# message carries the migration hint -- a synchronous, no-network arg-validation failure.
+_VPS_MIGRATION_BUILD_ARG: Final[str] = "--vps-region=trip4-bogus-region"
+
+
+def _curated_help_text(cli_output: str) -> str:
+    """Return the bracketed ``user_help_text`` from a rendered ``Error: <msg>  [<help>]``, or "".
+
+    ``MngrError.show`` formats the curated help as a trailing ``[...]`` block. Trip 4 keys the
+    "is the help text provider-correct?" check on *that* block specifically -- not the whole
+    message -- because a provider's error *reason* may already echo the setup command (e.g. the
+    google-auth ``DefaultCredentialsError`` text names ``gcloud auth application-default login``)
+    even when the curated guidance is still the generic "start Docker" default.
+    """
+    open_index = cli_output.find("[")
+    close_index = cli_output.rfind("]")
+    if open_index == -1 or close_index <= open_index:
+        return ""
+    return cli_output[open_index + 1 : close_index]
+
+
+def run_provider_release_trip4(
+    profile: ProviderReleaseProfile,
+    tmp_path: Path,
+    workspace: Path,
+) -> None:
+    """Drive Trip 4 ("error classification contract") for ``profile`` -- a pure no-boot CLI exercise.
+
+    Asserts the CLI surfaces the right error class / curated help for each failure mode without
+    ever provisioning a host (so it costs no compute and runs in seconds):
+
+    1. Missing credentials. ``mngr create`` resolves the provider eagerly, so a run with the
+       provider's credentials made unresolvable surfaces the credential error (non-zero exit).
+       The contract class is ``ProviderUnavailableError`` ("is not available"); where the provider
+       diverges (Modal's create-bootstrap surfaces a plain ``MngrError`` rather than the contract
+       class) the profile declares it via ``raises_contract_unavailable_error`` and the assertion
+       keys on its own surfaced message instead. The curated help text is provider-correct only
+       where the profile declares ``has_curated_unavailable_help``; elsewhere the documented
+       divergence (the generic "start Docker" guidance) is asserted so the test flips loudly once
+       the help text is fixed.
+    2. Build arg with the dropped ``--vps-*`` prefix. Where the provider's parser routes through
+       the shared migration check (the VPS family), ``mngr create`` fails synchronously with the
+       migration hint -- before any network call -- so the user is pointed at the per-provider
+       flag. Skipped for providers with their own arg parser (Modal).
+
+    The ``--stop-host``-on-an-unsupported-provider refusal that the spec lists under Trip 4 is
+    *not* exercised here: the CLI resolves the target host before the capability gate, so it
+    needs a real booted host and is already covered by Trip 1's refusal branch (Modal).
+
+    Skips (rather than fails) when the provider's credentials / opt-in are absent.
+    """
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    settings_dir = tmp_path
+    host_name = f"{profile.name_prefix}{get_short_random_string()}"
+
+    # 1. Missing credentials -> the provider's credential error surfaces from `mngr create`. Some
+    #    providers (Azure) need a settings.toml variant for this case, so use the dedicated hook.
+    profile.write_credentials_unresolvable_settings(settings_dir)
+    missing_creds = _run_mngr(
+        settings_dir,
+        workspace,
+        "create",
+        host_name,
+        "--type",
+        "command",
+        "--provider",
+        profile.provider_name,
+        "--no-connect",
+        "--",
+        "sleep",
+        "99999",
+        timeout=_LIFECYCLE_TIMEOUT_SECONDS,
+        env_overrides=profile.make_credentials_unresolvable_env(),
+    )
+    assert missing_creds.returncode != 0, (
+        f"`mngr create` should fail with credentials unresolvable, but it succeeded:\n{missing_creds.stdout}"
+    )
+    assert profile.unavailable_error_substring.lower() in missing_creds.stdout.lower(), (
+        f"expected the missing-credential error to mention "
+        f"{profile.unavailable_error_substring!r}:\n{missing_creds.stdout}"
+    )
+    if profile.raises_contract_unavailable_error:
+        # The contract error is `ProviderUnavailableError`, whose user-facing message is the same
+        # "is not available" phrase across providers; assert it so a regression to a non-contract
+        # class is caught.
+        assert "is not available" in missing_creds.stdout.lower(), (
+            f"expected the contract ProviderUnavailableError ('is not available'):\n{missing_creds.stdout}"
+        )
+    setup_command = profile.credential_setup_command.lower()
+    # Where the provider raises the contract `ProviderUnavailableError`, its curated guidance is
+    # the trailing `[...]` block, so key the help-text check on that block (a provider whose error
+    # *reason* happens to echo the setup command -- e.g. GCP's google-auth message -- must not be
+    # mistaken for curated help). Providers that diverge on the error *class* (Modal raises a plain
+    # MngrError with no `[...]` block) are checked against the whole surfaced message instead.
+    help_haystack = (
+        _curated_help_text(missing_creds.stdout) if profile.raises_contract_unavailable_error else missing_creds.stdout
+    ).lower()
+    if profile.has_curated_unavailable_help:
+        assert setup_command in help_haystack, (
+            f"help text should point at the provider-correct command "
+            f"{profile.credential_setup_command!r}:\n{missing_creds.stdout}"
+        )
+    else:
+        # Documented divergence: the curated help falls through to the generic "start Docker"
+        # default rather than the provider-correct command. Assert it is absent, so the test fails
+        # loudly the moment curated help lands (flip ``has_curated_unavailable_help`` then).
+        assert setup_command not in help_haystack, (
+            f"help text now mentions {profile.credential_setup_command!r}; set "
+            f"has_curated_unavailable_help=True for {profile.provider_name}:\n{missing_creds.stdout}"
+        )
+
+    # 2. A `--vps-*` build arg is rejected with the migration hint (VPS family only). This needs
+    #    valid credentials (the arg is parsed inside `create_host`, after the provider resolves),
+    #    so restore the normal settings.toml first.
+    if profile.supports_vps_migration_arg_check:
+        profile.write_settings(settings_dir)
+        migration = _run_mngr(
+            settings_dir,
+            workspace,
+            "create",
+            host_name,
+            "--type",
+            "command",
+            "--provider",
+            profile.provider_name,
+            "--no-connect",
+            "-b",
+            _VPS_MIGRATION_BUILD_ARG,
+            "--",
+            "sleep",
+            "99999",
+            timeout=_LIFECYCLE_TIMEOUT_SECONDS,
+        )
+        assert migration.returncode != 0, (
+            f"`mngr create` with a --vps-* build arg should be rejected:\n{migration.stdout}"
+        )
+        # The migration error's user-facing text (errors.py / build_args.py): keying on this stable
+        # phrase rather than the class name, which the CLI never prints.
+        assert "no longer supported" in migration.stdout.lower(), (
+            f"expected the build-arg migration refusal:\n{migration.stdout}"
+        )
+        assert "build args are now per-provider" in migration.stdout.lower(), (
+            f"expected the migration hint pointing at the per-provider flags:\n{migration.stdout}"
+        )
 
 
 # A unique prefix on the snapshot ``--format`` template so the id can be picked out of the

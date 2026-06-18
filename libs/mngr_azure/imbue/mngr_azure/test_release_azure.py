@@ -34,6 +34,7 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -43,6 +44,7 @@ from azure.mgmt.compute import ComputeManagementClient
 
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
@@ -95,7 +97,13 @@ def _fail_if_opted_in_without_credentials() -> None:
         )
 
 
-def _write_release_settings(settings_dir: Path, subscription_id: str, *, isolation: str | None = None) -> None:
+def _write_release_settings(
+    settings_dir: Path,
+    subscription_id: str,
+    *,
+    isolation: str | None = None,
+    include_subscription_id: bool = True,
+) -> None:
     """Write the release-test ``settings.toml`` into ``settings_dir``.
 
     Shared by the prepare fixture and the per-test settings fixture so both the
@@ -107,14 +115,19 @@ def _write_release_settings(settings_dir: Path, subscription_id: str, *, isolati
     ``isolation`` selects the placement shape: ``None`` leaves the default
     (Docker container); ``"NONE"`` writes ``isolation = "NONE"`` so the bare
     (no-container) realizer runs the agent directly on the Azure VM's OS.
+
+    ``include_subscription_id`` defaults to True; Trip 4's missing-credential case sets it False so
+    no subscription resolves (the env override also clears the ``AZURE_*`` subscription vars), which
+    is what makes ``build_provider_instance`` raise Azure's curated unavailable error.
     """
     isolation_line = f'isolation = "{isolation}"\n' if isolation is not None else ""
+    subscription_line = f'subscription_id = "{subscription_id}"\n' if include_subscription_id else ""
     (settings_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n"
         "\n[providers.azure]\n"
         'backend = "azure"\n'
         f"{isolation_line}"
-        f'subscription_id = "{subscription_id}"\n'
+        f"{subscription_line}"
         f'default_region = "{AZURE_DEFAULT_REGION}"\n'
         f'default_vm_size = "{AZURE_TEST_VM_SIZE}"\n'
         f'resource_group = "{AZURE_DEFAULT_RESOURCE_GROUP}"\n'
@@ -506,6 +519,11 @@ class _AzureReleaseProfile(VpsCloudReleaseProfile):
     provider_name = "azure"
     name_prefix = AZURE_TEST_NAME_PREFIX
 
+    # Trip 4: Azure is the one provider that curates its missing-credential help text -- it points
+    # at the subscription / `az login` setup steps instead of the generic "start Docker" guidance.
+    has_curated_unavailable_help = True
+    credential_setup_command = "az login"
+
     def __init__(self, client: AzureVpsClient, isolation: IsolationMode, subscription_id: str) -> None:
         super().__init__(client, isolation)
         self._azure_client = client
@@ -523,8 +541,23 @@ class _AzureReleaseProfile(VpsCloudReleaseProfile):
             isolation="NONE" if self._isolation is IsolationMode.NONE else None,
         )
 
+    def write_credentials_unresolvable_settings(self, settings_dir: Path) -> None:
+        # Omit ``subscription_id`` so nothing pins one in settings; paired with the env override
+        # clearing ``AZURE_SUBSCRIPTION_ID`` and pointing ``AZURE_CONFIG_DIR`` at an empty dir,
+        # ``get_subscription_id`` raises and Azure surfaces its curated unavailable error.
+        _write_release_settings(settings_dir, self._subscription_id, include_subscription_id=False)
+
     def create_extra_args(self) -> Sequence[str]:
         return ()
+
+    def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
+        # Clear the env subscription and point the az-CLI config at an empty dir so no subscription
+        # resolves from any source (settings omits it via the settings hook above).
+        return {
+            "AZURE_SUBSCRIPTION_ID": None,
+            "MNGR_AZURE_SUBSCRIPTION_ID": None,
+            "AZURE_CONFIG_DIR": "/nonexistent/azure/config",
+        }
 
     def find_launched_host_handle(self, host_name: str) -> str | None:
         return find_handle_by_launched_label(self._azure_client.list_instances(), AZURE_PYTEST_LAUNCHED_TAG)
@@ -559,6 +592,22 @@ def test_provider_release_trip3(
 ) -> None:
     run_provider_release_trip3(
         _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+def test_provider_release_trip4(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    azure_release_client: AzureVpsClient,
+    azure_release_subscription_id: str,
+) -> None:
+    # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
+    # isolation-agnostic) and no ``rsync`` mark (it never provisions a host). No network-prepare
+    # dependency either -- nothing is created.
+    run_provider_release_trip4(
+        _AzureReleaseProfile(azure_release_client, IsolationMode.CONTAINER, azure_release_subscription_id),
         tmp_path,
         temp_git_repo,
     )
