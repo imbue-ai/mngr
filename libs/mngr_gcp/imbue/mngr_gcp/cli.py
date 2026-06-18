@@ -37,6 +37,8 @@ from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
+from imbue.mngr_gcp.errors import GcpStateBucketNotEmptyError
+from imbue.mngr_gcp.errors import GcpStateBucketProvisioningError
 from imbue.mngr_gcp.state_bucket import GcsStateBucket
 from imbue.mngr_gcp.state_bucket import GcsStateBucketError
 from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
@@ -171,13 +173,14 @@ def _ensure_state_bucket(base: GcpProviderConfig, client: GcpVpsClient) -> tuple
     The bucket backs offline ``host_dir`` reads (captured operator-side at ``mngr
     stop``), so a missing storage permission or API failure raises here rather
     than masquerading as a silent "no bucket". Errors surface as an actionable
-    ``click.ClickException``. Mirrors ``mngr_aws.cli._ensure_state_bucket``.
+    ``GcpStateBucketProvisioningError`` (a ``MngrError``). Mirrors
+    ``mngr_aws.cli._ensure_state_bucket``.
     """
     bucket = _build_state_bucket(base, client)
     try:
         was_created = bucket.ensure_bucket()
     except GcsStateBucketError as e:
-        raise click.ClickException(
+        raise GcpStateBucketProvisioningError(
             f"Failed to create the GCS state bucket {bucket.bucket_name!r} "
             f"(check storage permissions, then re-run `mngr gcp prepare`): {e}"
         ) from e
@@ -188,17 +191,18 @@ def _perform_state_bucket_cleanup(bucket: GcsStateBucket, *, force: bool) -> str
     """Delete the GCS state bucket, refusing while any managed-host state remains.
 
     Returns the deleted bucket name, or ``None`` when no bucket existed. Unless
-    ``force`` is set, raises ``click.ClickException`` when the bucket still holds
-    ``hosts/`` state. By the time this runs the instance-exists check has already
-    passed, so any remaining state is *orphaned* offline state (a host whose
-    instance is gone but whose ``delete_host_state`` never ran) -- deleting it
-    silently could drop offline records the operator still wants, so we refuse
-    and let ``--force`` opt into deleting it. Mirrors ``mngr_aws.cli._perform_state_bucket_cleanup``.
+    ``force`` is set, raises ``GcpStateBucketNotEmptyError`` (a ``MngrError``)
+    when the bucket still holds ``hosts/`` state. By the time this runs the
+    instance-exists check has already passed, so any remaining state is
+    *orphaned* offline state (a host whose instance is gone but whose
+    ``delete_host_state`` never ran) -- deleting it silently could drop offline
+    records the operator still wants, so we refuse and let ``--force`` opt into
+    deleting it. Mirrors ``mngr_aws.cli._perform_state_bucket_cleanup``.
     """
     if not bucket.bucket_exists():
         return None
     if not force and bucket.has_any_host_state():
-        raise click.ClickException(
+        raise GcpStateBucketNotEmptyError(
             f"Refusing to delete GCS state bucket {bucket.bucket_name!r}: it still holds offline host "
             "state (from hosts that are no longer running instances). Re-run with `--force` to "
             "delete the bucket and the remaining state."
@@ -420,8 +424,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # GCS state bucket: backs the offline ``host_dir`` mirror written at ``mngr
     # stop``. Created here so the runtime create/stop paths can attach to it with
     # no extra bucket-management permissions. A storage permission or API failure
-    # surfaces as a click error (the bucket is the offline-host_dir feature's only
-    # backing store; a firewall-only prepare would leave offline host_dir
+    # surfaces as a GcpStateBucketProvisioningError (the bucket is the
+    # offline-host_dir feature's only backing store; a firewall-only prepare would leave offline host_dir
     # unavailable). Offline host_dir is the operator's own write path (no managed
     # identity needed), so prepare sets up only the firewall + bucket.
     state_bucket_name, was_bucket_created = _ensure_state_bucket(base, client)

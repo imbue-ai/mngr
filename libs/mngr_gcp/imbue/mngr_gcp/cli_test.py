@@ -14,7 +14,6 @@ Splits the test surface into two layers:
 
 import json
 
-import click
 import pluggy
 import pytest
 from click.testing import CliRunner
@@ -38,6 +37,7 @@ from imbue.mngr_gcp.cli import _resolve_provider_config
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.errors import GcpStateBucketNotEmptyError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _FAKE_CREDENTIALS
@@ -176,14 +176,14 @@ def test_perform_state_bucket_cleanup_refuses_while_host_state_remains() -> None
     """The bucket cleanup refuses (deletes nothing) while any host state remains.
 
     Without ``--force``, orphaned offline state from a removed host must not be
-    silently dropped: the helper raises a ``click.ClickException`` pointing the
-    operator at ``--force``, and the bucket is left untouched.
+    silently dropped: the helper raises a ``GcpStateBucketNotEmptyError`` pointing
+    the operator at ``--force``, and the bucket is left untouched.
     """
     fake_gcs = _FakeStorageClient()
     bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-refuse")
     bucket.ensure_bucket()
     bucket.write_host_record_json(HostId.generate(), "{}")
-    with pytest.raises(click.ClickException, match="still holds offline host state"):
+    with pytest.raises(GcpStateBucketNotEmptyError, match="still holds offline host state"):
         _perform_state_bucket_cleanup(bucket, force=False)
     # The bucket must still exist after a refusal.
     assert bucket.bucket_exists() is True
