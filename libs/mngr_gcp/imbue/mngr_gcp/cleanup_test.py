@@ -46,6 +46,18 @@ def test_find_filters_server_side_on_pytest_launched_label() -> None:
     assert client.last_list_filter == f"labels.{GCP_PYTEST_LAUNCHED_LABEL}=true"
 
 
+def test_find_skips_instance_with_unparseable_creation_timestamp() -> None:
+    # An instance whose age cannot be established from creation_timestamp must
+    # be left alone rather than crashing the scan (which runs in
+    # pytest_sessionfinish), mirroring the AWS / Azure / Vultr reapers.
+    client = FakeInstancesClient()
+    client.list_result = [
+        compute_v1.Instance(name="bad", creation_timestamp="not-a-timestamp"),
+        _instance("old", _NOW - timedelta(hours=3)),
+    ]
+    assert find_old_test_instances(client, _PROJECT, _ZONE, max_age=timedelta(hours=1), now=_NOW) == ["old"]
+
+
 def test_find_scan_error_returns_empty() -> None:
     client = FakeInstancesClient()
     client.list_error = google_api_exceptions.ServiceUnavailable("boom")

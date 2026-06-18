@@ -38,8 +38,11 @@ def find_old_test_instances(
     Filters server-side on the pytest-launched label, then keeps only
     instances whose ``creation_timestamp`` is before ``now - max_age``. Younger
     instances are skipped so neither the session-end check nor the reaper ever
-    race-kills an in-flight test on a parallel worker. A scan failure logs and
-    yields an empty list rather than raising.
+    race-kills an in-flight test on a parallel worker. An instance whose
+    ``creation_timestamp`` is missing or unparseable is left alone -- we never
+    delete an instance whose age we cannot establish (mirroring the AWS / Azure
+    / Vultr reapers). A scan failure logs and yields an empty list rather than
+    raising.
     """
     cutoff = now - max_age
     leaked: list[str] = []
@@ -49,7 +52,15 @@ def find_old_test_instances(
     try:
         page_result = instances_client.list(request=request)
         for instance in page_result:
-            created_at = datetime.fromisoformat(instance.creation_timestamp)
+            try:
+                created_at = datetime.fromisoformat(instance.creation_timestamp)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Unparseable creation_timestamp {!r} on GCE instance {}; leaving instance alone",
+                    instance.creation_timestamp,
+                    instance.name,
+                )
+                continue
             if created_at < cutoff:
                 leaked.append(instance.name)
     except google_api_exceptions.GoogleAPICallError as e:
