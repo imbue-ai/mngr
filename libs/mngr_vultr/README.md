@@ -33,6 +33,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
+| `backend` | `vultr` | Provider backend (always 'vultr' for this type) |
 | `api_key` | `None` | Vultr API key. Falls back to VULTR_API_KEY env var. |
 | `default_region` | `ewr` | Default Vultr region |
 | `default_plan` | `vc2-2c-4gb` | Default Vultr plan |

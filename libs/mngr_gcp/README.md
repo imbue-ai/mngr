@@ -111,6 +111,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
+| `backend` | `gcp` | Provider backend (always 'gcp' for this type) |
 | `project_id` | gcloud/ADC default | GCP project ID (a plain identifier, not a credential). When unset, the project is taken from Application Default Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env var); set it explicitly to pin a specific project. |
 | `default_region` | derived from zone | GCE region (e.g., 'us-west1'). Used only to validate the resolved zone; when unset, derived from the resolved zone. Set it to catch a mismatched default_zone typo. |
 | `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal). When unset, taken from the active 'gcloud config get compute/zone'. Must lie in default_region when both are set explicitly. |

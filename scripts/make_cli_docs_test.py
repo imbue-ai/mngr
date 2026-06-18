@@ -6,7 +6,6 @@ from imbue.mngr_vultr.config import VultrProviderConfig
 from scripts.make_cli_docs import CONFIG_TABLES
 from scripts.make_cli_docs import ConfigTable
 from scripts.make_cli_docs import ConfigTableRow
-from scripts.make_cli_docs import _own_field_names
 from scripts.make_cli_docs import _validate_table_coverage
 from scripts.make_cli_docs import get_relative_link
 
@@ -47,7 +46,7 @@ def test_config_table_covers_every_own_field(table: ConfigTable) -> None:
 
 
 def test_config_table_coverage_raises_on_undocumented_field() -> None:
-    # A real own field (`backend`) that is neither shown nor excluded must fail the build.
+    # A real own field (`backend`) with no row must fail the build.
     table = ConfigTable(
         readme="x/README.md",
         config_cls=VultrProviderConfig,
@@ -58,20 +57,3 @@ def test_config_table_coverage_raises_on_undocumented_field() -> None:
     with pytest.raises(ValueError) as exc_info:
         _validate_table_coverage(table)
     assert "backend" in str(exc_info.value)
-
-
-def test_config_table_coverage_raises_on_stale_exclusion() -> None:
-    # An excluded_fields entry that is not an own field of the config class is a stale
-    # exclusion (the field was renamed/removed/lifted to a base) and must fail loudly.
-    all_rows = tuple(ConfigTableRow(name, "x") for name in _own_field_names(VultrProviderConfig))
-    table = ConfigTable(
-        readme="x/README.md",
-        config_cls=VultrProviderConfig,
-        field_header="Field",
-        description_header="Description",
-        rows=all_rows,
-        excluded_fields=("not_a_real_field",),
-    )
-    with pytest.raises(ValueError) as exc_info:
-        _validate_table_coverage(table)
-    assert "not_a_real_field" in str(exc_info.value)

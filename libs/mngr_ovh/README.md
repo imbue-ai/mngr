@@ -56,6 +56,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
+| `backend` | `ovh` | Provider backend (always 'ovh' for this type) |
 | `endpoint` | `ovh-us` | python-ovh endpoint id ('ovh-eu', 'ovh-ca', ...). Falls back to OVH_ENDPOINT. |
 | `application_key` | `None` | OVH application key (AK). Falls back to OVH_APPLICATION_KEY/OVH_APP_KEY env vars or ~/.ovh.conf. |
 | `application_secret` | `None` | OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET/OVH_APP_SECRET env vars or ~/.ovh.conf. |

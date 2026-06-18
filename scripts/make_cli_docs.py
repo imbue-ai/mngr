@@ -721,13 +721,10 @@ class ConfigTable(NamedTuple):
     config_cls: type[BaseModel]  # the Pydantic config class whose field descriptions we render
     field_header: str  # label for column 1 (the field / option / setting name)
     description_header: str  # label for column 3
+    # Every field declared on ``config_cls`` must have a row -- ``_validate_table_coverage``
+    # fails the generator otherwise, so a newly added config field can never silently vanish
+    # from the README (the original bug this guard prevents).
     rows: tuple[ConfigTableRow, ...]
-    # Fields declared on ``config_cls`` that are intentionally omitted from the table
-    # (advanced/internal tunables documented in prose instead). Every field declared on
-    # ``config_cls`` must be either in ``rows`` or here -- ``_validate_table_coverage``
-    # fails the generator otherwise, so a newly added config field can never silently
-    # vanish from the README (the original bug this guard prevents).
-    excluded_fields: tuple[str, ...] = ()
 
 
 CONFIG_TABLES: tuple[ConfigTable, ...] = (
@@ -737,6 +734,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         field_header="Field",
         description_header="Description",
         rows=(
+            ConfigTableRow("backend", "`aws`"),
             ConfigTableRow("default_region", "`us-east-1`"),
             ConfigTableRow("default_instance_type", "`t3.small`"),
             ConfigTableRow("default_ami_id", "`None` (pinned Debian 12 amd64 per region)"),
@@ -753,7 +751,6 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("state_bucket_name", "`None` (auto-derived)"),
             ConfigTableRow("is_offline_host_dir_enabled", "`true`"),
         ),
-        excluded_fields=("backend",),  # fixed provider discriminator, not a user tunable
     ),
     ConfigTable(
         readme="libs/mngr_gcp/README.md",
@@ -761,6 +758,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         field_header="Field",
         description_header="Description",
         rows=(
+            ConfigTableRow("backend", "`gcp`"),
             ConfigTableRow("project_id", "gcloud/ADC default"),
             ConfigTableRow("default_region", "derived from zone"),
             ConfigTableRow("default_zone", "gcloud `compute/zone`, else `us-west1-a`"),
@@ -778,7 +776,6 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("service_account_scopes", '`("https://www.googleapis.com/auth/cloud-platform",)`'),
             ConfigTableRow("auto_shutdown_seconds", "`None`"),
         ),
-        excluded_fields=("backend",),  # fixed provider discriminator, not a user tunable
     ),
     ConfigTable(
         readme="libs/mngr_ovh/README.md",
@@ -786,6 +783,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         field_header="Field",
         description_header="Description",
         rows=(
+            ConfigTableRow("backend", "`ovh`"),
             ConfigTableRow("endpoint", "`ovh-us`"),
             ConfigTableRow("application_key", "`None`"),
             ConfigTableRow("application_secret", "`None`"),
@@ -805,7 +803,6 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("recycle_safety_margin_hours", "`2`"),
             ConfigTableRow("recycle_max_candidates_considered", "`10`"),
         ),
-        excluded_fields=("backend",),  # fixed provider discriminator, not a user tunable
     ),
     ConfigTable(
         readme="libs/mngr_vultr/README.md",
@@ -813,12 +810,12 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         field_header="Field",
         description_header="Description",
         rows=(
+            ConfigTableRow("backend", "`vultr`"),
             ConfigTableRow("api_key", "`None`"),
             ConfigTableRow("default_region", "`ewr`"),
             ConfigTableRow("default_plan", "`vc2-2c-4gb`"),
             ConfigTableRow("default_os_id", "`2136`"),
         ),
-        excluded_fields=("backend",),  # fixed provider tag
     ),
     ConfigTable(
         readme="libs/mngr_vps/README.md",
@@ -895,27 +892,19 @@ def _own_field_names(config_cls: type[BaseModel]) -> list[str]:
 
 
 def _validate_table_coverage(table: ConfigTable) -> None:
-    """Fail loudly if a field declared on ``config_cls`` is neither shown nor excluded.
+    """Fail loudly if a field declared on ``config_cls`` has no row in the table.
 
     The generator only renders the curated ``rows``, so a field added to the model but
     not to the table would silently disappear from the README. Requiring every own field
-    to be an explicit choice -- a row to show it, or ``excluded_fields`` to omit it --
-    turns that silent drop into a build failure.
+    to have a row turns that silent drop into a build failure.
     """
     own = _own_field_names(table.config_cls)
-    covered = {row.field for row in table.rows} | set(table.excluded_fields)
-    missing = [name for name in own if name not in covered]
+    shown = {row.field for row in table.rows}
+    missing = [name for name in own if name not in shown]
     if missing:
         raise ValueError(
-            f"{table.readme}: {table.config_cls.__name__} fields {missing} are neither shown in the "
-            f"table nor listed in excluded_fields. Add a ConfigTableRow to document each, or add it to "
-            f"excluded_fields to intentionally omit it."
-        )
-    stale = [name for name in table.excluded_fields if name not in own]
-    if stale:
-        raise ValueError(
-            f"{table.readme}: excluded_fields {stale} are not declared on {table.config_cls.__name__} "
-            f"(inherited or removed); drop them from excluded_fields."
+            f"{table.readme}: {table.config_cls.__name__} fields {missing} have no row in the table. "
+            f"Add a ConfigTableRow for each so the generated README documents them."
         )
 
 

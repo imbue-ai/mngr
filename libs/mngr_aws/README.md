@@ -82,6 +82,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
+| `backend` | `aws` | Provider backend (always 'aws' for this type) |
 | `default_region` | `us-east-1` | Default AWS region. |
 | `default_instance_type` | `t3.small` | EC2 instance type. Surfaced as the `--aws-instance-type=` build arg. |
 | `default_ami_id` | `None` (pinned Debian 12 amd64 per region) | Default AMI ID. When None, the pinned per-region default (DEFAULT_AMI_BY_REGION) is consulted for the chosen region. |
