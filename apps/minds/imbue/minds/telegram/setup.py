@@ -38,8 +38,6 @@ from imbue.mngr.primitives import AgentId
 
 _MAX_BOT_USERNAME_LENGTH: Final[int] = 32
 
-_MIN_BOT_USERNAME_LENGTH: Final[int] = 5
-
 
 class TelegramSetupStatus(UpperCaseStrEnum):
     """Status of a background Telegram setup operation."""
@@ -65,7 +63,9 @@ def generate_bot_username(agent_name: str) -> str:
     """Generate a valid Telegram bot username from an agent name.
 
     Bot usernames must be 5-32 characters, alphanumeric with underscores,
-    and end in 'bot'.
+    and end in 'bot'. The 5-character minimum is satisfied automatically: an
+    empty/blank name falls back to "workspace", and any non-empty sanitized
+    name yields at least one character plus the 4-character "_bot" suffix.
     """
     # Sanitize: lowercase, replace non-alphanumeric with underscore
     sanitized = re.sub(r"[^a-z0-9_]", "_", agent_name.lower())
@@ -80,10 +80,6 @@ def generate_bot_username(agent_name: str) -> str:
     if len(username) > _MAX_BOT_USERNAME_LENGTH:
         prefix_length = _MAX_BOT_USERNAME_LENGTH - len("_bot")
         username = f"{sanitized[:prefix_length].rstrip('_')}_bot"
-
-    # Pad if too short
-    if len(username) < _MIN_BOT_USERNAME_LENGTH:
-        username = f"workspace_{username}"
 
     return username
 

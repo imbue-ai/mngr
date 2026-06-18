@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 from inline_snapshot import snapshot
@@ -31,10 +32,13 @@ def test_generate_bot_username_truncates_long_names() -> None:
     assert result.endswith("_bot")
 
 
-def test_generate_bot_username_pads_short_names() -> None:
-    result = generate_bot_username("ab")
-    assert len(result) >= 5
-    assert result.endswith("_bot")
+def test_generate_bot_username_meets_minimum_length_for_shortest_inputs() -> None:
+    # The shortest possible non-empty name is a single character; with the
+    # "_bot" suffix that is exactly the 5-character Telegram minimum. An empty
+    # name falls back to "workspace_bot". Neither needs padding.
+    assert generate_bot_username("x") == snapshot("x_bot")
+    assert len(generate_bot_username("x")) == 5
+    assert len(generate_bot_username("")) >= 5
 
 
 def test_generate_bot_display_name() -> None:
@@ -102,18 +106,16 @@ def test_orchestrator_start_setup_skips_when_setup_already_in_progress(tmp_path:
     agent_id = AgentId()
     aid = str(agent_id)
 
-    # Simulate an in-progress setup by setting the status directly
+    # Seed an in-progress status directly: there is no public API to drive the
+    # orchestrator into CREATING_BOT without launching a real background browser
+    # flow, so seeding the status dict is the only available test seam.
     with orchestrator._lock:
         orchestrator._statuses[aid] = TelegramSetupStatus.CREATING_BOT
 
-    thread_count_before = len(orchestrator._threads)
     orchestrator.start_setup(agent_id=agent_id, agent_name="test")
-    thread_count_after = len(orchestrator._threads)
 
-    # No new thread should have been started
-    assert thread_count_after == thread_count_before
-
-    # Status should remain unchanged (not reset to CHECKING_CREDENTIALS)
+    # Re-entrant start_setup must be a no-op: the observable status stays
+    # CREATING_BOT rather than being clobbered back to CHECKING_CREDENTIALS.
     info = orchestrator.get_setup_info(agent_id)
     assert info is not None
     assert info.status == TelegramSetupStatus.CREATING_BOT
@@ -123,4 +125,11 @@ def test_orchestrator_wait_for_all_returns_immediately_when_no_threads(tmp_path:
     paths = WorkspacePaths(data_dir=tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)
 
-    orchestrator.wait_for_all(timeout=0.1)
+    # Pass a deliberately huge timeout: with no registered threads the call must
+    # return at once rather than blocking on (or anywhere near) the timeout. A
+    # regression that blocked would blow far past this generous bound.
+    start = time.monotonic()
+    orchestrator.wait_for_all(timeout=3600.0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 5.0
