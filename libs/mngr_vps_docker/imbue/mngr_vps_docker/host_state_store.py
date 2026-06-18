@@ -73,31 +73,29 @@ class HostDirBackend(MutableModel, ABC):
     does the real work, and ``NullHostDirBackend`` is the no-op fallback. This is
     the host_dir sibling of the ``HostStateStore`` select-once strategy.
 
-    The *launch* methods (``create_identity``, ``install_sync``) raise on failure:
-    with the bucket required, an instance that cannot be wired up to push its
-    host_dir is a setup failure, surfaced at create rather than silently yielding
-    an unreadable offline host_dir later. The read path is mostly strict too:
-    ``volume`` returns None only for a genuinely empty host_dir whose instance
-    still has its bucket-write identity, but it *raises* when an empty prefix is
-    explained by a missing identity (a permanent misconfiguration -- the host
-    predates the identity), and a bucket probe *error* propagates. The
-    no-network-probe ``volume_reference`` just builds the reference (None only when
-    the feature is off). Only ``trigger_final_sync`` stays soft -- it logs and
-    returns, since the periodic sync means a missed final sync costs freshness,
-    not the offline copy.
+    Capture is **operator-driven**: at ``mngr stop`` the operator (mngr, already
+    SSH-connected and holding the bucket credentials) reads ``host_dir`` off the
+    box and uploads it to the bucket via :meth:`capture`. There is no on-box sync
+    daemon and no instance/managed identity -- the only credentials involved are
+    the operator's own (the same ones that write the state records). The read path
+    (:meth:`volume` / :meth:`volume_reference`) serves the captured tree back from
+    the bucket with the operator's creds.
+
+    Limitation: a host that idle-self-poweroffs (or crashes) is NOT captured -- no
+    operator is involved at that moment, and by design the box holds no bucket
+    creds. Only ``mngr stop`` captures the latest ``host_dir``; an idle-stopped
+    host's offline ``host_dir`` therefore reflects its last ``mngr stop`` (or is
+    empty if it was never stopped that way). The state *records* are unaffected
+    (always operator-written).
     """
 
     @abstractmethod
-    def create_identity(self) -> str | None:
-        """Bucket-write identity to attach at create (IAM instance profile / managed-identity id), or None."""
+    def capture(self, host_id: HostId, vps_ip: str) -> None:
+        """Read the host's ``host_dir`` off the box and upload it to the bucket.
 
-    @abstractmethod
-    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the on-box periodic host_dir-to-bucket sync daemon."""
-
-    @abstractmethod
-    def trigger_final_sync(self, host_id: HostId, vps_ip: str) -> None:
-        """Run one final host_dir sync before the instance pauses, so the offline copy is current."""
+        Best-effort: a capture failure must not break ``mngr stop`` -- it only
+        means the offline ``host_dir`` is stale (as of the previous capture).
+        """
 
     @abstractmethod
     def volume_reference(self, host_id: HostId) -> HostVolume | None:
@@ -105,7 +103,7 @@ class HostDirBackend(MutableModel, ABC):
 
     @abstractmethod
     def volume(self, host_id: HostId) -> HostVolume | None:
-        """Bucket-backed host_dir volume with a light existence probe, or None when unavailable."""
+        """Bucket-backed host_dir volume with a light existence probe, or None when nothing was captured."""
 
 
 class NullHostDirBackend(HostDirBackend):
@@ -116,13 +114,7 @@ class NullHostDirBackend(HostDirBackend):
     null object rather than a per-provider empty subclass.
     """
 
-    def create_identity(self) -> str | None:
-        return None
-
-    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
-        pass
-
-    def trigger_final_sync(self, host_id: HostId, vps_ip: str) -> None:
+    def capture(self, host_id: HostId, vps_ip: str) -> None:
         pass
 
     def volume_reference(self, host_id: HostId) -> HostVolume | None:

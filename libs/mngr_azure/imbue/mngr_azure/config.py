@@ -13,7 +13,6 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
-from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
 # Storage-account names are globally unique, 3-24 chars, lowercase alphanumeric
@@ -290,22 +289,6 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         ``mngr azure prepare`` created them), not on whether a name can be built.
         """
         return BlobStateBucket(
-            credential=self.get_credential(),
-            subscription_id=subscription_id,
-            resource_group=self.resource_group,
-            region=self.default_region,
-            account_name=self.resolve_state_storage_account_name(subscription_id),
-        )
-
-    def build_host_identity(self, subscription_id: str) -> BlobStateHostIdentity:
-        """Build the bucket-write ``BlobStateHostIdentity`` from this config + the resolved subscription.
-
-        The identity name is derived from the state-account name, so it shares the
-        account's per-(subscription, resource-group) scope. The account name is
-        always derivable, so (like ``build_state_bucket``) this never returns None;
-        the provider gates on whether the identity actually *exists*.
-        """
-        return BlobStateHostIdentity(
             credential=self.get_credential(),
             subscription_id=subscription_id,
             resource_group=self.resource_group,

@@ -4,7 +4,6 @@ from datetime import datetime
 from datetime import timezone
 
 import boto3
-import pytest
 from botocore.stub import Stubber
 
 from imbue.mngr.config.data_types import MngrContext
@@ -18,7 +17,6 @@ from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.state_bucket import S3StateBucket
-from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
@@ -188,62 +186,14 @@ def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(aws_mock: None, te
 
 
 def test_get_volume_for_host_returns_none_when_prefix_empty(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """An empty host_dir prefix with no resolvable instance yields None (not a raise).
+    """An empty host_dir prefix yields None -- nothing was captured to the bucket yet.
 
-    Complement of ``..._raises_when_instance_has_no_iam_profile``: when the identity
-    probe can't even find the instance it cannot confirm a missing profile, so it
-    returns early and ``get_volume_for_host`` yields None rather than raising.
-    Together the two pin the empty-prefix matrix (instance-without-profile -> raise;
-    no-instance -> None).
+    With operator-driven host_dir, an empty prefix just means the host was never
+    `mngr stop`-ped (or idle-self-poweroffed with no operator to capture it); the
+    read simply has no volume to serve, with no instance probe or raise.
     """
-    provider, stubber = _build_bucket_provider(temp_mngr_ctx)
-    host_id = HostId.generate()
-    # The probe calls _find_instance_for_host, which lists instances, finds no
-    # match, refreshes the cache once, and lists again -> two describe calls, then
-    # returns early (no instance, so no IAM-profile probe and no raise).
-    stubber.add_response("describe_instances", {"Reservations": []})
-    stubber.add_response("describe_instances", {"Reservations": []})
-    stubber.activate()
-    try:
-        assert provider.get_volume_for_host(host_id) is None
-    finally:
-        stubber.deactivate()
-
-
-def test_get_volume_for_host_raises_when_instance_has_no_iam_profile(
-    aws_mock: None, temp_mngr_ctx: MngrContext
-) -> None:
-    """Empty host_dir + an instance with no IAM profile -> an actionable 're-run prepare' raise.
-
-    The instance never had the bucket-write profile, so it could never push its
-    host_dir -- a permanent misconfiguration (recreate the host), surfaced as a
-    raise rather than a silently-empty offline read.
-    """
-    provider, stubber = _build_bucket_provider(temp_mngr_ctx)
-    host_id = HostId.generate()
-    matching = {
-        "Reservations": [
-            {
-                "Instances": [
-                    {
-                        "InstanceId": "i-noprofile",
-                        "State": {"Name": "stopped"},
-                        "Tags": [{"Key": "mngr-host-id", "Value": str(host_id)}],
-                    }
-                ]
-            }
-        ]
-    }
-    # _find_instance_for_host: one list (cache populated this run on first call).
-    stubber.add_response("describe_instances", matching)
-    # get_instance_iam_profile_arn: a direct describe of the instance (no profile).
-    stubber.add_response("describe_instances", matching)
-    stubber.activate()
-    try:
-        with pytest.raises(S3StateHostIdentityError, match="no attached IAM instance profile"):
-            provider.get_volume_for_host(host_id)
-    finally:
-        stubber.deactivate()
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
+    assert provider.get_volume_for_host(HostId.generate()) is None
 
 
 def test_get_volume_for_host_returns_volume_when_objects_present(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
@@ -259,40 +209,6 @@ def test_get_volume_for_host_returns_volume_when_objects_present(aws_mock: None,
     volume = provider.get_volume_for_host(host_id)
     assert volume is not None
     assert volume.volume.read_file("logs/a.log") == b"a"
-
-
-def test_host_dir_sync_instance_profile_returned_when_identity_exists(
-    aws_mock: None, temp_mngr_ctx: MngrContext
-) -> None:
-    """The create path attaches the provisioned identity's profile when it exists."""
-    provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
-    identity = provider._host_identity()
-    assert identity is not None
-    identity.ensure_host_identity()
-    assert provider._host_dir_sync_instance_profile() == identity.identity_name
-
-
-def test_host_dir_sync_instance_profile_raises_when_identity_absent(
-    aws_mock: None, temp_mngr_ctx: MngrContext
-) -> None:
-    """create_identity raises when the identity was never provisioned by prepare.
-
-    With the bucket required and host_dir sync on, an instance that cannot attach
-    the bucket-write identity is a create-time setup failure, so the create path
-    raises rather than silently launching without offline host_dir.
-    """
-    provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
-    with pytest.raises(S3StateHostIdentityError, match="does not exist"):
-        provider._host_dir_sync_instance_profile()
-
-
-def test_host_dir_sync_instance_profile_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """No attachment when host_dir sync is disabled, even if the identity exists."""
-    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_offline_host_dir_enabled=False)
-    identity = provider._host_identity()
-    assert identity is not None
-    identity.ensure_host_identity()
-    assert provider._host_dir_sync_instance_profile() is None
 
 
 def test_get_volume_reference_is_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:

@@ -47,6 +47,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -2552,38 +2553,6 @@ def build_poweroff_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
     )
 
 
-def build_oneshot_sync_service_unit(
-    description: str, command: str, *, environment: Mapping[str, str] | None = None
-) -> str:
-    """Build a ``Type=oneshot`` systemd ``.service`` that runs ``command`` once.
-
-    Shared by the cloud host_dir-sync daemons (AWS ``aws s3 sync`` / Azure
-    ``azcopy sync``). ``environment`` adds ``Environment=K=V`` lines before
-    ``ExecStart`` (Azure pins the azcopy MSI login this way; AWS passes none).
-    """
-    env_lines = "".join(f"Environment={key}={value}\n" for key, value in (environment or {}).items())
-    return f"[Unit]\nDescription={description}\n[Service]\nType=oneshot\n{env_lines}ExecStart=/bin/sh -c '{command}'\n"
-
-
-def build_sync_timer_unit(description: str, interval_seconds: int, unit_name: str) -> str:
-    """Build a systemd ``.timer`` that fires ``<unit_name>.service`` every ``interval_seconds``.
-
-    ``OnBootSec`` gives the host a moment to finish bootstrapping before the first
-    run; ``OnUnitActiveSec`` then repeats at the interval. Shared by the cloud
-    host_dir-sync daemons.
-    """
-    return (
-        "[Unit]\n"
-        f"Description={description}\n"
-        "[Timer]\n"
-        f"OnBootSec={interval_seconds}\n"
-        f"OnUnitActiveSec={interval_seconds}\n"
-        f"Unit={unit_name}.service\n"
-        "[Install]\n"
-        "WantedBy=timers.target\n"
-    )
-
-
 class OfflineCapableVpsDockerProvider(VpsDockerProvider):
     """``VpsDockerProvider`` for cloud providers whose hosts can be stopped while
     their disk persists, with host/agent identity mirrored into instance
@@ -2628,8 +2597,8 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
             host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
         )
         # The container is stopped (so host_dir is quiesced) but the instance is
-        # still reachable: flush any offline host_dir mirror now, before the pause.
-        self._sync_host_dir_before_pause(host_id, host_record.vps_ip)
+        # still reachable: capture host_dir to the bucket now, before the pause.
+        self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
         self._pause_cloud_instance(host_record.config.vps_instance_id)
 
     @property
@@ -2645,15 +2614,17 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         """
         return NullHostDirBackend()
 
-    def _sync_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
-        """Push host_dir to the external store one final time before the instance pauses.
+    def _capture_host_dir_before_pause(self, host_id: HostId, vps_ip: str) -> None:
+        """Capture host_dir to the bucket before the instance pauses (operator-driven).
 
         Runs in ``stop_host`` after the container has stopped (host_dir quiesced)
-        and before the instance is paused (still SSH-reachable), so the offline view
-        is current the moment the instance stops. The no-op backend makes this a
-        no-op for providers without a bucket.
+        and before the instance is paused (still SSH-reachable), so the operator
+        reads the final host_dir off the box and uploads it -- making the offline
+        view current the moment the instance stops. The no-op backend makes this a
+        no-op for providers without a bucket. Best-effort (see ``capture``): a
+        failure never breaks ``stop_host``.
         """
-        self._host_dir_backend.trigger_final_sync(host_id, vps_ip)
+        self._host_dir_backend.capture(host_id, vps_ip)
 
     def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
         """Return the bucket-backed host_dir volume *reference* (cheap, no network probe), or None.
@@ -3182,15 +3153,15 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
 
 
 class BucketHostDirBackend(HostDirBackend):
-    """Shared offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
+    """Operator-driven offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
 
     Selected only when offline host_dir is on and the state bucket exists, so
-    ``bucket`` is always present and no method re-tests it. Holds a back-reference
-    to the provider for the SSH-to-outer / path plumbing the sync needs. The
-    offline-read (``volume`` / ``volume_reference``) and final-sync-before-pause
-    flow live here once; subclasses supply only the cloud-specific pieces
-    (identity provisioning, the sync-daemon install, the missing-identity probe)
-    and three small hooks (unit name, stop-action word, bucket error type).
+    ``bucket`` is always present and no method re-tests it. Cloud-agnostic and
+    concrete: capture reads the host's ``host_dir`` off the box over the generic
+    outer-host interface and uploads it to the bucket with the operator's
+    credentials, and the read path serves it back -- so there is no per-cloud
+    subclass, no instance/managed identity, and no on-box sync daemon. Holds a
+    back-reference to the provider for the SSH-to-outer / host_dir-path plumbing.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -3198,52 +3169,48 @@ class BucketHostDirBackend(HostDirBackend):
     provider: OfflineCapableVpsDockerProvider
     bucket: StateBucket
 
-    @abstractmethod
-    def _sync_unit_name(self) -> str:
-        """systemd unit base name for the host_dir sync daemon (e.g. ``mngr-aws-host-dir-sync``)."""
-        ...
-
-    @abstractmethod
-    def _pause_action(self) -> str:
-        """The pause verb for log context: ``stop`` (AWS/EC2) or ``deallocate`` (Azure)."""
-        ...
-
     def volume_reference(self, host_id: HostId) -> HostVolume | None:
         return HostVolume(volume=self.bucket.volume_for_host(host_id))
 
     def volume(self, host_id: HostId) -> HostVolume | None:
-        # A bucket probe error propagates (operational failure). An empty prefix
-        # because the instance has no bucket-write identity (so it could never
-        # push host_dir) raises an actionable error; an empty prefix with the
-        # identity present is a genuine "no host_dir yet" and yields None.
+        # An empty host_dir prefix means nothing was captured yet (the host was
+        # never `mngr stop`-ped, or idle-self-poweroffed with no operator to
+        # capture it) -> no offline volume. A bucket probe error propagates.
         if not self.bucket.host_dir_prefix_has_objects(host_id):
-            self._raise_if_identity_missing(host_id)
+            logger.debug("No offline host_dir captured for host {} (its host_dir prefix is empty)", host_id)
             return None
         return self.volume_reference(host_id)
 
-    def trigger_final_sync(self, host_id: HostId, vps_ip: str) -> None:
+    def capture(self, host_id: HostId, vps_ip: str) -> None:
+        """Pull the host's ``host_dir`` off the box and upload it to the bucket (operator-driven).
+
+        Reads the host_dir tree over the outer-host interface (the operator's SSH
+        connection) and writes each file into the bucket's host_dir volume with the
+        operator's credentials. Best-effort: a connection/storage failure is logged
+        and swallowed so it never breaks ``mngr stop`` -- the offline copy simply
+        stays as of the previous capture. The whole tree is read into memory before
+        upload, which is fine for a bounded ``host_dir`` (events / transcripts).
+        """
+        host_dir_on_outer = self.provider._host_dir_path_on_outer(host_id)
         try:
-            with log_span(f"Triggering final host_dir sync before {self._pause_action()}"):
+            with log_span("Capturing host_dir to the bucket for host {}", host_id):
                 with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
-                    outer.execute_idempotent_command(
-                        f"systemctl start --wait {self._sync_unit_name()}.service", timeout_seconds=300.0
-                    )
-        except MngrError as e:
+                    files: dict[str, bytes] = {}
+                    for entry in outer.list_directory(host_dir_on_outer, recursive=True):
+                        if entry.file_type == FileType.DIRECTORY:
+                            continue
+                        abs_path = Path(entry.path)
+                        rel = abs_path.relative_to(host_dir_on_outer).as_posix()
+                        files[rel] = outer.read_file(abs_path)
+                    if files:
+                        self.bucket.volume_for_host(host_id).write_files(files)
+        except (HostConnectionError, MngrError) as e:
             logger.warning(
-                "Final host_dir sync before stopping host {} failed; the offline copy will be as of "
-                "the last periodic sync: {}",
+                "Failed to capture host_dir to the bucket for host {}; the offline copy will be as of the "
+                "previous capture: {}",
                 host_id,
                 e,
             )
-
-    @abstractmethod
-    def _raise_if_identity_missing(self, host_id: HostId) -> None:
-        """Raise an actionable error when an empty host_dir prefix is explained by a missing cloud identity.
-
-        Best-effort *detection*: if the identity probe itself fails we cannot
-        confirm, so we return without raising (``volume`` then yields None).
-        """
-        ...
 
 
 # The host-name tag value is stored as ``mngr-<host_name>``; strip the prefix to

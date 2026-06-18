@@ -1,13 +1,20 @@
 """Tests for the provider-agnostic host-state-store / host_dir-backend strategy objects."""
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
+from typing import Any
+from typing import Iterator
 
 import pytest
 
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -15,10 +22,11 @@ from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import NullHostDirBackend
 from imbue.mngr_vps_docker.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.instance import BucketHostDirBackend
 
 
 def test_null_host_dir_backend_is_no_op() -> None:
-    """The fallback host_dir backend offers nothing: no identity, no volume, and no-op syncs.
+    """The fallback host_dir backend offers nothing: no volume and a no-op capture.
 
     This is the half of the select-once strategy a provider uses when offline
     host_dir is off or no state bucket exists, so every method must degrade
@@ -26,12 +34,10 @@ def test_null_host_dir_backend_is_no_op() -> None:
     """
     backend = NullHostDirBackend()
     host_id = HostId.generate()
-    assert backend.create_identity() is None
     assert backend.volume_reference(host_id) is None
     assert backend.volume(host_id) is None
-    # The sync hooks are no-ops that must not raise.
-    backend.install_sync(host_id=host_id, vps_ip="203.0.113.4")
-    backend.trigger_final_sync(host_id, "203.0.113.4")
+    # capture is a no-op that must not raise.
+    backend.capture(host_id, "203.0.113.4")
 
 
 def _host_record(host_id: HostId, host_name: str) -> VpsDockerHostRecord:
@@ -141,3 +147,76 @@ def test_missing_state_bucket_error_points_at_prepare() -> None:
     assert isinstance(error, MngrError)
     assert "fake state bucket" in str(error)
     assert "mngr fake prepare" in str(error)
+
+
+_HOST_DIR_ON_OUTER = Path("/mnt/host/host_dir")
+
+
+class _RecordingVolume:
+    """A ``Volume`` stand-in that records what ``write_files`` was handed."""
+
+    def __init__(self) -> None:
+        self.written: dict[str, bytes] = {}
+
+    def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+        self.written.update(file_contents_by_path)
+
+
+class _CaptureFakeBucket:
+    """Minimal ``StateBucket`` for capture: hands out one recording host_dir volume."""
+
+    def __init__(self) -> None:
+        self.volume = _RecordingVolume()
+
+    def volume_for_host(self, host_id: HostId) -> Any:
+        return self.volume
+
+
+class _FakeOuter:
+    """Fake outer host exposing the host_dir tree (recursive list + per-file read)."""
+
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self._files = files
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        return [
+            VolumeFile(path=str(_HOST_DIR_ON_OUTER / rel), file_type=FileType.FILE, mtime=0, size=len(body))
+            for rel, body in self._files.items()
+        ]
+
+    def read_file(self, path: Path) -> bytes:
+        return self._files[Path(path).relative_to(_HOST_DIR_ON_OUTER).as_posix()]
+
+
+class _CaptureFakeProvider:
+    """Fake provider exposing just the host_dir-path + outer-connection plumbing capture needs."""
+
+    def __init__(self, outer: object | None) -> None:
+        self._outer = outer
+
+    def _host_dir_path_on_outer(self, host_id: HostId) -> Path:
+        return _HOST_DIR_ON_OUTER
+
+    @contextmanager
+    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[object]:
+        if self._outer is None:
+            raise HostConnectionError("ssh down")
+        yield self._outer
+
+
+def test_bucket_host_dir_backend_capture_uploads_the_tree() -> None:
+    """Capture reads the host's host_dir off the box and uploads every file to the bucket volume."""
+    bucket = _CaptureFakeBucket()
+    outer = _FakeOuter({"events/e.jsonl": b"evt", "logs/a.log": b"a"})
+    backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider(outer), bucket=bucket)
+    backend.capture(HostId.generate(), "203.0.113.4")
+    assert bucket.volume.written == {"events/e.jsonl": b"evt", "logs/a.log": b"a"}
+
+
+def test_bucket_host_dir_backend_capture_is_best_effort() -> None:
+    """A connection failure during capture is swallowed -- it must never break ``mngr stop``."""
+    bucket = _CaptureFakeBucket()
+    backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider(None), bucket=bucket)
+    # The connection error inside capture must be swallowed (not re-raised here).
+    backend.capture(HostId.generate(), "203.0.113.4")
+    assert bucket.volume.written == {}

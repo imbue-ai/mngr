@@ -32,9 +32,6 @@ from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.client import HOST_NAME_TAG_KEY
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.state_bucket import BlobStateBucket
-from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
-from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
-from imbue.mngr_azure.state_bucket import host_dir_sync_target_for
 from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostDirBackend
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
@@ -44,8 +41,6 @@ from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.instance import BucketHostDirBackend
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import build_oneshot_sync_service_unit
-from imbue.mngr_vps_docker.instance import build_sync_timer_unit
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
@@ -70,94 +65,6 @@ AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 # only strand the VM unreachable while it keeps billing.
 # Where the host-side deallocate script is installed on the outer VM.
 _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
-
-# Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
-# When ``is_offline_host_dir_enabled`` is on and a state bucket exists, the
-# create path attaches the prepare-provisioned user-assigned managed identity,
-# then installs (over SSH on the outer) a systemd oneshot ``.service`` + ``.timer``
-# pair: every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` the oneshot runs ``azcopy sync``
-# of ``<host_dir_on_outer>`` to the blob container's ``hosts/<id>/host_dir/``
-# prefix, authenticating azcopy as the VM's user-assigned identity via MSI (no
-# long-lived keys on the box). The same oneshot is triggered once on graceful
-# stop (``stop_host``) so the offline copy is current. Offline reads are served
-# from the bucket by the operator's credentials via ``get_volume_for_host``.
-# Mirrors the AWS ``aws s3 sync`` daemon.
-HOST_DIR_SYNC_UNIT_NAME: Final[str] = "mngr-azure-host-dir-sync"
-HOST_DIR_SYNC_INTERVAL_SECONDS: Final[int] = 60
-# host_dir can contain large transient build artifacts; exclude the obvious ones
-# so a periodic full-tree sync stays cheap. azcopy distinguishes file-NAME globs
-# (``--exclude-pattern``) from directory PATH prefixes (``--exclude-path``), so the
-# file glob and the directory trees go on different flags -- a single
-# ``--exclude-pattern`` would only match files literally named ``__pycache__`` /
-# ``node_modules``, not their trees. Matches the effective AWS exclude set.
-_HOST_DIR_SYNC_EXCLUDE_PATTERNS: Final[tuple[str, ...]] = ("*.tmp",)
-_HOST_DIR_SYNC_EXCLUDE_PATHS: Final[tuple[str, ...]] = ("__pycache__", "node_modules")
-
-
-def _build_host_dir_sync_command(host_dir_on_outer: str, blob_prefix_url: str) -> str:
-    """Build the ``azcopy sync ... --delete-destination`` command the oneshot service runs.
-
-    Syncs the per-host ``host_dir`` tree to the ``hosts/<id>/host_dir/`` blob
-    prefix, with ``--delete-destination=true`` so a removed file is removed offline
-    too (the ``--delete`` analog). Large transient caches are excluded: file-name
-    globs via ``--exclude-pattern`` and whole directory trees via ``--exclude-path``
-    (azcopy treats the two differently -- a pattern only matches a file's name).
-    azcopy authenticates as the VM's *user-assigned* managed identity via MSI; the
-    identity is pinned by ``AZCOPY_AUTO_LOGIN_TYPE``/``AZCOPY_MSI_CLIENT_ID`` set in
-    the service unit's environment (not on the command line), since the VM also
-    carries a system-assigned identity.
-    """
-    exclude_patterns = ";".join(_HOST_DIR_SYNC_EXCLUDE_PATTERNS)
-    exclude_paths = ";".join(_HOST_DIR_SYNC_EXCLUDE_PATHS)
-    return (
-        f'azcopy sync "{host_dir_on_outer}" "{blob_prefix_url}" '
-        f"--recursive --delete-destination=true "
-        f'--exclude-pattern "{exclude_patterns}" --exclude-path "{exclude_paths}"'
-    )
-
-
-def _build_host_dir_sync_service_unit(host_dir_on_outer: str, blob_prefix_url: str, identity_client_id: str) -> str:
-    """Build the oneshot systemd ``.service`` that pushes host_dir to the bucket once.
-
-    Triggered periodically by the paired ``.timer`` and once on graceful stop.
-    ``Type=oneshot`` so a stop-time ``systemctl start`` blocks until the sync
-    completes (the offline copy is current before the VM deallocates). The MSI
-    login env pins azcopy to the bucket-write user-assigned identity.
-    """
-    command = _build_host_dir_sync_command(host_dir_on_outer, blob_prefix_url)
-    return build_oneshot_sync_service_unit(
-        "Sync this host's host_dir to the mngr Azure Blob state bucket for offline reads",
-        command,
-        environment={"AZCOPY_AUTO_LOGIN_TYPE": "MSI", "AZCOPY_MSI_CLIENT_ID": identity_client_id},
-    )
-
-
-def _build_host_dir_sync_timer_unit(interval_seconds: int) -> str:
-    """Build the systemd ``.timer`` that fires the host_dir sync every ``interval_seconds``."""
-    return build_sync_timer_unit(
-        "Periodically sync this host's host_dir to the mngr Azure Blob state bucket",
-        interval_seconds,
-        HOST_DIR_SYNC_UNIT_NAME,
-    )
-
-
-def _build_azcopy_install_command() -> str:
-    """Build the best-effort azcopy install command (no-op when already present).
-
-    Installs the azcopy v10 binary from Microsoft's static download into
-    ``/usr/local/bin`` only when ``azcopy`` is not already on PATH, so a re-run or
-    a baked image is a no-op. Uses curl + tar (both present on the Debian image
-    after the base cloud-init). Mirrors the AWS awscli best-effort install.
-    """
-    return (
-        "command -v azcopy >/dev/null 2>&1 || ("
-        "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl) && "
-        "tmp=$(mktemp -d) && "
-        'curl -fsSL "https://aka.ms/downloadazcopy-v10-linux" -o "$tmp/azcopy.tgz" && '
-        'tar -xzf "$tmp/azcopy.tgz" -C "$tmp" && '
-        'install -m 0755 "$tmp"/azcopy_linux_*/azcopy /usr/local/bin/azcopy && '
-        'rm -rf "$tmp")'
-    )
 
 
 def _build_idle_watcher_service_unit() -> str:
@@ -331,21 +238,8 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         """
         bucket = self._state_bucket
         if self.azure_config.is_offline_host_dir_enabled and bucket is not None:
-            return _BlobHostDirBackend(provider=self, bucket=bucket)
+            return BucketHostDirBackend(provider=self, bucket=bucket)
         return NullHostDirBackend()
-
-    def _host_identity(self) -> BlobStateHostIdentity | None:
-        """Return the bucket-write managed-identity helper (uncached), or None when unresolvable.
-
-        Built fresh each call (cheap; used only at create / rare diagnostics),
-        scoped to the same state-account name as ``_state_bucket``. Mirrors
-        ``AwsProvider._host_identity``.
-        """
-        try:
-            subscription_id = self.azure_config.get_subscription_id()
-        except ValueError:
-            return None
-        return self.azure_config.build_host_identity(subscription_id)
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List Azure VMs tagged with this provider's name."""
@@ -463,6 +357,9 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
                     f"got {type(parsed).__name__}. This indicates the parser hook returned a "
                     "non-Azure shape; _parse_build_args must return ParsedAzureBuildOptions."
                 )
+        # Offline host_dir is operator-driven (captured at `mngr stop`), so no
+        # user-assigned identity is attached here; the VM still gets a
+        # system-assigned identity (for the idle self-deallocate role).
         return self.azure_client.create_instance(
             label=label,
             region=parsed.region,
@@ -471,18 +368,7 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
             ssh_key_ids=ssh_key_ids,
             tags=tags,
             spot=spot,
-            user_assigned_identity_id=self._host_dir_sync_identity_resource_id(),
         )
-
-    def _host_dir_sync_identity_resource_id(self) -> str | None:
-        """Return the prepare-provisioned user-assigned identity resource id to attach at create, or None.
-
-        Delegates to the selected host_dir backend (the no-op backend returns None
-        when the feature is off or no bucket exists). Attaching the identity
-        requires the create credentials to hold the identity's
-        ``.../assign/action``. Mirrors ``AwsProvider._host_dir_sync_instance_profile``.
-        """
-        return self._host_dir_backend.create_identity()
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return public IPs of Azure VMs tagged with this provider's name.
@@ -568,17 +454,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
                 e,
             )
 
-    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install the base idle watcher and, when enabled, the host_dir-to-bucket sync daemon.
-
-        The sync install raises on failure (per the ``HostDirBackend`` launch
-        contract): with host_dir sync on, a host that cannot install the daemon
-        would silently have an unreadable offline host_dir, so it is a create-time
-        setup failure. When offline host_dir is disabled the backend is a no-op.
-        """
-        super()._on_host_finalized(host_id=host_id, vps_ip=vps_ip)
-        self._host_dir_backend.install_sync(host_id=host_id, vps_ip=vps_ip)
-
     def _write_idle_watcher_aux_files(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
         """Install the self-deallocate script the watcher ``.service`` runs (and ensure curl is present).
 
@@ -627,104 +502,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         misreported as STOPPED.
         """
         return self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) == VpsInstanceStatus.HALTED
-
-
-class _BlobHostDirBackend(BucketHostDirBackend):
-    """Bucket-backed offline host_dir for Azure: managed-identity + ``azcopy sync`` to the Blob bucket.
-
-    Selected only when offline host_dir is on and the state bucket exists, so
-    ``self.bucket`` is always present here and no method re-tests it. The
-    offline-read + final-sync flow is inherited from ``BucketHostDirBackend``;
-    this supplies the Azure-specific identity, sync-daemon install, and probes.
-    Mirrors ``mngr_aws.backend._S3HostDirBackend``.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    provider: AzureProvider
-    bucket: BlobStateBucket
-
-    def _sync_unit_name(self) -> str:
-        return HOST_DIR_SYNC_UNIT_NAME
-
-    def _pause_action(self) -> str:
-        return "deallocate"
-
-    def create_identity(self) -> str:
-        """The bucket-write managed-identity resource id to attach at launch.
-
-        Raises when the identity is missing or cannot be resolved (a
-        ``host_identity_exists`` storage error propagates): with host_dir sync on,
-        a VM launched without it could never push its host_dir, so this is a
-        create-time setup failure. Set ``is_offline_host_dir_enabled = false`` to
-        skip it.
-        """
-        identity = self.provider._host_identity()
-        if identity is None:
-            raise BlobStateHostIdentityError(
-                "host_dir sync is on but the bucket-write managed identity could not be resolved; re-run "
-                "`mngr azure prepare` with sufficient permissions, or set is_offline_host_dir_enabled = false."
-            )
-        if not identity.host_identity_exists():
-            raise BlobStateHostIdentityError(
-                f"host_dir sync is on but the bucket-write managed identity {identity.identity_name} does not "
-                "exist; re-run `mngr azure prepare` with sufficient permissions to enable offline host_dir, "
-                "or set is_offline_host_dir_enabled = false."
-            )
-        return identity.resource_id()
-
-    def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
-        # azcopy authenticates as the VM's user-assigned managed identity via MSI;
-        # without it the sync would just 403. With host_dir sync on, a missing
-        # identity is a create-time setup failure (per the launch contract), so
-        # raise rather than skip the install.
-        identity = self.provider._host_identity()
-        identity_client_id = identity.get_host_identity_client_id() if identity is not None else None
-        if identity_client_id is None:
-            raise BlobStateHostIdentityError(
-                f"host_dir sync is on but the bucket-write managed identity for host {host_id} is absent; re-run "
-                "`mngr azure prepare` with sufficient permissions, or set is_offline_host_dir_enabled = false."
-            )
-        host_dir_on_outer = str(self.provider._host_dir_path_on_outer(host_id))
-        blob_prefix_url = host_dir_sync_target_for(self.bucket.account_name, self.bucket.container_name, host_id)
-        service_unit = _build_host_dir_sync_service_unit(host_dir_on_outer, blob_prefix_url, identity_client_id)
-        timer_unit = _build_host_dir_sync_timer_unit(HOST_DIR_SYNC_INTERVAL_SECONDS)
-        with log_span("Installing Azure host_dir sync daemon"):
-            with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
-                outer.execute_idempotent_command(_build_azcopy_install_command(), timeout_seconds=300.0)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.service"), service_unit)
-                outer.write_text_file(Path(f"/etc/systemd/system/{HOST_DIR_SYNC_UNIT_NAME}.timer"), timer_unit)
-                outer.execute_idempotent_command("systemctl daemon-reload")
-                outer.execute_idempotent_command(f"systemctl enable --now {HOST_DIR_SYNC_UNIT_NAME}.timer")
-        logger.info("Azure host_dir sync daemon installed for host {} (target {})", host_id, blob_prefix_url)
-
-    def _raise_if_identity_missing(self, host_id: HostId) -> None:
-        """Raise when an empty host_dir prefix is explained by the VM having no managed identity.
-
-        A VM with no attached user-assigned managed identity could never push
-        host_dir -- an actionable, permanent misconfiguration (the host predates the
-        identity), so it raises rather than yielding an empty offline read. Detection
-        is best-effort: a probe failure means we can't confirm, so we return without
-        raising and ``volume`` yields None.
-        """
-        try:
-            instance = self.provider._find_instance_for_host(host_id)
-            if instance is None:
-                return
-            identity_ids = self.provider.azure_client.get_instance_user_assigned_identity_ids(
-                VpsInstanceId(instance["id"])
-            )
-        except (MngrError, AzureError) as e:
-            logger.debug(
-                "Could not check managed identity for host {} while diagnosing empty host_dir: {}", host_id, e
-            )
-            return
-        if not identity_ids:
-            raise BlobStateHostIdentityError(
-                f"Host {host_id}'s VM has no attached user-assigned managed identity, so its host_dir was never "
-                "pushed to the bucket and is not readable offline. Re-run `mngr azure prepare` with sufficient "
-                "permissions, then recreate the host so it picks up the identity."
-            )
 
 
 class AzureProviderBackend(ProviderBackendInterface):

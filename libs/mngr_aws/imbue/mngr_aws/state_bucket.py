@@ -12,14 +12,11 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import Volume
-from imbue.mngr.primitives import HostId
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_vps_docker import state_keys
 from imbue.mngr_vps_docker.state_bucket_base import BaseStateBucket
 
@@ -52,27 +49,6 @@ _S3_DEFAULT_REGION: Final[str] = "us-east-1"
 
 class S3StateBucketError(MngrError):
     """An S3 state-bucket operation failed."""
-
-
-class S3StateHostIdentityError(MngrError):
-    """An IAM host-identity (role / instance-profile) operation failed."""
-
-
-def host_identity_name_for_bucket(bucket_name: str) -> str:
-    """Return the deterministic IAM role / instance-profile name for a state bucket.
-
-    The bucket name already encodes the account id + region (or an operator
-    override), so deriving the identity name from it gives one stable identity
-    per ``prepare`` scope. IAM names allow ``[\\w+=,.@-]`` up to 128 chars; the
-    bucket name is DNS-form (lowercase alphanumerics + dashes), so it is a valid
-    suffix as-is.
-    """
-    return f"mngr-aws-host-{bucket_name}"
-
-
-def host_dir_sync_target_for(bucket_name: str, host_id: HostId) -> str:
-    """Return the ``s3://<bucket>/hosts/<host_id_hex>/host_dir/`` sync destination URI."""
-    return f"s3://{bucket_name}/{state_keys.host_dir_prefix(host_id)}"
 
 
 class S3StateBucket(BaseStateBucket):
@@ -210,187 +186,6 @@ class S3StateBucket(BaseStateBucket):
                 )
 
 
-def build_host_identity_inline_policy(bucket_name: str) -> str:
-    """Build the least-privilege inline policy JSON for the bucket-write host identity.
-
-    Grants ONLY the object actions the on-box sync daemon needs --
-    ``s3:PutObject`` / ``s3:GetObject`` / ``s3:DeleteObject`` on the
-    ``hosts/*`` prefix, and ``s3:ListBucket`` on the bucket itself (so
-    ``aws s3 sync --delete`` can enumerate the destination). Nothing else: the
-    role cannot read/write outside this bucket, nor any object outside
-    ``hosts/*``.
-    """
-    bucket_arn = f"arn:aws:s3:::{bucket_name}"
-    return json.dumps(
-        {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Sid": "ListStateBucket",
-                    "Effect": "Allow",
-                    "Action": ["s3:ListBucket"],
-                    "Resource": [bucket_arn],
-                },
-                {
-                    "Sid": "ReadWriteHostObjects",
-                    "Effect": "Allow",
-                    "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
-                    "Resource": [f"{bucket_arn}/{state_keys.HOSTS_PREFIX}/*"],
-                },
-            ],
-        }
-    )
-
-
-class S3StateHostIdentity(MutableModel):
-    """Manages the IAM role + instance profile that lets an EC2 instance push host_dir to the bucket.
-
-    The role is assumable by EC2 and carries a least-privilege inline policy
-    scoped to the state bucket's ``hosts/*`` prefix. Provisioned by
-    ``mngr aws prepare`` and attached at host create so the on-box sync daemon
-    can write via IMDS credentials. Reads never need this identity -- they use
-    the operator's credentials.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    session: boto3.Session = Field(frozen=True, description="boto3 Session with resolved credentials")
-    region: str = Field(frozen=True, description="AWS region (for the IAM client)")
-    bucket_name: str = Field(frozen=True, description="State bucket the identity is scoped to")
-    _cached_iam_client: Any = PrivateAttr(default=None)
-
-    def _iam(self) -> Any:
-        """Return the IAM client, building and caching it from the session on first use."""
-        if self._cached_iam_client is None:
-            self._cached_iam_client = self.session.client("iam", region_name=self.region)
-        return self._cached_iam_client
-
-    @property
-    def identity_name(self) -> str:
-        """The deterministic role / instance-profile name for this bucket."""
-        return host_identity_name_for_bucket(self.bucket_name)
-
-    def host_identity_exists(self) -> bool:
-        """Return whether the instance profile already exists (read-only GetInstanceProfile)."""
-        try:
-            self._iam().get_instance_profile(InstanceProfileName=self.identity_name)
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code in ("NoSuchEntity", "404"):
-                return False
-            raise S3StateHostIdentityError(f"Failed to check IAM instance profile {self.identity_name!r}: {e}") from e
-        return True
-
-    def ensure_host_identity(self) -> str:
-        """Idempotently create the role + inline policy + instance profile, returning the profile name.
-
-        Read-only-first: a ``GetInstanceProfile`` precedes any create, so a
-        re-run on an already-provisioned identity issues no write. Otherwise it
-        creates the EC2-assumable role, attaches the least-privilege inline
-        policy, creates the instance profile, and adds the role to it.
-        """
-        if self.host_identity_exists():
-            logger.debug("IAM host identity {} already exists; skipping create", self.identity_name)
-            return self.identity_name
-        with _translate_iam_errors(self.identity_name):
-            self._ensure_role()
-            self._iam().put_role_policy(
-                RoleName=self.identity_name,
-                PolicyName=_HOST_IDENTITY_INLINE_POLICY_NAME,
-                PolicyDocument=build_host_identity_inline_policy(self.bucket_name),
-            )
-            self._ensure_instance_profile_with_role()
-        logger.info("Provisioned IAM host identity {} for state bucket {}", self.identity_name, self.bucket_name)
-        return self.identity_name
-
-    def delete_host_identity(self) -> None:
-        """Tear down the instance profile + role. Idempotent (no error if already absent)."""
-        with _translate_iam_errors(self.identity_name):
-            self._delete_instance_profile_if_present()
-            self._delete_role_if_present()
-        logger.info("Deleted IAM host identity {} for state bucket {}", self.identity_name, self.bucket_name)
-
-    def _ensure_role(self) -> None:
-        try:
-            self._iam().create_role(
-                RoleName=self.identity_name,
-                AssumeRolePolicyDocument=_EC2_TRUST_POLICY,
-                Description=f"Auto-created by mngr_aws so EC2 instances can sync host_dir to {self.bucket_name}",
-                Tags=[{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}],
-            )
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code", "") != "EntityAlreadyExists":
-                raise
-
-    def _ensure_instance_profile_with_role(self) -> None:
-        try:
-            self._iam().create_instance_profile(
-                InstanceProfileName=self.identity_name,
-                Tags=[{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}],
-            )
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code", "") != "EntityAlreadyExists":
-                raise
-        try:
-            self._iam().add_role_to_instance_profile(
-                InstanceProfileName=self.identity_name,
-                RoleName=self.identity_name,
-            )
-        except ClientError as e:
-            # The role is already attached: IAM rejects a second add with
-            # LimitExceeded (an instance profile holds at most one role).
-            if e.response.get("Error", {}).get("Code", "") not in ("LimitExceeded", "EntityAlreadyExists"):
-                raise
-        self._wait_for_instance_profile_visible()
-
-    def _wait_for_instance_profile_visible(self) -> None:
-        """Poll until ``GetInstanceProfile`` reflects the attached role.
-
-        IAM is eventually consistent: a freshly-created instance profile may not
-        yet report its role to a subsequent describe (or to RunInstances). Poll a
-        few times so the create path can attach the profile right after prepare.
-        """
-        if not poll_until(
-            self._instance_profile_has_role,
-            timeout=_IAM_CONSISTENCY_TIMEOUT_SECONDS,
-            poll_interval=_IAM_CONSISTENCY_POLL_SECONDS,
-        ):
-            logger.warning(
-                "IAM instance profile {} did not report its role within {}s; proceeding (it may attach shortly)",
-                self.identity_name,
-                _IAM_CONSISTENCY_TIMEOUT_SECONDS,
-            )
-
-    def _instance_profile_has_role(self) -> bool:
-        response = self._iam().get_instance_profile(InstanceProfileName=self.identity_name)
-        return bool(response.get("InstanceProfile", {}).get("Roles"))
-
-    def _delete_instance_profile_if_present(self) -> None:
-        try:
-            response = self._iam().get_instance_profile(InstanceProfileName=self.identity_name)
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code", "") in ("NoSuchEntity", "404"):
-                return
-            raise
-        for role in response.get("InstanceProfile", {}).get("Roles", []):
-            self._iam().remove_role_from_instance_profile(
-                InstanceProfileName=self.identity_name, RoleName=role["RoleName"]
-            )
-        self._iam().delete_instance_profile(InstanceProfileName=self.identity_name)
-
-    def _delete_role_if_present(self) -> None:
-        try:
-            self._iam().delete_role_policy(RoleName=self.identity_name, PolicyName=_HOST_IDENTITY_INLINE_POLICY_NAME)
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code", "") not in ("NoSuchEntity", "404"):
-                raise
-        try:
-            self._iam().delete_role(RoleName=self.identity_name)
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code", "") not in ("NoSuchEntity", "404"):
-                raise
-
-
 class S3Volume(BaseVolume):
     """A ``Volume`` backed by an S3 bucket, for reading a host's offline host_dir.
 
@@ -499,12 +294,6 @@ def _as_dir_prefix(path: str) -> str:
     return f"{cleaned}/" if cleaned else ""
 
 
-# IAM is eventually consistent, so a just-created instance profile may not yet
-# report its attached role. Bound how long ``ensure_host_identity`` waits for it.
-_IAM_CONSISTENCY_TIMEOUT_SECONDS: Final[float] = 15.0
-_IAM_CONSISTENCY_POLL_SECONDS: Final[float] = 1.0
-
-
 @contextmanager
 def _translate_s3_errors(bucket_name: str) -> Iterator[None]:
     """Translate ``botocore.ClientError`` into ``S3StateBucketError`` within the block."""
@@ -512,12 +301,3 @@ def _translate_s3_errors(bucket_name: str) -> Iterator[None]:
         yield
     except ClientError as e:
         raise S3StateBucketError(f"S3 operation on bucket {bucket_name!r} failed: {e}") from e
-
-
-@contextmanager
-def _translate_iam_errors(identity_name: str) -> Iterator[None]:
-    """Translate ``botocore.ClientError`` into ``S3StateHostIdentityError`` within the block."""
-    try:
-        yield
-    except ClientError as e:
-        raise S3StateHostIdentityError(f"IAM operation on identity {identity_name!r} failed: {e}") from e

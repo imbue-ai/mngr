@@ -35,11 +35,8 @@ from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.cli import _output_cleanup_result
 from imbue.mngr_aws.cli import _output_prepare_result
 from imbue.mngr_aws.cli import _perform_cleanup
-from imbue.mngr_aws.cli import _perform_host_identity_cleanup
 from imbue.mngr_aws.cli import _perform_state_bucket_cleanup
-from imbue.mngr_aws.cli import _provision_host_identity
 from imbue.mngr_aws.cli import _refuse_cleanup_if_instances_exist
-from imbue.mngr_aws.cli import _resolve_and_provision_host_identity
 from imbue.mngr_aws.cli import _resolve_provider_config
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
@@ -47,8 +44,6 @@ from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.state_bucket import S3StateBucket
-from imbue.mngr_aws.state_bucket import S3StateHostIdentity
-from imbue.mngr_aws.state_bucket import host_identity_name_for_bucket
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 
 _ACTIVE_STATES = ["pending", "running", "stopping", "stopped"]
@@ -302,73 +297,6 @@ def test_perform_state_bucket_cleanup_none_is_noop() -> None:
 
 
 # =============================================================================
-# host-dir identity provisioning (required when gated on is_offline_host_dir_enabled)
-# =============================================================================
-
-_IDENTITY_BUCKET = "mngr-state-identity-cli"
-
-
-def _moto_identity() -> S3StateHostIdentity:
-    session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
-    return S3StateHostIdentity(session=session, region="us-east-1", bucket_name=_IDENTITY_BUCKET)
-
-
-def test_provision_host_identity_creates_identity() -> None:
-    """Provisioning the identity when IAM is available returns its name."""
-    with mock_aws():
-        identity = _moto_identity()
-        assert _provision_host_identity(identity) == host_identity_name_for_bucket(_IDENTITY_BUCKET)
-        assert identity.host_identity_exists() is True
-
-
-def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:
-    """Cleanup deletes a provisioned identity and is a no-op when already absent."""
-    with mock_aws():
-        identity = _moto_identity()
-        identity.ensure_host_identity()
-        assert _perform_host_identity_cleanup(identity) == host_identity_name_for_bucket(_IDENTITY_BUCKET)
-        # Now absent: a second cleanup is a no-op (returns None).
-        assert _perform_host_identity_cleanup(identity) is None
-
-
-def test_perform_host_identity_cleanup_none_is_noop() -> None:
-    assert _perform_host_identity_cleanup(None) is None
-
-
-def test_resolve_and_provision_host_identity_provisions_with_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Given a (created) bucket name and resolvable credentials, the identity is provisioned.
-
-    The bucket is required, so by the time this is called ``_ensure_state_bucket``
-    has already created it; provisioning then returns the identity name.
-    """
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
-    with mock_aws():
-        result = _resolve_and_provision_host_identity(
-            AwsProviderConfig(), region="us-east-1", state_bucket_name=_IDENTITY_BUCKET
-        )
-        assert result == host_identity_name_for_bucket(_IDENTITY_BUCKET)
-
-
-def test_resolve_and_provision_host_identity_raises_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unresolvable credentials raise a clean ``click.ClickException`` (no silent skip).
-
-    The old "skip with a warning when the bucket wasn't set up" path is gone: the
-    bucket is required and created first, so the only failure here is a credential
-    one, which surfaces rather than quietly disabling offline host_dir.
-    """
-    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
-    with pytest.raises(click.ClickException):
-        _resolve_and_provision_host_identity(
-            AwsProviderConfig(), region="us-east-1", state_bucket_name=_IDENTITY_BUCKET
-        )
-
-
-# =============================================================================
 # format-aware output (prepare / cleanup respect --format)
 # =============================================================================
 
@@ -377,7 +305,7 @@ def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFix
     """HUMAN mode emits one SG sentence (plus a bucket line when a bucket was set up)."""
     result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
     # No bucket name passed: the output helper emits only the SG line.
-    _output_prepare_result(result, "us-east-1", None, False, None, OutputFormat.HUMAN)
+    _output_prepare_result(result, "us-east-1", None, False, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert captured.out == "Prepared AWS security group sg-new123 in region us-east-1\n"
 
@@ -385,7 +313,7 @@ def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFix
 def test_output_prepare_result_human_includes_bucket_line(capsys: pytest.CaptureFixture[str]) -> None:
     """HUMAN mode appends a bucket line when a state bucket was created."""
     result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
-    _output_prepare_result(result, "us-east-1", "mngr-state-123-us-east-1", True, None, OutputFormat.HUMAN)
+    _output_prepare_result(result, "us-east-1", "mngr-state-123-us-east-1", True, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert "Prepared AWS security group sg-new123 in region us-east-1\n" in captured.out
     assert "Created S3 state bucket mngr-state-123-us-east-1 in region us-east-1\n" in captured.out
@@ -394,7 +322,7 @@ def test_output_prepare_result_human_includes_bucket_line(capsys: pytest.Capture
 def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON mode emits a structured object including the created signal and bucket fields."""
     result = SecurityGroupPrepareResult(security_group_id="sg-reused", was_created=False)
-    _output_prepare_result(result, "us-east-1", "mngr-state-123-us-east-1", False, None, OutputFormat.JSON)
+    _output_prepare_result(result, "us-east-1", "mngr-state-123-us-east-1", False, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload == {
         "security_group_id": "sg-reused",
@@ -402,14 +330,13 @@ def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureF
         "created": False,
         "state_bucket_name": "mngr-state-123-us-east-1",
         "state_bucket_created": False,
-        "host_identity_name": None,
     }
 
 
 def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
     """JSONL mode emits a ``prepared`` event with the same fields."""
     result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
-    _output_prepare_result(result, "us-east-1", None, False, None, OutputFormat.JSONL)
+    _output_prepare_result(result, "us-east-1", None, False, OutputFormat.JSONL)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["event"] == "prepared"
     assert payload["created"] is True
@@ -419,27 +346,25 @@ def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.Capture
 
 def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=True when an SG was removed."""
-    _output_cleanup_result("sg-gone", "us-east-1", "mngr-state-123-us-east-1", None, OutputFormat.JSON)
+    _output_cleanup_result("sg-gone", "us-east-1", "mngr-state-123-us-east-1", OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload == {
         "security_group_id": "sg-gone",
         "region": "us-east-1",
         "deleted": True,
         "state_bucket_deleted": "mngr-state-123-us-east-1",
-        "host_identity_deleted": None,
     }
 
 
 def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=False on the idempotent no-op path."""
-    _output_cleanup_result(None, "us-east-1", None, None, OutputFormat.JSON)
+    _output_cleanup_result(None, "us-east-1", None, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload == {
         "security_group_id": None,
         "region": "us-east-1",
         "deleted": False,
         "state_bucket_deleted": None,
-        "host_identity_deleted": None,
     }
 
 
