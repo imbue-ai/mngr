@@ -1,4 +1,4 @@
-"""Tests for VPS Docker provider configuration."""
+"""Tests for VPS provider configuration."""
 
 from pathlib import Path
 

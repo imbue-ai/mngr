@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Outer-side btrfs snapshot helper for vps-docker hosts.
+# Outer-side btrfs snapshot helper for mngr_vps hosts.
 #
 # Watches /var/lib/mngr-snapshot/request.json (the outer-host view of the
 # docker volume bind-mounted into the container at /mngr-snapshot/) and,

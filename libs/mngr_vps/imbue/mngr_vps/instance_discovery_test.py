@@ -179,7 +179,7 @@ class _DiscoveryTestProvider(VpsProvider):
                 raise AssertionError(f"state_container_ready=True for {vps_ip!r} not supported by this stub")
             # _DummyOuter answers the single docker-ps probe issued by
             # _read_host_id_label_from_vps with an empty result; cast to satisfy
-            # the OuterHostInterface yield type, matching the sibling vps_docker
+            # the OuterHostInterface yield type, matching the sibling mngr_vps
             # tests (e.g. _outer_helpers_test, instance_test).
             yield cast(OuterHostInterface, _DummyOuter())
             return
