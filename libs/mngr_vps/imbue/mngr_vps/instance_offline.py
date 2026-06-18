@@ -1248,17 +1248,20 @@ def normalized_tags_to_dict(instance: Mapping[str, Any]) -> dict[str, str]:
     return tags
 
 
-def host_name_from_tags(tags: Mapping[str, str], name_tag_key: str) -> HostName:
-    """Recover the host name from the ``<name_tag_key>=mngr-<host_name>`` identity tag.
+def host_name_from_prefixed_value(raw_name: str, host_id_fallback: str) -> HostName:
+    """Recover a host name from a ``mngr-<host_name>`` identity value.
 
-    Strips the ``mngr-`` prefix; falls back to the raw tag value, then to the
-    ``mngr-host-id`` tag, when the name tag is missing/unprefixed. Used only to
-    label a STOPPED host in discovery -- the authoritative name lives in the full
-    record in the external state store.
+    Strips the ``mngr-`` prefix; falls back to the raw value, then the host id, then
+    ``"unknown"``. Shared by the tag-keyed providers (``host_name_from_tags``) and
+    GCP's metadata-keyed recovery, which read the same ``mngr-``-prefixed value from
+    different sources (instance tags vs GCE metadata). Used only to label a STOPPED
+    host in discovery -- the authoritative name lives in the external state record.
     """
-    name_tag = tags.get(name_tag_key, "")
-    if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
-        return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
-    if name_tag:
-        return HostName(name_tag)
-    return HostName(tags.get("mngr-host-id", "unknown"))
+    if raw_name.startswith(_HOST_NAME_TAG_PREFIX):
+        return HostName(raw_name[len(_HOST_NAME_TAG_PREFIX) :])
+    return HostName(raw_name or host_id_fallback or "unknown")
+
+
+def host_name_from_tags(tags: Mapping[str, str], name_tag_key: str) -> HostName:
+    """Recover the host name from the ``<name_tag_key>=mngr-<host_name>`` identity tag."""
+    return host_name_from_prefixed_value(tags.get(name_tag_key, ""), tags.get("mngr-host-id", ""))

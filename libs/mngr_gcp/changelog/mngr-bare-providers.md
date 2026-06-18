@@ -48,3 +48,7 @@ cheap identity tag offline discovery reads), not just the host record. Previousl
 this metadata was written only at create, so a host that was renamed and then
 stopped still listed under its old name in offline discovery; it now lists under
 its new name.
+
+Internal dedup (no behavior change): GCP host-name recovery from instance metadata
+now calls the shared `host_name_from_prefixed_value` helper instead of a private copy
+of the strip-prefix / host-id fallback logic.

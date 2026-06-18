@@ -236,3 +236,12 @@ removal (`delete_snapshot_placement`) now treats an already-absent image as succ
 but raises on any other failure -- so a failed delete is no longer reported as one,
 and the snapshot stays listed until its image is really gone. (The docker provider
 still only warns here; the VPS provider deliberately raises.)
+
+`isolation_from_marker` now parses a *present* `mngr-isolation` marker strictly: an
+unrecognized value raises rather than silently resolving to CONTAINER (an absent
+marker still defaults to CONTAINER for pre-marker hosts, since the marker is
+mngr-written and a bad value is corruption worth surfacing).
+
+Extracted `host_name_from_prefixed_value` (shared by `host_name_from_tags` and GCP's
+metadata-based recovery) so the strip-`mngr-`-prefix / host-id fallback logic lives
+in one place. No behavior change.

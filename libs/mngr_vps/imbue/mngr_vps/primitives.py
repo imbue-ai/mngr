@@ -50,12 +50,13 @@ def isolation_from_marker(marker_value: str | None) -> IsolationMode:
 
     Hosts created before the marker existed carry no value (``None``); they were
     all CONTAINER placements, so an absent marker defaults to ``CONTAINER`` to
-    preserve the prior behavior. An unrecognized value also falls back to
-    ``CONTAINER`` rather than failing discovery.
+    preserve the prior behavior. A *present* value is parsed strictly: an
+    unrecognized marker raises rather than being silently mis-resolved (the marker
+    is mngr-written, so a bad value is corruption worth surfacing).
     """
-    if marker_value == isolation_marker_value(IsolationMode.NONE):
-        return IsolationMode.NONE
-    return IsolationMode.CONTAINER
+    if marker_value is None:
+        return IsolationMode.CONTAINER
+    return IsolationMode(marker_value.upper())
 
 
 class VpsInstanceStatus(UpperCaseStrEnum):

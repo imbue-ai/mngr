@@ -46,6 +46,7 @@ from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.instance_offline import host_name_from_prefixed_value
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
@@ -393,12 +394,9 @@ class GcpProvider(OfflineCapableVpsProvider):
     def _host_name_from_instance(self, instance: Mapping[str, Any]) -> HostName:
         """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id metadata)."""
         metadata = self._metadata_dict(instance)
-        name = metadata.get(HOST_NAME_METADATA_KEY, "")
-        if name.startswith(_HOST_NAME_PREFIX):
-            return HostName(name[len(_HOST_NAME_PREFIX) :])
-        if name:
-            return HostName(name)
-        return HostName(metadata.get(HOST_ID_METADATA_KEY, "unknown"))
+        return host_name_from_prefixed_value(
+            metadata.get(HOST_NAME_METADATA_KEY, ""), metadata.get(HOST_ID_METADATA_KEY, "")
+        )
 
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED-state DiscoveredHost from an instance's metadata, or None.

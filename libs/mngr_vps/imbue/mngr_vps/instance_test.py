@@ -597,17 +597,18 @@ def test_realizer_for_record_picks_container_for_a_container_record(temp_mngr_ct
 
 
 def test_isolation_from_marker_defaults_absent_to_container() -> None:
-    """An untagged (pre-marker) host defaults to CONTAINER; an explicit ``none`` marks bare.
+    """An untagged (pre-marker) host defaults to CONTAINER; explicit values parse exactly.
 
-    Backward-compat guard: hosts created before the ``mngr-isolation`` marker
-    existed were all container placements, so an absent marker must default to
-    CONTAINER (preserving the prior behavior); an unknown value is also treated as
-    container rather than failing discovery.
+    Backward-compat guard: hosts created before the ``mngr-isolation`` marker existed
+    were all container placements, so an absent marker (``None``) must default to
+    CONTAINER. A present value is parsed strictly -- an unrecognized marker raises
+    rather than being silently mis-resolved.
     """
     assert isolation_from_marker(None) is IsolationMode.CONTAINER
-    assert isolation_from_marker("garbage") is IsolationMode.CONTAINER
     assert isolation_from_marker("none") is IsolationMode.NONE
     assert isolation_from_marker("container") is IsolationMode.CONTAINER
+    with pytest.raises(ValueError):
+        isolation_from_marker("garbage")
 
 
 def test_bare_provider_rejects_snapshot_operations_up_front(temp_mngr_ctx: MngrContext) -> None:
