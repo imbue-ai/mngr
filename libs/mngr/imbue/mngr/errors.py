@@ -432,15 +432,6 @@ class SnapshotsNotSupportedError(SnapshotError):
         super().__init__(provider_name, f"Provider {provider_name} does not support snapshots")
 
 
-class TagLimitExceededError(ProviderError):
-    """Tags exceed provider's storage limit."""
-
-    def __init__(self, provider_name: ProviderInstanceName, limit: int, actual: int) -> None:
-        self.limit = limit
-        self.actual = actual
-        super().__init__(provider_name, f"Tag limit exceeded: {actual} tags (limit: {limit})")
-
-
 class LocalHostNotStoppableError(ProviderError):
     """Raised when attempting to stop the local host."""
 

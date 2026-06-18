@@ -6,18 +6,26 @@ anti-pattern (those files are auto-discovered, not designed for direct import).
 Mirrors ``libs/mngr_aws/imbue/mngr_aws/testing.py`` and ``mngr_gcp``'s.
 """
 
+import base64
+import json
 import os
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 from typing import Final
 
 from azure.core.exceptions import AzureError
 from azure.core.exceptions import HttpResponseError
+from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import ResourceNotFoundError
 from pydantic import Field
 
+from imbue.mngr.primitives import HostId
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureSubscriptionError
+from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_azure.state_bucket import BlobVolume
 
 # Optional prefix release tests use for their agent names so leaked VMs (should
 # the scanner ever fail) are still visually identifiable as mngr-created test
@@ -404,6 +412,7 @@ class FakeRoleAssignmentsOperations:
 
     def __init__(self) -> None:
         self.created: list[tuple[str, str, Any]] = []
+        self.deleted: list[tuple[str, str]] = []
         self.create_error: Exception | None = None
 
     def create(self, scope: str, role_assignment_name: str, parameters: Any) -> Any:
@@ -412,6 +421,14 @@ class FakeRoleAssignmentsOperations:
         self.created.append((scope, role_assignment_name, parameters))
         return SimpleNamespace(id=f"{scope}/providers/Microsoft.Authorization/roleAssignments/{role_assignment_name}")
 
+    def delete(self, scope: str, role_assignment_name: str) -> Any:
+        # A missing assignment 404s in the real SDK; model that so the production
+        # idempotent-delete path is exercised when nothing was ever created.
+        if (scope, role_assignment_name) not in {(s, n) for s, n, _p in self.created}:
+            raise ResourceNotFoundError(message=f"role assignment {role_assignment_name} not found")
+        self.deleted.append((scope, role_assignment_name))
+        return None
+
 
 class FakeAuthorizationClient:
     """Fake AuthorizationManagementClient bundling role_definitions + role_assignments."""
@@ -419,6 +436,40 @@ class FakeAuthorizationClient:
     def __init__(self) -> None:
         self.role_definitions = FakeRoleDefinitionsOperations()
         self.role_assignments = FakeRoleAssignmentsOperations()
+
+
+def _encode_fake_jwt(claims: dict[str, Any]) -> str:
+    """Build an (unsigned) JWT string whose payload carries ``claims``.
+
+    Used so ``resolve_operator_principal``'s real base64url-decode path is
+    exercised in tests against a chosen ``oid`` / ``idtyp``.
+    """
+
+    def _segment(obj: dict[str, Any]) -> str:
+        raw = json.dumps(obj).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{_segment({'alg': 'none', 'typ': 'JWT'})}.{_segment(claims)}.sig"
+
+
+class FakeTokenCredential:
+    """Minimal ``TokenCredential`` whose access token carries chosen ``oid`` / ``idtyp`` claims.
+
+    Lets tests drive ``resolve_operator_principal`` (and the operator blob-role
+    grant) without a real Azure login. Pass ``object_id=""`` to model a token with
+    no ``oid`` claim.
+    """
+
+    def __init__(self, object_id: str = "operator-oid-1", idtyp: str | None = "user") -> None:
+        self._object_id = object_id
+        self._idtyp = idtyp
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> Any:
+        del scopes, kwargs
+        claims: dict[str, Any] = {"oid": self._object_id}
+        if self._idtyp is not None:
+            claims["idtyp"] = self._idtyp
+        return SimpleNamespace(token=_encode_fake_jwt(claims), expires_on=0)
 
 
 class _StubbedAzureVpsClient(AzureVpsClient):
@@ -448,3 +499,181 @@ class _StubbedAzureVpsClient(AzureVpsClient):
 
     def _authorization(self) -> Any:
         return self.stubbed_authorization_client
+
+
+class FakeBlobStorageBackend:
+    """In-memory backing store for the Azure Blob + storage-management fakes.
+
+    There is no moto-equivalent for Azure Blob, so this models the slice of
+    behavior ``BlobStateBucket`` depends on: a single storage account that may or
+    may not exist, and one container holding ``{blob_name: bytes}``. Shared by the
+    data-plane and management-plane fakes so they observe a consistent state.
+    """
+
+    def __init__(self, account_exists: bool = False) -> None:
+        self.account_exists: bool = account_exists
+        self.container_exists: bool = False
+        self.blobs_by_name: dict[str, bytes] = {}
+        self.deleted_account: bool = False
+
+
+class _FakeBlobDownloader:
+    """Stand-in for the StorageStreamDownloader: ``readall`` returns the blob bytes."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def readall(self) -> bytes:
+        return self._data
+
+
+class FakeContainerClient:
+    """Fake ``ContainerClient`` over a ``FakeBlobStorageBackend``.
+
+    ``list_blobs`` items carry ``size`` / ``last_modified`` so ``BlobVolume.listdir``
+    can read them. ``walk_blobs`` models the delimited walk the real SDK does:
+    blobs directly under the prefix are returned as themselves, and deeper blobs
+    collapse to a single ``BlobPrefix``-shaped entry whose name ends with ``/``.
+    """
+
+    def __init__(self, backend: FakeBlobStorageBackend) -> None:
+        self._backend = backend
+
+    def exists(self) -> bool:
+        return self._backend.container_exists
+
+    def list_blobs(self, name_starts_with: str = "") -> Iterator[Any]:
+        for name in sorted(self._backend.blobs_by_name):
+            if name.startswith(name_starts_with):
+                data = self._backend.blobs_by_name[name]
+                yield SimpleNamespace(name=name, size=len(data), last_modified=None)
+
+    def walk_blobs(self, name_starts_with: str = "", delimiter: str = "/") -> Iterator[Any]:
+        seen_prefixes: set[str] = set()
+        for name in sorted(self._backend.blobs_by_name):
+            if not name.startswith(name_starts_with):
+                continue
+            remainder = name[len(name_starts_with) :]
+            head, sep, _tail = remainder.partition(delimiter)
+            if sep:
+                # A nested blob -> collapse to its immediate sub-"directory" prefix.
+                prefix = f"{name_starts_with}{head}{delimiter}"
+                if prefix not in seen_prefixes:
+                    seen_prefixes.add(prefix)
+                    yield SimpleNamespace(name=prefix)
+            else:
+                data = self._backend.blobs_by_name[name]
+                yield SimpleNamespace(name=name, size=len(data), last_modified=None)
+
+    def upload_blob(self, name: str, data: bytes, overwrite: bool = False) -> None:
+        if name in self._backend.blobs_by_name and not overwrite:
+            raise ResourceExistsError(message=f"blob {name} already exists")
+        self._backend.blobs_by_name[name] = data
+
+    def download_blob(self, name: str) -> _FakeBlobDownloader:
+        if name not in self._backend.blobs_by_name:
+            raise ResourceNotFoundError(message=f"blob {name} not found")
+        return _FakeBlobDownloader(self._backend.blobs_by_name[name])
+
+    def delete_blob(self, name: str) -> None:
+        if name not in self._backend.blobs_by_name:
+            raise ResourceNotFoundError(message=f"blob {name} not found")
+        del self._backend.blobs_by_name[name]
+
+
+class FakeBlobServiceClient:
+    """Fake ``BlobServiceClient`` returning a single shared ``FakeContainerClient``."""
+
+    def __init__(self, backend: FakeBlobStorageBackend) -> None:
+        self._backend = backend
+
+    def get_container_client(self, container_name: str) -> FakeContainerClient:
+        del container_name
+        return FakeContainerClient(self._backend)
+
+    def create_container(self, name: str) -> None:
+        del name
+        if self._backend.container_exists:
+            raise ResourceExistsError(message="container already exists")
+        self._backend.container_exists = True
+
+
+class FakeStorageAccountsOperations:
+    """Fake ``StorageManagementClient.storage_accounts``."""
+
+    def __init__(self, backend: FakeBlobStorageBackend) -> None:
+        self._backend = backend
+
+    def get_properties(self, resource_group_name: str, account_name: str) -> Any:
+        del resource_group_name
+        if not self._backend.account_exists:
+            raise ResourceNotFoundError(message="storage account not found")
+        return SimpleNamespace(name=account_name)
+
+    def begin_create(self, resource_group_name: str, account_name: str, parameters: Any) -> FakePoller:
+        del resource_group_name, parameters
+        self._backend.account_exists = True
+        return FakePoller(result_value=SimpleNamespace(name=account_name))
+
+    def delete(self, resource_group_name: str, account_name: str) -> None:
+        del resource_group_name, account_name
+        self._backend.account_exists = False
+        self._backend.container_exists = False
+        self._backend.blobs_by_name.clear()
+        self._backend.deleted_account = True
+
+
+class FakeStorageManagementClient:
+    """Fake ``StorageManagementClient`` bundling the ``storage_accounts`` operations."""
+
+    def __init__(self, backend: FakeBlobStorageBackend) -> None:
+        self.storage_accounts = FakeStorageAccountsOperations(backend)
+
+
+class _StubbedBlobVolume(BlobVolume):
+    """Test-only ``BlobVolume`` whose data-plane client is a fake over a shared backend."""
+
+    fake_backend: Any = Field(default=None, description="Shared FakeBlobStorageBackend for the injected fake")
+
+    def _blob_service(self) -> Any:
+        return FakeBlobServiceClient(self.fake_backend)
+
+
+class _StubbedBlobStateBucket(BlobStateBucket):
+    """Test-only ``BlobStateBucket`` that injects in-memory blob + storage clients.
+
+    Production ``BlobStateBucket`` builds the azure SDK clients lazily from its
+    credential; this subclass routes the data-plane and management-plane client
+    accessors to hand-written fakes backed by a single ``FakeBlobStorageBackend``,
+    so unit tests exercise the request-building and response-handling logic without
+    real Azure calls. Mirrors ``_StubbedAzureVpsClient``.
+    """
+
+    fake_backend: Any = Field(default=None, description="Shared FakeBlobStorageBackend for the injected fakes")
+    fake_authorization: Any = Field(
+        default=None, description="Fake AuthorizationManagementClient for the operator blob-role grant"
+    )
+
+    def _blob_service(self) -> Any:
+        return FakeBlobServiceClient(self.fake_backend)
+
+    def _storage_mgmt(self) -> Any:
+        return FakeStorageManagementClient(self.fake_backend)
+
+    def _authorization(self) -> Any:
+        return self.fake_authorization
+
+    def volume_for_host(self, host_id: HostId) -> Any:
+        """Return a fake-backed ``BlobVolume`` scoped to the host's host_dir prefix.
+
+        Overrides the production builder so offline-read tests against a stubbed
+        bucket exercise ``BlobVolume`` over the same in-memory backend (the
+        production method would build a real credential-backed ``BlobVolume``).
+        """
+        host_dir_prefix = f"hosts/{host_id.get_uuid().hex}/host_dir"
+        return _StubbedBlobVolume(
+            credential=None,
+            account_name=self.account_name,
+            container_name=self.container_name,
+            fake_backend=self.fake_backend,
+        ).scoped(host_dir_prefix)
