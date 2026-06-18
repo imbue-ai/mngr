@@ -1,4 +1,5 @@
 import shlex
+import tempfile
 from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -20,7 +21,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
-from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -33,7 +33,9 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
@@ -402,6 +404,23 @@ class OfflineCapableVpsProvider(VpsProvider):
         the box at ``mngr stop``, and by ``_idle_sentinel_path_on_outer``.
         """
         return self._realizer.host_dir_path_on_outer(host_id)
+
+    def _pull_host_dir_to_local(self, host_id: HostId, vps_ip: str, local_dir: Path) -> None:
+        """Rsync the host's ``host_dir`` off the box into ``local_dir`` (operator-driven capture).
+
+        Opens the operator's outer SSH connection and rsyncs the host_dir tree
+        down. rsync copies the regular-file tree and natively skips sockets / other
+        special files, so a live tmux socket can't sink the capture. A connection
+        or rsync failure raises (as a ``MngrError``).
+        """
+        host_dir_on_outer = self._host_dir_path_on_outer(host_id)
+        cg = ConcurrencyGroup(name="rsync-host-dir-capture")
+        with (
+            translate_outer_concurrency_errors("capture host_dir off the host"),
+            self._make_outer_for_vps_ip(vps_ip) as outer,
+            cg,
+        ):
+            download_directory_from_outer(outer, cg, str(host_dir_on_outer), local_dir)
 
     # =========================================================================
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
@@ -853,6 +872,21 @@ class OfflineCapableVpsProvider(VpsProvider):
             return self._offline_agent_dicts_for(host_id)
 
 
+def _read_local_file_tree(root: Path) -> dict[str, bytes]:
+    """Read every regular file under ``root`` into a ``{posix-relpath: bytes}`` map.
+
+    Used after rsyncing a captured ``host_dir`` into a local temp dir: walks the
+    tree and reads regular files only, skipping symlinks and any special files
+    rsync may have left behind. Keys are POSIX-relative to ``root``.
+    """
+    files: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        files[path.relative_to(root).as_posix()] = path.read_bytes()
+    return files
+
+
 class BucketHostDirBackend(HostDirBackend):
     """Operator-driven offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
 
@@ -885,37 +919,36 @@ class BucketHostDirBackend(HostDirBackend):
     def capture(self, host_id: HostId, vps_ip: str) -> None:
         """Pull the host's ``host_dir`` off the box and upload it to the bucket (operator-driven).
 
-        Reads the host_dir tree over the outer-host interface (the operator's SSH
-        connection) and writes each file into the bucket's host_dir volume with the
-        operator's credentials. Raises (with host_dir context) on failure rather
-        than swallowing it -- the operator should know the offline copy was not
-        captured. The caller (``stop_host``) pauses the instance in a ``finally``
-        *before* this can propagate, so raising never leaks a running instance: the
-        host is stopped and ``mngr stop`` then surfaces the error. The whole tree is
-        read into memory before upload, which is fine for a bounded ``host_dir``
-        (events / transcripts).
+        rsyncs the host_dir tree off the box into a local temp dir (via the
+        provider's outer SSH connection), then writes every captured file into the
+        bucket's host_dir volume with the operator's credentials. rsync handles the
+        whole tree and skips sockets / other special files natively, so a live tmux
+        socket can't sink the capture. A genuine failure -- a lost connection, an
+        rsync error, or a bucket write error -- raises (with host_dir context)
+        rather than being swallowed, so the operator knows the offline copy was not
+        captured; an empty host_dir is captured as nothing (no error). The caller
+        (``stop_host``) pauses the instance in a ``finally`` *before* this can
+        propagate, so raising never leaks a running instance: the host is stopped
+        and ``mngr stop`` then surfaces the error. The tree is read into memory
+        before upload, which is fine for a bounded ``host_dir`` (events / transcripts).
         """
-        host_dir_on_outer = self.provider._host_dir_path_on_outer(host_id)
         try:
             with log_span("Capturing host_dir to the bucket for host {}", host_id):
-                with self.provider._make_outer_for_vps_ip(vps_ip) as outer:
-                    files: dict[str, bytes] = {}
-                    for entry in outer.list_directory(host_dir_on_outer, recursive=True):
-                        if entry.file_type == FileType.DIRECTORY:
-                            continue
-                        abs_path = Path(entry.path)
-                        rel = abs_path.relative_to(host_dir_on_outer).as_posix()
-                        files[rel] = outer.read_file(abs_path)
+                with tempfile.TemporaryDirectory(prefix="mngr-host-dir-capture-") as tmp:
+                    local_root = Path(tmp)
+                    self.provider._pull_host_dir_to_local(host_id, vps_ip, local_root)
+                    files = _read_local_file_tree(local_root)
                     if files:
                         self.bucket.volume_for_host(host_id).write_files(files)
+                    else:
+                        logger.debug("host_dir for host {} is empty; nothing to capture", host_id)
         # A capture failure surfaces (it is NOT swallowed) -- the operator should
         # know the offline host_dir was not captured. stop_host's ``finally``
         # guarantees the instance is paused *before* this propagates, so raising
         # can never leak a running instance: the host is stopped and `mngr stop`
         # then reports the failure. The expected failure modes (a connection drop,
-        # a bucket storage error, or a raw paramiko SFTP OSError mid-read while the
-        # container quiesces) are re-raised with host_dir context; an unexpected
-        # error propagates as-is.
+        # an rsync failure, or a bucket storage error) are re-raised with host_dir
+        # context; an unexpected error propagates as-is.
         except (HostConnectionError, MngrError, OSError) as e:
             raise MngrError(
                 f"Failed to capture host_dir to the bucket for host {host_id}: {e}. The host is stopped, but "
