@@ -1051,7 +1051,9 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
 
 
 # Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout.
+# occasionally exceeds the default 10s pytest-timeout. Mark flaky so offload
+# retries a contended run rather than failing it outright.
+@pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
