@@ -92,6 +92,7 @@ from imbue.mngr.agents.common_transcript import maybe_provision_common_transcrip
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
@@ -107,7 +108,6 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
@@ -438,19 +438,18 @@ class CodexAgent(
         Called only when a version is pinned. A mismatch means the wrong codex is on
         PATH (e.g. a pre-existing global install that ``check_installation`` left in
         place), which the user must resolve -- re-install the pinned version or update
-        the pin.
+        the pin. Delegates to the shared verifier so codex matches the pin the same
+        (scheme-agnostic) way as the other agents.
         """
         pinned_version = self.agent_config.version
-        probe = f"{self.agent_config.command} --version 2>/dev/null"
-        result = host.execute_idempotent_command(probe, timeout_seconds=30.0)
-        installed_version = parse_codex_cli_version(result.stdout) if result.success else None
-        if installed_version != pinned_version:
-            raise AgentInstallationError(
-                f"codex version mismatch: installed version is {installed_version!r}, "
-                f"but agent config pins version {pinned_version!r}. "
-                "Re-install codex with the correct version or update the pinned version in your agent config."
-            )
-        logger.debug("codex version {} matches pinned version", installed_version)
+        if pinned_version is None:
+            return
+        verify_pinned_cli_version(
+            host,
+            command=str(self.agent_config.command),
+            binary_name=self.get_install_binary_name(),
+            pinned_version=pinned_version,
+        )
 
     def get_install_binary_name(self) -> str:
         return "codex"
