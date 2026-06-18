@@ -2846,17 +2846,10 @@ def _run_mngr_capturing(
 ) -> tuple[str, int, str]:
     """Run an ``mngr`` subprocess, returning ``(stdout, returncode, stderr)`` without raising on a nonzero exit.
 
-    The shared launch primitive behind ``_run_mngr``. The recovery host-health
-    probe needs ``mngr list``'s JSON body even when the command exits non-zero:
-    with ``--on-error continue`` a provider failure still emits
-    ``{"agents": [...], "errors": [...]}`` to stdout and *then* exits 1, and that
-    ``errors[]`` array is exactly where the provider-reachability signal lives, so
-    this returns the body and exit code rather than raising on a nonzero exit
-    (``_run_mngr`` layers that policy on for its callers). A failure to launch the
-    process raises ``MngrCommandError``; a timeout raises the more specific
-    ``MngrCommandTimeoutError`` so the caller can treat "never completed" (no body,
-    provider unreachable) differently from "ran and exited nonzero" (body present
-    to inspect).
+    A nonzero exit is reported through the returned ``returncode`` rather than
+    raised, so stdout is preserved for the caller to inspect. A failure to launch
+    the process raises ``MngrCommandError``; a timeout raises the more specific
+    ``MngrCommandTimeoutError``.
     """
     try:
         finished = concurrency_group.run_process_to_completion(
