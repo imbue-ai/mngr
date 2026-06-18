@@ -1,1 +1,0 @@
-The reducer-prompt send now routes through `require_interactive_agent(...)` before calling `send_message`, since `send_message` is no longer a universal `AgentInterface` method (it moved onto interactive agents). The reducer is a Claude agent (interactive), so behavior is unchanged; the guard just makes the interactive requirement explicit and type-safe.

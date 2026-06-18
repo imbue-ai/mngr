@@ -1,5 +1,0 @@
-- `mngr rsync` and `mngr git push`/`mngr git pull` now skip host/agent discovery when given a bare local path (the previous implementation always ran a full provider scan), and narrow discovery to the named provider when the address pins one (e.g. `@host.modal:/work` only queries the Modal provider, not Docker). Behaviour for fully qualified addresses is unchanged.
-
-- `mngr create --from` similarly narrows the cached host/agent loader: when the source, the target host, and `--reuse` (if used) all pin a provider, only those providers are queried; otherwise the loader falls back to a full scan exactly as before. Bare local sources and git URLs continue to skip provider discovery entirely.
-
-- New `imbue.mngr.api.find.resolve_host_location(parsed, mngr_ctx, *, is_start_desired=True)` helper consolidates the local-path shortcut and the discover-then-resolve flow that `mngr rsync` and `mngr git` previously duplicated. The lower-level `resolve_host_location_address(parsed, agents_by_host, mngr_ctx, ...)` is unchanged and remains the right entry point for callers (like `mngr create`) that drive discovery themselves to share a single result across multiple resolutions.
