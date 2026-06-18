@@ -2,18 +2,13 @@
 
 from typing import Any
 
-import pytest
-
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
-from imbue.mngr.agents.default_plugins.headless_command_agent import HeadlessCommandConfig
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_config_registry import ResolvedAgentType
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.overlay_merge import merge_models_via_overlay
-from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_claude.plugin import ClaudeAgent
@@ -36,15 +31,6 @@ def test_get_agent_class_returns_claude_agent_for_claude_type() -> None:
     """Claude agent type should return ClaudeAgent class."""
     agent_class = get_agent_class("claude")
     assert agent_class == ClaudeAgent
-
-
-def test_merge_models_via_overlay_wrong_type_raises_error() -> None:
-    """The same-type guard raises ConfigParseError when merging incompatible config types."""
-    base = ClaudeAgentConfig()
-    override = HeadlessCommandConfig()
-
-    with pytest.raises(ConfigParseError, match="Cannot merge ClaudeAgentConfig"):
-        merge_models_via_overlay(base, override)
 
 
 def test_resolve_agent_type_returns_claude_for_registered_type() -> None:

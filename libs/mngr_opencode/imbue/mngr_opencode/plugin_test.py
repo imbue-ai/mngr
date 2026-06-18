@@ -21,7 +21,6 @@ from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -81,14 +80,6 @@ def test_opencode_agent_config_merge_with_replaces_cli_args_and_overrides() -> N
     assert merged.cli_args == ("--verbose",)
     assert merged.config_overrides == {"model": "anthropic/claude-sonnet-4-5"}
     assert str(merged.command) == "opencode"
-
-
-def test_merge_models_via_overlay_rejects_other_type() -> None:
-    class _OtherConfig(OpenCodeAgentConfig):
-        pass
-
-    with pytest.raises(ConfigParseError):
-        merge_models_via_overlay(OpenCodeAgentConfig(), _OtherConfig())
 
 
 def test_opencode_agent_subclasses_base_agent() -> None:

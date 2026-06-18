@@ -34,8 +34,10 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import ProviderInstanceName
@@ -117,6 +119,15 @@ def test_mngr_container_entry_subclass_is_preserved() -> None:
     entry = actual.agent_types[AgentTypeName("c")]
     assert type(entry) is _MngrClaudeLikeConfig
     assert entry.auto_dismiss_dialogs is True
+
+
+def test_merge_models_via_overlay_rejects_mismatched_types() -> None:
+    """The same-type guard raises when base and override are different concrete
+    config types: the merge result reparses into ``type(base)``, so a sibling or
+    more-derived override would silently lose fields.
+    """
+    with pytest.raises(ConfigParseError, match="Cannot merge"):
+        merge_models_via_overlay(AgentTypeConfig(), _MngrClaudeLikeConfig())
 
 
 # =============================================================================
