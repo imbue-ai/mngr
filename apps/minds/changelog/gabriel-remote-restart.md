@@ -3,5 +3,3 @@ Workspace recovery now understands remote (Imbue Cloud) minds, not just local do
 When the provider is reachable but rejects the request for another reason (expired login, no account configured), recovery now shows a plain "Can't reach your workspace" message with the reason instead of offering a restart that cannot fix an auth/account problem.
 
 The destructive "Restart workspace" action now re-checks the workspace one last time immediately before it stops the container, and silently returns you to your workspace if it has recovered on its own (e.g. a connectivity blip that cleared) -- so a transient hiccup can no longer cost you a live container and the in-progress work in its agents.
-
-Remote minds now tolerate a longer run of failed health probes before the recovery page appears (local minds are unchanged). During that window you keep seeing the normal "Loading workspace" loader, so a brief internet blip no longer throws a remote workspace onto the recovery page; only a failure that genuinely persists escalates.

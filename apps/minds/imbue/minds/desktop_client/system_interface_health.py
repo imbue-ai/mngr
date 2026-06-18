@@ -56,15 +56,6 @@ from imbue.mngr.primitives import AgentId
 
 _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
 
-# Remote (imbue_cloud) workspaces are reached over the public internet, so a
-# brief connectivity blip -- flaky wifi, a hotel network hiccup -- produces a
-# run of probe failures that a local docker/lima workspace would never see. A
-# longer sustained-failure window keeps those blips from funneling a remote mind
-# onto the recovery page: during the extra window the user keeps seeing the
-# plugin's "Loading workspace" loader, and only a failure that genuinely
-# persists escalates to STUCK (and thus the recovery page).
-_DEFAULT_REMOTE_STUCK_THRESHOLD_SECONDS: Final[float] = 15.0
-
 # HTTP statuses that suggest the backend itself is unreachable / not serving,
 # as opposed to an application-layer error. The plugin reports every non-2xx
 # response, but only these (or a connection-level failure carrying no status)
@@ -139,15 +130,7 @@ class SystemInterfaceHealthTracker(MutableModel):
 
     stuck_threshold_seconds: float = Field(
         default=_DEFAULT_STUCK_THRESHOLD_SECONDS,
-        description="Seconds of continuous probe failures before HEALTHY -> STUCK fires for a local workspace.",
-    )
-    remote_stuck_threshold_seconds: float = Field(
-        default=_DEFAULT_REMOTE_STUCK_THRESHOLD_SECONDS,
-        description=(
-            "Seconds of continuous probe failures before HEALTHY -> STUCK fires for a remote "
-            "(imbue_cloud) workspace -- longer than the local threshold to tolerate transient "
-            "internet blips. Selected per probe via the ``is_remote`` flag on record_probe_failure."
-        ),
+        description="Seconds of continuous probe failures before HEALTHY -> STUCK fires.",
     )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -212,22 +195,17 @@ class SystemInterfaceHealthTracker(MutableModel):
                 self._records[aid_str] = record
             record.is_suspect = True
 
-    def record_probe_failure(self, agent_id: AgentId, is_remote: bool = False) -> None:
+    def record_probe_failure(self, agent_id: AgentId) -> None:
         """Record that a background probe observed ``agent_id`` as unreachable.
 
         Starts the agent's probe-failure run on the first failure, then
-        transitions HEALTHY -> STUCK once the run has lasted at least the
-        applicable threshold: ``remote_stuck_threshold_seconds`` when
-        ``is_remote`` (a remote/imbue_cloud workspace, which tolerates a longer
-        blip before escalating), else ``stuck_threshold_seconds``. Remoteness is
-        only known at the probe layer (it reads the provider), so the caller
-        passes it per probe rather than the tracker storing it. Probe failures
-        for an agent that is not HEALTHY (already STUCK, or RESTARTING /
-        RESTART_FAILED -- states owned by the restart flow) or that has no record
-        (de-enrolled concurrently) are ignored.
+        transitions HEALTHY -> STUCK once the run has lasted at least
+        ``stuck_threshold_seconds``. Probe failures for an agent that is not
+        HEALTHY (already STUCK, or RESTARTING / RESTART_FAILED -- states owned
+        by the restart flow) or that has no record (de-enrolled concurrently)
+        are ignored.
         """
         aid_str = str(agent_id)
-        threshold = self.remote_stuck_threshold_seconds if is_remote else self.stuck_threshold_seconds
         fire_health: AgentHealth | None = None
         with self._lock:
             record = self._records.get(aid_str)
@@ -237,7 +215,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.failure_run_started_at is None:
                 record.failure_run_started_at = now
             elapsed = now - record.failure_run_started_at
-            if elapsed + 1e-6 < threshold:
+            if elapsed + 1e-6 < self.stuck_threshold_seconds:
                 return
             record.health = AgentHealth.STUCK
             fire_health = AgentHealth.STUCK
