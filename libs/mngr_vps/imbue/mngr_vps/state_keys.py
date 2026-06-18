@@ -11,9 +11,9 @@ from imbue.mngr.primitives import HostId
 HOSTS_PREFIX: Final[str] = "hosts"
 HOST_STATE_FILENAME: Final[str] = "host_state.json"
 AGENTS_SUBPREFIX: Final[str] = "agents"
-# The instance pushes its host_dir mirror under this subprefix of the host's
-# prefix, i.e. ``hosts/<host_id_hex>/host_dir/...``. The offline-read volume is
-# scoped here so reads see exactly the host_dir tree.
+# The operator-driven capture at ``mngr stop`` uploads the host's host_dir mirror
+# under this subprefix of the host's prefix, i.e. ``hosts/<host_id_hex>/host_dir/...``.
+# The offline-read volume is scoped here so reads see exactly the host_dir tree.
 HOST_DIR_SUBPREFIX: Final[str] = "host_dir"
 
 # Tag/label marking a cloud resource (state bucket, host identity) as mngr-managed
@@ -43,5 +43,5 @@ def agents_prefix(host_id: HostId) -> str:
 
 
 def host_dir_prefix(host_id: HostId) -> str:
-    """Return ``hosts/<host_id_hex>/host_dir/`` -- the prefix the on-box sync daemon pushes to."""
+    """Return ``hosts/<host_id_hex>/host_dir/`` -- the prefix the operator-driven capture uploads to."""
     return f"{host_prefix(host_id)}/{HOST_DIR_SUBPREFIX}/"

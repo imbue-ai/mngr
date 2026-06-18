@@ -191,8 +191,8 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         default=None,
         description=(
             "Azure Storage account where mngr stores a deallocated VM's state so it is readable "
-            "without starting the VM. When None, named 'mngrst<hash>' (3-24 lowercase alnum). Without "
-            "it, mngr falls back to VM tags, which hold less and cap the number of agents."
+            "without starting the VM. When None, named 'mngrst<hash>' (3-24 lowercase alnum). The "
+            "storage account is required infrastructure (run `mngr azure prepare`); there is no tag fallback."
         ),
     )
     is_offline_host_dir_enabled: bool = Field(
