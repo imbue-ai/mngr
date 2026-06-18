@@ -18,14 +18,15 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Any
 from typing import Final
+from typing import Protocol
 
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
-from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_vps.leak_cleanup import cleanup_old_test_instances
 from imbue.mngr_vps.leak_cleanup import has_launched_marker
 from imbue.mngr_vps.leak_cleanup import parse_iso_utc
 from imbue.mngr_vps.leak_cleanup import parse_tag_value
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 # ISO ``mngr-created-at`` tag ``AzureVpsClient.create_instance`` stamps on every VM.
 AZURE_CREATED_AT_TAG_KEY: Final[str] = "mngr-created-at"
@@ -33,6 +34,25 @@ AZURE_CREATED_AT_TAG_KEY: Final[str] = "mngr-created-at"
 # Synthetic provider name for the network-reclaim sweep's returned resource records; the reaper
 # does not key on it, but ``reclaim_orphaned_network_resources`` requires one.
 AZURE_REAPER_PROVIDER_NAME: Final[ProviderInstanceName] = ProviderInstanceName("azure-test-reaper")
+
+
+class AzureReaperClient(Protocol):
+    """The slice of ``AzureVpsClient`` the Azure reaper needs.
+
+    Extends the shared ``VpsReaperClient`` contract (``list_instances`` + ``destroy_instance``)
+    with Azure's production ``reclaim_orphaned_network_resources`` (which the cross-provider reaper
+    has no notion of). Typing against this Protocol -- rather than the concrete ``AzureVpsClient``
+    -- lets a lightweight fake stand in for unit tests. ``list_instances`` is declared with no
+    arguments for the same reason as the shared Protocol (the reaper never passes the filter).
+    """
+
+    def list_instances(self) -> list[dict[str, Any]]: ...
+
+    def destroy_instance(self, instance_id: VpsInstanceId) -> None: ...
+
+    def reclaim_orphaned_network_resources(
+        self, provider_name: ProviderInstanceName, dry_run: bool = False
+    ) -> list[Any]: ...
 
 
 def azure_test_created_at(instance: Mapping[str, Any]) -> datetime | None:
@@ -46,7 +66,7 @@ def azure_test_created_at(instance: Mapping[str, Any]) -> datetime | None:
     return parse_iso_utc(parse_tag_value(instance.get("tags", ()), AZURE_CREATED_AT_TAG_KEY))
 
 
-def cleanup_old_azure_test_instances(client: AzureVpsClient, max_age: timedelta, now: datetime) -> int:
+def cleanup_old_azure_test_instances(client: AzureReaperClient, max_age: timedelta, now: datetime) -> int:
     """Reclaim orphaned network, then destroy pytest-launched VMs older than ``max_age``.
 
     Returns the number of VMs cleaned up. The network reclaim is best-effort (the client logs and
