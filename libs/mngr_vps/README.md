@@ -68,13 +68,13 @@ The base config (`VpsProviderConfig`) provides these settings:
 | `isolation` | `CONTAINER` | How the agent is isolated on its VPS. CONTAINER (the default) runs the agent in a Docker container; NONE runs it directly on the VPS OS. Selects the realizer the provider uses; the default preserves the original container behavior. |
 | `host_dir` | `/mngr` | Base directory for mngr data inside containers |
 | `default_image` | `debian:bookworm-slim` | Default Docker image |
-| `default_idle_timeout` | 800 | Idle timeout in seconds |
+| `default_idle_timeout` | `800` | Idle timeout in seconds |
 | `default_idle_mode` | `IO` | Idle detection mode |
 | `default_activity_sources` | (all sources) | Default activity sources |
-| `ssh_connect_timeout` | 60.0 | SSH connection timeout in seconds |
-| `instance_boot_timeout` | 300.0 | Timeout for the cloud instance to become reachable, in seconds |
-| `docker_install_timeout` | 300.0 | Docker installation timeout in seconds |
-| `container_ssh_port` | 2222 | Container sshd port exposed on VPS |
+| `ssh_connect_timeout` | `60.0` | SSH connection timeout in seconds |
+| `instance_boot_timeout` | `300.0` | Timeout for the cloud instance to become reachable, in seconds |
+| `docker_install_timeout` | `300.0` | Docker installation timeout in seconds |
+| `container_ssh_port` | `2222` | Container sshd port exposed on VPS |
 | `default_region` | `ewr` | Default cloud region (provider subclasses override the default) |
 | `default_start_args` | `()` | Default `docker run` arguments |
 | `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |

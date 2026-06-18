@@ -2,11 +2,10 @@ import os
 
 import pytest
 
-from imbue.mngr_vultr.config import VultrProviderConfig
 from scripts.make_cli_docs import CONFIG_TABLES
 from scripts.make_cli_docs import ConfigTable
-from scripts.make_cli_docs import ConfigTableRow
-from scripts.make_cli_docs import _validate_table_coverage
+from scripts.make_cli_docs import _render_config_table
+from scripts.make_cli_docs import _table_field_names
 from scripts.make_cli_docs import get_relative_link
 
 # Importing make_cli_docs sets MNGR_LOAD_ALL_PLUGINS=1 process-wide at import time (it
@@ -39,21 +38,34 @@ def test_get_relative_link_raises_on_unresolvable_ref() -> None:
 
 
 @pytest.mark.parametrize("table", CONFIG_TABLES, ids=lambda t: t.readme)
-def test_config_table_covers_every_own_field(table: ConfigTable) -> None:
-    # Every field declared on the config class must be either shown or explicitly excluded,
-    # so a newly added field cannot silently vanish from the generated README.
-    _validate_table_coverage(table)
+def test_config_table_renders(table: ConfigTable) -> None:
+    # Rendering exercises the coverage path end to end: every own field is auto-included, and a
+    # field whose default cannot be auto-rendered without a default_overrides entry raises here.
+    rendered = _render_config_table(table)
+    for name in _table_field_names(table):
+        assert f"| `{name}` |" in rendered
 
 
-def test_config_table_coverage_raises_on_undocumented_field() -> None:
-    # A real own field (`backend`) with no row must fail the build.
+def test_config_table_renders_every_own_field() -> None:
+    # Own fields are picked up automatically (no hand-listing), so a field added to the model
+    # cannot silently vanish from the table. `backend` is declared on VultrProviderConfig.
+    vultr_table = next(t for t in CONFIG_TABLES if t.readme.endswith("mngr_vultr/README.md"))
+    rendered = _render_config_table(vultr_table)
+    assert "| `backend` |" in rendered
+    assert "| `api_key` |" in rendered
+
+
+def test_config_table_raises_when_default_needs_override() -> None:
+    # AwsProviderConfig.security_group uses a default_factory, so without a default_overrides
+    # entry the renderer cannot produce a Default cell and must fail loudly.
+    from imbue.mngr_aws.config import AwsProviderConfig
+
     table = ConfigTable(
         readme="x/README.md",
-        config_cls=VultrProviderConfig,
+        config_cls=AwsProviderConfig,
         field_header="Field",
         description_header="Description",
-        rows=(ConfigTableRow("api_key", "`None`"),),
     )
     with pytest.raises(ValueError) as exc_info:
-        _validate_table_coverage(table)
-    assert "backend" in str(exc_info.value)
+        _render_config_table(table)
+    assert "security_group" in str(exc_info.value)

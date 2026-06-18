@@ -18,10 +18,13 @@ All content comes from two sources:
 """
 
 import argparse
+import enum
 import os
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import NamedTuple
 
 # Force all plugins to load regardless of local config so generated docs
@@ -32,6 +35,7 @@ os.environ["MNGR_LOAD_ALL_PLUGINS"] = "1"
 import click
 from click_option_group import GroupedOption
 from pydantic import BaseModel
+from pydantic.fields import FieldInfo
 
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -711,9 +715,7 @@ CONFIG_TABLE_BEGIN = "<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.p
 CONFIG_TABLE_END = "<!-- END GENERATED CONFIG TABLE -->"
 
 
-class ConfigTableRow(NamedTuple):
-    field: str
-    default: str
+_NO_DEFAULT_OVERRIDES: Mapping[str, str] = MappingProxyType({})
 
 
 class ConfigTable(NamedTuple):
@@ -721,10 +723,16 @@ class ConfigTable(NamedTuple):
     config_cls: type[BaseModel]  # the Pydantic config class whose field descriptions we render
     field_header: str  # label for column 1 (the field / option / setting name)
     description_header: str  # label for column 3
-    # Every field declared on ``config_cls`` must have a row -- ``_validate_table_coverage``
-    # fails the generator otherwise, so a newly added config field can never silently vanish
-    # from the README (the original bug this guard prevents).
-    rows: tuple[ConfigTableRow, ...]
+    # Inherited base fields to surface in addition to ``config_cls``'s own fields. Own fields
+    # (those declared directly on ``config_cls``) are rendered automatically in declaration
+    # order; everything inherited from a shared base is excluded unless named here. This is how
+    # a provider table shows its own fields plus a few common ones (e.g. ``allowed_ssh_cidrs``)
+    # while leaving the rest of the shared VPS base to the ``mngr_vps`` table.
+    extra_fields: tuple[str, ...] = ()
+    # Display string for fields whose default cannot be auto-rendered: a ``default_factory``,
+    # or a friendly note in place of the literal value (e.g. "gcloud/ADC default"). Keyed by
+    # field name. Everything else is rendered from the model default by ``_render_default``.
+    default_overrides: Mapping[str, str] = _NO_DEFAULT_OVERRIDES
 
 
 CONFIG_TABLES: tuple[ConfigTable, ...] = (
@@ -733,155 +741,60 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         config_cls=AwsProviderConfig,
         field_header="Field",
         description_header="Description",
-        rows=(
-            ConfigTableRow("backend", "`aws`"),
-            ConfigTableRow("default_region", "`us-east-1`"),
-            ConfigTableRow("default_instance_type", "`t3.small`"),
-            ConfigTableRow("default_ami_id", "`None` (pinned Debian 12 amd64 per region)"),
-            ConfigTableRow("security_group", '`AutoCreateSecurityGroup(name="mngr-aws")`'),
-            ConfigTableRow("subnet_id", "`None`"),
-            ConfigTableRow("vpc_id", "`None`"),
-            ConfigTableRow("allowed_ssh_cidrs", '`("0.0.0.0/0",)`'),
-            ConfigTableRow("associate_public_ip", "`True`"),
-            ConfigTableRow("root_volume_size_gb", "`30`"),
-            ConfigTableRow("root_volume_type", "`gp3`"),
-            ConfigTableRow("iam_instance_profile", "`None`"),
-            ConfigTableRow("terminate_on_shutdown", "`false`"),
-            ConfigTableRow("auto_shutdown_seconds", "`None`"),
-            ConfigTableRow("state_bucket_name", "`None` (auto-derived)"),
-            ConfigTableRow("is_offline_host_dir_enabled", "`true`"),
-        ),
+        extra_fields=("allowed_ssh_cidrs", "associate_public_ip", "auto_shutdown_seconds"),
+        default_overrides={
+            "default_ami_id": "`None` (pinned Debian 12 amd64 per region)",
+            "security_group": '`AutoCreateSecurityGroup(name="mngr-aws")`',
+            "allowed_ssh_cidrs": '`("0.0.0.0/0",)`',
+            "state_bucket_name": "`None` (auto-derived)",
+        },
     ),
     ConfigTable(
         readme="libs/mngr_gcp/README.md",
         config_cls=GcpProviderConfig,
         field_header="Field",
         description_header="Description",
-        rows=(
-            ConfigTableRow("backend", "`gcp`"),
-            ConfigTableRow("project_id", "gcloud/ADC default"),
-            ConfigTableRow("default_region", "derived from zone"),
-            ConfigTableRow("default_zone", "gcloud `compute/zone`, else `us-west1-a`"),
-            ConfigTableRow("default_machine_type", "`e2-small`"),
-            ConfigTableRow("default_source_image", "`projects/debian-cloud/global/images/family/debian-12`"),
-            ConfigTableRow("boot_disk_size_gb", "`30`"),
-            ConfigTableRow("boot_disk_type", "`pd-balanced`"),
-            ConfigTableRow("network", "`default`"),
-            ConfigTableRow("subnetwork", "`None`"),
-            ConfigTableRow("allowed_ssh_cidrs", '`("0.0.0.0/0",)`'),
-            ConfigTableRow("firewall_name", "`mngr-gcp-ssh`"),
-            ConfigTableRow("firewall_target_tag", "`mngr-ssh`"),
-            ConfigTableRow("associate_external_ip", "`True`"),
-            ConfigTableRow("service_account_email", "`None`"),
-            ConfigTableRow("service_account_scopes", '`("https://www.googleapis.com/auth/cloud-platform",)`'),
-            ConfigTableRow("auto_shutdown_seconds", "`None`"),
-        ),
+        extra_fields=("allowed_ssh_cidrs", "auto_shutdown_seconds"),
+        default_overrides={
+            "project_id": "gcloud/ADC default",
+            "default_region": "derived from zone",
+            "default_zone": "gcloud `compute/zone`, else `us-west1-a`",
+            "allowed_ssh_cidrs": '`("0.0.0.0/0",)`',
+            "service_account_scopes": '`("https://www.googleapis.com/auth/cloud-platform",)`',
+        },
     ),
     ConfigTable(
         readme="libs/mngr_ovh/README.md",
         config_cls=OvhProviderConfig,
         field_header="Field",
         description_header="Description",
-        rows=(
-            ConfigTableRow("backend", "`ovh`"),
-            ConfigTableRow("endpoint", "`ovh-us`"),
-            ConfigTableRow("application_key", "`None`"),
-            ConfigTableRow("application_secret", "`None`"),
-            ConfigTableRow("consumer_key", "`None`"),
-            ConfigTableRow("client_id", "`None`"),
-            ConfigTableRow("client_secret", "`None`"),
-            ConfigTableRow("project_id", "`None`"),
-            ConfigTableRow("default_region", "`US-EAST-VA`"),
-            ConfigTableRow("default_plan", "`vps-2025-model1`"),
-            ConfigTableRow("default_image_name", "`Debian 12 - Docker`"),
-            ConfigTableRow("bootstrap_ssh_user", "`debian`"),
-            ConfigTableRow("pricing_mode", "`default`"),
-            ConfigTableRow("duration", "`P1M`"),
-            ConfigTableRow("instance_boot_timeout", "`600.0`"),
-            ConfigTableRow("ovh_subsidiary", "`US`"),
-            ConfigTableRow("enable_recycle_cancelled", "`True`"),
-            ConfigTableRow("recycle_safety_margin_hours", "`2`"),
-            ConfigTableRow("recycle_max_candidates_considered", "`10`"),
-        ),
     ),
     ConfigTable(
         readme="libs/mngr_vultr/README.md",
         config_cls=VultrProviderConfig,
         field_header="Field",
         description_header="Description",
-        rows=(
-            ConfigTableRow("backend", "`vultr`"),
-            ConfigTableRow("api_key", "`None`"),
-            ConfigTableRow("default_region", "`ewr`"),
-            ConfigTableRow("default_plan", "`vc2-2c-4gb`"),
-            ConfigTableRow("default_os_id", "`2136`"),
-        ),
     ),
     ConfigTable(
         readme="libs/mngr_vps/README.md",
         config_cls=VpsProviderConfig,
         field_header="Field",
         description_header="Description",
-        rows=(
-            ConfigTableRow("isolation", "`CONTAINER`"),
-            ConfigTableRow("host_dir", "`/mngr`"),
-            ConfigTableRow("default_image", "`debian:bookworm-slim`"),
-            ConfigTableRow("default_idle_timeout", "800"),
-            ConfigTableRow("default_idle_mode", "`IO`"),
-            ConfigTableRow("default_activity_sources", "(all sources)"),
-            ConfigTableRow("ssh_connect_timeout", "60.0"),
-            ConfigTableRow("instance_boot_timeout", "300.0"),
-            ConfigTableRow("docker_install_timeout", "300.0"),
-            ConfigTableRow("container_ssh_port", "2222"),
-            ConfigTableRow("default_region", "`ewr`"),
-            ConfigTableRow("default_start_args", "`()`"),
-            ConfigTableRow("auto_shutdown_seconds", "`None`"),
-            ConfigTableRow("docker_runtime", "`None`"),
-            ConfigTableRow("install_gvisor_runtime", "`false`"),
-            ConfigTableRow("builder", "`DOCKER`"),
-            ConfigTableRow("btrfs_mount_path", "`/mngr-btrfs`"),
-            ConfigTableRow("btrfs_loop_file_path", "`/var/lib/mngr-btrfs.img`"),
-            ConfigTableRow("outer_disk_reserved_gb", "`20`"),
-        ),
+        default_overrides={"default_activity_sources": "(all sources)"},
     ),
     ConfigTable(
         readme="libs/mngr_opencode/README.md",
         config_cls=OpenCodeAgentConfig,
         field_header="Option",
         description_header="Meaning",
-        rows=(
-            ConfigTableRow("command", "`opencode`"),
-            ConfigTableRow("cli_args", "`()`"),
-            ConfigTableRow("config_overrides", "`{}`"),
-            ConfigTableRow("sync_global_config", "`true`"),
-            ConfigTableRow("symlink_auth", "`true`"),
-            ConfigTableRow("auto_allow_permissions", "`false`"),
-            ConfigTableRow("check_installation", "`true`"),
-            ConfigTableRow("version", "unset"),
-            ConfigTableRow("update_policy", "unset"),
-            ConfigTableRow("emit_common_transcript", "`true`"),
-            ConfigTableRow("preserve_on_destroy", "`true`"),
-        ),
+        default_overrides={"config_overrides": "`{}`", "version": "unset", "update_policy": "unset"},
     ),
     ConfigTable(
         readme="libs/mngr_pi_coding/README.md",
         config_cls=PiCodingAgentConfig,
         field_header="Setting",
         description_header="Description",
-        rows=(
-            ConfigTableRow("command", "`pi`"),
-            ConfigTableRow("sync_auth", "`true`"),
-            ConfigTableRow("sync_home_settings", "`true`"),
-            ConfigTableRow("check_installation", "`true`"),
-            ConfigTableRow("version", "unset"),
-            ConfigTableRow("update_policy", "unset"),
-            ConfigTableRow("auto_allow_permissions", "`true`"),
-            ConfigTableRow("resume_session", "`true`"),
-            ConfigTableRow("emit_common_transcript", "`true`"),
-            ConfigTableRow("emit_raw_transcript", "`true`"),
-            ConfigTableRow("auto_dismiss_dialogs", "`false`"),
-            ConfigTableRow("preserve_on_destroy", "`true`"),
-        ),
+        default_overrides={"version": "unset", "update_policy": "unset"},
     ),
 )
 
@@ -891,37 +804,60 @@ def _own_field_names(config_cls: type[BaseModel]) -> list[str]:
     return [name for name in getattr(config_cls, "__annotations__", {}) if name in config_cls.model_fields]
 
 
-def _validate_table_coverage(table: ConfigTable) -> None:
-    """Fail loudly if a field declared on ``config_cls`` has no row in the table.
+def _render_default(field_info: FieldInfo) -> str | None:
+    """Render a field's literal default for the Default column, or None if it needs an override.
 
-    The generator only renders the curated ``rows``, so a field added to the model but
-    not to the table would silently disappear from the README. Requiring every own field
-    to have a row turns that silent drop into a build failure.
+    Returns None for a ``default_factory`` or any value the simple renderer doesn't cover
+    (a non-empty collection, a custom object); the table must then supply a ``default_overrides``
+    entry, otherwise ``_render_config_table`` fails loudly.
     """
-    own = _own_field_names(table.config_cls)
-    shown = {row.field for row in table.rows}
-    missing = [name for name in own if name not in shown]
-    if missing:
-        raise ValueError(
-            f"{table.readme}: {table.config_cls.__name__} fields {missing} have no row in the table. "
-            f"Add a ConfigTableRow for each so the generated README documents them."
-        )
+    if field_info.default_factory is not None:
+        return None
+    value = field_info.default
+    if value is None:
+        return "`None`"
+    if isinstance(value, bool):
+        return "`true`" if value else "`false`"
+    if isinstance(value, enum.Enum):
+        return f"`{value.value}`"
+    if isinstance(value, Path):
+        return f"`{value}`"
+    if isinstance(value, str):
+        return '`""`' if value == "" else f"`{value}`"
+    if isinstance(value, (int, float)):
+        return f"`{value}`"
+    if isinstance(value, tuple) and not value:
+        return "`()`"
+    if isinstance(value, dict) and not value:
+        return "`{}`"
+    return None
+
+
+def _table_field_names(table: ConfigTable) -> list[str]:
+    """The fields a table renders: ``config_cls``'s own fields (declaration order) then the extras."""
+    return _own_field_names(table.config_cls) + list(table.extra_fields)
 
 
 def _render_config_table(table: ConfigTable) -> str:
-    """Render a markdown table; the Description column comes from the model's field descriptions."""
-    _validate_table_coverage(table)
+    """Render a markdown table; Default and Description both come from the model (Default may be
+    overridden per field via ``default_overrides``)."""
     model_fields = table.config_cls.model_fields
     lines = [
         f"| {table.field_header} | Default | {table.description_header} |",
         "|---|---|---|",
     ]
-    for row in table.rows:
-        field_info = model_fields.get(row.field)
+    for name in _table_field_names(table):
+        field_info = model_fields.get(name)
         if field_info is None:
-            raise ValueError(f"{table.config_cls.__name__} has no field {row.field!r} referenced by {table.readme}")
+            raise ValueError(f"{table.config_cls.__name__} has no field {name!r} referenced by {table.readme}")
+        default = table.default_overrides.get(name) or _render_default(field_info)
+        if default is None:
+            raise ValueError(
+                f"{table.readme}: field {name!r} has a default that can't be auto-rendered "
+                f"(default_factory or a complex value); add a default_overrides entry for it."
+            )
         description = _escape_markdown_table(" ".join((field_info.description or "").split()))
-        lines.append(f"| `{row.field}` | {row.default} | {description} |")
+        lines.append(f"| `{name}` | {default} | {description} |")
     return "\n".join(lines)
 
 

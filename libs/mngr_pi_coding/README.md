@@ -57,8 +57,8 @@ Tunables on the `pi-coding` agent type:
 | Setting | Default | Description |
 |---|---|---|
 | `command` | `pi` | Command to run the pi coding agent. |
-| `sync_auth` | `true` | Share ~/.pi/agent/auth.json into the per-agent config dir. |
 | `sync_home_settings` | `true` | Share settings.json and resource dirs from ~/.pi/agent/ into the per-agent config dir. |
+| `sync_auth` | `true` | Share ~/.pi/agent/auth.json into the per-agent config dir. |
 | `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present. |
 | `version` | unset | Pin the pi CLI version to install (e.g., '1.2.3'). When set, installation runs `npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed pi matches, erroring on a mismatch. When None (the default), installs the latest version. |
 | `update_policy` | unset | How to handle pi's startup version check. NEVER sets PI_SKIP_VERSION_CHECK=1 in the agent environment so pi does not phone home to compare against the latest release; AUTO leaves the check enabled. ASK has no interactive flow for pi and behaves like AUTO. When unset (the default), resolves to NEVER (check disabled) -- set AUTO to leave pi's startup version check enabled. (pi only notifies about updates -- it never self-replaces -- so this governs the startup check, not a background update.) |

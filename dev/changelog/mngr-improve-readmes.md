@@ -4,4 +4,4 @@ Removed a monorepo-development-only paragraph (the `~/.local/bin` pre-commit shi
 
 The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs, and its trigger now includes the provider/agent `config.py` / `plugin.py` sources and generated provider READMEs. Previously, drift in the generated provider README tables could slip past the hook.
 
-`make_cli_docs.py` now fails if a config field is neither shown in its README table nor listed in the table's `excluded_fields`, so a field added to a config model can no longer silently vanish from the generated table.
+The provider/agent config tables are rendered entirely from the model: each table only names its config class and which inherited base fields to also surface, and the field names, defaults, and descriptions are derived automatically (a small per-field override covers non-literal defaults like "gcloud/ADC default"). A field added to a config model now appears in its table automatically, so it can't silently vanish.
