@@ -44,6 +44,7 @@ from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.plugin_registry import _plugin_config_registry
 from imbue.mngr.config.plugin_registry import register_plugin_config
+from imbue.mngr.config.pre_readers import OPT_IN_PLUGINS
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
@@ -941,6 +942,78 @@ def test_load_config_threads_every_field_from_toml(
     assert ".venv" in config.work_dir_extra_paths
     assert ".test_output" in config.work_dir_extra_paths
     assert config.allow_settings_key_assignment_narrowing is True
+
+
+def test_load_config_disabled_plugins_includes_opt_in_plugin(
+    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """config.disabled_plugins must include opt-in plugins blocked by default.
+
+    Opt-in plugins (OPT_IN_PLUGINS) are blocked in create_plugin_manager but are
+    not [plugins.*] config entries, so _apply_plugin_overrides alone drops them.
+    load_config folds the opt-in-derived set back in so the field matches the
+    actual block state.
+    """
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+    # Mirror create_plugin_manager, which blocks opt-in plugins before load_config
+    # (and lets load_config's strict block pass re-affirm the block as a no-op).
+    pm.set_blocked(opt_in_name)
+
+    _isolate_load_config_env(monkeypatch)
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    assert opt_in_name in mngr_ctx.config.disabled_plugins
+
+
+def test_load_config_disabled_plugins_excludes_explicitly_enabled_opt_in_plugin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """An opt-in plugin explicitly enabled in config is not in disabled_plugins.
+
+    Mirrors the runtime: read_disabled_plugins() omits an opt-in plugin whose
+    config sets enabled = true, so create_plugin_manager does not block it and
+    the union must not add it back.
+    """
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mngr_dir)
+    (profile_dir / "settings.toml").write_text(
+        f"is_allowed_in_pytest = true\n[plugins.{opt_in_name}]\nenabled = true\n"
+    )
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    assert opt_in_name not in mngr_ctx.config.disabled_plugins
+
+
+def test_load_config_disabled_plugins_omits_opt_in_plugin_when_loading_all(
+    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNGR_LOAD_ALL_PLUGINS keeps opt-in plugins out of disabled_plugins.
+
+    Doc/tooling runs set MNGR_LOAD_ALL_PLUGINS so create_plugin_manager blocks
+    nothing; the union must be gated the same way or it would mark opt-in plugins
+    disabled even though they are loaded.
+    """
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+    monkeypatch.setenv("MNGR_LOAD_ALL_PLUGINS", "1")
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    assert opt_in_name not in mngr_ctx.config.disabled_plugins
 
 
 # Sample values used by the regression tests above. When adding a new field to
