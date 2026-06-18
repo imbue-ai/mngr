@@ -490,9 +490,8 @@ def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> Confi
 
     For each offending key it names both sides -- the file/scope doing the
     assignment and the file/scope whose value would be dropped -- then explains
-    how to opt in to the new assign-by-default semantics, points at the
-    ``__extend`` operator for additive opt-out, and warns that the safety net
-    itself is temporary.
+    how to opt in to the assign-by-default semantics and points at the
+    ``__extend`` / ``__assign`` operators for the additive / replace opt-outs.
     """
     detail_lines: list[str] = []
     for violation in violations:

@@ -434,17 +434,19 @@ class MngrConfig(FrozenModel):
         description="Max seconds to wait for an agent to signal readiness before sending messages. "
         "Hook-based polling returns early; this is an upper bound, not an unconditional delay.",
     )
+    # Consider removing this global flag entirely: the per-key `__assign` suffix now gives a
+    # targeted opt-out from the narrowing guard, which may make a blanket escape hatch
+    # unnecessary. (The once-planned flip of this default to True is no longer planned.)
     allow_settings_key_assignment_narrowing: bool = Field(
         default=False,
         description=(
             "When False (the default), it is an error for a higher-precedence settings layer "
             "(project local, env vars, --setting, etc.) to assign over a non-empty list/tuple/"
             "dict/set value coming from a lower-precedence layer. This guards against silently "
-            "losing entries when a settings file is loaded with the new assign-by-default merge "
-            "behavior; the user is told to either use the __extend suffix to opt into the prior "
-            "additive behavior or to set this field to True. The default for this field is "
-            "expected to change to True in a future version, and support for False may be "
-            "removed entirely once the migration is complete."
+            "losing entries when a settings file is loaded with the assign-by-default merge "
+            "behavior; the user is told to use the __extend suffix to keep the additive behavior, "
+            "the __assign suffix to replace a specific key without this error, or to set this "
+            "field to True to allow assign-by-default narrowing globally."
         ),
     )
 

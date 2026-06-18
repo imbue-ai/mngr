@@ -76,7 +76,7 @@ Create templates (applied at command time via `--template <name>`) also follow t
 
 Adding a brand-new entry under any of these (e.g. defining `[agent_types.my_other_claude]` in `settings.local.toml` when only `[agent_types.my_claude]` was in `settings.toml`) is a pure addition and never narrows; the container-level merge is per-key additive by design.
 
-The default value of `allow_settings_key_assignment_narrowing` is expected to change to `true` in a future version, and support for `false` may be removed entirely. Migrate your configs ahead of the flip so the eventual default change is a no-op.
+Besides setting `allow_settings_key_assignment_narrowing = true` to allow assign-by-default narrowing globally, you can opt a specific key out per layer: `key__extend` keeps the additive (merge) behavior, and `key__assign` replaces the value without the narrowing error.
 
 CLI flags that supply tuple/list values (e.g. `--env X=6`) always extend the merged settings value rather than replace it — the result is `<config values> + <template result> + <CLI values>` for the `create` command (CLI extends after templates apply), and `<config values> + <CLI values>` for everything else. The safety net only applies to the settings-file / env-var / `--setting` / template merge, not to CLI flag merging — the CLI is always the user's final, additive word.
 

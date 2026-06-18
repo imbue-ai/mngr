@@ -584,9 +584,7 @@ def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseErro
         "To opt into this assign-by-default behavior (and silence this error), set "
         "`allow_settings_key_assignment_narrowing = true` in your settings.toml.\n"
         "To keep the additive behavior for a specific key, switch to the `__extend` suffix on "
-        "the --setting key (e.g. `--setting commands.create.env__extend='[\"X=5\"]'`).\n"
-        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        "in a future version, and support for False may be removed entirely."
+        "the --setting key (e.g. `--setting commands.create.env__extend='[\"X=5\"]'`)."
     )
 
 
@@ -876,9 +874,7 @@ def _build_template_narrowing_message(template_name: str, param_name: str) -> st
         f"To opt into this assign-by-default behavior (and silence this error), set "
         f"`allow_settings_key_assignment_narrowing = true` in your settings.toml.\n"
         f"To keep the additive behavior for this specific key, switch the template entry to "
-        f"`{param_name}__extend = [...]`.\n"
-        f"NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        f"in a future version, and support for False may be removed entirely."
+        f"`{param_name}__extend = [...]`."
     )
 
 

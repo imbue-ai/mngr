@@ -544,7 +544,7 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
 
 
 def _apply_settings_overrides(
-    base_data: dict[str, Any], settings_overrides: dict[str, Any], *, allow_narrowing: bool
+    base_data: dict[str, Any], settings_overrides: dict[str, Any], *, allow_narrowing: bool, base_description: str
 ) -> dict[str, Any]:
     """Fold the user's ``settings_overrides`` patch onto a concrete base settings dict.
 
@@ -557,11 +557,21 @@ def _apply_settings_overrides(
 
     Hard-errors (via the shared narrowing message) when a bare override key at any depth
     drops a non-empty aggregate from the base, unless ``allow_narrowing`` is set.
+    ``base_description`` names the side whose value would be dropped (e.g. the home
+    ``settings.json`` path), mirroring the config-load narrowing error's two-sided
+    attribution -- the assigning side is always the agent type's ``settings_overrides``
+    (already merged across config scopes by the time it reaches provisioning, so the
+    specific config file is not pinpointed here).
     """
     base = finalize(lift(base_data))
     merged, narrowings = merge_narrowing_allowed(lift(base), lift(settings_overrides))
     if narrowings and not allow_narrowing:
-        raise ConfigParseError(build_settings_narrowing_message([f"  {path}" for path in narrowings]))
+        detail_lines: list[str] = []
+        for path in narrowings:
+            detail_lines.append(f"  {path}")
+            detail_lines.append("      assigned by the agent type's `settings_overrides`")
+            detail_lines.append(f"      would drop a value from {base_description}")
+        raise ConfigParseError(build_settings_narrowing_message(detail_lines))
     return finalize(merged)
 
 
@@ -600,18 +610,23 @@ def _build_settings_json(
     if sync_local and source.exists():
         try:
             data: dict[str, Any] = json.loads(source.read_text())
+            base_description = f"your home Claude settings ({source})"
         except json.JSONDecodeError:
             logger.warning("Corrupt settings.json at {}, using defaults", source)
             data = _generate_claude_home_settings()
+            base_description = "mngr's generated Claude settings defaults"
     else:
         data = _generate_claude_home_settings()
+        base_description = "mngr's generated Claude settings defaults"
     # Flags are flat scalars, so a shallow update is correct here.
     data.update(compute_settings_json_flags(ctx))
 
     # Fold in mngr's own hooks (concatenated into the hook event lists by
     # merge_hooks_config), then fold the user's settings_overrides patch onto that base.
     data = fold_hook_configs(data, build_mngr_hook_configs(config, is_unattended=is_unattended))
-    data = _apply_settings_overrides(data, config.settings_overrides, allow_narrowing=allow_narrowing)
+    data = _apply_settings_overrides(
+        data, config.settings_overrides, allow_narrowing=allow_narrowing, base_description=base_description
+    )
     return json.dumps(data, indent=2) + "\n"
 
 
@@ -1634,6 +1649,7 @@ class ClaudeCoreAgent(
             settings,
             self.agent_config.settings_overrides,
             allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
+            base_description="mngr's managed Claude hooks",
         )
 
         settings_path = get_managed_settings_path(self._get_agent_dir())
