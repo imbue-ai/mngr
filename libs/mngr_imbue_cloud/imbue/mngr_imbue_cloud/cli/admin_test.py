@@ -12,12 +12,14 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr_imbue_cloud.cli.admin import PoolHostUnderlyingTeardown
 from imbue.mngr_imbue_cloud.cli.admin import _CONTAINER_SSH_PORT
 from imbue.mngr_imbue_cloud.cli.admin import _INSERT_POOL_HOST_SQL
 from imbue.mngr_imbue_cloud.cli.admin import _ufw_provision_commands
 from imbue.mngr_imbue_cloud.cli.admin import build_extra_tags_env_value
 from imbue.mngr_imbue_cloud.cli.admin import build_pool_host_insert_values
 from imbue.mngr_imbue_cloud.cli.admin import pool
+from imbue.mngr_imbue_cloud.cli.admin import resolve_underlying_teardown
 
 
 def test_build_extra_tags_env_value_empty() -> None:
@@ -265,3 +267,34 @@ def test_pool_create_ovh_backend_requires_management_key() -> None:
     )
     assert result.exit_code != 0
     assert "--management-public-key-file is required for --backend ovh_vps" in result.output
+
+
+def test_resolve_underlying_teardown_slice_destroys_vm() -> None:
+    """A slice row tears down its lima VM (not an OVH cancel) -- the regression this fix closes."""
+    assert (
+        resolve_underlying_teardown(backend_kind="slice", is_skip_requested=False)
+        == PoolHostUnderlyingTeardown.SLICE_VM
+    )
+
+
+def test_resolve_underlying_teardown_ovh_vps_cancels_vps() -> None:
+    assert (
+        resolve_underlying_teardown(backend_kind="ovh_vps", is_skip_requested=False)
+        == PoolHostUnderlyingTeardown.OVH_VPS
+    )
+
+
+def test_resolve_underlying_teardown_legacy_null_backend_treated_as_ovh() -> None:
+    """Rows written before the backend_kind column existed (None) take the OVH path."""
+    assert (
+        resolve_underlying_teardown(backend_kind=None, is_skip_requested=False) == PoolHostUnderlyingTeardown.OVH_VPS
+    )
+
+
+def test_resolve_underlying_teardown_skip_overrides_every_backend() -> None:
+    """--skip-vps-cancel drops the row only, regardless of backend."""
+    for backend_kind in ("slice", "ovh_vps", None):
+        assert (
+            resolve_underlying_teardown(backend_kind=backend_kind, is_skip_requested=True)
+            == PoolHostUnderlyingTeardown.NONE
+        )

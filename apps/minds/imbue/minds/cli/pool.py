@@ -851,26 +851,43 @@ def pool_list(database_url: str | None) -> None:
     "--skip-vps-cancel",
     is_flag=True,
     default=False,
-    help="Only drop the DB row; do NOT cancel the OVH VPS. Use only when the VPS is already gone.",
+    help=(
+        "Only drop the DB row; do NOT tear down the underlying machine (cancel the "
+        "OVH VPS for an ovh_vps row, or destroy the lima VM for a slice row). Use "
+        "only when the machine is already gone."
+    ),
 )
 def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
-    """Full teardown of a pool host: cancel its OVH VPS, then drop the row.
+    """Full teardown of a pool host: tear down its underlying machine, then drop the row.
 
-    Forwards to ``mngr imbue_cloud admin pool destroy``, which by default cancels
-    the underlying OVH VPS (so it can't strand a still-billing host) before
-    deleting the row. OVH credentials are read from the activated tier's Vault
-    entry and injected into the subprocess, mirroring ``pool create``. Pass
-    ``--skip-vps-cancel`` to only drop the row when the VPS is already gone.
+    Forwards to ``mngr imbue_cloud admin pool destroy``, which by default tears down
+    the row's underlying machine before deleting the row -- cancelling the OVH VPS for
+    an ``ovh_vps`` row, or destroying the lima VM (freeing the box slot) for a
+    ``slice`` row. The teardown secrets are read from the activated tier's Vault
+    entries and injected into the subprocess, mirroring ``pool create``. Pass
+    ``--skip-vps-cancel`` to only drop the row when the machine is already gone.
     """
     env_name = require_activated_env_name()
     extra_env: dict[str, str] | None = None
     if not skip_vps_cancel:
+        # The wrapper can't know the row's backend without an extra DB round-trip, so
+        # inject BOTH teardown secrets the admin command might need; it uses only the
+        # one matching the row's backend (OVH AK/AS/CK for an ovh_vps row,
+        # POOL_SSH_PRIVATE_KEY for a slice row). Every tier with pool hosts has both
+        # Vault entries (minds env deploy pushes both).
         try:
-            extra_env = resolve_ovh_env_from_vault(env_name)
+            ovh_env = resolve_ovh_env_from_vault(env_name)
         except VaultReadError as exc:
             raise click.ClickException(
                 f"Could not read OVH credentials from Vault for env '{env_name}': {exc}"
             ) from exc
+        try:
+            pool_private_key = read_pool_private_key_from_vault(env_name)
+        except VaultReadError as exc:
+            raise click.ClickException(
+                f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
+            ) from exc
+        extra_env = {**ovh_env, _POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}
     args = build_destroy_admin_args(
         pool_host_id=pool_host_id,
         database_url=resolve_host_pool_dsn(env_name, database_url),
