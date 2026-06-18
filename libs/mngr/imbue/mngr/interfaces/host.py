@@ -1043,7 +1043,14 @@ class CreateAgentOptions(FrozenModel):
     plugin_data: dict[str, Any] = Field(
         default_factory=dict,
         description="Opaque dict for plugins to pass data through the creation pipeline. "
-        "Keys are namespaced by plugin (e.g. 'adopt_session' for ClaudeAgent).",
+        "Keys are namespaced by plugin.",
+    )
+    adopt_session: tuple[str, ...] = Field(
+        default=(),
+        description="Session id(s) or path(s) to adopt into the new agent so it resumes that "
+        "conversation (the --adopt option). Repeatable; the last named session is the one resumed "
+        "on startup. Only valid for agent types that support session adoption "
+        "(HasSessionAdoptionMixin); mutually exclusive with cloning via --from.",
     )
     source_agent_state_location: HostLocation | None = Field(
         default=None,

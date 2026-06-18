@@ -33,6 +33,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
@@ -106,7 +107,7 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
             "Failed to reach WAITING state within {}s, proceeding anyway",
             timeout,
         )
-    agent.send_message(resume_message)
+    require_interactive_agent(agent).send_message(resume_message)
     logger.debug("Sent resume message to agent {}", agent.name)
 
 

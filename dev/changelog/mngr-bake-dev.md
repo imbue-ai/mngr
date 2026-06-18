@@ -1,0 +1,1 @@
+The `just destroy-pool-host` recipe comment now documents that teardown mirrors the row's backend -- cancelling the OVH VPS for an `ovh_vps` row, or destroying the lima VM (freeing the box slot) for a `slice` row -- and that `--skip-vps-cancel` is for when the underlying machine is already gone (not just the OVH VPS).

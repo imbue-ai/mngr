@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections.abc import Callable
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Never
 
 from loguru import logger
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.live_output_tail import tail_live_output
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import SendMessageError
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.live_output import LIVE_OUTPUT_POLL_INTERVAL
+from imbue.mngr.interfaces.live_output import LIVE_OUTPUT_POLL_TIMEOUT
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.polling import poll_until
 
-TAIL_POLL_INTERVAL: float = 0.05
-TAIL_POLL_TIMEOUT: float = 300.0
 # Default startup grace period before trusting lifecycle state. During startup
 # the tmux pane may show the shell as the current command, making the agent
 # look DONE/STOPPED before the real process has started. Subclasses can
@@ -98,21 +100,33 @@ def render_file_diagnostic(
     return f"{prefix}{char_count} chars, tail:\n{tail}".rstrip()
 
 
-class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
+class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin, HasUnattendedModeMixin):
     """Base class for headless agents that capture output to files.
 
     Provides shared infrastructure for agents that redirect stdout/stderr
     to files and expose output programmatically. Subclasses must implement
-    _get_stdout_path, _get_stderr_path, and stream_output.
+    _get_stdout_path, _get_stderr_path, and make_live_output_reader (the reader
+    that turns the captured stdout into text deltas); stream_output is provided
+    here on top of the shared live-output tail loop.
+
+    Headless agents run unattended by construction -- they produce output
+    non-interactively, with no in-run tool prompt to approve -- so
+    ``is_unattended_enabled`` is always True.
 
     Subclasses can customize behavior by overriding:
     - _no_output_error_subject: the subject for "X exited without producing output" messages
     - _get_extra_error_sources(): additional error sources beyond stderr (e.g. stdout JSON errors)
     - _startup_grace_seconds: how long to wait for the process to start before trusting lifecycle state
+    - _make_live_output_finished_predicate(): the "agent finished" check the tail loop polls on
+    - _raise_stream_error(): how to surface a terminal error reported by the reader
     """
 
     _no_output_error_subject: str = "Command"
     _startup_grace_seconds: float = STARTUP_GRACE_SECONDS
+
+    def is_unattended_enabled(self) -> bool:
+        """Headless agents always run unattended -- there is no interactive prompt to gate on."""
+        return True
 
     @abstractmethod
     def _get_stdout_path(self) -> Path:
@@ -123,13 +137,6 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
     def _get_stderr_path(self) -> Path:
         """Return the path to the stderr output file for this agent."""
         ...
-
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Headless agents do not accept interactive messages."""
-        raise SendMessageError(
-            str(self.name),
-            "Headless agents do not accept interactive messages.",
-        )
 
     def _is_agent_finished(self) -> bool:
         """Check if the agent process has exited (tmux lifecycle) or is no longer running."""
@@ -156,16 +163,62 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         if poll_until(
             lambda: self._file_exists_on_host(stdout_path),
             timeout=self._startup_grace_seconds,
-            poll_interval=TAIL_POLL_INTERVAL,
+            poll_interval=LIVE_OUTPUT_POLL_INTERVAL,
         ):
             return True
         # Phase 2: file didn't appear during grace period, now also check lifecycle
         poll_until(
             lambda: self._file_exists_on_host(stdout_path) or self._is_agent_finished(),
-            timeout=max(0.0, TAIL_POLL_TIMEOUT - self._startup_grace_seconds),
-            poll_interval=TAIL_POLL_INTERVAL,
+            timeout=max(0.0, LIVE_OUTPUT_POLL_TIMEOUT - self._startup_grace_seconds),
+            poll_interval=LIVE_OUTPUT_POLL_INTERVAL,
         )
         return self._file_exists_on_host(stdout_path)
+
+    def get_live_output_path(self) -> Path:
+        """A headless agent publishes its live output as the captured stdout file."""
+        return self._get_stdout_path()
+
+    def _make_live_output_finished_predicate(self) -> Callable[[], bool]:
+        """Return the "agent finished" predicate the tail loop polls on.
+
+        Defaults to the plain lifecycle check; subclasses that need a startup
+        grace period (e.g. a CLI that is slow to spawn) override this to wrap it.
+        """
+        return self._is_agent_finished
+
+    def _raise_stream_error(self, error: str) -> Never:
+        """Raise the terminal error a reader surfaced via ``stream_error``.
+
+        The default wraps it plainly; subclasses override to add context (e.g.
+        appending captured stderr). Only reached when a reader reports an error,
+        so a base headless agent whose reader never sets one never calls this.
+        """
+        raise MngrError(error)
+
+    def stream_output(self) -> Iterator[str]:
+        """Stream the agent's captured output as text deltas.
+
+        Waits for the stdout file, then tails it via the shared live-output loop
+        using this agent's reader. Raises MngrError if the reader surfaces a
+        terminal error, or if the agent exits without producing any output.
+        """
+        stdout_path = self._get_stdout_path()
+        if not self._wait_for_stdout_file(stdout_path):
+            self._raise_no_output_error()
+
+        reader = self.make_live_output_reader()
+        is_any_output_yielded = False
+        for chunk in tail_live_output(
+            self.host, self.get_live_output_path(), reader, self._make_live_output_finished_predicate()
+        ):
+            is_any_output_yielded = True
+            yield chunk
+
+        stream_error = reader.stream_error
+        if stream_error is not None:
+            self._raise_stream_error(stream_error)
+        if not is_any_output_yielded:
+            self._raise_no_output_error()
 
     def output(self) -> str:
         """Wait for the agent to finish and return its complete output."""
