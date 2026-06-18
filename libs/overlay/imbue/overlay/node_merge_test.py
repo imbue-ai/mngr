@@ -408,6 +408,24 @@ def test_static_dict_is_an_atomic_leaf_through_lift_finalize_lower() -> None:
     assert finalize(merged) == {"permissions": {"allow": ["X"]}}
 
 
+def test_static_dict_as_extend_payload_replaces_atomically() -> None:
+    """A ``StaticDict`` used as an ``__extend`` payload is an atomic leaf: it replaces the
+    base wholesale rather than being recursed into. (Regression: the extend branches used
+    ``isinstance(dict)`` and descended into the marker's raw values, crashing with
+    ``AttributeError``.)"""
+    # Extend-against-a-patch-base: the Static* value wins atomically.
+    base = lift({"a": {"x": [1]}})
+    merged, narrowings = merge_narrowing_allowed(base, lift({"a__extend": StaticDict({"y": 2})}))
+    assert finalize(merged) == {"a": {"y": 2}}
+    assert narrowings == []
+    # Extend-against-absent (the original crash repro: a present-but-None base).
+    merged2, _ = merge_narrowing_allowed(lift({"a": None}), lift({"a__extend": StaticDict({"x": 1})}))
+    assert finalize(merged2) == {"a": {"x": 1}}
+    # Extend-over-Extend with a Static* payload: the higher one wins outright.
+    merged3, _ = merge_narrowing_allowed(lift({"a__extend": {"x": 1}}), lift({"a__extend": StaticDict({"y": 2})}))
+    assert finalize(merged3) == {"a": {"y": 2}}
+
+
 def test_merge_scalar_tuple_payload_suppresses_narrowing() -> None:
     base = lift({"cidrs": ("0.0.0.0/0",)})
     higher = lift({"cidrs": ScalarTuple(("203.0.113.4/32",))})

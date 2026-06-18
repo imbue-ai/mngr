@@ -4812,8 +4812,13 @@ def test_build_settings_json_bare_override_narrows_raises() -> None:
         check_installation=False,
         settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}},
     )
-    with pytest.raises(ConfigParseError, match="narrow"):
+    with pytest.raises(ConfigParseError, match="narrow") as exc_info:
         _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    # The error attributes both sides: the settings_overrides assigning, and the home
+    # settings.json whose value would be dropped (named by path).
+    message = str(exc_info.value)
+    assert "settings_overrides" in message
+    assert str(claude_dir / "settings.json") in message
 
 
 def test_build_settings_json_bare_override_narrows_allowed_with_escape_hatch() -> None:

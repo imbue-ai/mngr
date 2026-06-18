@@ -177,7 +177,10 @@ def setup_command_context(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load config (is_interactive will be resolved below)
+    # Load config (is_interactive will be resolved below). The ``mngr config`` command is
+    # exempt from the settings-narrowing guard: it must be able to load a config that would
+    # otherwise narrow in order to *edit* it (otherwise `mngr config set`/`unset` -- the way
+    # to fix a narrowing config -- would themselves fail with the narrowing error).
     pm = ctx.obj
     mngr_ctx = load_config(
         pm,
@@ -187,6 +190,7 @@ def setup_command_context(
         is_interactive=False,
         strict=strict,
         silent_unknown_fields=silent_unknown_fields,
+        enforce_narrowing_guard=command_name != "config",
     )
 
     # Resolve is_interactive from all sources.
@@ -584,9 +588,7 @@ def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseErro
         "To opt into this assign-by-default behavior (and silence this error), set "
         "`allow_settings_key_assignment_narrowing = true` in your settings.toml.\n"
         "To keep the additive behavior for a specific key, switch to the `__extend` suffix on "
-        "the --setting key (e.g. `--setting commands.create.env__extend='[\"X=5\"]'`).\n"
-        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        "in a future version, and support for False may be removed entirely."
+        "the --setting key (e.g. `--setting commands.create.env__extend='[\"X=5\"]'`)."
     )
 
 
@@ -876,9 +878,7 @@ def _build_template_narrowing_message(template_name: str, param_name: str) -> st
         f"To opt into this assign-by-default behavior (and silence this error), set "
         f"`allow_settings_key_assignment_narrowing = true` in your settings.toml.\n"
         f"To keep the additive behavior for this specific key, switch the template entry to "
-        f"`{param_name}__extend = [...]`.\n"
-        f"NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        f"in a future version, and support for False may be removed entirely."
+        f"`{param_name}__extend = [...]`."
     )
 
 

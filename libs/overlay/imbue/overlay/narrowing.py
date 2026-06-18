@@ -38,7 +38,10 @@ def narrowing_paths(base_value: Any, override_value: Any, prefix: str) -> list[s
     list/set narrowing, a whole-aggregate replacement, or a dropped dict key reports at the
     field ``prefix`` itself; a same-keys dict whose nested values narrow reports the deep
     leaf path of each narrowed value. ``Static*`` overrides, no-ops, supersets, and
-    empty/non-aggregate bases yield ``[]``.
+    empty/non-aggregate bases yield ``[]``. The list/tuple "superset" check is by
+    membership (a base entry counts as retained if it appears in the override at all), so
+    it is insensitive to order and multiplicity -- dropping a duplicate while keeping one
+    copy is not treated as narrowing.
     """
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return []

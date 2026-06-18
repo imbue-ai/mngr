@@ -184,9 +184,15 @@ def apply_extend(
     assign nested *inside* this extend payload that drops a lower aggregate is still
     recorded for the narrowing filter (the recursive-narrowing case): an extend never
     narrows at its own level, but a nested assign within it can.
+
+    A ``Static*`` marker is an atomic leaf everywhere else in the algebra (``_is_patch_dict``
+    excludes it), so as an extend payload it replaces the base wholesale rather than being
+    recursed/concatenated, and a ``Static*`` base is never descended into.
     """
+    if is_static_marker(extend_payload):
+        return extend_payload
     if current_payload is None:
-        if isinstance(extend_payload, dict):
+        if _is_patch_dict(extend_payload):
             return combine({}, extend_payload, path=(field_path,), assign_drops=assign_drops)
         if not isinstance(extend_payload, _AGGREGATE_LEAF_TYPES):
             raise OverlayError(
@@ -194,8 +200,8 @@ def apply_extend(
                 f"got: {type(extend_payload).__name__}"
             )
         return extend_payload
-    if isinstance(current_payload, dict):
-        if not isinstance(extend_payload, dict):
+    if _is_patch_dict(current_payload):
+        if not _is_patch_dict(extend_payload):
             raise OverlayError(
                 f"__extend on field '{field_path}' (dict) requires a JSON object value; "
                 f"got: {type(extend_payload).__name__}"
@@ -217,8 +223,13 @@ def combine_extend_payloads(
     drops a lower aggregate is still recorded); list/tuple pairs concatenate;
     set/frozenset pairs union. Incompatible shapes are an error. The result is still
     an unresolved extend payload (stays in an ``Extend`` node).
+
+    A ``Static*`` marker on either side is an atomic leaf, so the higher-precedence
+    payload wins outright rather than the two being merged.
     """
-    if isinstance(lower_payload, dict) and isinstance(higher_payload, dict):
+    if is_static_marker(lower_payload) or is_static_marker(higher_payload):
+        return higher_payload
+    if _is_patch_dict(lower_payload) and _is_patch_dict(higher_payload):
         return combine(lower_payload, higher_payload, path=(field_path,), assign_drops=assign_drops)
     if isinstance(lower_payload, (list, tuple)) and isinstance(higher_payload, (list, tuple)):
         merged = list(lower_payload) + list(higher_payload)

@@ -258,7 +258,8 @@ def _reparse_container_entries(
         reparsed: dict[Any, Any] = {}
         for key, entry in container.items():
             entry_model = entry_models.get(key)
-            assert entry_model is not None, f"no class recovered for {field_name}.{key}"
+            if entry_model is None:
+                raise ConfigParseError(f"no class recovered for {field_name}.{key}")
             reparsed[key] = type(entry_model).model_validate(entry)
         result[field_name] = reparsed
     return result
@@ -499,8 +500,5 @@ def build_settings_narrowing_message(detail_lines: Sequence[str]) -> str:
         "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
         "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
         'key in the higher-precedence layer (e.g. `permissions__extend = {allow__extend = ["..."]}`), '
-        "or `__assign` to replace it intentionally without this error.\n"
-        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        "in a future version, and support for False may be removed entirely. Migrate now so "
-        "the eventual default flip is a no-op for your config."
+        "or `__assign` to replace it intentionally without this error."
     )
