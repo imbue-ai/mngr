@@ -260,7 +260,7 @@ def test_list_leased_hosts_maps_transport_failure_to_provider_unavailable() -> N
     # The provider name is attributed (so mngr's errors[] carries it) and the
     # curated help text does NOT tell a cloud user to start Docker.
     assert exc_info.value.provider_name == ProviderInstanceName("imbue-cloud-test")
-    assert "docker" not in exc_info.value.user_help_text.lower()
+    assert "docker" not in (exc_info.value.user_help_text or "").lower()
 
 
 def test_list_leased_hosts_preserves_auth_error() -> None:
