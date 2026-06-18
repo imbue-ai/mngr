@@ -159,3 +159,64 @@ def test_offline_resume_mirrors_record_with_cleared_stop_reason(temp_mngr_ctx: M
     assert store.written.certified_host_data.stop_reason is None
     assert store.written.vps_ip == "10.0.0.9"
     assert provider._mirrored_record is store.written
+
+
+class _HostKeyWaitProvider(_ResumeMirrorProvider):
+    """Records the resume readiness-wait sequence so a test can assert the resume
+    path waits for the *expected* host key (not just any sshd) before connecting."""
+
+    _calls: list[str] = PrivateAttr(default_factory=list)
+    _expected_key_arg: str | None = PrivateAttr(default=None)
+
+    def _wait_for_sshd_on_vps(self, vps_ip: str, timeout_seconds: float) -> None:
+        self._calls.append("wait_sshd")
+
+    def _wait_for_expected_host_key(self, vps_ip: str, expected_host_public_key: str, timeout_seconds: float) -> None:
+        self._calls.append("wait_host_key")
+        self._expected_key_arg = expected_host_public_key
+
+    @contextmanager
+    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+        self._calls.append("open_outer")
+        yield _LocalFakeOuter(id=HostId.generate(), connector=_make_local_connector())
+
+
+def test_offline_resume_waits_for_expected_host_key_before_connecting(temp_mngr_ctx: MngrContext) -> None:
+    """Resume must poll for mngr's *exact* VPS host key (port 22) before the strict connect.
+
+    Regression guard for the GCP-bare resume failure: GCP's GCE startup-script
+    re-runs on every boot and ``systemctl restart ssh``s partway through, so a
+    plain ``wait_for_sshd`` (any-key handshake) can return while sshd is about to
+    be restarted, and the strict-checked connect then hits a refused/mismatched
+    port 22. The shared base now mirrors create's host-key wait on resume -- after
+    ``_wait_for_sshd_on_vps`` and before ``_make_outer_for_vps_ip`` -- using the VPS
+    host public key (port 22's key, which is the bare agent endpoint). Cloud-init
+    backends inherit the no-op default, so they return on the first poll.
+    """
+    host_id = HostId.generate()
+    config = VpsHostConfig(vps_instance_id=VpsInstanceId("i-resume"), region="r", plan="p")
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="resumed-host",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        stop_reason=HostState.STOPPED.value,
+    )
+    store = _CapturingHostStore(VpsHostRecord(certified_host_data=certified, vps_ip=None, config=config))
+    provider = _HostKeyWaitProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsProviderConfig(backend=ProviderBackendName("offline-test")),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    provider._realizer_cache = cast(HostRealizer, _FakeRealizer(cast(VpsHostStore, store)))
+
+    with pytest.raises(_MirrorCalled):
+        provider.start_host(host_id)
+
+    # The host-key wait happens, after the sshd wait and before the strict connect.
+    assert provider._calls == ["wait_sshd", "wait_host_key", "open_outer"]
+    # It waits for mngr's locally-held VPS host public key (the key sshd serves on
+    # port 22 -- the bare agent endpoint), not a record/account-sourced value.
+    assert provider._expected_key_arg == provider._get_vps_host_keypair()[1]

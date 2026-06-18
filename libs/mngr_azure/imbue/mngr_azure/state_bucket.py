@@ -14,8 +14,6 @@ from azure.core.exceptions import ResourceExistsError
 from azure.core.exceptions import ResourceNotFoundError
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.authorization.v2022_04_01.models import RoleAssignmentCreateParameters
-from azure.mgmt.msi import ManagedServiceIdentityClient
-from azure.mgmt.msi.models import Identity
 from azure.mgmt.storage import StorageManagementClient
 from azure.mgmt.storage.models import Sku
 from azure.mgmt.storage.models import StorageAccountCreateParameters
@@ -26,10 +24,8 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.volume import Volume
-from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_vps import state_keys
 from imbue.mngr_vps.state_bucket_base import BaseObjectStoreVolume
@@ -48,47 +44,22 @@ _STORAGE_ACCOUNT_SKU: Final[str] = "Standard_LRS"
 _STORAGE_ACCOUNT_KIND: Final[str] = "StorageV2"
 
 # Built-in Azure role that grants data-plane read/write on Blob storage. Scoped
-# (in ``BlobStateHostIdentity``) to JUST the state storage account, so the VM's
-# managed identity can push host_dir but cannot touch any other storage. The id
-# is the well-known, stable role-definition GUID for ``Storage Blob Data
+# (by ``ensure_operator_blob_access``) to JUST the state storage account, so the
+# operator can read/write mngr's state blobs but cannot touch any other storage.
+# The id is the well-known, stable role-definition GUID for ``Storage Blob Data
 # Contributor`` (least privilege: data-plane only, no account management).
 STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID: Final[str] = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
 
-# Azure role assignments are eventually consistent: a freshly-created
-# user-assigned identity may not yet be resolvable as a role-assignment
-# principal. Bound how long ``ensure_host_identity`` waits for the assignment to
-# stick before proceeding (mirrors the AWS IAM consistency poll).
+# Azure role assignments are eventually consistent: a freshly-created principal
+# may not yet be resolvable as a role-assignment principal. Bound how long
+# ``ensure_blob_data_contributor`` waits for the assignment to stick before
+# proceeding (mirrors the AWS IAM consistency poll).
 _AZURE_CONSISTENCY_TIMEOUT_SECONDS: Final[float] = 30.0
 _AZURE_CONSISTENCY_POLL_SECONDS: Final[float] = 2.0
 
 
-def host_identity_name_for_account(account_name: str) -> str:
-    """Return the deterministic user-assigned managed-identity name for a state account.
-
-    The storage-account name already encodes the subscription + resource-group
-    scope (or an operator override), so deriving the identity name from it gives
-    one stable identity per ``prepare`` scope. Managed-identity resource names
-    allow ``[\\w-]`` (3-128 chars); ``mngrid-<account>`` stays well within that.
-    """
-    return f"mngrid-{account_name}"
-
-
-def host_dir_sync_target_for(account_name: str, container_name: str, host_id: HostId) -> str:
-    """Return the ``https://<account>.blob.core.windows.net/<container>/hosts/<id>/host_dir`` sync target.
-
-    The full blob URL the on-box ``azcopy sync`` pushes to. Mirrors the AWS
-    ``host_dir_sync_target_for`` (which returns the ``s3://`` URI).
-    """
-    prefix = state_keys.host_dir_prefix(host_id).rstrip("/")
-    return f"https://{account_name}.blob.core.windows.net/{container_name}/{prefix}"
-
-
 class BlobStateBucketError(MngrError):
     """An Azure Blob state-bucket operation failed."""
-
-
-class BlobStateHostIdentityError(MngrError):
-    """A managed-identity / role-assignment host-identity operation failed."""
 
 
 def _decode_jwt_claims(token: str) -> dict[str, Any]:
@@ -463,173 +434,6 @@ class BlobStateBucket(BaseStateBucket):
             return [blob.name for blob in self._container().list_blobs(name_starts_with=prefix)]
 
 
-class BlobStateHostIdentity(MutableModel):
-    """Manages the user-assigned managed identity + role assignment that lets a VM push host_dir.
-
-    The Azure analog of ``S3StateHostIdentity``: a user-assigned managed identity
-    (in the mngr resource group) plus a ``Storage Blob Data Contributor`` role
-    assignment SCOPED TO JUST the state storage account -- least privilege, so the
-    VM's identity can write Blob data on this one account and nothing else.
-    Provisioned by ``mngr azure prepare`` and attached at VM create so the on-box
-    sync daemon can write via IMDS/MSI. Reads never need this identity -- they use
-    the operator's credentials.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    # Typed ``Any`` because azure.core.credentials.TokenCredential is a Protocol,
-    # which pydantic's arbitrary_types_allowed validation cannot accept as a field.
-    credential: Any = Field(frozen=True, description="DefaultAzureCredential (or compatible) for the mgmt clients")
-    subscription_id: str = Field(frozen=True, description="Azure subscription the identity + account live in")
-    resource_group: str = Field(frozen=True, description="Resource group holding the identity + storage account")
-    region: str = Field(frozen=True, description="Azure region the identity is created in")
-    account_name: str = Field(frozen=True, description="State storage account the role assignment is scoped to")
-    _cached_msi_client: Any = PrivateAttr(default=None)
-    _cached_authorization_client: Any = PrivateAttr(default=None)
-
-    def _msi(self) -> Any:
-        """Return the ``ManagedServiceIdentityClient`` (identity create/get/delete), cached."""
-        if self._cached_msi_client is None:
-            self._cached_msi_client = ManagedServiceIdentityClient(self.credential, self.subscription_id)
-        return self._cached_msi_client
-
-    def _authorization(self) -> Any:
-        """Return the ``AuthorizationManagementClient`` (role assignments), cached."""
-        if self._cached_authorization_client is None:
-            self._cached_authorization_client = AuthorizationManagementClient(self.credential, self.subscription_id)
-        return self._cached_authorization_client
-
-    @property
-    def identity_name(self) -> str:
-        """The deterministic user-assigned managed-identity name for this state account."""
-        return host_identity_name_for_account(self.account_name)
-
-    def resource_id(self) -> str:
-        """ARM resource id of the user-assigned managed identity (for VM-create attachment)."""
-        return (
-            f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
-            f"/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{self.identity_name}"
-        )
-
-    def _account_scope(self) -> str:
-        """ARM resource id of the state storage account -- the role-assignment scope (least privilege)."""
-        return (
-            f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
-            f"/providers/Microsoft.Storage/storageAccounts/{self.account_name}"
-        )
-
-    def _get_identity(self) -> Any | None:
-        """Return the user-assigned identity resource (read-only GET), or None if absent."""
-        try:
-            return self._msi().user_assigned_identities.get(self.resource_group, self.identity_name)
-        except ResourceNotFoundError:
-            return None
-        except AzureError as e:
-            raise BlobStateHostIdentityError(
-                f"Failed to check user-assigned managed identity {self.identity_name!r}: {e}"
-            ) from e
-
-    def host_identity_exists(self) -> bool:
-        """Return whether the user-assigned managed identity already exists (read-only GET)."""
-        return self._get_identity() is not None
-
-    def get_host_identity_client_id(self) -> str | None:
-        """Return the managed identity's client id (for the on-box azcopy MSI login), or None if absent.
-
-        The on-box sync daemon authenticates azcopy as a *user-assigned* identity,
-        which requires that identity's client id (a VM may carry several). Read-only.
-        """
-        identity = self._get_identity()
-        if identity is None:
-            return None
-        return identity.client_id
-
-    def ensure_host_identity(self) -> str:
-        """Idempotently create the managed identity + scoped role assignment; return the identity resource id.
-
-        Read-only-first: a GET precedes the (idempotent) identity create. Then the
-        ``Storage Blob Data Contributor`` role is assigned to the identity's
-        principal, scoped to JUST the state storage account. Both the identity
-        create_or_update and the role-assignment create are idempotent. Azure is
-        eventually consistent about a fresh identity's principal, so the role
-        assignment is retried briefly. Mirrors ``S3StateHostIdentity.ensure_host_identity``.
-        """
-        with _translate_identity_errors(self.identity_name):
-            identity = self._msi().user_assigned_identities.create_or_update(
-                self.resource_group,
-                self.identity_name,
-                Identity(location=self.region, tags={state_keys.MANAGED_BY_TAG_KEY: state_keys.MANAGED_BY_TAG_VALUE}),
-            )
-            principal_id = identity.principal_id
-            if not principal_id:
-                raise BlobStateHostIdentityError(
-                    f"User-assigned managed identity {self.identity_name!r} has no principal id; cannot "
-                    "assign the Storage Blob Data Contributor role."
-                )
-            self._ensure_blob_role_assignment(principal_id)
-        logger.info(
-            "Provisioned managed identity {} (Storage Blob Data Contributor on account {})",
-            self.identity_name,
-            self.account_name,
-        )
-        return self.resource_id()
-
-    def _blob_role_assignment_name(self, principal_id: str) -> str:
-        """The deterministic role-assignment GUID for this principal on the account scope.
-
-        Derived from the principal + scope so ``ensure`` and ``delete`` target the
-        same assignment across runs.
-        """
-        return _blob_data_role_assignment_name(principal_id, self._account_scope())
-
-    def _ensure_blob_role_assignment(self, principal_id: str) -> None:
-        """Assign Storage Blob Data Contributor to the identity's principal, scoped to the state account.
-
-        Delegates to the shared :func:`ensure_blob_data_contributor` helper (the
-        same logic the operator grant uses), passing ``ServicePrincipal`` since a
-        managed identity is a service principal.
-        """
-        ensure_blob_data_contributor(
-            self._authorization(),
-            self.subscription_id,
-            self._account_scope(),
-            principal_id,
-            "ServicePrincipal",
-            subject_label=f"managed identity {self.identity_name!r}",
-            account_name=self.account_name,
-            error_cls=BlobStateHostIdentityError,
-        )
-
-    def delete_host_identity(self) -> None:
-        """Delete the scoped role assignment, then the user-assigned managed identity. Idempotent.
-
-        The role assignment is deleted explicitly (rather than relying on Azure's
-        stale-principal reaping) so cleanup leaves nothing orphaned, mirroring how
-        ``S3StateHostIdentity`` explicitly detaches+deletes its role/profile/policy.
-        Both deletes tolerate a missing target. Skips the assignment delete when the
-        identity is already gone (no principal to derive the assignment name from).
-        """
-        with _translate_identity_errors(self.identity_name):
-            identity = self._get_identity()
-            if identity is not None and identity.principal_id:
-                self._delete_blob_role_assignment_if_present(identity.principal_id)
-            try:
-                self._msi().user_assigned_identities.delete(self.resource_group, self.identity_name)
-            except ResourceNotFoundError:
-                return
-        logger.info("Deleted managed identity {} for state account {}", self.identity_name, self.account_name)
-
-    def _delete_blob_role_assignment_if_present(self, principal_id: str) -> None:
-        """Delete the deterministic blob-data-contributor assignment for this principal. Idempotent."""
-        try:
-            self._authorization().role_assignments.delete(
-                scope=self._account_scope(),
-                role_assignment_name=self._blob_role_assignment_name(principal_id),
-            )
-        except ResourceNotFoundError:
-            return
-
-
 class BlobVolume(BaseObjectStoreVolume):
     """A ``Volume`` backed by an Azure Blob container, for reading a host's offline host_dir.
 
@@ -710,15 +514,6 @@ class BlobVolume(BaseObjectStoreVolume):
 
     def _write_object(self, key: str, content: bytes) -> None:
         self._container().upload_blob(name=key, data=content, overwrite=True)
-
-
-@contextmanager
-def _translate_identity_errors(identity_name: str) -> Iterator[None]:
-    """Translate ``azure.core.exceptions.AzureError`` into ``BlobStateHostIdentityError`` within the block."""
-    try:
-        yield
-    except AzureError as e:
-        raise BlobStateHostIdentityError(f"Managed-identity operation on {identity_name!r} failed: {e}") from e
 
 
 @contextmanager

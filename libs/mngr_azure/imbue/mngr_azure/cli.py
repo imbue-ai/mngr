@@ -37,7 +37,6 @@ from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
-from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
 from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
@@ -215,71 +214,17 @@ def _perform_state_bucket_cleanup(bucket: BlobStateBucket, *, force: bool) -> st
     return bucket.account_name
 
 
-def _build_host_identity(base: AzureProviderConfig, client: AzureVpsClient) -> BlobStateHostIdentity:
-    """Build the bucket-write managed-identity helper for the operator commands.
-
-    The identity name is derived from the state-account name (itself derived from
-    subscription + resource group), so it shares the bucket's scope and tracks the
-    operator client's subscription / region / resource group.
-    """
-    return BlobStateHostIdentity(
-        credential=base.get_credential(),
-        subscription_id=client.subscription_id,
-        resource_group=client.resource_group,
-        region=client.region,
-        account_name=base.resolve_state_storage_account_name(client.subscription_id),
-    )
-
-
-def _provision_host_identity(identity: BlobStateHostIdentity) -> str:
-    """Provision the bucket-write managed identity, returning its name.
-
-    With offline host_dir enabled the identity is part of ``mngr azure prepare``'s
-    setup, so a permission/API failure raises rather than leaving offline host_dir
-    quietly broken. Mirrors ``mngr_aws.cli._provision_host_identity``.
-    """
-    identity.ensure_host_identity()
-    return identity.identity_name
-
-
-def _provision_host_identity_for_prepare(base: AzureProviderConfig, client: AzureVpsClient) -> str:
-    """Provision the host-dir identity during prepare (raises on failure).
-
-    The identity's Storage Blob Data Contributor role assignment is scoped to the
-    state account, which ``_ensure_state_bucket`` has already created (it raises
-    otherwise). Called only when ``is_offline_host_dir_enabled`` is set. Mirrors
-    ``mngr_aws.cli._resolve_and_provision_host_identity``.
-    """
-    return _provision_host_identity(_build_host_identity(base, client))
-
-
-def _perform_host_identity_cleanup(identity: BlobStateHostIdentity) -> str | None:
-    """Delete the bucket-write managed identity. Returns its name, or None when absent.
-
-    Idempotent: a missing identity is a no-op (returns None). A permission/API
-    failure raises so ``mngr azure cleanup`` reports an incomplete teardown rather
-    than silently leaving the identity behind. Mirrors
-    ``mngr_aws.cli._perform_host_identity_cleanup``.
-    """
-    if not identity.host_identity_exists():
-        return None
-    identity.delete_host_identity()
-    return identity.identity_name
-
-
 def _output_prepare_result(
     result: AzureNetworkPrepareResult,
     state_account_name: str | None,
     was_bucket_created: bool,
-    host_identity_name: str | None,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr azure prepare`` in the requested format.
 
     HUMAN: one (or two) result lines to stdout. JSON: a single object. JSONL: a
     ``prepared`` event. The structured forms carry ``created`` (network) and
-    ``state_storage_account_name`` / ``state_bucket_created`` (None when the
-    bucket setup was skipped, e.g. missing storage permissions). Mirrors
+    ``state_storage_account_name`` / ``state_bucket_created``. Mirrors
     ``mngr aws prepare``.
     """
     account_verb = "Created" if was_bucket_created else "Reused existing"
@@ -298,11 +243,6 @@ def _output_prepare_result(
                 state_storage_account_name=state_account_name,
                 state_bucket_created=was_bucket_created,
             ),
-            OperatorResultPart.shown_if(
-                host_identity_name,
-                f"Provisioned host-dir managed identity {host_identity_name}",
-                host_identity_name=host_identity_name,
-            ),
         ],
         output_format,
     )
@@ -313,7 +253,6 @@ def _output_cleanup_result(
     subscription_id: str,
     region: str,
     deleted_account_name: str | None,
-    deleted_host_identity_name: str | None,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr azure cleanup`` in the requested format.
@@ -321,9 +260,7 @@ def _output_cleanup_result(
     HUMAN: one (or more) result lines to stdout. JSON: a single object. JSONL: a
     ``cleaned_up`` event. ``deleted`` is False when the resource group was already
     absent; ``state_storage_account_deleted`` carries the deleted account name (or
-    None when none existed / setup was skipped); ``host_identity_deleted`` carries
-    the deleted managed-identity name (or None when none existed). Mirrors
-    ``mngr aws cleanup``.
+    None when none existed). Mirrors ``mngr aws cleanup``.
     """
     emit_operator_result(
         "cleaned_up",
@@ -341,11 +278,6 @@ def _output_cleanup_result(
                 deleted_account_name,
                 f"Deleted Azure state storage account {deleted_account_name} in region {region}",
                 state_storage_account_deleted=deleted_account_name,
-            ),
-            OperatorResultPart.shown_if(
-                deleted_host_identity_name,
-                f"Deleted host-dir managed identity {deleted_host_identity_name}",
-                host_identity_deleted=deleted_host_identity_name,
             ),
         ],
         output_format,
@@ -446,16 +378,10 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # prepare's primary job; a network-only prepare would leave offline host state
     # unavailable).
     state_account_name, was_bucket_created = _ensure_state_bucket(_build_state_bucket(base, client))
-    # Provision the bucket-write managed identity when the offline host_dir feature
-    # is enabled (raises on failure). The bucket-only steps above are
-    # unconditional, so flipping is_offline_host_dir_enabled on and re-running
-    # prepare adds just the identity.
-    host_identity_name: str | None = None
-    if base.is_offline_host_dir_enabled:
-        host_identity_name = _provision_host_identity_for_prepare(base, client)
-    _output_prepare_result(
-        result, state_account_name, was_bucket_created, host_identity_name, output_opts.output_format
-    )
+    # Offline host_dir needs no managed identity: it is captured operator-side at
+    # `mngr stop` (mngr reads host_dir off the box and uploads it with the
+    # operator's own creds), so prepare sets up only the network + state account.
+    _output_prepare_result(result, state_account_name, was_bucket_created, output_opts.output_format)
 
 
 @azure_cli_group.command(name="cleanup")
@@ -534,11 +460,6 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     # account lives in the resource group, so it is deleted first (its own
     # delete, before the RG cascade).
     deleted_account_name = _perform_state_bucket_cleanup(_build_state_bucket(base, client), force=opts.force)
-    # Delete the bucket-write managed identity (idempotent; raises on a delete
-    # failure) before the RG cascade. The RG delete would reap it anyway, but the
-    # explicit delete keeps cleanup well-defined when the identity outlives a
-    # partial prior cleanup.
-    deleted_host_identity_name = _perform_host_identity_cleanup(_build_host_identity(base, client))
     # _perform_cleanup raises ManagedResourcesExistError when a VM still exists, and
     # delete_managed_resource_group raises VpsApiError when the group lacks the
     # managed-by=mngr tag. Both are MngrErrors, so they render as clean CLI
@@ -549,6 +470,5 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         client.subscription_id,
         client.region,
         deleted_account_name,
-        deleted_host_identity_name,
         output_opts.output_format,
     )
