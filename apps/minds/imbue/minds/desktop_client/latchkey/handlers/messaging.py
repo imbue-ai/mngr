@@ -133,8 +133,8 @@ class MngrMessageSender(MutableModel):
             delivered = self.deliver(target, text)
             if delivered or time.monotonic() >= deadline:
                 break
-            # ``Event().wait`` rather than ``time.sleep`` so the wait is
-            # interruptible and consistent with the sibling onboarding poller.
+            # ``Event().wait`` rather than ``time.sleep``, matching the sibling
+            # onboarding poller's idiom for a plain inter-attempt pause.
             threading.Event().wait(timeout=self.delivery_retry_wait_seconds)
         if delivered:
             if attempt > 1:
