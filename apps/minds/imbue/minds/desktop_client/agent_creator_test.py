@@ -990,7 +990,11 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
     )
 
 
-def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 10.0) -> None:
+# The poll deadline is kept just under the callers' 30s pytest-timeout (rather
+# than the old 10s) so that under heavy parallel offload load the real creation
+# work -- fresh ConcurrencyGroups + the recording http-server fixture -- has room
+# to finish before this fires, while the pytest-timeout stays the hard backstop.
+def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 25.0) -> None:
     """Poll ``get_creation_info`` until status is DONE or FAILED, then return."""
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
@@ -1051,7 +1055,8 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
 
 
 # Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout.
+# occasionally exceeds the default 10s pytest-timeout (so these carry a 30s
+# timeout, matched by _wait_until_finished's poll deadline).
 @pytest.mark.timeout(30)
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
