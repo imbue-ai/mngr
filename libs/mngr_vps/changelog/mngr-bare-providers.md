@@ -165,4 +165,19 @@ Lifted more cross-provider glue out of the aws/azure/gcp backends into the share
 
 Localized internal cleanups (no user-visible behavior change): a shared `_run_provisioning_step` helper collapses the repeated "run an outer command, raise `VpsProvisioningError` with its stderr on failure" shape across the btrfs/dir/systemd provisioning steps in `container_setup`; the four structurally-identical `teardown_placement` cleanup blocks in `docker_realizer` route through a single `_record_cleanup_attempt` helper; a `VpsHostRecord.with_certified_updates` method wraps the "update the nested certified data, then re-wrap the record" idiom at its three call sites; a `VpsProvider._write_and_mirror` method pairs every on-volume `write_host_record` with its external-store mirror in one place (the two had a history of drifting apart); a `VpsProvider._write_shutdown_script` method shares the `commands/shutdown.sh` mkdir/write/chmod plumbing across the container/bare/sentinel/deallocate variants; and the duplicated base64 remote-script wrapper (`_remote_sh_command`) is gone in favor of the shared `host_setup.build_remote_script_command` (renamed from the private `_remote_script_command`).
 
+Bugfix (found by the GCP bare release test): on resume, the shared
+`OfflineCapableVpsProvider.start_host` waited only for *any* sshd handshake
+(`wait_for_sshd`) before its strict-host-key-checked connect, but never waited for
+the VM to actually serve mngr's expected host key the way create does. On GCP the
+GCE startup-script re-runs on every boot and `systemctl restart ssh`s partway
+through, so the any-key wait could return inside that restart window and the
+strict connect then hit a refused/mismatched port 22 -- failing `mngr start` with
+"Unable to connect to port 22". This surfaced for bare placement specifically,
+whose agent endpoint *is* port 22 (containers reach the agent on a separate,
+stable container port). `start_host` now mirrors create's host-key wait
+(`_wait_for_expected_host_key` on port 22, using mngr's VPS host public key) right
+after the sshd wait, in the shared base. Cloud-init backends (AWS/Azure) inherit
+the no-op default and return on the first poll; GCP's existing override polls
+until its startup-script-installed key is live, riding out the ssh restart.
+
 Integrated the `mngr/volumes` offline-store simplification (commit `f8bb5c0a5`): the per-agent instance-tag mirror is removed in favor of a single uniform external `HostStateStore` per provider -- AWS/Azure use their object-storage state bucket as the sole offline store (a stopped host's offline metadata now requires the bucket; the provider's `_state_store` raises an actionable `missing_state_bucket_error` pointing at `mngr <cloud> prepare` when the bucket is absent), and GCP uses a lossless instance-metadata-backed store (full host record + one JSON value per agent). AWS/Azure/GCP now extend `OfflineCapableVpsProvider` directly. This supersedes the earlier-on-this-branch tag-mirror dedup (the lifted `TagHostStateStore` / `KeyValueMirrorVpsProvider` / `TagMirrorVpsProvider` are gone); the realizer architecture, the systemd-unit hardening, and the cli/config/state-bucket dedup are retained. No behavior change for container hosts beyond the offline-metadata-requires-bucket consequence noted above.

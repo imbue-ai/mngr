@@ -6,6 +6,8 @@ anti-pattern (those files are auto-discovered, not designed for direct import).
 Mirrors ``libs/mngr_aws/imbue/mngr_aws/testing.py`` and ``mngr_gcp``'s.
 """
 
+import base64
+import json
 import os
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -23,7 +25,6 @@ from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
-from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobVolume
 
 # Optional prefix release tests use for their agent names so leaked VMs (should
@@ -437,6 +438,40 @@ class FakeAuthorizationClient:
         self.role_assignments = FakeRoleAssignmentsOperations()
 
 
+def _encode_fake_jwt(claims: dict[str, Any]) -> str:
+    """Build an (unsigned) JWT string whose payload carries ``claims``.
+
+    Used so ``resolve_operator_principal``'s real base64url-decode path is
+    exercised in tests against a chosen ``oid`` / ``idtyp``.
+    """
+
+    def _segment(obj: dict[str, Any]) -> str:
+        raw = json.dumps(obj).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{_segment({'alg': 'none', 'typ': 'JWT'})}.{_segment(claims)}.sig"
+
+
+class FakeTokenCredential:
+    """Minimal ``TokenCredential`` whose access token carries chosen ``oid`` / ``idtyp`` claims.
+
+    Lets tests drive ``resolve_operator_principal`` (and the operator blob-role
+    grant) without a real Azure login. Pass ``object_id=""`` to model a token with
+    no ``oid`` claim.
+    """
+
+    def __init__(self, object_id: str = "operator-oid-1", idtyp: str | None = "user") -> None:
+        self._object_id = object_id
+        self._idtyp = idtyp
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> Any:
+        del scopes, kwargs
+        claims: dict[str, Any] = {"oid": self._object_id}
+        if self._idtyp is not None:
+            claims["idtyp"] = self._idtyp
+        return SimpleNamespace(token=_encode_fake_jwt(claims), expires_on=0)
+
+
 class _StubbedAzureVpsClient(AzureVpsClient):
     """Test-only AzureVpsClient that injects fake management clients.
 
@@ -615,12 +650,18 @@ class _StubbedBlobStateBucket(BlobStateBucket):
     """
 
     fake_backend: Any = Field(default=None, description="Shared FakeBlobStorageBackend for the injected fakes")
+    fake_authorization: Any = Field(
+        default=None, description="Fake AuthorizationManagementClient for the operator blob-role grant"
+    )
 
     def _blob_service(self) -> Any:
         return FakeBlobServiceClient(self.fake_backend)
 
     def _storage_mgmt(self) -> Any:
         return FakeStorageManagementClient(self.fake_backend)
+
+    def _authorization(self) -> Any:
+        return self.fake_authorization
 
     def volume_for_host(self, host_id: HostId) -> Any:
         """Return a fake-backed ``BlobVolume`` scoped to the host's host_dir prefix.
@@ -636,77 +677,3 @@ class _StubbedBlobStateBucket(BlobStateBucket):
             container_name=self.container_name,
             fake_backend=self.fake_backend,
         ).scoped(host_dir_prefix)
-
-
-class FakeUserAssignedIdentity:
-    """Minimal stand-in for a user-assigned managed-identity resource."""
-
-    def __init__(self, principal_id: str = "principal-1", client_id: str = "client-1") -> None:
-        self.principal_id = principal_id
-        self.client_id = client_id
-
-
-class FakeUserAssignedIdentitiesOperations:
-    """Fake ``ManagedServiceIdentityClient.user_assigned_identities`` over a backend flag.
-
-    Models a single identity per (resource group, name) that may or may not exist:
-    ``create_or_update`` creates it (and reports a principal/client id for the role
-    assignment), ``get`` raises 404 until it exists, and ``delete`` removes it.
-    """
-
-    def __init__(self) -> None:
-        self.exists: bool = False
-        self.created: list[str] = []
-        self.deleted: list[str] = []
-        self.create_error: Exception | None = None
-        self.delete_error: Exception | None = None
-        self.principal_id: str = "principal-1"
-        self.client_id: str = "client-1"
-
-    def create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakeUserAssignedIdentity:
-        del resource_group, parameters
-        if self.create_error is not None:
-            raise self.create_error
-        self.exists = True
-        self.created.append(name)
-        return FakeUserAssignedIdentity(self.principal_id, self.client_id)
-
-    def get(self, resource_group: str, name: str) -> FakeUserAssignedIdentity:
-        del resource_group
-        if not self.exists:
-            raise ResourceNotFoundError(message=f"identity {name} not found")
-        return FakeUserAssignedIdentity(self.principal_id, self.client_id)
-
-    def delete(self, resource_group: str, name: str) -> None:
-        del resource_group
-        if not self.exists:
-            raise ResourceNotFoundError(message=f"identity {name} not found")
-        if self.delete_error is not None:
-            raise self.delete_error
-        self.exists = False
-        self.deleted.append(name)
-
-
-class FakeManagedServiceIdentityClient:
-    """Fake ``ManagedServiceIdentityClient`` bundling the ``user_assigned_identities`` operations."""
-
-    def __init__(self) -> None:
-        self.user_assigned_identities = FakeUserAssignedIdentitiesOperations()
-
-
-class _StubbedBlobStateHostIdentity(BlobStateHostIdentity):
-    """Test-only ``BlobStateHostIdentity`` that injects fake MSI + authorization clients.
-
-    Routes the lazily-built management clients to hand-written fakes so the
-    identity ensure/delete/exists logic (and its scoped role assignment) is
-    exercised without real Azure calls. Mirrors ``_StubbedBlobStateBucket``.
-    """
-
-    fake_msi_client: Any = Field(default=None, description="Fake ManagedServiceIdentityClient")
-    fake_authorization_client: Any = Field(default=None, description="Fake AuthorizationManagementClient")
-
-    def _msi(self) -> Any:
-        return self.fake_msi_client
-
-    def _authorization(self) -> Any:
-        return self.fake_authorization_client

@@ -106,25 +106,28 @@ def resolve_volume_device(outer: OuterHostInterface, volume_name: str) -> Path:
 
 
 class VpsHostStore(MutableModel):
-    """Reads/writes one host's metadata directly on its unified Docker volume.
+    """Reads/writes one host's metadata over a directory on the outer.
 
-    Each VPS hosts exactly one mngr container (1:1 invariant), so each store
-    instance is bound to a single per-host btrfs subvolume on the outer
-    (``<btrfs_mount_path>/<host_id_hex>``). The docker named volume is created
-    with bind options pointing at that subvolume, so the docker-managed
-    ``Mountpoint`` placeholder under ``/var/lib/docker/volumes`` is never read
-    from -- ``Options.device`` is the real path. File operations go through the
-    outer host's ``read_text_file`` / ``write_text_file`` /
-    ``execute_idempotent_command``.
+    Each VPS hosts exactly one mngr agent (1:1 invariant), so each store instance
+    is bound to a single directory whose backing depends on the realizer:
 
-    Layout inside the subvolume::
+    - Container realizer: the per-host btrfs subvolume
+      (``<btrfs_mount_path>/<host_id_hex>``) that the agent's docker named volume
+      binds to. The volume is created with bind options pointing at that
+      subvolume, so the docker-managed ``Mountpoint`` placeholder under
+      ``/var/lib/docker/volumes`` is never read from -- ``Options.device`` is the
+      real path. Construct via :func:`open_host_store`, which resolves that path
+      via ``docker volume inspect --format '{{.Options.device}}'``.
+    - Bare realizer: a fixed directory on the VM's root disk (no docker volume,
+      no btrfs subvolume). Construct directly with that path as ``mountpoint``.
+
+    Either way the layout under ``mountpoint`` is identical, and file operations
+    go through the outer host's ``read_text_file`` / ``write_text_file`` /
+    ``execute_idempotent_command``::
 
         host_state.json
         agents/<agent_id>.json
         host_dir/<...agent host data...>
-
-    Construct via :func:`open_host_store`, which resolves the volume's
-    bind-source path via ``docker volume inspect --format '{{.Options.device}}'``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -133,8 +136,9 @@ class VpsHostStore(MutableModel):
     mountpoint: Path = Field(
         frozen=True,
         description=(
-            "Absolute path on the outer of the per-host btrfs subvolume backing this docker volume "
-            "(value of the volume's ``Options.device``)."
+            "Absolute path on the outer of the directory backing this store: the docker volume's "
+            "``Options.device`` btrfs subvolume for the container realizer, or the fixed root-disk "
+            "store directory for the bare realizer."
         ),
     )
 

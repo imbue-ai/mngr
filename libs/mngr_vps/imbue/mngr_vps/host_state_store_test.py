@@ -3,9 +3,12 @@
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.volume import Volume
@@ -15,10 +18,11 @@ from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
 from imbue.mngr_vps.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.instance_offline import BucketHostDirBackend
 
 
 def test_null_host_dir_backend_is_no_op() -> None:
-    """The fallback host_dir backend offers nothing: no identity, no volume, and no-op syncs.
+    """The fallback host_dir backend offers nothing: no volume and a no-op capture.
 
     This is the half of the select-once strategy a provider uses when offline
     host_dir is off or no state bucket exists, so every method must degrade
@@ -26,12 +30,10 @@ def test_null_host_dir_backend_is_no_op() -> None:
     """
     backend = NullHostDirBackend()
     host_id = HostId.generate()
-    assert backend.create_identity() is None
     assert backend.volume_reference(host_id) is None
     assert backend.volume(host_id) is None
-    # The sync hooks are no-ops that must not raise.
-    backend.install_sync(host_id=host_id, vps_ip="203.0.113.4")
-    backend.trigger_final_sync(host_id, "203.0.113.4")
+    # capture is a no-op that must not raise.
+    backend.capture(host_id, "203.0.113.4")
 
 
 def _host_record(host_id: HostId, host_name: str) -> VpsHostRecord:
@@ -141,3 +143,73 @@ def test_missing_state_bucket_error_points_at_prepare() -> None:
     assert isinstance(error, MngrError)
     assert "fake state bucket" in str(error)
     assert "mngr fake prepare" in str(error)
+
+
+class _RecordingVolume:
+    """A ``Volume`` stand-in that records what ``write_files`` was handed."""
+
+    def __init__(self) -> None:
+        self.written: dict[str, bytes] = {}
+
+    def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+        self.written.update(file_contents_by_path)
+
+
+class _CaptureFakeBucket:
+    """Minimal ``StateBucket`` for capture: hands out one recording host_dir volume."""
+
+    def __init__(self) -> None:
+        self.volume = _RecordingVolume()
+
+    def volume_for_host(self, host_id: HostId) -> Any:
+        return self.volume
+
+
+class _CaptureFakeProvider:
+    """Fake provider whose ``_pull_host_dir_to_local`` stands in for the rsync pull.
+
+    Capture is operator-driven: it rsyncs the host_dir off the box into a local
+    temp dir and uploads what landed there. This fake either populates that dir
+    (simulating a successful rsync of ``files``) or raises a connection failure.
+    """
+
+    def __init__(self, files: dict[str, bytes] | None) -> None:
+        self._files = files
+
+    def _pull_host_dir_to_local(self, host_id: HostId, vps_ip: str, local_dir: Path) -> None:
+        if self._files is None:
+            raise HostConnectionError("ssh down")
+        for rel, body in self._files.items():
+            dest = local_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(body)
+
+
+def test_bucket_host_dir_backend_capture_uploads_the_tree() -> None:
+    """Capture rsyncs the host's host_dir into a local temp dir and uploads every file to the bucket."""
+    bucket = _CaptureFakeBucket()
+    provider = _CaptureFakeProvider({"events/e.jsonl": b"evt", "logs/a.log": b"a"})
+    backend = BucketHostDirBackend.model_construct(provider=provider, bucket=bucket)
+    backend.capture(HostId.generate(), "203.0.113.4")
+    assert bucket.volume.written == {"events/e.jsonl": b"evt", "logs/a.log": b"a"}
+
+
+def test_bucket_host_dir_backend_capture_uploads_nothing_for_empty_host_dir() -> None:
+    """An empty host_dir (a successful rsync of nothing) captures nothing and does not raise."""
+    bucket = _CaptureFakeBucket()
+    backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider({}), bucket=bucket)
+    backend.capture(HostId.generate(), "203.0.113.4")
+    assert bucket.volume.written == {}
+
+
+def test_bucket_host_dir_backend_capture_raises_on_connection_failure() -> None:
+    """A connection/rsync failure during capture raises (as MngrError) so the operator knows it failed.
+
+    The instance pause is the caller's job (a ``finally`` in stop_host), so raising
+    surfaces the failure without leaking a running instance.
+    """
+    bucket = _CaptureFakeBucket()
+    backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider(None), bucket=bucket)
+    with pytest.raises(MngrError, match="Failed to capture host_dir"):
+        backend.capture(HostId.generate(), "203.0.113.4")
+    assert bucket.volume.written == {}
