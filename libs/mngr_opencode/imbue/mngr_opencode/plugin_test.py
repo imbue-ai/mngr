@@ -691,18 +691,23 @@ def test_adopt_session_from_clone_resumes_the_clone(local_provider: LocalProvide
     assert agent._get_root_session_file_path().read_text() == "ses_clone"
 
 
-def test_adopt_session_from_clone_with_no_store_raises(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """A ``--from`` clone whose source has no opencode store is a hard error, not a fresh start."""
+def test_adopt_session_from_clone_with_no_store_starts_fresh(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A ``--from`` clone whose source has no opencode store warns and starts fresh, not a hard error."""
     agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     # A source state dir with no native opencode store at all.
     source_location = HostLocation(host=agent.host, path=tmp_path / "empty_source")
 
-    with pytest.raises(AgentStartError):
-        agent.adopt_session(
-            agent.host,
-            CreateAgentOptions(agent_type=AgentTypeName("opencode"), source_agent_state_location=source_location),
-            agent.mngr_ctx,
-        )
+    agent.adopt_session(
+        agent.host,
+        CreateAgentOptions(agent_type=AgentTypeName("opencode"), source_agent_state_location=source_location),
+        agent.mngr_ctx,
+    )
+
+    # No session was resumed and no db was staged onto the agent: it starts fresh.
+    assert not agent._get_root_session_file_path().exists()
+    assert not get_opencode_db_path_for_data_home(agent._get_opencode_data_home()).exists()
 
 
 class _RemoteSourceHost(FrozenModel):

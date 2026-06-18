@@ -25,6 +25,7 @@ Requires the ``agy`` binary on PATH and a logged-in ``~/.gemini`` (the shared
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -63,19 +64,29 @@ _REAL_MACOS_KEYCHAINS = Path.home() / "Library" / "Keychains"
 
 # An agy "models" display name for a Claude model. agy's default Gemini model can hit
 # per-account usage limits; a Claude model is reliable. Seeded into settings.json, so the
-# spaces/parens never reach a shell (unlike a model passed as a cli_arg). Update if the
+# spaces/parens never reach a shell (unlike a model passed as a cli_arg). Overridable via
+# MNGR_AGY_TEST_MODEL so a run can switch to a model that still has quota (agy quotas are
+# per-model) -- must be an exact `agy models` display name. Update the default if the
 # account's available models change.
-_MODEL = "Claude Sonnet 4.6 (Thinking)"
+_MODEL = os.environ.get("MNGR_AGY_TEST_MODEL", "Claude Sonnet 4.6 (Thinking)")
 
 
 class _AntigravityReleaseProfile(AgentReleaseProfile):
     agent_type = "antigravity"
     common_transcript_subdir = "antigravity"
-    # agy sets its marker on PreInvocation (turn start) and clears it on Stop, and its
-    # send is tmux paste+Enter with no marker-confirm, so polling RUNNING mid-turn is racy;
-    # rely on the transcript-keyed assertions. agy's turn forces no tool and reports no
-    # token usage in the common envelope.
-    observes_running_marker = False
+    # agy observes the RUNNING marker (it sets the marker on PreInvocation and its Enter path
+    # waits on the busy-signal, so the marker is present once `message` returns). It does not
+    # report token usage, so that assertion is off.
+    # FIXME(agy-forces-tool-call): forces_tool_call stays False because a single forced-tool
+    # turn never carries a tool_result. agy DOES make the call (the converter surfaces the
+    # nested assistant tool_call), but no tool_result lands, for two compounding reasons:
+    # agy runs the command async (WaitMsBeforeAsync) and ends the turn before the result step
+    # settles, and decode_agy_transcript.py never decodes CODE_ACTION/tool-output content (it
+    # fills `content` only for USER_INPUT/PLANNER_RESPONSE/ERROR_MESSAGE), so the converter
+    # drops it. Capture is a live ~1s SQLite poll plus a turn-end flush, not a turn snapshot.
+    # Confirmed independent of quota (reproduced on a quota-healthy Gemini model) and prompt.
+    # Enabling this needs the decoder to surface the real tool-output step type AND agy to
+    # persist a settled result in-turn; see the investigation noted in the PR.
     forces_tool_call = False
     asserts_usage = False
     # This is the store the adopt-from-preserved arc adopts: after destroy, the harness

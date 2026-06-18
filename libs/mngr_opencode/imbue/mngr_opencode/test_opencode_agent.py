@@ -69,10 +69,10 @@ _PERMISSION_MARKER_TIMEOUT_SECONDS = 120.0
 class _OpenCodeReleaseProfile(AgentReleaseProfile):
     agent_type = "opencode"
     common_transcript_subdir = "opencode"
-    # opencode reliably surfaces the RUNNING marker; its free-model turn does not call a
-    # tool, and it does not report token usage.
-    observes_running_marker = True
-    forces_tool_call = False
+    # opencode's free model forces the bash tool call (run unattended via
+    # auto_allow_permissions, set in create_extra_args). It does not report token usage, so
+    # that assertion is off (observing the RUNNING marker is universal).
+    forces_tool_call = True
     asserts_usage = False
     # Only the SQLite db is reliably present after a short turn; the WAL sidecars and
     # the storage/ dir are conditional (created only when there are uncheckpointed writes
@@ -115,7 +115,15 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
         return AgentReleaseContext(env=env, workspace=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
-        return ["--no-ensure-clean", "--source", str(ctx.workspace)]
+        # auto_allow_permissions injects a wildcard permission allow so the forced bash
+        # tool call runs without pausing on an approval prompt.
+        return [
+            "--no-ensure-clean",
+            "--source",
+            str(ctx.workspace),
+            "-S",
+            "agent_types.opencode.auto_allow_permissions=true",
+        ]
 
     def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
         return run_mngr_subprocess(*args, env=dict(ctx.env), timeout=timeout)

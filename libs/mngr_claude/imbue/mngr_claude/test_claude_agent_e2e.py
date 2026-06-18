@@ -6,19 +6,22 @@ through the shared agent release lifecycle (create -> WAITING -> message -> RUNN
 arc and assertions live in ``imbue.mngr.agents.agent_release_testing``; this file
 supplies claude's plumbing via an :class:`AgentReleaseProfile`.
 
-claude exercises the richest end of the shared lifecycle: it observes the RUNNING
-marker (its UserPromptSubmit hook touches the ``active`` marker), forces a bash tool
-call (so the transcript carries a tool_result), and reports token usage in the common
-envelope -- the capability flags below turn those shared assertions on.
+claude runs the same shared arc as every other port: it observes the RUNNING marker (its
+UserPromptSubmit hook touches the ``active`` marker), forces a bash tool call, and -- with
+``asserts_usage`` on -- reports token usage. Its plumbing differs from the sibling ports
+only in:
 
-claude's only real specifics over the sibling ports:
+* Repo-local ``.gitignore``. claude's preflight refuses to write hooks to
+  ``.claude/settings.local.json`` unless the repository's *own* ``.gitignore``
+  excludes it (a global rule is rejected, since remote hosts lack it).
+  ``_init_claude_workspace`` seeds that rule for both the seed worktree and the fresh
+  adoption worktree; the sibling ports don't need this.
 
-* Auth/dialog seeding. ``setup_claude_trust_config_for_subprocess`` writes a
-  ``~/.claude.json`` (into the autouse fixture's temp HOME) that dismisses the
-  onboarding/effort/permissions dialogs and pre-approves the ``ANTHROPIC_API_KEY``
-  (so claude doesn't block on its custom-key dialog). Per-work-dir trust is then
-  added automatically by ``mngr create --yes`` (auto-approve), which covers both the
-  seed worktree and the fresh adoption worktree.
+* Custom-API-key approval. The plugin's ``approve_api_key_for_claude`` pre-approves the
+  passed-in ``ANTHROPIC_API_KEY`` during provision, so claude doesn't block on its
+  custom-key dialog (no sibling port has one). claude's other first-run dialogs
+  (onboarding/effort) and work-dir trust are dismissed by the ``--yes`` the harness
+  already passes for every agent -- not a claude specific -- so the test seeds no config.
 
 * Post-``--`` args. ``--dangerously-skip-permissions`` lets the forced bash tool call
   run without a permission pause, ``--pass-env ANTHROPIC_API_KEY`` carries the key to the
@@ -48,9 +51,10 @@ import pytest
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
-from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 
 # claude's native resumable session store, relative to the agent state dir: the
 # per-agent Claude config dir's session JSONLs (see ``_AGENT_CLAUDE_PROJECTS_RELPATH``
@@ -64,14 +68,25 @@ _CLAUDE_PROJECTS_RELPATH = "plugin/claude/anthropic/projects"
 _MODEL = "haiku"
 
 
+def _init_claude_workspace(path: Path) -> None:
+    """Init a git repo whose own .gitignore excludes Claude's settings.local.json.
+
+    mngr's claude preflight refuses to write hooks to .claude/settings.local.json
+    unless the repository's *own* .gitignore excludes it (a global rule is rejected,
+    since remote hosts lack it). Both the seed worktree and the fresh adoption
+    worktree must carry that rule, so this replaces the bare init_git_repo for each.
+    """
+    init_git_repo(path, initial_commit=False)
+    (path / ".gitignore").write_text(".claude/settings.local.json\n")
+    run_git_command(path, "add", ".gitignore")
+    run_git_command(path, "commit", "-m", "Add .gitignore")
+
+
 class _ClaudeReleaseProfile(AgentReleaseProfile):
     agent_type = "claude"
     common_transcript_subdir = "claude"
-    # claude touches the ``active`` marker on UserPromptSubmit (so RUNNING is reliably
-    # observable once a message returns), its forced seed turn runs a bash tool call,
-    # and its common-transcript converter emits per-message token usage -- so all three
-    # of the richer shared assertions apply.
-    observes_running_marker = True
+    # claude's forced seed turn runs a bash tool call and its converter emits per-message
+    # token usage, so both gated assertions apply (observing the RUNNING marker is universal).
     forces_tool_call = True
     asserts_usage = True
     # This is the store the adopt-from-preserved arc adopts: after destroy, a fresh agent
@@ -98,12 +113,11 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
         return None
 
     def setup(self, tmp_path: Path) -> AgentReleaseContext:
-        # Seed ~/.claude.json (in the autouse fixture's temp HOME) with the dialog
-        # dismissals + ANTHROPIC_API_KEY approval claude needs to start non-interactively.
-        # Per-work-dir trust is added automatically by ``mngr create --yes``. This also
-        # returns a subprocess env carrying the redirected HOME and the isolated
+        # ``mngr create --yes`` dismisses claude's first-run dialogs and trusts the work dir,
+        # and the plugin's ``approve_api_key_for_claude`` pre-approves the key, so no seeded
+        # ~/.claude.json is needed. The env carries the redirected HOME and the isolated
         # MNGR_HOST_DIR / tmux server from the autouse fixture.
-        env = setup_claude_trust_config_for_subprocess(trusted_paths=[], root_name="mngr-claude-release-test")
+        env = get_subprocess_test_env(root_name="mngr-claude-release-test")
 
         # Disable the remote providers for every command: a purely local agent test, and
         # leaving them on makes mngr probe Modal/Docker (and rejects the autouse test prefix).
@@ -115,8 +129,13 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
         env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
 
         work_dir = tmp_path / "claude-source"
-        init_git_repo(work_dir, initial_commit=True)
+        _init_claude_workspace(work_dir)
         return AgentReleaseContext(env=env, workspace=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
+
+    def prepare_adoption_workspace(self, work_dir: Path) -> None:
+        # The adoption worktree is also a claude source, so it needs the same
+        # repo-local .gitignore rule the seed worktree carries (see _init_claude_workspace).
+        _init_claude_workspace(work_dir)
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
         # Pass the work dir via --source (so mngr runs from the checkout under ``uv run``)

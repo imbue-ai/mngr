@@ -88,6 +88,7 @@ transcript`` reads.
 from __future__ import annotations
 
 import importlib.resources
+import re
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -122,7 +123,6 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
@@ -493,21 +493,21 @@ class AntigravityAgent(
 ):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
-    # Stable substring of the footer hint that agy renders ONLY once the
-    # input prompt is fully drawn and ready to receive keystrokes. Polled by
-    # ``InteractiveTuiAgent.wait_for_ready_signal``.
+    # Regex (searched against the pane) for the input box agy draws ONLY once the
+    # prompt is ready for keystrokes: a horizontal rule, the ``>`` prompt line, and a
+    # second horizontal rule. Polled by ``InteractiveTuiAgent.wait_for_ready_signal``.
     #
-    # We deliberately do NOT key off the "Antigravity CLI <version>" splash
-    # banner: agy renders an early "Welcome to the Antigravity CLI. You are
-    # currently not signed in." line *before* OAuth completes, which also
-    # contains the substring "Antigravity CLI" but does NOT mean the input
-    # row is ready. If mngr starts pasting at that point, agy drops the
-    # keystrokes on the floor (no input row yet to receive them) and
-    # ``wait_for_paste_visible`` times out, surfacing as a noisy
-    # ``mngr create --message`` timeout. The "? for shortcuts" footer string
-    # appears only with the rendered input prompt, so it's a reliable
-    # ready signal.
-    TUI_READY_INDICATOR: ClassVar[str] = "? for shortcuts"
+    # We key off the box chrome rather than text for two reasons. First, agy 1.0.9
+    # dropped the "? for shortcuts" footer hint that earlier versions rendered with the
+    # input row. Second, the only remaining stable text is the "Antigravity CLI" splash
+    # banner, which is unusable here: it appears in an early "Welcome to the Antigravity
+    # CLI..." line *before* the input row exists (pasting then drops keystrokes), and it
+    # scrolls off the top once a resumed conversation fills the screen. agy keeps both
+    # rules pinned on screen (trimming long input between them), so this box matches on a
+    # fresh start AND a resume, and only once the input row is actually drawn. The rule
+    # spans the terminal width, which at the minimum width is just two ``─`` -- hence
+    # ``{2,}`` rather than a longer run.
+    TUI_READY_INDICATOR: ClassVar[re.Pattern[str]] = re.compile(r"─{2,}\n>.*\n(?:.*\n)*?─{2,}")
 
     def get_expected_process_name(self) -> str:
         # `agy` is a single-file Go binary; ps/tmux show the literal command name.
@@ -735,7 +735,7 @@ class AntigravityAgent(
         logger.info("Adopted agy conversation: {}", conversation_id)
         return conversation_id
 
-    def _copy_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
+    def _copy_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
         """Transfer a ``--from <agent>`` clone's conversation store and return its resume id.
 
         A generic clone copies the source *workspace* but not the source agent's *state dir*,
@@ -748,25 +748,27 @@ class AntigravityAgent(
 
         The conversation to resume is the source's root conversation (its
         ``ROOT_CONVERSATION_FILENAME``); if that pointer is absent or its store did not come
-        across, the most-recent transferred ``<id>.db`` is used. Raises
-        :class:`AgentStartError` when the clone has nothing to resume (no store, or a store
-        with no usable conversation id) -- a ``--from`` that can't carry the source's
-        conversation forward is a failed adoption, not a silent fresh start.
+        across, the most-recent transferred ``<id>.db`` is used. Returns ``None`` (after
+        warning) when the clone has nothing to resume (no store, or a store with no usable
+        conversation id) -- ``--from`` is fundamentally a workspace clone, so carrying the
+        source's conversation forward is a bonus, not a requirement; the caller starts fresh.
         """
         transferred = transfer_cloned_agent_session_store(
             host, self._get_agent_dir(), source_location, _AGENT_CONVERSATIONS_RELPATH
         )
         if not transferred:
-            raise AgentStartError(
-                self.name,
-                f"Clone adopt: source agent {source_location.path} has no agy conversation store to resume.",
+            logger.warning(
+                "Clone adopt: source agent {} has no agy conversation store to resume; starting fresh.",
+                source_location.path,
             )
+            return None
         conversation_id = self._pick_cloned_conversation_id(host, source_location)
         if conversation_id is None:
-            raise AgentStartError(
-                self.name,
-                f"Clone adopt: transferred agy store from {source_location.path} has no resumable conversation.",
+            logger.warning(
+                "Clone adopt: transferred agy store from {} has no resumable conversation; starting fresh.",
+                source_location.path,
             )
+            return None
         logger.info("Adopted cloned agy conversation: {}", conversation_id)
         return conversation_id
 

@@ -437,6 +437,42 @@ def test_adopt_sessions_clone_is_resumed_over_explicit(local_provider: LocalProv
     assert resumed == ["clone-id"]
 
 
+def test_adopt_sessions_clone_without_session_falls_back_to_last_explicit(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    location = HostLocation(host=host, path=tmp_path)
+    resumed: list[str] = []
+
+    # A --from clone with no resumable session returns None (it warns, not raises); the last
+    # --adopt session is then still the one resumed.
+    adopt_sessions(
+        ("a", "b"),
+        location,
+        copy_explicit=lambda arg: f"id:{arg}",
+        copy_clone=lambda _loc: None,
+        resume=resumed.append,
+    )
+    assert resumed == ["id:b"]
+
+
+def test_adopt_sessions_clone_without_session_and_no_adopt_is_fresh(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    location = HostLocation(host=host, path=tmp_path)
+    resumed: list[str] = []
+
+    # --from with no session and no --adopt resumes nothing (fresh start).
+    def fail_explicit(_arg: str) -> str:
+        raise AssertionError("copy_explicit must not run")
+
+    adopt_sessions((), location, copy_explicit=fail_explicit, copy_clone=lambda _loc: None, resume=resumed.append)
+    assert resumed == []
+
+
 def test_adopt_sessions_no_op_when_neither() -> None:
     def fail_explicit(_arg: str) -> str:
         raise AssertionError("copy_explicit must not run")

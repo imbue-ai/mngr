@@ -550,7 +550,9 @@ class OpenCodeAgent(
             apply_opencode_rebind(staging_db, session_id, new_directory)
         return session_id
 
-    def _stage_cloned_session(self, staging_db: Path, new_directory: Path, source_location: HostLocation) -> str:
+    def _stage_cloned_session(
+        self, staging_db: Path, new_directory: Path, source_location: HostLocation
+    ) -> str | None:
         """Stage the source agent's conversation into the local staging db after a ``--from <agent>`` clone.
 
         A ``--from`` clone copies the source workspace but not its state dir, so the source's native
@@ -560,16 +562,16 @@ class OpenCodeAgent(
         an explicit adopt, then rebound to this agent's work dir. The returned id is what the caller
         resumes.
 
-        A ``--from`` clone is meant to resume the source's conversation, so a source with no store is a
-        hard error (:class:`AgentStartError`) rather than a silent fresh start.
+        A ``--from`` clone is a workspace clone, so carrying the session forward is a bonus: a source
+        with no store warns and returns ``None`` (the agent starts fresh) rather than failing.
         """
         source_db = source_location.path / AGENT_OPENCODE_DB_RELPATH
         if not source_location.host.path_exists(source_db):
-            raise AgentStartError(
-                str(self.name),
-                f"Clone adopt: no OpenCode session store at source "
-                f"{source_location.path / AGENT_OPENCODE_STORE_RELPATH}; nothing to resume.",
+            logger.warning(
+                "Clone adopt: no OpenCode session store at source {}; starting fresh.",
+                source_location.path / AGENT_OPENCODE_STORE_RELPATH,
             )
+            return None
         local_source_db = self._localize_source_db(source_location, staging_db.parent)
         session_id = read_only_root_session_id(local_source_db)
         with log_span("Adopting cloned OpenCode session {}", session_id):

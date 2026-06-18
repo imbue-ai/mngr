@@ -97,6 +97,38 @@ def test_destroy_instance_raises_on_genuine_delete_failure() -> None:
         client.destroy_instance(VpsInstanceId("mngr-slice-abc"))
 
 
+def test_list_disk_names_parses_jsonl_names() -> None:
+    disk_json = '{"name": "mngr-slice-aaa-data"}\n{"name": "mngr-slice-bbb-data"}\n'
+    client = _recording_client({"limactl disk list --json": (0, disk_json, "")})
+    assert client.list_disk_names() == {"mngr-slice-aaa-data", "mngr-slice-bbb-data"}
+
+
+def test_destroy_disk_unlocks_then_force_deletes() -> None:
+    # A leaked orphan disk is typically locked, so destroy_disk must unlock first.
+    client = _recording_client({})
+    client.destroy_disk("mngr-slice-abc-data")
+    recorded = client.recorded_commands
+    unlock_idx = next(
+        i for i, cmd in enumerate(recorded) if "limactl disk unlock" in cmd and "mngr-slice-abc-data" in cmd
+    )
+    delete_idx = next(
+        i for i, cmd in enumerate(recorded) if "limactl disk delete --force" in cmd and "mngr-slice-abc-data" in cmd
+    )
+    assert unlock_idx < delete_idx
+
+
+def test_destroy_disk_tolerates_already_absent_disk() -> None:
+    client = _recording_client({"limactl disk delete": (1, "", "disk does not exist")})
+    # An already-absent disk must not raise.
+    client.destroy_disk("mngr-slice-abc-data")
+
+
+def test_destroy_disk_raises_on_genuine_delete_failure() -> None:
+    client = _recording_client({"limactl disk delete": (1, "", "permission denied")})
+    with pytest.raises(LimaCommandError):
+        client.destroy_disk("mngr-slice-abc-data")
+
+
 def test_parse_listening_ports_extracts_ipv4_ipv6_and_wildcard() -> None:
     ss_output = (
         "LISTEN 0      128          0.0.0.0:22         0.0.0.0:*\n"

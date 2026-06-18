@@ -42,9 +42,8 @@ _MODEL = "claude-haiku-4-5"
 class _PiReleaseProfile(AgentReleaseProfile):
     agent_type = "pi-coding"
     common_transcript_subdir = "pi-coding"
-    # pi reliably surfaces the RUNNING marker, its seed turn forces a bash tool call,
-    # and it reports token usage -- so all three richer assertions apply.
-    observes_running_marker = True
+    # pi forces the bash tool call and reports token usage, so both gated assertions apply
+    # (observing the RUNNING marker is universal).
     forces_tool_call = True
     asserts_usage = True
     # This is the store the adopt-from-preserved arc adopts (see adopt_session_arg).

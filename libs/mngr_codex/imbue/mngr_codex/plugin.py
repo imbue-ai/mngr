@@ -107,7 +107,6 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
@@ -954,12 +953,12 @@ class CodexAgent(
         logger.info("Adopted codex session {} into agent {}", session_id, self.id)
         return session_id
 
-    def _copy_cloned_codex_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str:
+    def _copy_cloned_codex_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
         """Transfer the cloned source agent's native session store in, rebind its latest rollout.
 
         Transfers the source's native session store (the same relpath the agent preserves
         and scans) into this agent's state dir, and rebinds the source's most-recent rollout
-        cwd. Returns the discovered session id.
+        cwd. Returns the discovered session id, or ``None`` when there is nothing to resume.
 
         The clone's session id is read from the *source* store (which holds only the source
         agent's own sessions), not the merged destination store: any ``--adopt`` sessions the
@@ -967,17 +966,19 @@ class CodexAgent(
         "now"), so an ``ls -t`` over the destination could rank one of them ahead of the clone's
         older transferred rollout and resume the wrong session.
 
-        Raises :class:`AgentStartError` when the source has no session store, or the store holds
-        no rollout: a ``--from`` clone is an explicit request to resume the source's conversation,
-        so an empty source is a hard failure rather than a silent fresh start.
+        Warns and returns ``None`` when the source has no session store, or the store holds no
+        rollout: a ``--from`` clone is fundamentally a workspace clone, so carrying the session
+        forward is a bonus -- an empty source falls back to a fresh start (or the last
+        ``--adopt``), not a hard failure.
         """
         source_sessions_dir = source_location.path / _AGENT_SESSIONS_RELPATH
+        if not source_location.host.path_exists(source_sessions_dir):
+            logger.warning("clone source agent {} has no codex session store to resume", source_location.path)
+            return None
         session_id = self._find_latest_session_id(source_location.host, source_sessions_dir)
         if session_id is None:
-            raise AgentStartError(
-                str(self.name),
-                f"clone source agent {source_location.path} has no codex session store to resume",
-            )
+            logger.warning("no rollout found in codex session store at {}", source_sessions_dir)
+            return None
         transfer_cloned_agent_session_store(host, self._get_agent_dir(), source_location, _AGENT_SESSIONS_RELPATH)
         dest_sessions_dir = self._get_codex_home() / "sessions"
         with log_span("Adopting cloned codex session {}", session_id):
