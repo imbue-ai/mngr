@@ -18,7 +18,6 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
-from typing import assert_never
 
 import click
 from click_option_group import optgroup
@@ -28,9 +27,8 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.cli.output_helpers import OperatorResultPart
+from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
@@ -194,26 +192,19 @@ def _output_prepare_result(
     ``prepared`` event. The structured forms carry ``created`` so a caller can
     tell a first-run create from an idempotent no-op.
     """
-    data = {
-        "firewall_name": firewall_name,
-        "target_tag": result.target_tag,
-        "project_id": project_id,
-        "created": result.was_created,
-    }
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(data)
-        case OutputFormat.JSONL:
-            emit_event("prepared", data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            write_human_line(
-                "Prepared GCP firewall rule {} (tag {}) in project {}",
-                firewall_name,
-                result.target_tag,
-                project_id,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
+    emit_operator_result(
+        "prepared",
+        [
+            OperatorResultPart.shown(
+                f"Prepared GCP firewall rule {firewall_name} (tag {result.target_tag}) in project {project_id}",
+                firewall_name=firewall_name,
+                target_tag=result.target_tag,
+                project_id=project_id,
+                created=result.was_created,
+            ),
+        ],
+        output_format,
+    )
 
 
 def _output_cleanup_result(
@@ -228,23 +219,20 @@ def _output_cleanup_result(
     ``cleaned_up`` event. ``deleted`` is False when the rule was already absent
     (idempotent no-op).
     """
-    data = {
-        "firewall_name": firewall_name,
-        "project_id": project_id,
-        "deleted": deleted_firewall is not None,
-    }
-    match output_format:
-        case OutputFormat.JSON:
-            write_json_line(data)
-        case OutputFormat.JSONL:
-            emit_event("cleaned_up", data, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            if deleted_firewall is None:
-                write_human_line("Nothing to clean up: no firewall rule {} in project {}.", firewall_name, project_id)
-            else:
-                write_human_line("Cleaned up GCP firewall rule {} in project {}", deleted_firewall, project_id)
-        case _ as unreachable:
-            assert_never(unreachable)
+    emit_operator_result(
+        "cleaned_up",
+        [
+            OperatorResultPart.shown(
+                f"Cleaned up GCP firewall rule {deleted_firewall} in project {project_id}"
+                if deleted_firewall is not None
+                else f"Nothing to clean up: no firewall rule {firewall_name} in project {project_id}.",
+                firewall_name=firewall_name,
+                project_id=project_id,
+                deleted=deleted_firewall is not None,
+            ),
+        ],
+        output_format,
+    )
 
 
 @click.group(name="gcp")
