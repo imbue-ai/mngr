@@ -8,17 +8,17 @@
 <script src="/_static/destroying.js" defer></script>
 {% endset %}
 <Base title={{ "Destroying: " ~ agent_name }}
-      body_class="bg-white text-zinc-900 font-sans antialiased"
+      body_class="bg-white text-primary font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>
     <div id="destroying-page" data-agent-id="{{ agent_id }}" data-pid="{{ pid }}" data-initial-status="{{ status }}">
-      <h1 class="text-xl font-semibold text-zinc-900 leading-tight">Destroying {{ agent_name }}</h1>
-      <p class="text-xs text-zinc-400 mb-4">{{ agent_id }} &middot; pid {{ pid }}</p>
+      <h1 class="text-xl font-semibold text-primary leading-tight">Destroying {{ agent_name }}</h1>
+      <p class="text-xs text-tertiary mb-4">{{ agent_id }} &middot; pid {{ pid }}</p>
 
       <div id="destroying-status" class="my-4 flex items-center gap-2">
         {% if status == 'running' %}
           <Spinner />
-          <span id="status-text" class="text-zinc-700">Running...</span>
+          <span id="status-text" class="text-primary">Running...</span>
         {% elif status == 'failed' %}
           <StatusBadge variant="error">Failed</StatusBadge>
         {% else %}
@@ -26,7 +26,7 @@
         {% endif %}
       </div>
 
-      <h2 class="text-sm font-medium text-zinc-500 mt-6 mb-2">Log</h2>
+      <h2 class="text-sm font-medium text-secondary mt-6 mb-2">Log</h2>
       <div id="destroying-log"
            class="p-3 bg-zinc-900 text-zinc-200 font-mono text-xs rounded-xl max-h-[420px] overflow-y-auto whitespace-pre-wrap border border-zinc-900"></div>
 

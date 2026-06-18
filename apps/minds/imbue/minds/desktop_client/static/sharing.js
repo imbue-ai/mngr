@@ -69,13 +69,13 @@
       left.appendChild(prefix);
     }
     var emailEl = document.createElement('span');
-    emailEl.className = 'text-sm ' + (variant === 'removed' ? 'text-zinc-400' : 'text-zinc-800');
+    emailEl.className = 'text-sm ' + (variant === 'removed' ? 'text-tertiary' : 'text-primary');
     emailEl.textContent = email;
     left.appendChild(emailEl);
     row.appendChild(left);
 
     var btn = document.createElement('button');
-    btn.className = 'bg-transparent border-none cursor-pointer text-zinc-400 text-lg leading-none px-1 hover:text-zinc-700';
+    btn.className = 'bg-transparent border-none cursor-pointer text-tertiary text-lg leading-none px-1 hover:text-primary';
     btn.setAttribute('aria-label', 'Remove');
     btn.setAttribute('data-action',
       variant === 'added' ? 'unmark-added'
@@ -106,7 +106,7 @@
     });
     if (rowCount === 0) {
       var empty = document.createElement('p');
-      empty.className = 'text-sm text-zinc-400';
+      empty.className = 'text-sm text-tertiary';
       empty.textContent = 'No one in the access list';
       container.appendChild(empty);
     }

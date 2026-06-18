@@ -64,10 +64,10 @@ _BTN_SIZES: Final[Mapping[str, str]] = {
 }
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "primary": "bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800",
-    "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
+    "secondary": "bg-zinc-100 text-primary border border-zinc-200 hover:bg-zinc-200",
     "danger": "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
     "success": "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
-    "ghost": "bg-transparent text-zinc-700 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
+    "ghost": "bg-transparent text-primary border border-transparent hover:bg-zinc-100 hover:text-primary",
 }
 
 # Shared Tailwind class string for the three form-control components
@@ -76,7 +76,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # exactly one place. Width and border-radius vary per-component so they
 # are NOT included here -- each component sets its own.
 _INPUT_BASE: Final[str] = (
-    "px-3 py-2.5 text-sm border border-zinc-200 bg-white text-zinc-900 "
+    "px-3 py-2.5 text-sm border border-zinc-200 bg-white text-primary "
     "outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
 )
 

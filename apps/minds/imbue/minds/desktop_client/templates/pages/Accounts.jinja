@@ -12,7 +12,7 @@
 #}
 <Base title="Manage Accounts">
   <PageContainer>
-    <h1 class="text-xl font-semibold text-zinc-900 leading-tight mb-5">Manage Accounts</h1>
+    <h1 class="text-xl font-semibold text-primary leading-tight mb-5">Manage Accounts</h1>
 
     {% if accounts %}
       {% for acct in accounts %}
@@ -25,7 +25,7 @@
                 <StatusBadge variant="warn" size="xs" extra="ml-2" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</StatusBadge>
               {% endif %}
             </div>
-            <div class="text-xs text-zinc-400">
+            <div class="text-xs text-tertiary">
               {{ acct.workspace_ids | length }} workspace(s)
               {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
             </div>
@@ -40,7 +40,7 @@
                 <ButtonSubmit variant="secondary">Set default</ButtonSubmit>
               </form>
             {% else %}
-              <span class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm bg-zinc-100 text-zinc-900 border border-zinc-200 opacity-60 cursor-default">Default</span>
+              <span class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm bg-zinc-100 text-primary border border-zinc-200 opacity-60 cursor-default">Default</span>
             {% endif %}
             <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/logout" }}>
               <ButtonSubmit variant="danger">Log out</ButtonSubmit>
@@ -49,7 +49,7 @@
         </Card>
       {% endfor %}
     {% else %}
-      <p class="text-zinc-500">No accounts logged in.</p>
+      <p class="text-secondary">No accounts logged in.</p>
     {% endif %}
 
     <div class="mt-4">

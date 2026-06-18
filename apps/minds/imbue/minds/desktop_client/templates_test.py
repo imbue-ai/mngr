@@ -1242,7 +1242,7 @@ def test_form_label_default_is_block_with_mb_1_5() -> None:
     assert "mb-1.5" in html
     assert "text-sm" in html
     assert "font-medium" in html
-    assert "text-zinc-900" in html
+    assert "text-primary" in html
 
 
 def test_form_label_inline_drops_block_and_mb() -> None:

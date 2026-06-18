@@ -16,7 +16,7 @@
        editor is hidden behind the "Adjust" link below. #}
     <div id="permissions-simple-view">
       {% if checked_permissions %}
-        <p class="text-sm text-zinc-700 mb-3">
+        <p class="text-sm text-primary mb-3">
           Approving will grant {{ ws_name or agent_id }} and its sibling agents the following permissions:
         </p>
         <Card extra="space-y-3">
@@ -33,11 +33,11 @@
                     <path fill-rule="evenodd" clip-rule="evenodd"
                           d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" />
                   </svg>
-                  <code class="text-sm font-mono text-zinc-900">{{ wildcard_label if permission == wildcard_permission else permission }}</code>
+                  <code class="text-sm font-mono text-primary">{{ wildcard_label if permission == wildcard_permission else permission }}</code>
                 </div>
                 {% set permission_description = description_by_permission_name.get(permission) %}
                 {% if permission_description %}
-                  <span class="block text-sm text-zinc-700 mt-0.5 ml-[26px]">{{ permission_description }}</span>
+                  <span class="block text-sm text-primary mt-0.5 ml-[26px]">{{ permission_description }}</span>
                 {% endif %}
               </div>
             {% endif %}
@@ -72,7 +72,7 @@
        via "Adjust". The inputs are present in the DOM either way so the
        generic submit handler can read the checked set. #}
     <div id="permissions-editor-view" class="hidden">
-      <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions to grant:</h2>
+      <h2 class="text-sm font-medium text-primary mb-2">Permissions to grant:</h2>
       <Card extra="space-y-3">
         {% for permission in permission_schemas %}
           <label class="flex items-start gap-2.5 cursor-pointer">
@@ -81,10 +81,10 @@
                    {% if permission == wildcard_permission %}data-wildcard="true"{% endif %}
                    {% if permission in checked_permissions %}checked{% endif %}>
             <span class="min-w-0">
-              <code class="text-sm font-mono text-zinc-900">{{ wildcard_label if permission == wildcard_permission else permission }}</code>
+              <code class="text-sm font-mono text-primary">{{ wildcard_label if permission == wildcard_permission else permission }}</code>
               {% set permission_description = description_by_permission_name.get(permission) %}
               {% if permission_description %}
-                <span class="block text-sm text-zinc-700 mt-0.5">{{ permission_description }}</span>
+                <span class="block text-sm text-primary mt-0.5">{{ permission_description }}</span>
               {% endif %}
             </span>
           </label>

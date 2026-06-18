@@ -8,7 +8,7 @@
   boxed monospace pill for a file path). When empty, the defaults are
   plain text.
 #}
-<h1 class="text-2xl font-normal text-zinc-900 leading-tight pr-8">
+<h1 class="text-2xl font-normal text-primary leading-tight pr-8">
   Permission request:
   {% if header_display_name_html %}
     {{ header_display_name_html }}
@@ -22,7 +22,7 @@
     {% if rationale_label_html %}
       {{ rationale_label_html }}
     {% else %}
-      <p class="text-base font-semibold text-zinc-900 mb-1">{{ ws_name or agent_id }} says:</p>
+      <p class="text-base font-semibold text-primary mb-1">{{ ws_name or agent_id }} says:</p>
     {% endif %}
     <p class="text-sm italic whitespace-pre-wrap">{{ rationale }}</p>
   </div>

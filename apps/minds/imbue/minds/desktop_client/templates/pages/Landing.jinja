@@ -125,9 +125,9 @@
       if (stopBtn) stopBtn.style.display = showStop ? '' : 'none';
       if (badge) {
         var text = '';
-        var tone = 'bg-zinc-100 text-zinc-700';
-        if (state === 'STOPPED') { text = 'Stopped'; tone = 'bg-zinc-100 text-zinc-700'; }
-        else if (state === 'UNKNOWN') { text = 'Status unknown'; tone = 'bg-zinc-100 text-zinc-500'; }
+        var tone = 'bg-zinc-100 text-primary';
+        if (state === 'STOPPED') { text = 'Stopped'; tone = 'bg-zinc-100 text-primary'; }
+        else if (state === 'UNKNOWN') { text = 'Status unknown'; tone = 'bg-zinc-100 text-secondary'; }
         else if (state === 'STOPPING') { text = 'Stopping…'; tone = 'bg-amber-100 text-amber-800'; }
         else if (state === 'STARTING') { text = 'Starting…'; tone = 'bg-amber-100 text-amber-800'; }
         badge.textContent = text;
@@ -243,8 +243,8 @@
     function badgeClassForStatus(status) {
       if (status === 'ok') return 'bg-emerald-100 text-emerald-800';
       if (status === 'error') return 'bg-red-100 text-red-800';
-      if (status === 'disabled') return 'bg-zinc-100 text-zinc-700';
-      return 'bg-zinc-100 text-zinc-700';
+      if (status === 'disabled') return 'bg-zinc-100 text-primary';
+      return 'bg-zinc-100 text-primary';
     }
 
     function badgeLabelForStatus(status) {
@@ -296,13 +296,13 @@
         row.dataset.providerName = entry.name;
 
         var nameEl = document.createElement('span');
-        nameEl.className = 'font-medium text-zinc-900';
+        nameEl.className = 'font-medium text-primary';
         nameEl.textContent = entry.name;
         row.appendChild(nameEl);
 
         if (entry.backend) {
           var backendEl = document.createElement('span');
-          backendEl.className = 'text-xs text-zinc-500';
+          backendEl.className = 'text-xs text-secondary';
           backendEl.textContent = entry.backend;
           row.appendChild(backendEl);
         }
@@ -314,7 +314,7 @@
 
         if (entry.status === 'error' && entry.error_message) {
           var err = document.createElement('span');
-          err.className = 'flex-1 text-xs text-zinc-700 truncate';
+          err.className = 'flex-1 text-xs text-primary truncate';
           err.title = (entry.error_type || '') + ': ' + entry.error_message;
           err.textContent = (entry.error_type || '') + ': ' + entry.error_message;
           row.appendChild(err);
@@ -329,7 +329,7 @@
         var isPending = pendingClickedAt && (!lastFullSnapshotAt || pendingClickedAt > snapshotAt);
 
         var btn = document.createElement('button');
-        btn.className = 'px-2 py-1 text-xs rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700';
+        btn.className = 'px-2 py-1 text-xs rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 text-primary';
         if (isPending) {
           btn.disabled = true;
           btn.textContent = 'Waiting…';
@@ -390,7 +390,7 @@
       if (!badge) return;
       var state = status && status.state;
       var text = '';
-      var tone = 'bg-zinc-100 text-zinc-500';
+      var tone = 'bg-zinc-100 text-secondary';
       if (state === 'BACKING_UP') {
         text = 'Backing up…'; tone = 'bg-blue-100 text-blue-800';
       } else if (state === 'BACKED_UP') {
@@ -398,13 +398,13 @@
       } else if (state === 'NEVER') {
         text = 'Backup pending'; tone = 'bg-amber-100 text-amber-800';
       } else if (state === 'UNKNOWN') {
-        text = 'Backup status unknown'; tone = 'bg-zinc-100 text-zinc-500';
+        text = 'Backup status unknown'; tone = 'bg-zinc-100 text-secondary';
       } else {
         var createdMs = status && status.created_at ? Date.parse(status.created_at) : NaN;
         if (!isNaN(createdMs) && (Date.now() - createdMs) < BACKUP_RECENT_CREATE_MS) {
-          text = 'Created ' + relativeAgo(status.created_at); tone = 'bg-zinc-100 text-zinc-500';
+          text = 'Created ' + relativeAgo(status.created_at); tone = 'bg-zinc-100 text-secondary';
         } else {
-          text = 'No backups'; tone = 'bg-zinc-100 text-zinc-500';
+          text = 'No backups'; tone = 'bg-zinc-100 text-secondary';
         }
       }
       badge.textContent = text;
@@ -463,7 +463,7 @@
     function showBackupChecking() {
       document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
         badge.textContent = BACKUP_CHECKING_TEXT;
-        badge.className = BACKUP_BADGE_BASE + 'bg-zinc-100 text-zinc-500';
+        badge.className = BACKUP_BADGE_BASE + 'bg-zinc-100 text-secondary';
       });
     }
 
@@ -553,7 +553,7 @@
   <PageContainer>
     {% if agent_ids %}
       <div class="flex items-center justify-between mb-5" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
-        <h1 class="text-xl font-semibold text-zinc-900">Projects</h1>
+        <h1 class="text-xl font-semibold text-primary">Projects</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
 
@@ -578,7 +578,7 @@
                   extra="accent-spine relative overflow-hidden"
                   :href="destroying_href"
                   :style="accent_style">
-              <span class="flex-1 font-medium text-zinc-500 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="flex-1 font-medium text-secondary pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               {% if destroying_status == 'running' %}
                 <StatusBadge extra="gap-2">
                   <Spinner size="sm" />
@@ -596,10 +596,10 @@
                   :data-default-href="goto_href"
                   :data-mind-name="agent_names.get(agent_id | string, agent_id)"
                   onclick="window.landingRowClick(event, this)">
-              <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="flex-1 font-medium text-primary pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               {% set provider_label = agent_providers.get(agent_id | string, "") %}
               {% if provider_label %}
-                <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-zinc-100 text-zinc-500">{{ provider_label }}</span>
+                <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-zinc-100 text-secondary">{{ provider_label }}</span>
               {% endif %}
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
               <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
@@ -654,12 +654,12 @@
     {% else %}
       {% if is_discovering %}
         <div class="flex items-center justify-center min-h-[80vh]">
-          <p class="text-zinc-400 text-center">Discovering agents...</p>
+          <p class="text-tertiary text-center">Discovering agents...</p>
         </div>
         <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
         <div class="text-center py-12">
-          <p class="text-zinc-400 mb-6">No projects yet</p>
+          <p class="text-tertiary mb-6">No projects yet</p>
           <ButtonLink href="/create" variant="primary">Create</ButtonLink>
         </div>
       {% endif %}
@@ -671,13 +671,13 @@
        summary to expand into the full list + freshness counters. #}
     <section class="mt-10 pt-6 border-t border-zinc-200" data-providers-panel hidden>
       <button type="button" data-providers-toggle
-              class="w-full flex items-center justify-between text-left text-sm text-zinc-700 hover:text-zinc-900 bg-transparent border-0 cursor-pointer p-0">
+              class="w-full flex items-center justify-between text-left text-sm text-primary hover:text-primary bg-transparent border-0 cursor-pointer p-0">
         <span data-providers-summary>0 providers enabled</span>
-        <span data-providers-chevron class="text-zinc-400 ml-2">&#9656;</span>
+        <span data-providers-chevron class="text-tertiary ml-2">&#9656;</span>
       </button>
       <div data-providers-details class="mt-3" hidden>
         <div class="flex items-center justify-end mb-3">
-          <div class="text-xs text-zinc-500 flex gap-4">
+          <div class="text-xs text-secondary flex gap-4">
             <span>last event <span data-providers-last-event>&mdash;</span></span>
             <span>last snapshot <span data-providers-last-snapshot>&mdash;</span></span>
           </div>

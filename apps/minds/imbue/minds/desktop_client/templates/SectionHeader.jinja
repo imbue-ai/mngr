@@ -1,13 +1,13 @@
 {#def divider=false, extra="" #}
 {#
   Small section header used inside settings-style pages. Tone is the
-  canonical "label" color (text-sm text-zinc-500). When ``divider=true``
+  canonical "label" color (text-sm text-secondary). When ``divider=true``
   the header sits above a horizontal rule with top spacing -- used to
   break a card-shaped page into top-level sections.
 
   Use ``extra=""`` for one-off margin overrides; the existing call sites
   are stable enough that the default + divider variants cover them.
 #}
-{% set _base = "text-sm font-medium text-zinc-500 mb-3" %}
+{% set _base = "text-sm font-medium text-secondary mb-3" %}
 {% set _divider = "mt-8 pt-5 border-t border-zinc-200" if divider else "" %}
 <h2 class="{{ _base }} {{ _divider }} {{ extra }}">{{ content }}</h2>
