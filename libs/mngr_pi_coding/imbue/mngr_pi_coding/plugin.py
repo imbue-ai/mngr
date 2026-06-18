@@ -6,36 +6,56 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import click
 from loguru import logger
 from pydantic import Field
+from pydantic import field_validator
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
 from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import require_unique_match
+from imbue.mngr.api.preservation import run_adopt_session_preflight
+from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import classify_waiting_reason
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_pi_coding import resources as _pi_resources
@@ -105,6 +125,10 @@ _READY_TIMEOUT_SECONDS: float = 30.0
 # viewable). Kept in sync with INBOX_NAME in mngr_pi_lifecycle.ts.
 _INBOX_FILE_NAME: str = "pi_inbox"
 
+# The lifecycle marker the pi extension maintains while a turn is in flight
+# (RUNNING vs WAITING). Kept in sync with ACTIVE_MARKER_NAME in mngr_pi_lifecycle.ts.
+_ACTIVE_MARKER_NAME: str = "active"
+
 # After inboxing a message, wait up to this long for the turn to start (the
 # ``active`` marker to appear) as delivery confirmation. Covers the extension's
 # poll interval plus pi accepting the injected message.
@@ -125,6 +149,14 @@ def _load_resource(filename: str) -> str:
 # ``{path: bool}`` (see pi's core/trust-manager.ts). mngr seeds it so the interactive
 # agent never stalls at the dialog.
 _PI_TRUST_FILE_NAME: str = "trust.json"
+
+# pi's native "auto-trust this run" flag (``--approve``/``-a``, "Trust project-local
+# files for this run"). When passed, pi's ``resolveProjectTrusted`` short-circuits to
+# trusted regardless of any ``.pi``/``.agents/skills`` trust inputs in the cwd and
+# without a saved decision, so the interactive trust dialog never appears. mngr adds it
+# to the launch command when ``auto_dismiss_dialogs`` is set, so an unattended agent is
+# trusted via pi's own code path rather than relying solely on the seeded trust store.
+_PI_APPROVE_FLAG: str = "--approve"
 
 
 def _read_pi_trust(content: str | None, path: Path) -> dict[str, bool]:
@@ -175,6 +207,110 @@ def _get_pi_home_dir(home_dir: Path | None = None) -> Path:
     return home_dir / _PI_HOME_DIR_NAME / _PI_AGENT_SUBDIR
 
 
+# The first line of a pi session JSONL is a ``{"type": "session", ..., "cwd": ...}``
+# record; ``cwd`` is the absolute (realpath) directory pi resumes into. When that
+# directory no longer exists pi refuses to resume ("Stored session working directory
+# does not exist"), so adoption rewrites this field to the new agent's work_dir.
+_PI_SESSION_RECORD_TYPE: str = "session"
+_PI_SESSION_CWD_KEY: str = "cwd"
+
+
+def _pi_session_store_dirs(mngr_ctx: MngrContext) -> list[Path]:
+    """Return the pi ``sessions`` directories to search on the local host.
+
+    Mirrors the claude resolver's scope: every live local mngr agent
+    (``<host_dir>/agents/<id>/...``) and every preserved agent
+    (``<host_dir>/preserved/<name>--<id>/...``), each of which stores its pi
+    session JSONLs under ``plugin/pi_coding/sessions/<encoded-cwd>/``.
+
+    Only the local host dir is scanned: an adopted session's files are copied
+    onto the destination host from a local source path, so remote agents' stores
+    are not searched here.
+    """
+    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
+    return iter_agent_session_paths(local_host_dir, Path(_PI_SESSIONS_DIR_RELPATH))
+
+
+def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext, home_dir: Path | None = None) -> Path:
+    """Resolve an adopt-session argument to the source pi session JSONL path.
+
+    Accepts either:
+    - An absolute path to a ``.jsonl`` session file.
+    - A session id, searched across (all of):
+      * the user-native store ``~/.pi/agent/sessions/`` (a plain ``pi`` run)
+      * every live local mngr agent's ``plugin/pi_coding/sessions/``
+      * every preserved (destroyed) agent's ``plugin/pi_coding/sessions/``
+
+      The id matches a JSONL whose filename stem ends with the id (pi names files
+      ``<timestamp>_<id>.jsonl``, so the bare id is the trailing component). All
+      dirs are searched; a match in more than one is rejected as ambiguous (the
+      user must pass the full ``.jsonl`` path), exactly as claude does.
+
+    Returns the source session JSONL path.
+    """
+    if adopt_session_arg.endswith(".jsonl"):
+        session_file = Path(adopt_session_arg).resolve()
+        if not session_file.exists():
+            raise UserInputError(f"pi session file not found: {session_file}")
+        return session_file
+
+    candidate_dirs = [_get_pi_home_dir(home_dir) / "sessions", *_pi_session_store_dirs(mngr_ctx)]
+    search_dirs = dedupe_by_resolved_path(candidate_dirs)
+
+    matches: list[Path] = []
+    for sessions_dir in search_dirs:
+        if sessions_dir.is_dir():
+            for session_file in sessions_dir.glob(f"*/*{adopt_session_arg}.jsonl"):
+                if session_file.stem == adopt_session_arg or session_file.stem.endswith(f"_{adopt_session_arg}"):
+                    matches.append(session_file)
+
+    # Don't enumerate the searched dirs in the not-found message: there is one per local mngr
+    # agent, so the list can run long. The search scope is the user-native store, live agents,
+    # and preserved agents.
+    return require_unique_match(
+        matches,
+        not_found_message=(
+            f"pi session {adopt_session_arg} not found. "
+            "Check that the session id is correct, or pass an absolute path to the .jsonl file."
+        ),
+        ambiguous_message=(
+            f"pi session {adopt_session_arg} found in multiple session stores; "
+            "pass the absolute path to the .jsonl file to specify which one:"
+        ),
+    )
+
+
+def _rewrite_pi_session_cwd(content: str, new_cwd: str) -> str:
+    """Rewrite the embedded ``cwd`` in a pi session JSONL's first (``session``) record.
+
+    pi binds a session to the cwd it was created in (the first JSONL line's
+    ``cwd`` field) and refuses to resume when that directory no longer exists.
+    After adopting a session into a new agent's (new) work_dir we rewrite this to
+    the new work_dir so the resume never stalls at the missing-cwd dialog. Only
+    the first record is touched; later records carry no ``cwd``. A first line that
+    is not a ``session`` record is a schema we don't understand -- a hard error
+    rather than a silent no-op (which would leave the dialog in place).
+    """
+    lines = content.splitlines()
+    if not lines:
+        raise UserInputError("pi session file is empty; cannot rebind its working directory")
+    first = json.loads(lines[0])
+    if not isinstance(first, dict) or first.get("type") != _PI_SESSION_RECORD_TYPE:
+        raise UserInputError(
+            f"pi session file's first record is not a {_PI_SESSION_RECORD_TYPE!r} record; "
+            "cannot rebind its working directory"
+        )
+    first[_PI_SESSION_CWD_KEY] = new_cwd
+    lines[0] = json.dumps(first)
+    return "\n".join(lines) + "\n"
+
+
+class PiAutoAllowRequiredError(PluginMngrError, ValueError):
+    """Raised when pi's auto_allow_permissions is set to False, which pi cannot honor."""
+
+    ...
+
+
 class PiCodingAgentConfig(AgentTypeConfig):
     """Config for the pi-coding agent type."""
 
@@ -194,6 +330,22 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=True,
         description="Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present.",
     )
+    auto_allow_permissions: bool = Field(
+        default=True,
+        description="pi runs every tool without an approval prompt, so it always operates unattended; "
+        "setting this to False is an error because pi cannot enforce a deny.",
+    )
+
+    @field_validator("auto_allow_permissions")
+    @classmethod
+    def _require_auto_allow(cls, value: bool) -> bool:
+        if not value:
+            raise PiAutoAllowRequiredError(
+                "pi runs every tool without an approval prompt, so it cannot honor "
+                "auto_allow_permissions=False; pi always operates unattended."
+            )
+        return value
+
     resume_session: bool = Field(
         default=True,
         description=(
@@ -216,8 +368,10 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=False,
         description=(
             "Trust the workspace without prompting, suppressing pi's 'Trust project folder?' "
-            "dialog. Also implied by `mngr create --yes`. When False and the source repo is not "
-            "already trusted, mngr prompts interactively and refuses to run non-interactively."
+            "dialog. When set, mngr launches pi with `--approve` so pi auto-trusts the project "
+            "folder for the run. Also implied by `mngr create --yes`. When False and the source "
+            "repo is not already trusted, mngr prompts interactively and refuses to run "
+            "non-interactively."
         ),
     )
     preserve_on_destroy: bool = Field(
@@ -227,24 +381,8 @@ class PiCodingAgentConfig(AgentTypeConfig):
     )
 
 
-def _check_pi_installed(host: OnlineHostInterface) -> bool:
-    """Check if pi is installed on the host."""
-    result = host.execute_idempotent_command("command -v pi", timeout_seconds=10.0)
-    return result.success
-
-
-# The npm package pi ships under (used for the remote-host auto-install).
+# The npm package pi ships under (used for the auto-install command).
 _PI_NPM_PACKAGE: str = "@earendil-works/pi-coding-agent"
-
-
-def _install_pi(host: OnlineHostInterface) -> None:
-    """Install pi on the host via npm."""
-    result = host.execute_idempotent_command(
-        f"npm install -g {_PI_NPM_PACKAGE}",
-        timeout_seconds=300.0,
-    )
-    if not result.success:
-        raise PluginMngrError(f"Failed to install pi. stderr: {result.stderr}")
 
 
 def _has_api_credentials_available(
@@ -284,7 +422,16 @@ def _has_api_credentials_available(
     return False
 
 
-class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
+class PiCodingAgent(
+    BaseAgent[PiCodingAgentConfig],
+    InteractiveAgentMixin,
+    CliBackedAgentMixin,
+    HasCommonTranscriptMixin,
+    HasSessionAdoptionMixin,
+    HasSessionPreservationMixin,
+    HasUnattendedModeMixin,
+    HasAutoInstallMixin,
+):
     """Agent implementation for the pi coding agent.
 
     pi's only lifecycle-event surface is its TypeScript extension API (no
@@ -356,7 +503,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
 
     def _confirm_turn_started(self, timeout: float = _TURN_CONFIRM_TIMEOUT_SECONDS) -> None:
         """Wait for the injected message to start a turn (the ``active`` marker appearing)."""
-        marker_path = self._get_agent_dir() / "active"
+        marker_path = self._get_agent_dir() / _ACTIVE_MARKER_NAME
         if self._check_file_exists(marker_path):
             # Already running: the followUp message is queued; no marker-based confirmation.
             return
@@ -411,6 +558,11 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         foreground (and lifecycle-detected) process is plain ``pi``
         (``get_expected_process_name`` pins ``"pi"`` regardless).
 
+        When ``auto_dismiss_dialogs`` is set, ``--approve`` is added so pi
+        auto-trusts the project folder for the run (its native unattended
+        path), and the interactive trust dialog never blocks the first message
+        even when the cwd carries trust inputs (``.pi``/``.agents/skills``).
+
         Resume (when ``resume_session``) appends ``--session <file>`` for the
         main session's file recorded by the extension in ``pi_session_file``.
         It is shell-evaluated here because the stored command is replayed on
@@ -425,6 +577,8 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         invocation = f"{base_command} -e {shlex.quote(str(self._get_lifecycle_extension_path()))}"
+        if self.agent_config.auto_dismiss_dialogs:
+            invocation = f"{invocation} {_PI_APPROVE_FLAG}"
         if not self.agent_config.resume_session:
             return CommandString(invocation)
         quoted_session_file = shlex.quote(str(self._get_agent_dir() / _SESSION_FILE_NAME))
@@ -597,21 +751,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         config = self.agent_config
 
         if config.check_installation:
-            is_installed = _check_pi_installed(host)
-            if is_installed:
-                logger.debug("pi is already installed on the host")
-            else:
-                install_hint = f"npm install -g {_PI_NPM_PACKAGE}"
-                if host.is_local and not mngr_ctx.is_auto_approve:
-                    raise PluginMngrError(f"pi is not installed. Please install it with:\n  {install_hint}")
-                elif not host.is_local and not mngr_ctx.config.is_remote_agent_installation_allowed:
-                    raise PluginMngrError(
-                        "pi is not installed on the remote host and automatic remote installation is disabled."
-                    )
-                else:
-                    logger.info("Installing pi...")
-                    _install_pi(host)
-                    logger.info("pi installed successfully")
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
 
         # Trust gate first (consent + durable global record), so a declined /
         # non-interactive-without-opt-in case exits cleanly before any setup.
@@ -760,7 +900,133 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """No post-provisioning steps needed."""
+        """Adopt an existing pi session (if requested) so the new agent resumes its conversation."""
+        self.adopt_session(host, options, mngr_ctx)
+
+    def adopt_session(self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
+        """Adopt one or more sessions so the new agent resumes existing context.
+
+        Delegates the copy/resume ordering to ``adopt_sessions``: every ``--adopt``
+        value is copied in (``_adopt_session``) and, additionally, a ``--from`` clone
+        is copied in (``_adopt_cloned_session``); each call rebinds its session to
+        this agent's work_dir and returns the resumable session-file path. The one
+        actually resumed is the clone's when ``--from`` is given, otherwise the last
+        ``--adopt`` value; ``_resume_adopted_session`` writes that as the
+        ``pi_session_file`` pointer. With neither option set, the agent starts fresh.
+        """
+        adopt_sessions(
+            options.adopt_session,
+            options.source_agent_state_location,
+            copy_explicit=lambda arg: self._adopt_session(host, arg),
+            copy_clone=lambda location: self._adopt_cloned_session(host, location),
+            resume=lambda session_file: self._resume_adopted_session(host, Path(session_file)),
+        )
+
+    def _adopt_session(self, host: OnlineHostInterface, adopt_arg: str) -> str:
+        """Copy the resolved session into this agent's store, rebind it, and return its file path.
+
+        Steps:
+        1. Resolve ``adopt_arg`` (id or path) to a source JSONL on the local host.
+        2. Copy the source's encoded-cwd subdir into this agent's ``sessions/`` so the
+           store mirrors pi's own layout (the subdir name is cosmetic -- pi resumes by
+           the absolute path recorded later). Additive: multiple ``--adopt`` values
+           each land in their own subdir, so all are available in the new agent.
+        3. Rebind the adopted JSONL to this agent's work_dir (so pi never stalls at
+           its missing-cwd dialog) and return its absolute path; the resume pointer is
+           written separately, only for the session actually resumed.
+        """
+        source_file = _resolve_adopt_session(adopt_arg, self.mngr_ctx)
+        sessions_dir = self.get_pi_config_dir() / "sessions"
+        dest_subdir = sessions_dir / source_file.parent.name
+        with log_span("Adopting pi session {} into {}", source_file, dest_subdir):
+            host.copy_directory(host, source_file.parent, dest_subdir)
+        adopted_file = dest_subdir / source_file.name
+        self._rebind_adopted_session(host, adopted_file)
+        return str(adopted_file)
+
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
+        """Transfer the source agent's pi session into a ``--from`` clone and return its file path.
+
+        A generic ``--from`` clone copies the source *workspace* but not the source
+        agent's *state dir*, so the cloned pi has no session to resume. This picks
+        the most-recent session JSONL *on the source* (so the choice is unaffected
+        by sessions an earlier ``--adopt`` may have already placed in the shared
+        destination store), transfers the source's native session store into this
+        agent's store, and rebinds the transferred copy of that session to this
+        agent's work_dir.
+
+        Warns and returns ``None`` if the source has no pi session store, or a store
+        with no resumable session JSONL: a ``--from`` clone carries the source's
+        workspace, and resuming its conversation is a bonus -- a source that never
+        started a session simply starts fresh rather than failing the clone.
+        """
+        store_relpath = Path(_PI_SESSIONS_DIR_RELPATH)
+        source_store = source_location.path / store_relpath
+        source_host = source_location.host
+        if not source_host.path_exists(source_store):
+            logger.warning(
+                "Clone adopt: no pi session store at source {}; starting the clone without a resumed session.",
+                source_store,
+            )
+            return None
+        # Choose on the source, where the store holds only the source agent's own
+        # sessions -- the destination store may already contain --adopt sessions.
+        latest_on_source = source_host.execute_idempotent_command(
+            f"ls -t {shlex.quote(str(source_store))}/*/*.jsonl 2>/dev/null | head -n1",
+            timeout_seconds=5.0,
+        )
+        if not (latest_on_source.success and latest_on_source.stdout.strip()):
+            logger.warning(
+                "Clone adopt: source pi session store {} has no session JSONL "
+                "(ls success={}, stderr={!r}); starting the clone without a resumed session.",
+                source_store,
+                latest_on_source.success,
+                latest_on_source.stderr.strip(),
+            )
+            return None
+        latest_relative = Path(latest_on_source.stdout.strip()).relative_to(source_store)
+
+        transfer_cloned_agent_session_store(host, self._get_agent_dir(), source_location, store_relpath)
+        adopted_file = self._get_agent_dir() / store_relpath / latest_relative
+        self._rebind_adopted_session(host, adopted_file)
+        return str(adopted_file)
+
+    def _rebind_adopted_session(self, host: OnlineHostInterface, adopted_file: Path) -> None:
+        """Rebind an adopted session JSONL's embedded cwd to this agent's work_dir.
+
+        pi binds a session to the cwd it was created in and refuses to resume when
+        that directory no longer exists, so the cwd is rewritten to this agent's
+        host-canonical work_dir. This does *not* write the resume pointer -- that is
+        ``_resume_adopted_session``, called only for the single session resumed.
+        Shared by ``--adopt`` and ``--from``.
+        """
+        new_cwd = self._get_host_canonical_work_dir(host)
+        host.write_text_file(adopted_file, _rewrite_pi_session_cwd(host.read_text_file(adopted_file), new_cwd))
+        logger.info("Adopted pi session {} (rebound cwd -> {})", adopted_file, new_cwd)
+
+    def _resume_adopted_session(self, host: OnlineHostInterface, adopted_file: Path) -> None:
+        """Point resume at an already-rebound adopted session.
+
+        Writes the session's absolute path to ``pi_session_file`` so the launch
+        ``pi --session <file>`` resumes it. Called once, for the single session
+        chosen by ``adopt_sessions`` (the ``--from`` clone, else the last ``--adopt``).
+        """
+        host.write_text_file(self._get_agent_dir() / _SESSION_FILE_NAME, str(adopted_file))
+        logger.info("Resuming adopted pi session {}", adopted_file)
+
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_pi_coding_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        # pi has no tool-approval gate, so it always runs unattended; the config
+        # field is pinned True (False is rejected at validation).
+        return self.agent_config.auto_allow_permissions
+
+    def get_install_binary_name(self) -> str:
+        return "pi"
+
+    def get_install_command(self) -> str:
+        return f"npm install -g {_PI_NPM_PACKAGE}"
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and the session-file pointer before the state dir is deleted.
@@ -769,7 +1035,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
         other cleanup to do.
         """
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_pi_coding_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
 
 def _pi_coding_preserved_items() -> list[PreservedItem]:
@@ -793,6 +1059,26 @@ def _pi_coding_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> S
     return flag_gated_items(ref, "preserve_on_destroy", _pi_coding_preserved_items())
 
 
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting, or None while it is active.
+
+    pi has no tool-approval gate, so it can never be blocked on a permission
+    prompt: ``is_blocked_on_permission`` is always False and the only possible
+    reason is ``END_OF_TURN`` (the agent is idle). Wired through the same shared
+    ``classify_waiting_reason`` the other plugins use, so the single-value result
+    is a real extension point if pi ever gains an approval gate.
+    """
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    is_active = host.path_exists(agent_dir / _ACTIVE_MARKER_NAME)
+    return classify_waiting_reason(is_active, is_blocked_on_permission=False)
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose pi-coding-specific agent fields for listing."""
+    return (_PI_AGENT_TYPE, {"waiting_reason": _waiting_reason})
+
+
 @hookimpl
 def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     """Preserve pi-coding transcripts from the host's volume before it is destroyed.
@@ -804,6 +1090,19 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     preserve_host_agents_on_destroy(
         host, mngr_ctx, AgentTypeName(_PI_AGENT_TYPE), _pi_coding_items_to_preserve_for_discovered_agent
     )
+
+
+@hookimpl
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+    """Fail-fast pre-resolution of pi ``--adopt`` session ids (see ``run_adopt_session_preflight``)."""
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        PiCodingAgent,
+        lambda session_arg: _resolve_adopt_session(session_arg, mngr_ctx),
+    )
+    return None
 
 
 @hookimpl

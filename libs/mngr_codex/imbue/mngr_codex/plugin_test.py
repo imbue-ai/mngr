@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
+import time
 import tomllib
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 from typing import cast
 
 import pytest
@@ -18,8 +22,14 @@ from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -45,9 +55,14 @@ from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex.plugin import CodexAgentConfig
 from imbue.mngr_codex.plugin import CodexUpdatePolicy
+from imbue.mngr_codex.plugin import _resolve_adopt_session
 from imbue.mngr_codex.plugin import _resolve_lifecycle_state_for_permission
+from imbue.mngr_codex.plugin import _session_id_from_rollout_path
+from imbue.mngr_codex.plugin import _sessions_root_for_rollout
+from imbue.mngr_codex.plugin import _user_native_codex_home
 from imbue.mngr_codex.plugin import _waiting_reason
 from imbue.mngr_codex.plugin import agent_field_generators
+from imbue.mngr_codex.plugin import on_before_create
 from imbue.mngr_codex.plugin import register_agent_type
 
 # =============================================================================
@@ -104,6 +119,96 @@ def test_register_agent_type_returns_codex_class_and_config() -> None:
 
 
 # =============================================================================
+# Capability-mixin contract methods (install / unattended / permission / version)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_codex() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert agent.get_install_binary_name() == "codex"
+
+
+def test_get_install_command_installs_codex() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert agent.get_install_command() == "npm i -g @openai/codex"
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = CodexAgent.model_construct(agent_config=CodexAgentConfig(auto_allow_permissions=True))
+    attended = CodexAgent.model_construct(agent_config=CodexAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def test_get_permission_policy_carries_sandbox_mode() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(sandbox_mode="read-only"))
+    policy = agent.get_permission_policy()
+    assert policy["sandbox_mode"] == "read-only"
+
+
+def test_get_permission_policy_includes_approval_policy_override() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(config_overrides={"approval_policy": "never"}))
+    policy = agent.get_permission_policy()
+    assert policy["sandbox_mode"] == "workspace-write"
+    assert policy["approval_policy"] == "never"
+
+
+def test_reconcile_installed_version_delegates_to_update_check() -> None:
+    # codex's version reconciliation IS its update check: reconcile resolves the codex
+    # home and runs _maybe_check_for_codex_update against it. (The update decision logic
+    # itself is covered by the _read_codex_versions-override tests below.)
+    recorded: dict[str, object] = {}
+
+    class _RecordingAgent(CodexAgent):
+        def _resolve_user_codex_home(self, host: object) -> Path:
+            return Path("/sentinel/codex-home")
+
+        def _maybe_check_for_codex_update(self, host: object, user_codex_home: Path, mngr_ctx: object) -> None:
+            recorded["home"] = user_codex_home
+
+    agent = _RecordingAgent.model_construct(agent_config=CodexAgentConfig())
+    agent.reconcile_installed_version(cast(OnlineHostInterface, object()), cast(MngrContext, object()))
+    assert recorded["home"] == Path("/sentinel/codex-home")
+
+
+class _StubHost(FakeHost):
+    """FakeHost that returns scripted results for commands matched by substring.
+
+    Records every command and returns the first ``command_results`` entry whose
+    pattern is a substring of the command; otherwise falls through to the local
+    FakeHost. Lets the host-shell helpers (version probe, codex update,
+    CODEX_HOME resolution) be exercised without a real codex binary.
+    """
+
+    command_results: dict[str, CommandResult] = {}
+    executed_commands: list[str] = []
+
+    def _execute_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.executed_commands.append(command)
+        for pattern, result in self.command_results.items():
+            if pattern in command:
+                return result
+        return super()._execute_command(command, user, cwd, env, timeout_seconds)
+
+
+def _stub_host(
+    host_dir: Path,
+    *,
+    is_local: bool = True,
+    command_results: dict[str, CommandResult] | None = None,
+) -> Any:
+    """Create a _StubHost typed as Any to satisfy OnlineHostInterface parameters in tests."""
+    return _StubHost(host_dir=host_dir, is_local=is_local, command_results=command_results or {})
+
+
+# =============================================================================
 # Construction helpers
 # =============================================================================
 
@@ -117,6 +222,11 @@ def _make_codex_agent(
     is_interactive: bool = False,
     is_auto_approve: bool = False,
 ) -> CodexAgent:
+    # These setup tests run against a real local host where codex is not installed; the
+    # install check is irrelevant to provision setup (files/trust/config) and is covered
+    # separately, so skip it unless a caller opted in explicitly.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir(exist_ok=True)
@@ -199,6 +309,16 @@ def test_resolve_user_codex_home_defaults_to_home_dot_codex(codex_agent: CodexAg
     resolved = codex_agent._resolve_user_codex_home(host)
     assert resolved.name == ".codex"
     assert resolved.parent == Path.home()
+
+
+def test_resolve_user_codex_home_aborts_when_resolution_fails(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """A failed CODEX_HOME-resolution probe is a user-facing error: the shared auth.json can't be located."""
+    host = _stub_host(
+        tmp_path,
+        command_results={"${CODEX_HOME:-$HOME/.codex}": CommandResult(stdout="", stderr="boom", success=False)},
+    )
+    with pytest.raises(PluginMngrError):
+        codex_agent._resolve_user_codex_home(host)
 
 
 def test_resolve_canonical_path_resolves_symlinks(codex_agent: CodexAgent, tmp_path: Path) -> None:
@@ -443,6 +563,17 @@ class _UnknownVersionCodexAgent(_OutdatedCodexAgent):
         return (None, None)
 
 
+class _OutdatedRealUpdateAgent(CodexAgent):
+    """Reports a fixed outdated pair but runs the *real* ``_run_codex_update``.
+
+    Unlike ``_OutdatedCodexAgent`` it does not stub ``_run_codex_update``, so the
+    AUTO path exercises the actual ``codex update`` host call (stubbed on the host).
+    """
+
+    def _read_codex_versions(self, host: object, user_codex_home: Path) -> tuple[str | None, str | None]:
+        return ("0.140.0", "0.141.0")
+
+
 def _check_update(agent: CodexAgent) -> None:
     # user_codex_home is irrelevant in the decision tests (the probe is overridden).
     agent._maybe_check_for_codex_update(agent.host, agent.work_dir, agent.mngr_ctx)
@@ -557,6 +688,31 @@ def test_never_policy_only_notifies(local_provider: LocalProviderInstance, tmp_p
     _check_update(agent)
 
 
+def test_auto_policy_runs_real_codex_update_on_success(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """AUTO with an outdated codex shells out ``codex update`` over the host; a clean exit just logs."""
+    agent = _make_codex_agent(
+        _OutdatedRealUpdateAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
+    )
+    host = _stub_host(tmp_path, command_results={"codex update": CommandResult(stdout="ok", stderr="", success=True)})
+    agent._maybe_check_for_codex_update(host, agent.work_dir, agent.mngr_ctx)
+    assert any("codex update" in command for command in host.executed_commands)
+
+
+def test_auto_policy_real_codex_update_failure_is_not_fatal(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A non-zero ``codex update`` is warned about but never aborts provisioning."""
+    agent = _make_codex_agent(
+        _OutdatedRealUpdateAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
+    )
+    host = _stub_host(
+        tmp_path,
+        command_results={"codex update": CommandResult(stdout="", stderr="updater missing", success=False)},
+    )
+    agent._maybe_check_for_codex_update(host, agent.work_dir, agent.mngr_ctx)
+    assert any("codex update" in command for command in host.executed_commands)
+
+
 def test_read_codex_versions_parses_installed_and_cached(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
@@ -586,6 +742,20 @@ def test_read_codex_versions_latest_is_none_when_cache_absent(
     )
     installed, latest = agent._read_codex_versions(agent.host, agent._resolve_user_codex_home(agent.host))
     assert installed == "1.2.3"
+    assert latest is None
+
+
+def test_read_codex_versions_returns_none_when_probe_fails(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A non-zero version probe (codex absent / shell error) yields (None, None) without raising."""
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig())
+    host = _stub_host(
+        tmp_path,
+        command_results={"--version": CommandResult(stdout="", stderr="no such file", success=False)},
+    )
+    installed, latest = agent._read_codex_versions(host, tmp_path / ".codex")
+    assert installed is None
     assert latest is None
 
 
@@ -761,3 +931,392 @@ def test_waiting_reason_returns_none_when_active(codex_agent: CodexAgent) -> Non
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ACTIVE_MARKER_FILENAME).touch()
     assert _waiting_reason(codex_agent, codex_agent.host) is None
+
+
+# =============================================================================
+# Session adoption
+# =============================================================================
+
+# A codex session id is a UUID; the rollout filename embeds it as
+# ``rollout-<timestamp>-<uuid>.jsonl`` under ``sessions/YYYY/MM/DD/``.
+_SESSION_ID = "01234567-89ab-cdef-0123-456789abcdef"
+_OTHER_SESSION_ID = "fedcba98-7654-3210-fedc-ba9876543210"
+
+
+def _write_rollout(
+    sessions_dir: Path, session_id: str, cwd: str = "/old/work/dir", *, date: str = "2026/06/16"
+) -> Path:
+    """Write a minimal two-record codex rollout under ``sessions_dir`` and return its path."""
+    day_dir = sessions_dir / date
+    day_dir.mkdir(parents=True, exist_ok=True)
+    rollout = day_dir / f"rollout-2026-06-16T12-00-00-{session_id}.jsonl"
+    rollout.write_text(
+        json.dumps({"type": "session_meta", "payload": {"cwd": cwd, "id": session_id}})
+        + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"cwd": cwd}})
+        + "\n"
+    )
+    return rollout
+
+
+def _ctx_with_host_dir(base_ctx: MngrContext, host_dir: Path) -> MngrContext:
+    """Return ``base_ctx`` with its config's ``default_host_dir`` pointed at ``host_dir``."""
+    updated_config = base_ctx.config.model_copy_update(
+        to_update(base_ctx.config.field_ref().default_host_dir, host_dir),
+    )
+    return base_ctx.model_copy_update(to_update(base_ctx.field_ref().config, updated_config))
+
+
+def test_session_id_from_rollout_path_extracts_trailing_uuid() -> None:
+    rollout = Path(f"/x/sessions/2026/06/16/rollout-2026-06-16T12-00-00-{_SESSION_ID}.jsonl")
+    assert _session_id_from_rollout_path(rollout) == _SESSION_ID
+
+
+def test_session_id_from_rollout_path_rejects_names_without_an_id() -> None:
+    with pytest.raises(UserInputError):
+        _session_id_from_rollout_path(Path("/x/sessions/rollout-short.jsonl"))
+
+
+def test_sessions_root_for_rollout_returns_the_sessions_ancestor() -> None:
+    sessions = Path("/x/home/sessions")
+    rollout = sessions / "2026/06/16" / f"rollout-ts-{_SESSION_ID}.jsonl"
+    assert _sessions_root_for_rollout(rollout) == sessions
+
+
+def test_sessions_root_for_rollout_falls_back_to_parent_for_a_flat_layout() -> None:
+    rollout = Path("/x/flat") / f"rollout-ts-{_SESSION_ID}.jsonl"
+    assert _sessions_root_for_rollout(rollout) == Path("/x/flat")
+
+
+def test_user_native_codex_home_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_HOME", "/custom/codex")
+    assert _user_native_codex_home() == Path("/custom/codex")
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    assert _user_native_codex_home() == Path.home() / ".codex"
+
+
+# --- _resolve_adopt_session -------------------------------------------------
+
+
+def test_resolve_adopt_session_by_jsonl_path(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    sessions = tmp_path / "store" / "sessions"
+    rollout = _write_rollout(sessions, _SESSION_ID)
+    session_id, source_dir = _resolve_adopt_session(str(rollout), codex_agent.mngr_ctx, tmp_path / "unused")
+    assert session_id == _SESSION_ID
+    assert source_dir == sessions
+
+
+def test_resolve_adopt_session_rejects_a_missing_jsonl_path(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    with pytest.raises(UserInputError, match="not found"):
+        _resolve_adopt_session(str(tmp_path / "nope.jsonl"), codex_agent.mngr_ctx, tmp_path)
+
+
+def test_resolve_adopt_session_by_id_in_user_native_store(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    user_home = tmp_path / "user_codex"
+    sessions = user_home / "sessions"
+    _write_rollout(sessions, _SESSION_ID)
+    # An empty host dir means no mngr agent stores compete with the user store.
+    ctx = _ctx_with_host_dir(codex_agent.mngr_ctx, tmp_path / "empty_host")
+    session_id, source_dir = _resolve_adopt_session(_SESSION_ID, ctx, user_home)
+    assert session_id == _SESSION_ID
+    assert source_dir == sessions
+
+
+def test_resolve_adopt_session_by_id_in_a_live_agent_store(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    host_dir = tmp_path / "host"
+    agent_sessions = host_dir / "agents" / "agent-1" / "plugin" / "codex" / "home" / "sessions"
+    _write_rollout(agent_sessions, _SESSION_ID)
+    ctx = _ctx_with_host_dir(codex_agent.mngr_ctx, host_dir)
+    session_id, source_dir = _resolve_adopt_session(_SESSION_ID, ctx, tmp_path / "no_user_home")
+    assert session_id == _SESSION_ID
+    assert source_dir == agent_sessions
+
+
+def test_resolve_adopt_session_unknown_id_raises(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    ctx = _ctx_with_host_dir(codex_agent.mngr_ctx, tmp_path / "empty_host")
+    with pytest.raises(UserInputError, match="not found"):
+        _resolve_adopt_session(_SESSION_ID, ctx, tmp_path / "empty_user_home")
+
+
+def test_resolve_adopt_session_ambiguous_id_raises(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    user_home = tmp_path / "user_codex"
+    _write_rollout(user_home / "sessions", _SESSION_ID)
+    host_dir = tmp_path / "host"
+    _write_rollout(host_dir / "agents" / "agent-1" / "plugin" / "codex" / "home" / "sessions", _SESSION_ID)
+    ctx = _ctx_with_host_dir(codex_agent.mngr_ctx, host_dir)
+    with pytest.raises(UserInputError, match="multiple session stores"):
+        _resolve_adopt_session(_SESSION_ID, ctx, user_home)
+
+
+def test_resolve_adopt_session_dedupes_a_coinciding_store(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """The user store and a scanned agent dir pointing at the same physical dir collapse to one match."""
+    user_home = tmp_path / "user_codex"
+    real_sessions = user_home / "sessions"
+    _write_rollout(real_sessions, _SESSION_ID)
+    host_dir = tmp_path / "host"
+    agent_codex_home = host_dir / "agents" / "agent-1" / "plugin" / "codex" / "home"
+    agent_codex_home.mkdir(parents=True, exist_ok=True)
+    # Symlink the agent's sessions/ at the user store, so both candidates resolve to one dir.
+    (agent_codex_home / "sessions").symlink_to(real_sessions)
+    ctx = _ctx_with_host_dir(codex_agent.mngr_ctx, host_dir)
+    session_id, _source_dir = _resolve_adopt_session(_SESSION_ID, ctx, user_home)
+    assert session_id == _SESSION_ID
+
+
+# --- find / rewrite / rebind helpers ----------------------------------------
+
+
+def test_find_latest_session_id_picks_the_newest_rollout(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    sessions = tmp_path / "sessions"
+    older = _write_rollout(sessions, _OTHER_SESSION_ID, date="2026/06/15")
+    newer = _write_rollout(sessions, _SESSION_ID, date="2026/06/16")
+    # Make mtimes deterministic so "newest by mtime" is unambiguous.
+    os.utime(older, (1000, 1000))
+    os.utime(newer, (2000, 2000))
+    assert codex_agent._find_latest_session_id(codex_agent.host, sessions) == _SESSION_ID
+
+
+def test_find_latest_session_id_returns_none_for_an_empty_store(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    empty = tmp_path / "sessions"
+    empty.mkdir()
+    assert codex_agent._find_latest_session_id(codex_agent.host, empty) is None
+
+
+def test_find_adopted_rollout_path_locates_the_session_file(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    sessions = tmp_path / "sessions"
+    rollout = _write_rollout(sessions, _SESSION_ID)
+    found = codex_agent._find_adopted_rollout_path(codex_agent.host, sessions, _SESSION_ID)
+    assert found == rollout
+
+
+def test_find_adopted_rollout_path_returns_none_when_absent(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    assert codex_agent._find_adopted_rollout_path(codex_agent.host, sessions, _SESSION_ID) is None
+
+
+def test_rewrite_rollout_text_cwd_rewrites_every_cwd_record(codex_agent: CodexAgent) -> None:
+    text = (
+        json.dumps({"type": "session_meta", "payload": {"cwd": "/old", "id": _SESSION_ID}})
+        + "\n"
+        + json.dumps({"type": "response_item", "payload": {"text": "hi"}})
+        + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"cwd": "/old"}})
+        + "\n"
+    )
+    rewritten = codex_agent._rewrite_rollout_text_cwd(text, "/new/work", Path("/x.jsonl"))
+    lines = [json.loads(line) for line in rewritten.splitlines()]
+    assert lines[0]["payload"]["cwd"] == "/new/work"
+    assert lines[1] == {"type": "response_item", "payload": {"text": "hi"}}
+    assert lines[2]["payload"]["cwd"] == "/new/work"
+    assert rewritten.endswith("\n")
+
+
+def test_rewrite_rollout_text_cwd_passes_through_malformed_lines(
+    codex_agent: CodexAgent, log_warnings: list[str]
+) -> None:
+    text = "{not json\n" + json.dumps({"type": "turn_context", "payload": {"cwd": "/old"}}) + "\n"
+    rewritten = codex_agent._rewrite_rollout_text_cwd(text, "/new", Path("/x.jsonl"))
+    lines = rewritten.splitlines()
+    assert lines[0] == "{not json"
+    assert json.loads(lines[1])["payload"]["cwd"] == "/new"
+    assert any("unparseable" in m for m in log_warnings)
+
+
+def test_rewrite_rollout_text_cwd_passes_through_non_object_json(codex_agent: CodexAgent) -> None:
+    text = "[1, 2, 3]\n"
+    assert codex_agent._rewrite_rollout_text_cwd(text, "/new", Path("/x.jsonl")) == "[1, 2, 3]\n"
+
+
+def test_rewrite_rollout_text_cwd_preserves_blank_lines(codex_agent: CodexAgent) -> None:
+    text = json.dumps({"type": "turn_context", "payload": {"cwd": "/old"}}) + "\n\n"
+    rewritten = codex_agent._rewrite_rollout_text_cwd(text, "/new", Path("/x.jsonl"))
+    lines = rewritten.splitlines()
+    assert json.loads(lines[0])["payload"]["cwd"] == "/new"
+    assert lines[1] == ""
+
+
+def test_rebind_adopted_rollout_rewrites_cwd(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    sessions = tmp_path / "dest_sessions"
+    _write_rollout(sessions, _SESSION_ID, cwd="/old/dir")
+    codex_agent._rebind_adopted_rollout_cwd(codex_agent.host, sessions, _SESSION_ID)
+    # The rollout cwd now points at this agent's (canonical) work dir.
+    rollout = codex_agent._find_adopted_rollout_path(codex_agent.host, sessions, _SESSION_ID)
+    assert rollout is not None
+    canonical_work = codex_agent._resolve_canonical_path(codex_agent.host, codex_agent.work_dir)
+    for line in rollout.read_text().splitlines():
+        record = json.loads(line)
+        if record["type"] in ("session_meta", "turn_context"):
+            assert record["payload"]["cwd"] == canonical_work
+
+
+def test_write_codex_resume_pointer_writes_root_session(codex_agent: CodexAgent) -> None:
+    codex_agent._write_codex_resume_pointer(codex_agent.host, _SESSION_ID)
+    assert codex_agent._get_root_session_file_path().read_text() == _SESSION_ID
+
+
+def test_rebind_adopted_rollout_cwd_warns_when_rollout_is_missing(
+    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    codex_agent._rebind_adopted_rollout_cwd(codex_agent.host, sessions, _SESSION_ID)
+    assert any("no rollout file" in m for m in log_warnings)
+
+
+# --- adopt_session / on_after_provisioning ----------------------------------
+
+
+@pytest.mark.rsync
+def test_adopt_session_copies_store_and_rebinds(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """--adopt by .jsonl path copies the source sessions tree in and sets the resume pointer."""
+    source_sessions = tmp_path / "source" / "sessions"
+    rollout = _write_rollout(source_sessions, _SESSION_ID, cwd="/old")
+    options = CreateAgentOptions(agent_type=AgentTypeName("codex"), adopt_session=(str(rollout),))
+    codex_agent.on_after_provisioning(codex_agent.host, options, codex_agent.mngr_ctx)
+    assert codex_agent._get_root_session_file_path().read_text() == _SESSION_ID
+    dest_sessions = codex_agent._get_codex_home() / "sessions"
+    assert codex_agent._find_adopted_rollout_path(codex_agent.host, dest_sessions, _SESSION_ID) is not None
+
+
+def test_adopt_session_noop_without_adopt_or_source(codex_agent: CodexAgent) -> None:
+    options = CreateAgentOptions(agent_type=AgentTypeName("codex"))
+    codex_agent.adopt_session(codex_agent.host, options, codex_agent.mngr_ctx)
+    assert not codex_agent._get_root_session_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_adopt_cloned_session_transfers_store_and_rebinds(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """--from transfers the source agent's native session store, then resumes its latest rollout."""
+    source_state_dir = tmp_path / "source_agent_state"
+    source_sessions = source_state_dir / "plugin" / "codex" / "home" / "sessions"
+    _write_rollout(source_sessions, _SESSION_ID, cwd="/old")
+    source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
+    options = CreateAgentOptions(agent_type=AgentTypeName("codex"), source_agent_state_location=source_location)
+    codex_agent.adopt_session(codex_agent.host, options, codex_agent.mngr_ctx)
+    assert codex_agent._get_root_session_file_path().read_text() == _SESSION_ID
+
+
+def test_adopt_cloned_session_warns_when_source_has_no_store(
+    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    source_state_dir = tmp_path / "source_agent_state"
+    source_state_dir.mkdir()
+    source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
+    assert codex_agent._copy_cloned_codex_session(codex_agent.host, source_location) is None
+    assert any("no codex session store" in m for m in log_warnings)
+    assert not codex_agent._get_root_session_file_path().exists()
+
+
+def test_adopt_session_from_clone_with_no_session_warns_and_starts_fresh(
+    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """Integration: ``--from`` a sessionless source warns and starts fresh -- it does NOT raise.
+
+    Exercises the full public adopt path (``adopt_session`` -> the shared ``adopt_sessions``
+    orchestrator -> ``copy_clone``) against a real local host, pinning that a ``--from`` clone
+    whose source has no resumable session is a warning, not a hard error (unlike an explicit
+    ``--adopt`` of an unknown id, which raises).
+    """
+    source_state_dir = tmp_path / "sessionless_source"
+    source_state_dir.mkdir()
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("codex"),
+        source_agent_state_location=HostLocation(host=codex_agent.host, path=source_state_dir),
+    )
+    # Must not raise: a --from workspace clone with no session is tolerated.
+    codex_agent.adopt_session(codex_agent.host, options, codex_agent.mngr_ctx)
+    assert any("no codex session store" in m for m in log_warnings)
+    # No resume pointer -> the agent will start a fresh session on launch.
+    assert not codex_agent._get_root_session_file_path().exists()
+
+
+def test_adopt_cloned_session_warns_when_store_has_no_rollout(
+    codex_agent: CodexAgent, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    source_state_dir = tmp_path / "source_agent_state"
+    (source_state_dir / "plugin" / "codex" / "home" / "sessions").mkdir(parents=True)
+    source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
+    assert codex_agent._copy_cloned_codex_session(codex_agent.host, source_location) is None
+    assert any("no rollout found" in m for m in log_warnings)
+    assert not codex_agent._get_root_session_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_adopt_multiple_sessions_resumes_the_last(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """``--adopt A B`` copies both source trees in and resumes the last named one."""
+    rollout_a = _write_rollout(tmp_path / "a" / "sessions", _SESSION_ID, cwd="/old", date="2026/06/15")
+    rollout_b = _write_rollout(tmp_path / "b" / "sessions", _OTHER_SESSION_ID, cwd="/old", date="2026/06/16")
+    options = CreateAgentOptions(agent_type=AgentTypeName("codex"), adopt_session=(str(rollout_a), str(rollout_b)))
+    codex_agent.adopt_session(codex_agent.host, options, codex_agent.mngr_ctx)
+    # The last named session is the one resumed.
+    assert codex_agent._get_root_session_file_path().read_text() == _OTHER_SESSION_ID
+    # Both rollouts coexist in the destination store (date-nested).
+    dest_sessions = codex_agent._get_codex_home() / "sessions"
+    assert codex_agent._find_adopted_rollout_path(codex_agent.host, dest_sessions, _SESSION_ID) is not None
+    assert codex_agent._find_adopted_rollout_path(codex_agent.host, dest_sessions, _OTHER_SESSION_ID) is not None
+
+
+@pytest.mark.rsync
+def test_adopt_and_from_resumes_the_clone(codex_agent: CodexAgent, tmp_path: Path) -> None:
+    """``--adopt A --from X`` copies the explicit session in but resumes the ``--from`` clone."""
+    explicit_rollout = _write_rollout(tmp_path / "explicit" / "sessions", _SESSION_ID, cwd="/old")
+    source_state_dir = tmp_path / "source_agent_state"
+    source_sessions = source_state_dir / "plugin" / "codex" / "home" / "sessions"
+    clone_rollout = _write_rollout(source_sessions, _OTHER_SESSION_ID, cwd="/old")
+    # Make the explicit ``--adopt`` rollout the *newest* by mtime in the merged dest store
+    # (the worst case for any destination-mtime scan): the clone must still win because its
+    # id is read from the source store before transfer, not picked by ``ls -t`` over the dest.
+    far_future = time.time() + 1_000_000
+    os.utime(clone_rollout, (1000, 1000))
+    os.utime(explicit_rollout, (far_future, far_future))
+    source_location = HostLocation(host=codex_agent.host, path=source_state_dir)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("codex"),
+        adopt_session=(str(explicit_rollout),),
+        source_agent_state_location=source_location,
+    )
+    codex_agent.adopt_session(codex_agent.host, options, codex_agent.mngr_ctx)
+    # The clone wins the resume pointer.
+    assert codex_agent._get_root_session_file_path().read_text() == _OTHER_SESSION_ID
+    # The explicit session is still copied in (available in the session switcher).
+    dest_sessions = codex_agent._get_codex_home() / "sessions"
+    assert codex_agent._find_adopted_rollout_path(codex_agent.host, dest_sessions, _SESSION_ID) is not None
+
+
+# --- on_before_create -------------------------------------------------------
+
+
+def _on_before_create_args(local_provider: LocalProviderInstance, **option_kwargs: Any) -> OnBeforeCreateArgs:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    return OnBeforeCreateArgs(
+        target_host=cast(OnlineHostInterface, host),
+        agent_options=CreateAgentOptions(agent_type=AgentTypeName("codex"), **option_kwargs),
+        create_work_dir=True,
+    )
+
+
+def test_on_before_create_noop_without_adopt(local_provider: LocalProviderInstance) -> None:
+    args = _on_before_create_args(local_provider)
+    assert on_before_create(args, local_provider.mngr_ctx) is None
+
+
+# NOTE: the "on_before_create noops for a non-codex agent type" case is intentionally not
+# tested here. Post-gate, a non-codex create that reaches this hook is necessarily another
+# *adoption-capable* type (the core _validate_session_adoption gate rejects non-adoption types
+# before any on_before_create runs, which run_adopt_session_preflight asserts). That
+# noop-on-type-mismatch is core logic, covered by test_run_adopt_session_preflight_skips_for_
+# nonmatching_type in libs/mngr/.../preservation_test.py; reproducing it here would require
+# registering a fake adoptable agent type in the global class registry (no per-test reset).
+
+
+def test_on_before_create_resolves_a_valid_jsonl_adopt(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    rollout = _write_rollout(tmp_path / "store" / "sessions", _SESSION_ID)
+    args = _on_before_create_args(local_provider, adopt_session=(str(rollout),))
+    assert on_before_create(args, local_provider.mngr_ctx) is None
+
+
+def test_on_before_create_fails_fast_on_a_bad_adopt_id(local_provider: LocalProviderInstance) -> None:
+    args = _on_before_create_args(local_provider, adopt_session=("not-a-real-session-id",))
+    with pytest.raises(UserInputError):
+        on_before_create(args, local_provider.mngr_ctx)
