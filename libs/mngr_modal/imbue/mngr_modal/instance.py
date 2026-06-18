@@ -3386,6 +3386,33 @@ def _substitute_dockerfile_build_args(dockerfile_contents: str, build_args: Sequ
 
 
 # FIXME: this code that breaks dockefiles up into layers really only needs to chunk the layer when we run into a COPY or RUN command (or when we're finished parsing the commands from the file).
+def _group_cached_layer_commands(instructions: Sequence[Mapping[str, object]]) -> list[list[str]]:
+    """Group parsed Dockerfile instructions into per-layer command lists.
+
+    Each non-ARG, non-COMMENT instruction becomes its own layer so Modal can
+    cache it independently. ``ARG`` declarations do not change image content, so
+    rather than emitting a (no-op) layer for each, they are carried forward and
+    prepended to every subsequent layer. This keeps build args in scope for the
+    ``RUN``/``ENV`` instructions that reference them: we issue each layer as a
+    separate ``dockerfile_commands`` build, and Docker's ``ARG`` scope does not
+    persist across those independent builds. Without this, an instruction like
+    ``RUN ... "https://nodejs.org/dist/v${NODE_VERSION}/..."`` in a later layer
+    would expand ``${NODE_VERSION}`` to an empty string and fail.
+    """
+    active_args: list[str] = []
+    command_groups: list[list[str]] = []
+    for instr in instructions:
+        instruction = str(instr["instruction"])
+        if instruction == "COMMENT":
+            continue
+        content = str(instr["content"])
+        if instruction == "ARG":
+            active_args.append(content)
+            continue
+        command_groups.append([*active_args, content])
+    return command_groups
+
+
 #  Doing that should make things quite a bit faster, but without really sacrificing any debuggability (since commands like ENV and ARG don't really do much)
 #  Specifically, we should execute the dockerfile commands together in modal, where each batch ends with a RUN or COPY command (or the end of the file), rather than doing *EVERY* command separately
 def _build_image_from_dockerfile_contents(
@@ -3437,11 +3464,9 @@ def _build_image_from_dockerfile_contents(
             secrets_list = list(secrets)
             expanded_context_dir = context_dir.expanduser() if context_dir is not None else None
             if is_each_layer_cached:
-                for instr in instructions:
-                    if instr["instruction"] == "COMMENT":
-                        continue
+                for layer_commands in _group_cached_layer_commands(instructions):
                     modal_image = modal_image.dockerfile_commands(
-                        [instr["content"]],
+                        layer_commands,
                         context_dir=expanded_context_dir,
                         secrets=secrets_list,
                     )

@@ -1,36 +1,28 @@
-import json
-from datetime import datetime
-from datetime import timezone
-from io import StringIO
+import shutil
 from pathlib import Path
 from typing import Any
-from typing import TypeVar
 from typing import cast
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
-from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
+from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.config import ModalProviderConfig
-from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
-from imbue.mngr_modal.instance import HostRecord
 from imbue.mngr_modal.instance import MODAL_VOLUME_NAME_MAX_LENGTH
-from imbue.mngr_modal.instance import ModalProviderApp
 from imbue.mngr_modal.instance import ModalProviderInstance
-from imbue.mngr_modal.instance import SandboxConfig
 from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
@@ -40,9 +32,13 @@ from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.instance import build_sandbox_tags
 from imbue.mngr_modal.instance import check_host_name_is_unique
 from imbue.mngr_modal.instance import parse_sandbox_tags
+from imbue.mngr_modal.testing import make_host_record
+from imbue.mngr_modal.testing import make_sandbox_with_tags
+from imbue.mngr_modal.testing import make_snapshot
 from imbue.modal_proxy.errors import ModalProxyAuthError
-from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.testing import FakeModalInterface
+from imbue.modal_proxy.testing import FakeSecret
 
 # =============================================================================
 # Unit tests for sandbox tag helper functions
@@ -149,92 +145,34 @@ class ExpiredCredentialsModalProviderInstance(ModalProviderInstance):
         raise ModalProxyAuthError("Token missing or expired")
 
 
-_T = TypeVar("_T", bound=ModalProviderInstance)
-
-
-def _make_modal_provider_with_mocks(
-    mngr_ctx: MngrContext,
-    app_name: str,
-    provider_cls: type[_T],
-    instance_name: str,
-) -> _T:
-    """Create a ModalProviderInstance subclass with mocked Modal dependencies for unit tests.
-
-    Uses model_construct() to bypass Pydantic validation, allowing MagicMock objects
-    to be used in place of real modal.App and modal.Volume instances.
-    """
-    mock_app = MagicMock()
-    mock_app.app_id = "mock-app-id"
-    mock_app.name = app_name
-
-    mock_volume = MagicMock()
-    output_buffer = StringIO()
-    mock_environment_name = f"test-env-{app_name}"
-
-    mock_modal_interface = MagicMock()
-
-    modal_app = ModalProviderApp.model_construct(
-        app_name=app_name,
-        environment_name=mock_environment_name,
-        app=mock_app,
-        volume=mock_volume,
-        close_callback=MagicMock(),
-        get_output_callback=output_buffer.getvalue,
-        modal_interface=mock_modal_interface,
-    )
-
-    config = ModalProviderConfig(
-        app_name=app_name,
-        host_dir=Path("/mngr"),
-        default_sandbox_timeout=300,
-        default_cpu=0.5,
-        default_memory=0.5,
-        is_persistent=False,
-        is_snapshotted_after_create=False,
-    )
-
-    instance = provider_cls.model_construct(
-        name=ProviderInstanceName(instance_name),
-        host_dir=Path("/mngr"),
-        mngr_ctx=mngr_ctx,
-        config=config,
-        modal_app=modal_app,
-    )
-    return instance
-
-
-def make_modal_provider_with_mocks(mngr_ctx: MngrContext, app_name: str) -> ModalProviderInstance:
-    """Create a ModalProviderInstance with mocked Modal dependencies for unit tests."""
-    return _make_modal_provider_with_mocks(mngr_ctx, app_name, ModalProviderInstance, "modal-test")
-
-
-def make_expired_credentials_modal_provider(
-    mngr_ctx: MngrContext, app_name: str
-) -> ExpiredCredentialsModalProviderInstance:
-    """Create an ExpiredCredentialsModalProviderInstance for testing AuthError handling."""
-    return _make_modal_provider_with_mocks(
-        mngr_ctx, app_name, ExpiredCredentialsModalProviderInstance, "modal-test-expired"
-    )
-
-
 @pytest.fixture
-def modal_provider(temp_mngr_ctx: MngrContext, mngr_test_id: str) -> ModalProviderInstance:
-    """Create a ModalProviderInstance with mocked Modal for unit/integration tests."""
-    app_name = f"{MODAL_TEST_APP_PREFIX}{mngr_test_id}"
-    return make_modal_provider_with_mocks(temp_mngr_ctx, app_name)
+def modal_provider(testing_provider: ModalProviderInstance) -> ModalProviderInstance:
+    """A ModalProviderInstance backed by FakeModalInterface.
+
+    Alias of ``testing_provider`` kept for the many property and
+    ``_parse_build_args`` tests that only need a fully-constructed instance.
+    """
+    return testing_provider
 
 
 @pytest.fixture
 def expired_credentials_modal_provider(
-    temp_mngr_ctx: MngrContext, mngr_test_id: str
+    testing_provider: ModalProviderInstance,
 ) -> ExpiredCredentialsModalProviderInstance:
-    """Create an ExpiredCredentialsModalProviderInstance for testing AuthError handling.
+    """An ExpiredCredentialsModalProviderInstance for testing AuthError handling.
 
-    This provider raises modal.exception.AuthError when API calls are made,
-    simulating invalid/expired credentials.
+    Re-wraps a real ``testing_provider``'s validated fields in the subclass that
+    raises ``ModalProxyAuthError`` from ``_get_modal_app``, simulating
+    invalid/expired credentials. Everything except the Modal-app accessor is a
+    real fake, so the @handle_modal_auth_error conversion path runs end-to-end.
     """
-    app_name = f"{MODAL_TEST_APP_PREFIX}{mngr_test_id}"
-    return make_expired_credentials_modal_provider(temp_mngr_ctx, app_name)
+    return ExpiredCredentialsModalProviderInstance(
+        name=testing_provider.name,
+        host_dir=testing_provider.host_dir,
+        mngr_ctx=testing_provider.mngr_ctx,
+        config=testing_provider.config,
+        modal_app=testing_provider.modal_app,
+    )
 
 
 # =============================================================================
@@ -333,243 +271,163 @@ def test_handle_modal_auth_error_decorator_converts_auth_error_to_modal_auth_err
 # =============================================================================
 
 
-def _make_host_record(
-    host_id: HostId,
-    host_name: str = "test-host",
-    snapshots: list[SnapshotRecord] | None = None,
-    failure_reason: str | None = None,
-) -> HostRecord:
-    """Create a HostRecord for testing."""
-    now = datetime.now(timezone.utc)
-    certified_data = CertifiedHostData(
-        host_id=str(host_id),
-        host_name=host_name,
-        user_tags={},
-        snapshots=snapshots or [],
-        failure_reason=failure_reason,
-        created_at=now,
-        updated_at=now,
-    )
-    return HostRecord(
-        ssh_host="test.host",
-        ssh_port=22,
-        ssh_host_public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ...",
-        config=SandboxConfig(cpu=1.0, memory=1.0),
-        certified_host_data=certified_data,
-    )
-
-
-def _make_snapshot_record(name: str = "initial") -> SnapshotRecord:
-    """Create a SnapshotRecord for testing."""
-    # The id is now the Modal image ID directly
-    return SnapshotRecord(
-        id="im-abc123",
-        name=name,
-        created_at="2026-01-01T00:00:00Z",
-    )
-
-
 def test_list_all_host_records_returns_empty_when_volume_empty(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """_list_all_host_records should return empty list when volume has no host records."""
-    # Mock volume.listdir to return empty
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.return_value = []
+    """_list_all_host_records returns empty list when the volume has no host records.
 
-    host_records = modal_provider._list_all_host_records(modal_provider.mngr_ctx.concurrency_group)
-
+    The fake volume has no /hosts/ directory until something is written, so this
+    also covers the "directory missing" path (listdir raises NotFound, swallowed).
+    """
+    host_records = testing_provider._list_all_host_records(testing_provider.mngr_ctx.concurrency_group)
     assert host_records == []
-    mock_volume.listdir.assert_called_once_with("/hosts/")
-
-
-def test_list_all_host_records_returns_empty_when_hosts_dir_missing(
-    modal_provider: ModalProviderInstance,
-) -> None:
-    """_list_all_host_records should return empty list when /hosts/ directory does not exist."""
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.side_effect = ModalProxyNotFoundError("Not found")
-
-    host_records = modal_provider._list_all_host_records(modal_provider.mngr_ctx.concurrency_group)
-
-    assert host_records == []
-    mock_volume.listdir.assert_called_once_with("/hosts/")
 
 
 def test_list_all_host_records_returns_records_from_volume(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """_list_all_host_records should return host records from volume."""
+    """_list_all_host_records returns the host records that were written to the volume."""
     host_id = HostId.generate()
-    host_record = _make_host_record(host_id)
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="round-tripped"))
 
-    # Mock volume.listdir to return a file entry
-    mock_entry = MagicMock()
-    mock_entry.path = f"hosts/{host_id}.json"
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.return_value = [mock_entry]
+    host_records = testing_provider._list_all_host_records(testing_provider.mngr_ctx.concurrency_group)
 
-    # Mock _read_host_record to return the host record
-    with patch.object(modal_provider, "_read_host_record", return_value=host_record):
-        host_records = modal_provider._list_all_host_records(modal_provider.mngr_ctx.concurrency_group)
+    assert len(host_records) == 1
+    assert host_records[0].certified_host_data.host_id == str(host_id)
+    assert host_records[0].certified_host_data.host_name == "round-tripped"
 
+
+def test_list_all_host_records_skips_non_json_files(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """_list_all_host_records ignores non-.json entries under /hosts/."""
+    host_id = HostId.generate()
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="real-host"))
+
+    # Write a stray non-json file and a stray subdirectory alongside the record.
+    volume = testing_provider.get_state_volume()
+    volume.write_files({"/hosts/readme.txt": b"not a record", "/hosts/subdir/inner.json": b"{}"})
+
+    host_records = testing_provider._list_all_host_records(testing_provider.mngr_ctx.concurrency_group)
+
+    # Only the .json host record is returned; readme.txt and the subdir are skipped.
     assert len(host_records) == 1
     assert host_records[0].certified_host_data.host_id == str(host_id)
 
 
-def test_list_all_host_records_skips_non_json_files(
-    modal_provider: ModalProviderInstance,
+def test_discover_hosts_running_sandbox_surfaces_running_state_from_record(
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
 ) -> None:
-    """_list_all_host_records should skip non-.json files."""
-    # Mock volume.listdir to return both .json and non-.json files
-    mock_entry_json = MagicMock()
-    mock_entry_json.path = f"hosts/{HostId.generate()}.json"
-    mock_entry_txt = MagicMock()
-    mock_entry_txt.path = "hosts/readme.txt"
-    mock_entry_dir = MagicMock()
-    mock_entry_dir.path = "hosts/subdir"
+    """A host with a live sandbox is reported RUNNING regardless of its record's snapshots.
 
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.return_value = [mock_entry_json, mock_entry_txt, mock_entry_dir]
-
-    # Mock _read_host_record - only called for .json files
-    with patch.object(modal_provider, "_read_host_record", return_value=None) as mock_read:
-        modal_provider._list_all_host_records(modal_provider.mngr_ctx.concurrency_group)
-        # Should only have tried to read the .json file
-        assert mock_read.call_count == 1
-
-
-def test_discover_hosts_includes_running_sandboxes_without_host_records(
-    modal_provider: ModalProviderInstance,
-) -> None:
-    """discover_hosts should include running sandboxes even if host record hasn't propagated."""
+    The host record has no snapshots (so without the sandbox it would look
+    DESTROYED), but the running tagged sandbox drives the discovery state to
+    RUNNING. This exercises the sandbox-present branch of
+    _construct_host_from_record_for_discovery.
+    """
     host_id = HostId.generate()
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="live-host", snapshots=[]))
+    make_sandbox_with_tags(testing_modal, host_id, "live-host")
 
-    # Mock _list_sandboxes to return a sandbox
-    mock_sandbox = MagicMock()
-    mock_sandbox.get_tags.return_value = {
-        TAG_HOST_ID: str(host_id),
-        TAG_HOST_NAME: "test-host",
-    }
-
-    # Mock _list_all_host_records to return empty (eventual consistency scenario)
-    # Mock _create_host_from_sandbox to return a mock host
-    mock_host = MagicMock()
-    mock_host.id = host_id
-    mock_host.get_name.return_value = HostName("test-host")
-    mock_host.get_state.return_value = HostState.RUNNING
-
-    with (
-        patch.object(modal_provider, "_list_sandboxes", return_value=[mock_sandbox]),
-        patch.object(modal_provider, "_list_all_host_records", return_value=[]),
-        patch.object(modal_provider, "_create_host_from_sandbox", return_value=mock_host),
-    ):
-        hosts = modal_provider.discover_hosts(cg=modal_provider.mngr_ctx.concurrency_group)
+    hosts = testing_provider.discover_hosts(cg=testing_provider.mngr_ctx.concurrency_group)
 
     assert len(hosts) == 1
     assert hosts[0].host_id == host_id
+    assert hosts[0].host_state == HostState.RUNNING
+
+
+def test_discover_hosts_skips_running_sandbox_without_host_record(
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
+) -> None:
+    """A running sandbox with no host record on the volume is not surfaced.
+
+    _create_host_from_sandbox re-reads the host record from the volume and
+    returns None when it is absent (the host cannot be reconstructed without
+    its SSH metadata), so discover_hosts reports no hosts. This is the real
+    observable behavior of the eventual-consistency path -- the prior version
+    mocked _create_host_from_sandbox to return a host and so never exercised
+    the missing-record return.
+    """
+    host_id = HostId.generate()
+    make_sandbox_with_tags(testing_modal, host_id, "orphan-sandbox")
+
+    hosts = testing_provider.discover_hosts(cg=testing_provider.mngr_ctx.concurrency_group)
+
+    assert hosts == []
 
 
 def test_discover_hosts_returns_stopped_hosts_with_snapshots(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """discover_hosts should return stopped hosts (no sandbox, has snapshots)."""
+    """discover_hosts returns a host that was cleanly stopped (no sandbox, has snapshots) as STOPPED.
+
+    The record carries stop_reason="STOPPED" (as a user-stopped host would),
+    so with snapshots present and no live sandbox the derived discovery state
+    is STOPPED.
+    """
     host_id = HostId.generate()
-    snapshot = _make_snapshot_record("initial")
-    host_record = _make_host_record(host_id, snapshots=[snapshot])
+    record = make_host_record(host_id=host_id, host_name="stopped-host", snapshots=[make_snapshot()])
+    stopped_data = record.certified_host_data.model_copy_update(
+        to_update(record.certified_host_data.field_ref().stop_reason, HostState.STOPPED.value)
+    )
+    record = record.model_copy_update(to_update(record.field_ref().certified_host_data, stopped_data))
+    testing_provider._write_host_record(record)
 
-    # Mock _list_sandboxes to return empty (no running sandboxes)
-    # Mock _list_all_host_records to return the host record with a snapshot
-    # Mock _create_host_from_host_record to return a mock host
-    mock_host = MagicMock()
-    mock_host.id = host_id
-    mock_host.get_name.return_value = HostName("test-host")
-    mock_host.get_state.return_value = HostState.STOPPED
-
-    with (
-        patch.object(modal_provider, "_list_sandboxes", return_value=[]),
-        patch.object(modal_provider, "_list_all_host_records", return_value=[host_record]),
-        patch.object(modal_provider, "_create_host_from_host_record", return_value=mock_host),
-    ):
-        hosts = modal_provider.discover_hosts(cg=modal_provider.mngr_ctx.concurrency_group)
+    hosts = testing_provider.discover_hosts(cg=testing_provider.mngr_ctx.concurrency_group)
 
     assert len(hosts) == 1
     assert hosts[0].host_id == host_id
+    assert hosts[0].host_state == HostState.STOPPED
 
 
 def test_discover_hosts_excludes_destroyed_hosts_by_default(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """discover_hosts should exclude destroyed hosts (no sandbox, no snapshots) by default."""
+    """discover_hosts excludes destroyed hosts (no sandbox, no snapshots) by default."""
     host_id = HostId.generate()
-    # Host record with no snapshots = destroyed
-    host_record = _make_host_record(host_id, snapshots=[])
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="destroyed", snapshots=[]))
 
-    with (
-        patch.object(modal_provider, "_list_sandboxes", return_value=[]),
-        patch.object(modal_provider, "_list_all_host_records", return_value=[host_record]),
-    ):
-        hosts = modal_provider.discover_hosts(cg=modal_provider.mngr_ctx.concurrency_group, include_destroyed=False)
+    hosts = testing_provider.discover_hosts(cg=testing_provider.mngr_ctx.concurrency_group, include_destroyed=False)
 
     assert len(hosts) == 0
 
 
 def test_discover_hosts_includes_destroyed_hosts_when_requested(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """discover_hosts(include_destroyed=True) should include destroyed hosts."""
+    """discover_hosts(include_destroyed=True) includes destroyed hosts in DESTROYED state."""
     host_id = HostId.generate()
-    # Host record with no snapshots = destroyed
-    host_record = _make_host_record(host_id, snapshots=[])
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="destroyed", snapshots=[]))
 
-    mock_host = MagicMock()
-    mock_host.id = host_id
-    mock_host.get_name.return_value = HostName("test-host")
-    mock_host.get_state.return_value = HostState.DESTROYED
-
-    with (
-        patch.object(modal_provider, "_list_sandboxes", return_value=[]),
-        patch.object(modal_provider, "_list_all_host_records", return_value=[host_record]),
-        patch.object(modal_provider, "_create_host_from_host_record", return_value=mock_host),
-    ):
-        hosts = modal_provider.discover_hosts(cg=modal_provider.mngr_ctx.concurrency_group, include_destroyed=True)
+    hosts = testing_provider.discover_hosts(cg=testing_provider.mngr_ctx.concurrency_group, include_destroyed=True)
 
     assert len(hosts) == 1
     assert hosts[0].host_id == host_id
+    assert hosts[0].host_state == HostState.DESTROYED
 
 
 def test_discover_hosts_prefers_running_sandbox_over_host_record(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
 ) -> None:
-    """discover_hosts should use sandbox for running hosts, not host record."""
+    """discover_hosts derives RUNNING state from a live sandbox even when a stale record exists.
+
+    Both a running tagged sandbox and a (stale, snapshot-only) host record are
+    present for the same host_id. The running sandbox must win, so the host is
+    reported as RUNNING rather than STOPPED.
+    """
     host_id = HostId.generate()
-    snapshot = _make_snapshot_record("initial")
-    host_record = _make_host_record(host_id, snapshots=[snapshot])
+    record = make_host_record(host_id=host_id, host_name="running-host", snapshots=[make_snapshot()])
+    testing_provider._write_host_record(record)
+    make_sandbox_with_tags(testing_modal, host_id, "running-host")
 
-    # Mock sandbox with same host_id
-    mock_sandbox = MagicMock()
-    mock_sandbox.get_tags.return_value = {
-        TAG_HOST_ID: str(host_id),
-        TAG_HOST_NAME: "test-host",
-    }
-
-    mock_host = MagicMock()
-    mock_host.id = host_id
-    mock_host.get_name.return_value = HostName("test-host")
-    mock_host.get_state.return_value = HostState.RUNNING
-
-    with (
-        patch.object(modal_provider, "_list_sandboxes", return_value=[mock_sandbox]),
-        patch.object(modal_provider, "_list_all_host_records", return_value=[host_record]),
-        patch.object(modal_provider, "_create_host_from_sandbox", return_value=mock_host) as mock_from_sandbox,
-        patch.object(modal_provider, "_create_host_from_host_record") as mock_from_record,
-    ):
-        hosts = modal_provider.discover_hosts(cg=modal_provider.mngr_ctx.concurrency_group)
+    hosts = testing_provider.discover_hosts(cg=testing_provider.mngr_ctx.concurrency_group)
 
     assert len(hosts) == 1
-    # Should use sandbox, not host record
-    mock_from_sandbox.assert_called_once()
-    mock_from_record.assert_not_called()
+    assert hosts[0].host_id == host_id
+    assert hosts[0].host_state == HostState.RUNNING
 
 
 # =============================================================================
@@ -923,37 +781,21 @@ def test_parse_volume_spec_invalid_empty_parts() -> None:
 
 def make_modal_provider_with_config_defaults(
     mngr_ctx: MngrContext,
+    modal_interface: FakeModalInterface,
     app_name: str,
     default_gpu: str | None = None,
     default_image: str | None = None,
     default_region: str | None = None,
 ) -> ModalProviderInstance:
-    """Create a ModalProviderInstance with custom config defaults for testing."""
-    mock_app = MagicMock()
-    mock_app.app_id = "mock-app-id"
-    mock_app.name = app_name
+    """Create a ModalProviderInstance with custom config defaults for testing.
 
-    mock_volume = MagicMock()
-    output_buffer = StringIO()
-
-    # Create a mock environment name for testing
-    mock_environment_name = f"test-env-{app_name}"
-
-    mock_modal_interface = MagicMock()
-
-    modal_app = ModalProviderApp.model_construct(
-        app_name=app_name,
-        environment_name=mock_environment_name,
-        app=mock_app,
-        volume=mock_volume,
-        close_callback=MagicMock(),
-        get_output_callback=output_buffer.getvalue,
-        modal_interface=mock_modal_interface,
-    )
-
+    Builds through the shared backend factory against a FakeModalInterface so
+    the instance is a real fake (no MagicMock app/volume).
+    """
     config = ModalProviderConfig(
         app_name=app_name,
-        host_dir=Path("/mngr"),
+        user_id=UserId("test-user"),
+        host_dir=mngr_ctx.config.default_host_dir,
         default_sandbox_timeout=300,
         default_cpu=0.5,
         default_memory=0.5,
@@ -961,22 +803,26 @@ def make_modal_provider_with_config_defaults(
         default_image=default_image,
         default_region=default_region,
         is_persistent=False,
+        is_snapshotted_after_create=False,
     )
-
-    instance = ModalProviderInstance.model_construct(
-        name=ProviderInstanceName("modal-test"),
-        host_dir=Path("/mngr"),
-        mngr_ctx=mngr_ctx,
-        config=config,
-        modal_app=modal_app,
+    instance = ModalProviderBackend._construct_modal_provider(
+        ProviderInstanceName("modal-test"),
+        config,
+        mngr_ctx,
+        modal_interface,
     )
+    if not isinstance(instance, ModalProviderInstance):
+        raise MngrError(f"Expected ModalProviderInstance, got {type(instance).__name__}")
     return instance
 
 
-def test_parse_build_args_uses_config_default_gpu(temp_mngr_ctx: MngrContext) -> None:
+def test_parse_build_args_uses_config_default_gpu(
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
+) -> None:
     """When default_gpu is set in config, _parse_build_args should use it."""
     provider = make_modal_provider_with_config_defaults(
         temp_mngr_ctx,
+        testing_modal,
         app_name="test-app",
         default_gpu="h100",
     )
@@ -988,10 +834,13 @@ def test_parse_build_args_uses_config_default_gpu(temp_mngr_ctx: MngrContext) ->
     assert config.gpu == "h100"
 
 
-def test_parse_build_args_uses_config_default_image(temp_mngr_ctx: MngrContext) -> None:
+def test_parse_build_args_uses_config_default_image(
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
+) -> None:
     """When default_image is set in config, _parse_build_args should use it."""
     provider = make_modal_provider_with_config_defaults(
         temp_mngr_ctx,
+        testing_modal,
         app_name="test-app",
         default_image="python:3.11-slim",
     )
@@ -999,10 +848,13 @@ def test_parse_build_args_uses_config_default_image(temp_mngr_ctx: MngrContext) 
     assert config.image == "python:3.11-slim"
 
 
-def test_parse_build_args_uses_config_default_region(temp_mngr_ctx: MngrContext) -> None:
+def test_parse_build_args_uses_config_default_region(
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
+) -> None:
     """When default_region is set in config, _parse_build_args should use it."""
     provider = make_modal_provider_with_config_defaults(
         temp_mngr_ctx,
+        testing_modal,
         app_name="test-app",
         default_region="us-east",
     )
@@ -1010,10 +862,13 @@ def test_parse_build_args_uses_config_default_region(temp_mngr_ctx: MngrContext)
     assert config.region == "us-east"
 
 
-def test_parse_build_args_uses_all_config_defaults(temp_mngr_ctx: MngrContext) -> None:
+def test_parse_build_args_uses_all_config_defaults(
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
+) -> None:
     """When all defaults are set in config, _parse_build_args should use them."""
     provider = make_modal_provider_with_config_defaults(
         temp_mngr_ctx,
+        testing_modal,
         app_name="test-app",
         default_gpu="a100",
         default_image="ubuntu:22.04",
@@ -1025,10 +880,13 @@ def test_parse_build_args_uses_all_config_defaults(temp_mngr_ctx: MngrContext) -
     assert config.region == "eu-west"
 
 
-def test_parse_build_args_explicit_args_override_config_defaults(temp_mngr_ctx: MngrContext) -> None:
+def test_parse_build_args_explicit_args_override_config_defaults(
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
+) -> None:
     """Explicit build args should override config defaults."""
     provider = make_modal_provider_with_config_defaults(
         temp_mngr_ctx,
+        testing_modal,
         app_name="test-app",
         default_gpu="h100",
         default_image="python:3.11-slim",
@@ -1077,61 +935,69 @@ def test_modal_provider_config_user_id_can_be_set() -> None:
 # =============================================================================
 
 
-def test_build_modal_secrets_from_env_empty_list() -> None:
+def test_build_modal_secrets_from_env_empty_list(testing_modal: FakeModalInterface) -> None:
     """Empty list of env vars should return empty list of secrets."""
-    mock_iface = MagicMock()
-    result = _build_modal_secrets_from_env([], mock_iface)
+    result = _build_modal_secrets_from_env([], testing_modal)
     assert result == []
 
 
-def test_build_modal_secrets_from_env_with_set_vars(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Should create secrets from environment variables that are set."""
+def test_build_modal_secrets_from_env_with_set_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    testing_modal: FakeModalInterface,
+) -> None:
+    """Should create a single Modal secret carrying every set env var's value."""
     monkeypatch.setenv("TEST_SECRET_1", "value1")
     monkeypatch.setenv("TEST_SECRET_2", "value2")
 
-    mock_iface = MagicMock()
-    mock_iface.secret_from_dict.return_value = MagicMock()
-    result = _build_modal_secrets_from_env(["TEST_SECRET_1", "TEST_SECRET_2"], mock_iface)
+    result = _build_modal_secrets_from_env(["TEST_SECRET_1", "TEST_SECRET_2"], testing_modal)
 
-    # All vars are combined into one Secret
+    # All vars are combined into one Secret holding the exact key-value mapping.
     assert len(result) == 1
-    mock_iface.secret_from_dict.assert_called_once()
+    secret = result[0]
+    assert isinstance(secret, FakeSecret)
+    assert secret.values == {"TEST_SECRET_1": "value1", "TEST_SECRET_2": "value2"}
 
 
-def test_build_modal_secrets_from_env_missing_var_raises_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_modal_secrets_from_env_missing_var_raises_error(
+    monkeypatch: pytest.MonkeyPatch,
+    testing_modal: FakeModalInterface,
+) -> None:
     """Should raise MngrError when an environment variable is not set."""
     monkeypatch.delenv("NONEXISTENT_VAR", raising=False)
 
-    mock_iface = MagicMock()
     with pytest.raises(MngrError) as exc_info:
-        _build_modal_secrets_from_env(["NONEXISTENT_VAR"], mock_iface)
+        _build_modal_secrets_from_env(["NONEXISTENT_VAR"], testing_modal)
 
     assert "Environment variable(s) not set for secrets" in str(exc_info.value)
     assert "NONEXISTENT_VAR" in str(exc_info.value)
 
 
-def test_build_modal_secrets_from_env_multiple_missing_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_modal_secrets_from_env_multiple_missing_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    testing_modal: FakeModalInterface,
+) -> None:
     """Should report all missing environment variables in the error."""
     monkeypatch.delenv("MISSING_VAR_1", raising=False)
     monkeypatch.delenv("MISSING_VAR_2", raising=False)
 
-    mock_iface = MagicMock()
     with pytest.raises(MngrError) as exc_info:
-        _build_modal_secrets_from_env(["MISSING_VAR_1", "MISSING_VAR_2"], mock_iface)
+        _build_modal_secrets_from_env(["MISSING_VAR_1", "MISSING_VAR_2"], testing_modal)
 
     error_message = str(exc_info.value)
     assert "MISSING_VAR_1" in error_message
     assert "MISSING_VAR_2" in error_message
 
 
-def test_build_modal_secrets_from_env_partial_missing_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_modal_secrets_from_env_partial_missing_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    testing_modal: FakeModalInterface,
+) -> None:
     """Should raise error listing only the missing vars when some are set."""
     monkeypatch.setenv("SET_VAR", "value")
     monkeypatch.delenv("MISSING_VAR", raising=False)
 
-    mock_iface = MagicMock()
     with pytest.raises(MngrError) as exc_info:
-        _build_modal_secrets_from_env(["SET_VAR", "MISSING_VAR"], mock_iface)
+        _build_modal_secrets_from_env(["SET_VAR", "MISSING_VAR"], testing_modal)
 
     error_message = str(exc_info.value)
     assert "MISSING_VAR" in error_message
@@ -1143,54 +1009,63 @@ def test_build_modal_secrets_from_env_partial_missing_vars(monkeypatch: pytest.M
 # =============================================================================
 
 
+class _CapturingHost:
+    """Test double that captures content written via write_text_file.
+
+    Stands in for a Host purely to capture the shutdown script the provider
+    writes; it is not a Modal mock. Records both the content and the mode per
+    path so tests can assert on the generated script and its permissions.
+    """
+
+    host_dir = Path("/mngr")
+
+    def __init__(self) -> None:
+        self.written_content: dict[str, str] = {}
+        self.written_modes: dict[str, str] = {}
+
+    def write_text_file(self, path: Path, content: str, mode: str | None = None) -> None:
+        self.written_content[str(path)] = content
+        if mode:
+            self.written_modes[str(path)] = mode
+
+
 def test_create_shutdown_script_generates_correct_content(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """_create_shutdown_script should generate a script with correct content."""
-    # Create a simple mock host that captures the written content
-    written_content: dict[str, str] = {}
-    written_modes: dict[str, str] = {}
+    host = _CapturingHost()
 
-    class MockHost:
-        host_dir = Path("/mngr")
-
-        def write_text_file(self, path: Path, content: str, mode: str | None = None) -> None:
-            written_content[str(path)] = content
-            if mode:
-                written_modes[str(path)] = mode
-
-    mock_host = MockHost()
-
-    # Create a mock sandbox with get_object_id()
-    mock_sandbox = MagicMock()
-    mock_sandbox.get_object_id.return_value = "sb-test-sandbox-123"
-
-    # Call the method with a test URL
+    # Use a real testing sandbox so its get_object_id() returns a deterministic id
+    # (no MagicMock repr risk in the rendered script).
     host_id = HostId.generate()
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "shutdown-host")
+    sandbox_id = sandbox.get_object_id()
+
     snapshot_url = "https://test--app-snapshot-and-shutdown.modal.run"
 
-    modal_provider._create_shutdown_script(
-        cast(Any, mock_host),
-        mock_sandbox,
+    testing_provider._create_shutdown_script(
+        cast(Any, host),
+        sandbox,
         host_id,
         snapshot_url,
     )
 
     # Verify the script was written to the correct path
     expected_path = "/mngr/commands/shutdown.sh"
-    assert expected_path in written_content
+    assert expected_path in host.written_content
 
     # Verify the script content
-    script = written_content[expected_path]
+    script = host.written_content[expected_path]
     assert "#!/bin/bash" in script
     assert snapshot_url in script
-    assert "sb-test-sandbox-123" in script
+    assert sandbox_id in script
     assert str(host_id) in script
     assert "curl" in script
     assert "Content-Type: application/json" in script
 
     # Verify the mode is executable
-    assert written_modes[expected_path] == "755"
+    assert host.written_modes[expected_path] == "755"
 
 
 # =============================================================================
@@ -1199,9 +1074,9 @@ def test_create_shutdown_script_generates_correct_content(
 
 
 def test_persist_agent_data_writes_to_volume(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """persist_agent_data should write agent data as JSON to the volume."""
+    """persist_agent_data should write agent data as JSON readable back from the volume."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     agent_data = {
@@ -1211,28 +1086,20 @@ def test_persist_agent_data_writes_to_volume(
         "command": "echo hello",
     }
 
-    # Track what was written to the volume via write_files
-    written_files: dict[str, bytes] = {}
+    testing_provider.persist_agent_data(host_id, agent_data)
 
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.write_files.side_effect = lambda files: written_files.update(files)
-
-    modal_provider.persist_agent_data(host_id, agent_data)
-
-    # Verify the file was written to the correct path
-    expected_path = f"/hosts/{host_id}/{agent_id}.json"
-    assert expected_path in written_files
-
-    # Verify the content is valid JSON with expected fields
-    uploaded_content = json.loads(written_files[expected_path].decode("utf-8"))
-    assert uploaded_content["id"] == str(agent_id)
-    assert uploaded_content["name"] == "test-agent"
-    assert uploaded_content["type"] == "generic"
-    assert uploaded_content["command"] == "echo hello"
+    # Read the persisted record straight back off the fake volume.
+    persisted = testing_provider.list_persisted_agent_data_for_host(host_id)
+    assert len(persisted) == 1
+    stored = persisted[0]
+    assert stored["id"] == str(agent_id)
+    assert stored["name"] == "test-agent"
+    assert stored["type"] == "generic"
+    assert stored["command"] == "echo hello"
 
 
 def test_persist_agent_data_without_id_logs_warning_and_returns(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
     """persist_agent_data should warn and return early if agent_data has no id field."""
     host_id = HostId.generate()
@@ -1241,46 +1108,44 @@ def test_persist_agent_data_without_id_logs_warning_and_returns(
         "type": "generic",
     }
 
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-
     # Should not raise, just return early
-    modal_provider.persist_agent_data(host_id, agent_data)
+    testing_provider.persist_agent_data(host_id, agent_data)
 
-    # Verify the volume was never accessed
-    mock_volume.write_files.assert_not_called()
+    # Nothing was persisted to the volume.
+    assert testing_provider.list_persisted_agent_data_for_host(host_id) == []
 
 
 def test_remove_persisted_agent_data_removes_file(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """remove_persisted_agent_data should remove the agent file from the volume."""
+    """remove_persisted_agent_data should remove the agent record from the volume."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
+    testing_provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "a", "type": "claude"})
+    assert len(testing_provider.list_persisted_agent_data_for_host(host_id)) == 1
 
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
+    testing_provider.remove_persisted_agent_data(host_id, agent_id)
 
-    modal_provider.remove_persisted_agent_data(host_id, agent_id)
-
-    expected_path = f"/hosts/{host_id}/{agent_id}.json"
-    mock_volume.remove_file.assert_called_once_with(expected_path, recursive=False)
+    assert testing_provider.list_persisted_agent_data_for_host(host_id) == []
 
 
 def test_remove_persisted_agent_data_handles_file_not_found(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """remove_persisted_agent_data should silently handle FileNotFoundError."""
+    """remove_persisted_agent_data should silently no-op when the agent file is absent.
+
+    Removing an agent that was never persisted exercises the real
+    ModalProxyNotFoundError/FileNotFoundError handling in the production method
+    against the fake volume. The observable result is that it returns without
+    raising and the host still has no persisted agents.
+    """
     host_id = HostId.generate()
     agent_id = AgentId.generate()
 
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.remove_file.side_effect = FileNotFoundError("File not found")
+    # No record was ever written, so removal must not raise.
+    testing_provider.remove_persisted_agent_data(host_id, agent_id)
 
-    # Should not raise
-    modal_provider.remove_persisted_agent_data(host_id, agent_id)
-
-    # Verify the method was called
-    expected_path = f"/hosts/{host_id}/{agent_id}.json"
-    mock_volume.remove_file.assert_called_once_with(expected_path, recursive=False)
+    assert testing_provider.list_persisted_agent_data_for_host(host_id) == []
 
 
 # =============================================================================
@@ -1288,69 +1153,39 @@ def test_remove_persisted_agent_data_handles_file_not_found(
 # =============================================================================
 
 
-def _make_modal_provider_without_host_volume(
-    mngr_ctx: MngrContext,
-    app_name: str,
-) -> ModalProviderInstance:
-    """Create a ModalProviderInstance with is_host_volume_created=False."""
-    mock_app = MagicMock()
-    mock_app.app_id = "mock-app-id"
-    mock_app.name = app_name
-
-    mock_volume = MagicMock()
-    output_buffer = StringIO()
-    mock_environment_name = f"test-env-{app_name}"
-
-    mock_modal_interface = MagicMock()
-
-    modal_app = ModalProviderApp.model_construct(
-        app_name=app_name,
-        environment_name=mock_environment_name,
-        app=mock_app,
-        volume=mock_volume,
-        close_callback=MagicMock(),
-        get_output_callback=output_buffer.getvalue,
-        modal_interface=mock_modal_interface,
-    )
-
-    config = ModalProviderConfig(
-        app_name=app_name,
-        host_dir=Path("/mngr"),
-        default_sandbox_timeout=300,
-        default_cpu=0.5,
-        default_memory=0.5,
-        is_persistent=False,
-        is_snapshotted_after_create=False,
-        is_host_volume_created=False,
-    )
-
-    return ModalProviderInstance.model_construct(
-        name=ProviderInstanceName("modal-test-no-vol"),
-        host_dir=Path("/mngr"),
-        mngr_ctx=mngr_ctx,
-        config=config,
-        modal_app=modal_app,
-    )
-
-
-@pytest.fixture
-def modal_provider_no_host_volume(temp_mngr_ctx: MngrContext, mngr_test_id: str) -> ModalProviderInstance:
-    """Create a ModalProviderInstance with is_host_volume_created=False."""
-    app_name = f"{MODAL_TEST_APP_PREFIX}{mngr_test_id}"
-    return _make_modal_provider_without_host_volume(temp_mngr_ctx, app_name)
-
-
 def test_get_volume_for_host_returns_none_when_host_volume_disabled(
-    modal_provider_no_host_volume: ModalProviderInstance,
+    testing_provider_no_host_volume: ModalProviderInstance,
 ) -> None:
     """get_volume_for_host should return None when is_host_volume_created=False."""
     host_id = HostId.generate()
-    result = modal_provider_no_host_volume.get_volume_for_host(host_id)
+    result = testing_provider_no_host_volume.get_volume_for_host(host_id)
     assert result is None
 
 
+class _VolumeAuthErrorModalInterface(FakeModalInterface):
+    """Fake Modal interface whose ``volume_from_name`` always raises an auth error.
+
+    Mirrors ``ExpiredCredentialsModalProviderInstance`` (which raises from
+    ``_get_modal_app``) but targets the ``volume_from_name`` call that
+    ``get_volume_reference_for_host`` makes, so the @handle_modal_auth_error
+    conversion path runs end-to-end against a real fake rather than a MagicMock.
+    """
+
+    def volume_from_name(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        environment_name: str,
+        version: int | None = None,
+    ) -> Any:
+        raise ModalProxyAuthError("Token missing or expired")
+
+
 def test_get_volume_reference_for_host_converts_auth_error(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
 ) -> None:
     """get_volume_reference_for_host should convert ModalProxyAuthError to ModalAuthError.
 
@@ -1358,122 +1193,127 @@ def test_get_volume_reference_for_host_converts_auth_error(
     make_readable_offline_host -> to_offline_host, so it must surface the
     user-friendly ModalAuthError rather than the raw proxy error.
     """
-    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
-    mock_interface.volume_from_name.side_effect = ModalProxyAuthError("Token missing or expired")
+    root = tmp_path / "auth-fail"
+    root.mkdir(parents=True, exist_ok=True)
+    auth_failing_interface = _VolumeAuthErrorModalInterface(root_dir=root, concurrency_group=cg)
+    # Swap only the interface on the already-constructed provider so the
+    # auth failure surfaces at the host-volume lookup (not during app/state-volume
+    # construction, which also calls volume_from_name).
+    modal_app_with_auth_failure = testing_provider.modal_app.model_copy_update(
+        to_update(testing_provider.modal_app.field_ref().modal_interface, auth_failing_interface)
+    )
+    provider = testing_provider.model_copy_update(
+        to_update(testing_provider.field_ref().modal_app, modal_app_with_auth_failure)
+    )
     with pytest.raises(ModalAuthError):
-        modal_provider.get_volume_reference_for_host(HostId.generate())
+        provider.get_volume_reference_for_host(HostId.generate())
 
 
 def test_get_volume_reference_for_host_does_not_probe(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
     """The reference method must NOT call listdir -- skipping that existence probe
     is its entire reason to exist (it keeps make_readable_offline_host cheap during
-    host discovery)."""
-    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
-    vol_iface = mock_interface.volume_from_name.return_value
-    vol_iface.listdir.reset_mock()
+    host discovery).
 
-    ref = modal_provider.get_volume_reference_for_host(HostId.generate())
+    We create a real host volume, then delete its backing directory while keeping
+    the lazy ``volume_from_name`` reference resolvable. A ``listdir`` probe on the
+    now-missing directory would raise ``ModalProxyNotFoundError``; the reference
+    method returning a value proves it did not probe.
+    """
+    host_id = HostId.generate()
+    volume = cast(Any, testing_provider._build_host_volume(host_id))
+    shutil.rmtree(volume.root_dir)
+
+    ref = testing_provider.get_volume_reference_for_host(host_id)
 
     assert ref is not None
-    vol_iface.listdir.assert_not_called()
 
 
 def test_get_volume_for_host_probes_with_listdir(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
     """By contrast, get_volume_for_host confirms the volume exists with a listdir('/')
     probe (volume_from_name returns a lazy reference that does not fail for a deleted
-    volume)."""
-    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
-    vol_iface = mock_interface.volume_from_name.return_value
-    vol_iface.listdir.reset_mock()
+    volume).
 
-    result = modal_provider.get_volume_for_host(HostId.generate())
+    With the backing directory deleted out from under the still-resolvable
+    reference, the ``listdir('/')`` probe raises ``ModalProxyNotFoundError``, so
+    get_volume_for_host returns None -- whereas get_volume_reference_for_host
+    (which skips the probe) returns a reference for the same host.
+    """
+    host_id = HostId.generate()
+    volume = cast(Any, testing_provider._build_host_volume(host_id))
+    shutil.rmtree(volume.root_dir)
 
-    assert result is not None
-    vol_iface.listdir.assert_called_once_with("/")
+    assert testing_provider.get_volume_for_host(host_id) is None
+    # The reference path, which skips the probe, still returns a value for the same host.
+    assert testing_provider.get_volume_reference_for_host(host_id) is not None
 
 
 def test_shutdown_script_omits_volume_sync_when_host_volume_disabled(
-    modal_provider_no_host_volume: ModalProviderInstance,
+    testing_provider_no_host_volume: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Shutdown script should not include volume sync when is_host_volume_created=False."""
-    written_content: dict[str, str] = {}
-
-    class MockHost:
-        host_dir = Path("/mngr")
-
-        def write_text_file(self, path: Path, content: str, mode: str | None = None) -> None:
-            written_content[str(path)] = content
-
-    mock_sandbox = MagicMock()
-    mock_sandbox.object_id = "sb-test-9182736"
-
+    host = _CapturingHost()
     host_id = HostId.generate()
-    modal_provider_no_host_volume._create_shutdown_script(
-        cast(Any, MockHost()),
-        mock_sandbox,
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "no-vol-host")
+    sandbox_id = sandbox.get_object_id()
+
+    testing_provider_no_host_volume._create_shutdown_script(
+        cast(Any, host),
+        sandbox,
         host_id,
         "https://test--snapshot.modal.run",
     )
 
-    script = written_content["/mngr/commands/shutdown.sh"]
+    script = host.written_content["/mngr/commands/shutdown.sh"]
     assert "sync /host_volume" not in script
+    # The sandbox id from get_object_id() is still embedded in the script.
+    assert sandbox_id in script
 
 
 def test_shutdown_script_includes_volume_sync_when_host_volume_enabled(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Shutdown script should include volume sync when is_host_volume_created=True."""
-    written_content: dict[str, str] = {}
-
-    class MockHost:
-        host_dir = Path("/mngr")
-
-        def write_text_file(self, path: Path, content: str, mode: str | None = None) -> None:
-            written_content[str(path)] = content
-
-    mock_sandbox = MagicMock()
-    mock_sandbox.object_id = "sb-test-4567890"
-
+    host = _CapturingHost()
     host_id = HostId.generate()
-    modal_provider._create_shutdown_script(
-        cast(Any, MockHost()),
-        mock_sandbox,
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "vol-host")
+    sandbox_id = sandbox.get_object_id()
+
+    testing_provider._create_shutdown_script(
+        cast(Any, host),
+        sandbox,
         host_id,
         "https://test--snapshot.modal.run",
     )
 
-    script = written_content["/mngr/commands/shutdown.sh"]
+    script = host.written_content["/mngr/commands/shutdown.sh"]
     assert "sync /host_volume" in script
+    # The sandbox id from get_object_id() is embedded in the script.
+    assert sandbox_id in script
 
 
 def test_shutdown_script_forces_kill_on_curl_failure(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Shutdown script should log response, sync volume, and kill -9 1 when curl fails."""
-    written_content: dict[str, str] = {}
-
-    class MockHost:
-        host_dir = Path("/mngr")
-
-        def write_text_file(self, path: Path, content: str, mode: str | None = None) -> None:
-            written_content[str(path)] = content
-
-    mock_sandbox = MagicMock()
-    mock_sandbox.get_object_id.return_value = "sb-test-curl-fail"
-
+    host = _CapturingHost()
     host_id = HostId.generate()
-    modal_provider._create_shutdown_script(
-        cast(Any, MockHost()),
-        mock_sandbox,
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "curl-fail-host")
+
+    testing_provider._create_shutdown_script(
+        cast(Any, host),
+        sandbox,
         host_id,
         "https://test--snapshot.modal.run",
     )
 
-    script = written_content["/mngr/commands/shutdown.sh"]
+    script = host.written_content["/mngr/commands/shutdown.sh"]
     assert "CURL_EXIT" in script
     assert "kill -9 1" in script
     assert 'log "Response (if any): $RESPONSE"' in script
@@ -1491,42 +1331,29 @@ def test_is_host_volume_created_defaults_to_true() -> None:
 
 
 def test_list_all_host_and_agent_records_returns_empty_when_volume_empty(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
     """_list_all_host_and_agent_records returns empty results when volume has no entries."""
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.return_value = []
-
-    host_records, agent_data = modal_provider._list_all_host_and_agent_records(
-        modal_provider.mngr_ctx.concurrency_group
+    host_records, agent_data = testing_provider._list_all_host_and_agent_records(
+        testing_provider.mngr_ctx.concurrency_group
     )
 
     assert host_records == []
     assert agent_data == {}
-    mock_volume.listdir.assert_called_once_with("/hosts/")
 
 
 def test_list_all_host_and_agent_records_returns_host_records_and_agent_data(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """_list_all_host_and_agent_records reads host records and agent data for .json entries."""
+    """_list_all_host_and_agent_records reads host records and agent data round-tripped via the volume."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    host_record = _make_host_record(host_id)
-    agent_data_list = [{"id": str(agent_id), "name": "test-agent", "type": "claude"}]
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="with-agent"))
+    testing_provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "test-agent", "type": "claude"})
 
-    mock_entry = MagicMock()
-    mock_entry.path = f"hosts/{host_id}.json"
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.return_value = [mock_entry]
-
-    with (
-        patch.object(modal_provider, "_read_host_record", return_value=host_record),
-        patch.object(ModalProviderInstance, "list_persisted_agent_data_for_host", return_value=agent_data_list),
-    ):
-        host_records, agent_data = modal_provider._list_all_host_and_agent_records(
-            modal_provider.mngr_ctx.concurrency_group
-        )
+    host_records, agent_data = testing_provider._list_all_host_and_agent_records(
+        testing_provider.mngr_ctx.concurrency_group
+    )
 
     assert len(host_records) == 1
     assert host_records[0].certified_host_data.host_id == str(host_id)
@@ -1536,71 +1363,41 @@ def test_list_all_host_and_agent_records_returns_host_records_and_agent_data(
 
 
 def test_list_all_host_and_agent_records_skips_non_json_files(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
-    """_list_all_host_and_agent_records only processes .json files."""
-    mock_entry_json = MagicMock()
-    mock_entry_json.path = f"hosts/{HostId.generate()}.json"
-    mock_entry_dir = MagicMock()
-    mock_entry_dir.path = "hosts/some-directory"
+    """_list_all_host_and_agent_records only processes .json host record files."""
+    host_id = HostId.generate()
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="real-host"))
 
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.return_value = [mock_entry_json, mock_entry_dir]
+    # Place a stray non-json file and a stray subdirectory alongside the record.
+    volume = testing_provider.get_state_volume()
+    volume.write_files({"/hosts/notes.txt": b"ignore me", "/hosts/some-directory/inner.json": b"{}"})
 
-    with (
-        patch.object(modal_provider, "_read_host_record", return_value=None) as mock_read,
-        patch.object(ModalProviderInstance, "list_persisted_agent_data_for_host", return_value=[]) as mock_list_agent,
-    ):
-        modal_provider._list_all_host_and_agent_records(modal_provider.mngr_ctx.concurrency_group)
-        assert mock_read.call_count == 1
-        assert mock_list_agent.call_count == 1
+    host_records, agent_data = testing_provider._list_all_host_and_agent_records(
+        testing_provider.mngr_ctx.concurrency_group
+    )
+
+    # Only the real .json host record is returned.
+    assert len(host_records) == 1
+    assert host_records[0].certified_host_data.host_id == str(host_id)
+    assert set(agent_data.keys()) == {host_id}
 
 
 def test_list_all_host_and_agent_records_without_agents(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
     """_list_all_host_and_agent_records with is_including_agents=False skips agent data."""
     host_id = HostId.generate()
-    host_record = _make_host_record(host_id)
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="no-agents-wanted"))
+    # Persist an agent so we can prove it is omitted when agents aren't requested.
+    testing_provider.persist_agent_data(host_id, {"id": str(AgentId.generate()), "name": "a", "type": "claude"})
 
-    mock_entry = MagicMock()
-    mock_entry.path = f"hosts/{host_id}.json"
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.return_value = [mock_entry]
-
-    with (
-        patch.object(modal_provider, "_read_host_record", return_value=host_record),
-        patch.object(ModalProviderInstance, "list_persisted_agent_data_for_host") as mock_list_agent,
-    ):
-        host_records, agent_data = modal_provider._list_all_host_and_agent_records(
-            modal_provider.mngr_ctx.concurrency_group, is_including_agents=False
-        )
+    host_records, agent_data = testing_provider._list_all_host_and_agent_records(
+        testing_provider.mngr_ctx.concurrency_group, is_including_agents=False
+    )
 
     assert len(host_records) == 1
     assert agent_data == {}
-    mock_list_agent.assert_not_called()
-
-
-def test_list_all_host_and_agent_records_skips_none_host_records(
-    modal_provider: ModalProviderInstance,
-) -> None:
-    """_list_all_host_and_agent_records filters out None results from _read_host_record."""
-    host_id = HostId.generate()
-
-    mock_entry = MagicMock()
-    mock_entry.path = f"hosts/{host_id}.json"
-    mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.return_value = [mock_entry]
-
-    with (
-        patch.object(modal_provider, "_read_host_record", return_value=None),
-        patch.object(ModalProviderInstance, "list_persisted_agent_data_for_host", return_value=[]),
-    ):
-        host_records, agent_data = modal_provider._list_all_host_and_agent_records(
-            modal_provider.mngr_ctx.concurrency_group
-        )
-
-    assert host_records == []
 
 
 # =============================================================================
@@ -1609,49 +1406,43 @@ def test_list_all_host_and_agent_records_skips_none_host_records(
 
 
 def test_list_running_host_ids_returns_empty_when_no_sandboxes(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
     """_list_running_host_ids returns empty set when no sandboxes exist."""
-    mock_iface = cast(Any, modal_provider.modal_app.modal_interface)
-    mock_iface.sandbox_list.return_value = []
-    result = modal_provider._list_running_host_ids(modal_provider.mngr_ctx.concurrency_group)
-
+    result = testing_provider._list_running_host_ids(testing_provider.mngr_ctx.concurrency_group)
     assert result == set()
 
 
 def test_list_running_host_ids_fetches_tags_in_parallel(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """_list_running_host_ids fetches tags for all sandboxes and extracts host IDs."""
     host_id_1 = HostId.generate()
     host_id_2 = HostId.generate()
+    make_sandbox_with_tags(testing_modal, host_id_1, "host-1")
+    make_sandbox_with_tags(testing_modal, host_id_2, "host-2")
 
-    sandbox_1 = MagicMock()
-    sandbox_1.get_tags.return_value = {TAG_HOST_ID: str(host_id_1), TAG_HOST_NAME: "host-1"}
-    sandbox_2 = MagicMock()
-    sandbox_2.get_tags.return_value = {TAG_HOST_ID: str(host_id_2), TAG_HOST_NAME: "host-2"}
-
-    mock_iface = cast(Any, modal_provider.modal_app.modal_interface)
-    mock_iface.sandbox_list.return_value = [sandbox_1, sandbox_2]
-    result = modal_provider._list_running_host_ids(modal_provider.mngr_ctx.concurrency_group)
+    result = testing_provider._list_running_host_ids(testing_provider.mngr_ctx.concurrency_group)
 
     assert result == {host_id_1, host_id_2}
 
 
 def test_list_running_host_ids_skips_sandboxes_without_host_id_tag(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """_list_running_host_ids skips sandboxes that don't have the host ID tag."""
     host_id = HostId.generate()
+    make_sandbox_with_tags(testing_modal, host_id, "tagged-host")
 
-    sandbox_with_tag = MagicMock()
-    sandbox_with_tag.get_tags.return_value = {TAG_HOST_ID: str(host_id)}
-    sandbox_without_tag = MagicMock()
-    sandbox_without_tag.get_tags.return_value = {"some_other_tag": "value"}
+    # Create a sandbox WITHOUT mngr tags; it must be ignored.
+    image = testing_modal.image_debian_slim()
+    app = list(testing_modal._apps.values())[0]
+    untagged = testing_modal.sandbox_create(image=image, app=app, timeout=300, cpu=1.0, memory=1024)
+    untagged.set_tags({"some_other_tag": "value"})
 
-    mock_iface = cast(Any, modal_provider.modal_app.modal_interface)
-    mock_iface.sandbox_list.return_value = [sandbox_with_tag, sandbox_without_tag]
-    result = modal_provider._list_running_host_ids(modal_provider.mngr_ctx.concurrency_group)
+    result = testing_provider._list_running_host_ids(testing_provider.mngr_ctx.concurrency_group)
 
     assert result == {host_id}
 
@@ -1667,8 +1458,8 @@ def test_discover_hosts_and_agents_returns_agents_from_volume_data(
     """discover_hosts_and_agents builds DiscoveredHost->DiscoveredAgent map from volume data."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    snapshot = _make_snapshot_record("initial")
-    host_record = _make_host_record(host_id, host_name="my-host", snapshots=[snapshot])
+    snapshot = make_snapshot(name="initial")
+    host_record = make_host_record(host_id, host_name="my-host", snapshots=[snapshot])
     agent_data = [{"id": str(agent_id), "name": "test-agent", "type": "claude"}]
 
     with (
@@ -1697,7 +1488,7 @@ def test_discover_hosts_and_agents_excludes_destroyed_hosts_by_default(
 ) -> None:
     """discover_hosts_and_agents excludes destroyed hosts (no sandbox, no snapshots) by default."""
     host_id = HostId.generate()
-    host_record = _make_host_record(host_id, snapshots=[])
+    host_record = make_host_record(host_id, snapshots=[])
 
     with (
         patch.object(modal_provider, "_list_running_host_ids", return_value=set()),
@@ -1715,7 +1506,7 @@ def test_discover_hosts_and_agents_includes_destroyed_hosts_when_requested(
 ) -> None:
     """discover_hosts_and_agents includes destroyed hosts when include_destroyed=True."""
     host_id = HostId.generate()
-    host_record = _make_host_record(host_id, snapshots=[])
+    host_record = make_host_record(host_id, snapshots=[])
 
     with (
         patch.object(modal_provider, "_list_running_host_ids", return_value=set()),
@@ -1733,7 +1524,7 @@ def test_discover_hosts_and_agents_includes_running_hosts_from_host_records(
 ) -> None:
     """discover_hosts_and_agents includes running hosts (sandbox exists + host record exists)."""
     host_id = HostId.generate()
-    host_record = _make_host_record(host_id, host_name="running-host", snapshots=[])
+    host_record = make_host_record(host_id, host_name="running-host", snapshots=[])
 
     with (
         patch.object(modal_provider, "_list_running_host_ids", return_value={host_id}),
@@ -1835,7 +1626,7 @@ def test_check_host_name_is_unique_passes_when_no_existing_hosts() -> None:
 def test_check_host_name_is_unique_passes_when_name_is_different() -> None:
     """check_host_name_is_unique should not raise when the name is different from existing hosts."""
     host_id = HostId.generate()
-    existing_record = _make_host_record(host_id, host_name="existing-host", snapshots=[_make_snapshot_record()])
+    existing_record = make_host_record(host_id, host_name="existing-host", snapshots=[make_snapshot()])
 
     check_host_name_is_unique(
         _TEST_PROVIDER_NAME, HostName("different-host"), host_records=[existing_record], running_host_ids=set()
@@ -1845,7 +1636,7 @@ def test_check_host_name_is_unique_passes_when_name_is_different() -> None:
 def test_check_host_name_is_unique_raises_when_name_already_exists_on_running_host() -> None:
     """check_host_name_is_unique should raise HostNameConflictError when a running host has the same name."""
     host_id = HostId.generate()
-    existing_record = _make_host_record(host_id, host_name="taken-name")
+    existing_record = make_host_record(host_id, host_name="taken-name")
 
     with pytest.raises(HostNameConflictError) as exc_info:
         check_host_name_is_unique(
@@ -1857,7 +1648,7 @@ def test_check_host_name_is_unique_raises_when_name_already_exists_on_running_ho
 def test_check_host_name_is_unique_raises_when_name_exists_on_stopped_host_with_snapshots() -> None:
     """check_host_name_is_unique should raise when a stopped host with snapshots has the same name."""
     host_id = HostId.generate()
-    existing_record = _make_host_record(host_id, host_name="taken-name", snapshots=[_make_snapshot_record()])
+    existing_record = make_host_record(host_id, host_name="taken-name", snapshots=[make_snapshot()])
 
     with pytest.raises(HostNameConflictError):
         check_host_name_is_unique(
@@ -1869,7 +1660,7 @@ def test_check_host_name_is_unique_allows_reuse_of_destroyed_host_name() -> None
     """check_host_name_is_unique should allow reusing a name from a destroyed host."""
     host_id = HostId.generate()
     # A destroyed host: no snapshots, no failure_reason, not running
-    destroyed_record = _make_host_record(host_id, host_name="reusable-name", snapshots=[])
+    destroyed_record = make_host_record(host_id, host_name="reusable-name", snapshots=[])
 
     # Should not raise
     check_host_name_is_unique(
@@ -1880,9 +1671,9 @@ def test_check_host_name_is_unique_allows_reuse_of_destroyed_host_name() -> None
 def test_check_host_name_is_unique_raises_when_name_matches_any_non_destroyed() -> None:
     """check_host_name_is_unique should raise if the name matches any non-destroyed host."""
     host_records = [
-        _make_host_record(HostId.generate(), host_name="host-alpha", snapshots=[_make_snapshot_record()]),
-        _make_host_record(HostId.generate(), host_name="host-beta", snapshots=[_make_snapshot_record()]),
-        _make_host_record(HostId.generate(), host_name="host-gamma", snapshots=[_make_snapshot_record()]),
+        make_host_record(HostId.generate(), host_name="host-alpha", snapshots=[make_snapshot()]),
+        make_host_record(HostId.generate(), host_name="host-beta", snapshots=[make_snapshot()]),
+        make_host_record(HostId.generate(), host_name="host-gamma", snapshots=[make_snapshot()]),
     ]
 
     with pytest.raises(HostNameConflictError):
@@ -1894,7 +1685,7 @@ def test_check_host_name_is_unique_raises_when_name_matches_any_non_destroyed() 
 def test_check_host_name_is_unique_raises_when_name_exists_on_failed_host() -> None:
     """check_host_name_is_unique should raise for a failed host (not running, no snapshots, but has failure_reason)."""
     host_id = HostId.generate()
-    failed_record = _make_host_record(host_id, host_name="failed-host", failure_reason="Build failed")
+    failed_record = make_host_record(host_id, host_name="failed-host", failure_reason="Build failed")
 
     with pytest.raises(HostNameConflictError):
         check_host_name_is_unique(

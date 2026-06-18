@@ -11,6 +11,7 @@ Or to run all tests including Modal tests:
 """
 
 import importlib.resources
+import json
 import os
 import subprocess
 import tarfile
@@ -30,22 +31,27 @@ def test_mngr_create_echo_command_on_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """Test creating an agent with echo command on Modal using the CLI.
+    """Test creating a command agent on Modal and that the host runs commands.
 
-    This is an end-to-end acceptance test that verifies the full flow:
-    1. CLI parses arguments correctly
-    2. Modal sandbox is created
-    3. SSH connection is established
-    4. Work directory is copied to remote host
-    5. Agent is created and command runs
-    6. Output can be verified
+    Verifies the full create flow (CLI parsing, Modal sandbox creation, SSH
+    setup, work-dir copy, agent creation -> "Done.") and then that the resulting
+    host actually executes commands, by running a unique marker command via
+    ``mngr exec`` and asserting its output.
+
+    Note on scope: we verify command execution by exec-ing a command directly
+    rather than by inspecting the side effect of the *agent's own* command. A
+    command-type agent created with ``--no-connect`` runs its command in a
+    detached session whose filesystem side effects are not synchronously
+    observable from a subsequent ``mngr exec`` on Modal (confirmed empirically),
+    so exec-ing a fresh marker command is the reliable signal that the created
+    host can run the user's command -- the regression this guards against.
     """
     agent_name = f"test-modal-echo-{get_short_random_string()}"
     expected_output = f"hello-from-modal-{get_short_random_string()}"
 
-    # Run mngr create with echo command on modal
-    # Using --no-connect to create without attaching
-    # Using --no-ensure-clean since temp dir won't be a git repo
+    # Run mngr create with a long-lived command so the host stays up for exec.
+    # Using --no-connect to create without attaching and --no-ensure-clean since
+    # the temp source dir is not a git repo.
     result = subprocess.run(
         [
             "uv",
@@ -61,8 +67,8 @@ def test_mngr_create_echo_command_on_modal(
             "--source",
             str(temp_source_dir),
             "--",
-            "echo",
-            expected_output,
+            "sleep",
+            "100316",
         ],
         capture_output=True,
         text=True,
@@ -72,6 +78,21 @@ def test_mngr_create_echo_command_on_modal(
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
+
+    # Verify the created host actually runs commands by exec-ing a unique marker
+    # and asserting it appears in the output (the default human output prints the
+    # command's stdout, so a substring check suffices).
+    exec_result = subprocess.run(
+        ["uv", "run", "mngr", "exec", agent_name, f"echo {expected_output}"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=modal_subprocess_env.env,
+    )
+    assert exec_result.returncode == 0, f"exec failed with stderr: {exec_result.stderr}\nstdout: {exec_result.stdout}"
+    assert expected_output in exec_result.stdout, (
+        f"Expected marker '{expected_output}' in exec stdout: {exec_result.stdout}\nstderr: {exec_result.stderr}"
+    )
 
 
 @pytest.mark.acceptance
@@ -160,10 +181,20 @@ def test_mngr_create_with_invalid_snapshot_id_fails(
 
     assert result.returncode != 0, "Expected create with invalid snapshot ID to fail"
     combined = (result.stdout + result.stderr).lower()
-    # Require contextual evidence that the failure is snapshot-related; a bare
-    # "snap-123abc" alternative would match command echoes on any unrelated failure.
-    assert "snapshot" in combined or "host creation failed" in combined, (
-        f"Expected snapshot-context error. stderr: {result.stderr}\nstdout: {result.stdout}"
+    # The snapshot id is loaded via modal.Image.from_id("snap-123abc") during
+    # create, so a real snapshot-resolution failure must reference the bad id AND
+    # carry a not-found / resolution phrase. The previous "host creation failed"
+    # alternative was too broad -- it matched the generic failure banner emitted
+    # on *any* create error (bad image, network, quota), so it would pass even if
+    # the --snapshot flag were silently ignored. Require both signals together.
+    assert "snap-123abc" in combined, (
+        f"Expected the bad snapshot id 'snap-123abc' in the error output. "
+        f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    )
+    not_found_phrases = ("not found", "no such", "does not exist", "could not", "invalid", "unable to")
+    assert any(phrase in combined for phrase in not_found_phrases), (
+        f"Expected a snapshot/image resolution-failure phrase ({not_found_phrases}) in the error "
+        f"output. stderr: {result.stderr}\nstdout: {result.stdout}"
     )
 
 
@@ -179,7 +210,10 @@ def test_mngr_create_with_build_args_on_modal(
     This verifies that build arguments are passed correctly to the Modal sandbox.
     """
     agent_name = f"test-modal-build-{get_short_random_string()}"
-    expected_output = f"build-test-{get_short_random_string()}"
+    # Request a distinctive, non-default memory size (the test fixture default is
+    # 2.0 GB) so the value read back is unambiguously attributable to this build
+    # arg rather than the default.
+    requested_memory_gb = 1.5
 
     result = subprocess.run(
         [
@@ -202,10 +236,10 @@ def test_mngr_create_with_build_args_on_modal(
             "-b",
             "--memory",
             "-b",
-            "0.5",
+            str(requested_memory_gb),
             "--",
-            "echo",
-            expected_output,
+            "sleep",
+            "100314",
         ],
         capture_output=True,
         text=True,
@@ -215,6 +249,33 @@ def test_mngr_create_with_build_args_on_modal(
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
+
+    # Verify the requested --memory build arg actually flowed through to the
+    # host's recorded resources. Modal does not expose --memory as an in-sandbox
+    # cgroup limit (the sandbox sees the host's total RAM), so instead we read it
+    # back via `mngr list`: the host "resource" block is produced by
+    # ModalProviderInstance.get_host_resources from the SandboxConfig the build
+    # args were parsed into. A regression where --memory was dropped or ignored
+    # would surface as the default 2.0 GB here.
+    list_result = subprocess.run(
+        ["uv", "run", "mngr", "list", "--provider", "modal", "--format", "json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=modal_subprocess_env.env,
+    )
+    assert list_result.returncode == 0, f"mngr list failed: {list_result.stderr}\n{list_result.stdout}"
+    listing = json.loads(list_result.stdout)
+    host_resource = next(
+        (a.get("host", {}).get("resource") for a in listing.get("agents", []) if a.get("name") == agent_name),
+        None,
+    )
+    assert host_resource is not None, (
+        f"Could not find host resource for agent {agent_name} in listing: {list_result.stdout}"
+    )
+    assert host_resource.get("memory_gb") == requested_memory_gb, (
+        f"Expected host memory_gb == {requested_memory_gb} (from the --memory build arg), but got: {host_resource}"
+    )
 
 
 @pytest.mark.acceptance
@@ -232,11 +293,13 @@ def test_mngr_create_with_dockerfile_on_modal(
     3. The sandbox runs with the custom image
     """
     agent_name = f"test-modal-dockerfile-{get_short_random_string()}"
-    expected_output = f"dockerfile-test-{get_short_random_string()}"
+    # Use a unique marker baked into the custom image so we can prove via exec
+    # that the sandbox is actually running the image built from this Dockerfile.
+    dockerfile_marker = f"custom-dockerfile-marker-{get_short_random_string()}"
 
     # Create a simple Dockerfile in the source directory
     dockerfile_path = temp_source_dir / "Dockerfile"
-    dockerfile_content = """\
+    dockerfile_content = f"""\
 FROM debian:bookworm-slim
 
 # Install minimal dependencies for mngr to work (openssh, tmux, rsync for file transfer)
@@ -248,7 +311,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     && rm -rf /var/lib/apt/lists/*
 
 # Create a marker file to verify we're using the custom image
-RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
+RUN echo "{dockerfile_marker}" > /dockerfile-marker.txt
 """
     dockerfile_path.write_text(dockerfile_content)
 
@@ -269,8 +332,8 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
             "-b",
             f"--file={dockerfile_path}",
             "--",
-            "echo",
-            expected_output,
+            "sleep",
+            "100315",
         ],
         capture_output=True,
         text=True,
@@ -281,7 +344,23 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
+    # Verify the sandbox is running the custom image by reading the marker file
+    # that only this Dockerfile creates.
+    exec_result = subprocess.run(
+        ["uv", "run", "mngr", "exec", agent_name, "cat /dockerfile-marker.txt"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=modal_subprocess_env.env,
+    )
+    assert exec_result.returncode == 0, f"exec failed with stderr: {exec_result.stderr}\nstdout: {exec_result.stdout}"
+    assert dockerfile_marker in exec_result.stdout, (
+        f"Expected dockerfile marker '{dockerfile_marker}' in exec stdout (proving the custom "
+        f"image is in use): {exec_result.stdout}\nstderr: {exec_result.stderr}"
+    )
 
+
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_mngr_create_with_failing_dockerfile_shows_build_failure(
@@ -405,6 +484,21 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
+    # Verify the untracked marker file actually landed on the remote work_dir.
+    # exec runs in the agent's work_dir, so a relative path resolves correctly.
+    exec_result = subprocess.run(
+        ["uv", "run", "mngr", "exec", agent_name, "cat marker.txt"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=modal_subprocess_env.env,
+    )
+    assert exec_result.returncode == 0, f"exec failed with stderr: {exec_result.stderr}\nstdout: {exec_result.stdout}"
+    assert unique_marker in exec_result.stdout, (
+        f"Expected untracked marker '{unique_marker}' transferred to remote work_dir: "
+        f"{exec_result.stdout}\nstderr: {exec_result.stderr}"
+    )
+
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
@@ -416,9 +510,13 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
 
     This tests the git branch creation functionality during transfer:
     1. All local branches and tags are pushed via git
-    2. A new branch is created with the specified prefix
+    2. A new branch is created (via --branch main:<new>) and checked out on the
+       remote work_dir
     """
     agent_name = f"test-modal-branch-{get_short_random_string()}"
+    # Branch off main into a uniquely-named new branch so we can assert the
+    # remote work_dir was actually checked out onto exactly this branch.
+    new_branch = f"modal-branch-test-{get_short_random_string()}"
 
     result = subprocess.run(
         [
@@ -432,6 +530,8 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
             "--new-host",
             "--no-connect",
             "--no-ensure-clean",
+            "--branch",
+            f"main:{new_branch}",
             "--source",
             str(temp_git_repo),
             "--",
@@ -446,6 +546,23 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
+
+    # Verify the remote work_dir is checked out onto the new branch.
+    # exec runs in the agent's work_dir, which is the transferred git repo.
+    exec_result = subprocess.run(
+        # --format "{stdout}" so the captured output is exactly the branch name,
+        # without mngr exec's human "Command succeeded on agent ..." status line.
+        ["uv", "run", "mngr", "exec", agent_name, "git rev-parse --abbrev-ref HEAD", "--format", "{stdout}"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=modal_subprocess_env.env,
+    )
+    assert exec_result.returncode == 0, f"exec failed with stderr: {exec_result.stderr}\nstdout: {exec_result.stdout}"
+    assert exec_result.stdout.strip() == new_branch, (
+        f"Expected remote work_dir on branch '{new_branch}', got: {exec_result.stdout.strip()!r}\n"
+        f"stderr: {exec_result.stderr}"
+    )
 
 
 def _get_mngr_default_dockerfile_path() -> Path:
@@ -468,12 +585,10 @@ def test_mngr_create_with_default_dockerfile_on_modal(
 
     This verifies that the default Dockerfile in libs/mngr/imbue/mngr/resources/Dockerfile
     builds successfully on Modal and that ``mngr create`` can launch an agent on the
-    resulting image (reporting "Done.").
-
-    Assertions here are weak: ``mngr create`` returns as soon as the agent is launched
-    in its detached tmux session, so the agent's own command never gates the test.
-    A stronger check would add a synchronous ``mngr exec`` after create to verify
-    image contents (e.g. ``which uv && which claude``).
+    resulting image (reporting "Done."). A synchronous ``mngr exec`` after create then
+    asserts the resulting image actually contains tools the default Dockerfile installs
+    (``ttyd`` and ``uv``), confirming the sandbox is running the default image rather
+    than just that create returned.
 
     This test is marked as release since it takes longer due to the image build.
     """
@@ -548,3 +663,18 @@ def test_mngr_create_with_default_dockerfile_on_modal(
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
+
+    # Verify the sandbox is running the default image by checking for tools that
+    # only the default Dockerfile installs: ttyd (to /usr/local/bin) and uv (to
+    # /root/.local/bin). Their presence is a property unique to the default image.
+    exec_result = subprocess.run(
+        ["uv", "run", "mngr", "exec", agent_name, "test -x /usr/local/bin/ttyd -a -x /root/.local/bin/uv"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=modal_subprocess_env.env,
+    )
+    assert exec_result.returncode == 0, (
+        f"Expected the default image to contain ttyd and uv, but the existence check failed.\n"
+        f"stdout: {exec_result.stdout}\nstderr: {exec_result.stderr}"
+    )

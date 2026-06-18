@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
@@ -40,8 +41,6 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
-from imbue.mngr.providers.listing_utils import parse_optional_float
-from imbue.mngr.providers.listing_utils import parse_optional_int
 from imbue.mngr.utils.testing import SHARED_MODAL_ENV_NAME_VAR
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import read_shared_modal_env_name
@@ -68,6 +67,7 @@ from imbue.mngr_modal.instance import TAG_USER_PREFIX
 from imbue.mngr_modal.instance import _build_image_from_dockerfile_contents
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
 from imbue.mngr_modal.instance import _build_modal_volumes
+from imbue.mngr_modal.instance import _group_cached_layer_commands
 from imbue.mngr_modal.instance import _parse_volume_spec
 from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.routes.deployment import deploy_function
@@ -319,14 +319,15 @@ def test_build_host_volume(testing_provider: ModalProviderInstance) -> None:
 
 def test_get_volume_for_host_returns_volume(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    # Create the host volume first
-    testing_provider._build_host_volume(host_id)
-    # Write something to it so listdir works
+    # Create the host volume and write a marker so the listdir probe succeeds.
     vol = testing_provider._build_host_volume(host_id)
     vol.write_files({"marker.txt": b"exists"})
 
     host_volume = testing_provider.get_volume_for_host(host_id)
     assert host_volume is not None
+    # The returned volume must wrap the same underlying host volume: the marker
+    # written above is readable back through it.
+    assert host_volume.volume.read_file("marker.txt") == b"exists"
 
 
 def test_get_volume_for_host_returns_none_when_disabled(
@@ -400,6 +401,9 @@ def test_sandbox_cache_by_id(
 
     testing_provider._cache_sandbox(host_id, name, sandbox)
 
+    # The sandbox is recorded in the by-id cache structure (not just discoverable via API).
+    assert testing_provider._sandbox_cache_by_id[host_id].get_object_id() == sandbox.get_object_id()
+
     found = testing_provider._find_sandbox_by_host_id(host_id)
     assert found is not None
     assert found.get_object_id() == sandbox.get_object_id()
@@ -414,6 +418,9 @@ def test_sandbox_cache_by_name(
     sandbox = make_sandbox_with_tags(testing_modal, host_id, "by-name")
 
     testing_provider._cache_sandbox(host_id, name, sandbox)
+
+    # The sandbox is recorded in the by-name cache structure (not just discoverable via API).
+    assert testing_provider._sandbox_cache_by_name[name].get_object_id() == sandbox.get_object_id()
 
     found = testing_provider._find_sandbox_by_name(name)
     assert found is not None
@@ -431,8 +438,12 @@ def test_uncache_sandbox(
     testing_provider._cache_sandbox(host_id, name, sandbox)
     testing_provider._uncache_sandbox(host_id, name)
 
-    # Should fall through to Modal API lookup
-    # The sandbox has tags, so it should still be found
+    # The entry must be gone from both cache structures after uncaching.
+    assert host_id not in testing_provider._sandbox_cache_by_id
+    assert name not in testing_provider._sandbox_cache_by_name
+
+    # Documents the API fallback: the sandbox still carries mngr tags, so the
+    # finder rediscovers it via the Modal API even though the cache was cleared.
     found = testing_provider._find_sandbox_by_host_id(host_id)
     assert found is not None
 
@@ -510,7 +521,10 @@ def test_find_sandbox_returns_none_when_not_found(
 
 def test_get_modal_image_definition_default(testing_provider: ModalProviderInstance) -> None:
     image = testing_provider._get_modal_image_definition()
-    assert image.get_object_id() is not None
+    # With no base image or Dockerfile, the default branch builds from debian_slim.
+    # The fake encodes the base in the object id, distinguishing it from the
+    # registry ("img-reg-") and Dockerfile ("img-<hex>") branches.
+    assert image.get_object_id().startswith("img-debian")
 
 
 def test_get_modal_image_definition_from_registry(testing_provider: ModalProviderInstance) -> None:
@@ -522,10 +536,13 @@ def test_get_modal_image_definition_from_dockerfile(
     testing_provider: ModalProviderInstance,
     tmp_path: Path,
 ) -> None:
+    # A FROM-only Dockerfile (no further instructions) means the result is the
+    # registry image for the parsed base, so the base name surfaces in the object
+    # id -- proving the Dockerfile's FROM was parsed and routed to the build.
     dockerfile = tmp_path / "Dockerfile"
-    dockerfile.write_text("FROM debian:bookworm-slim\nRUN echo hello\n")
+    dockerfile.write_text("FROM python:3.11-slim\n")
     image = testing_provider._get_modal_image_definition(dockerfile=dockerfile)
-    assert image.get_object_id() is not None
+    assert "python" in image.get_object_id()
 
 
 def test_get_modal_image_definition_with_secrets(
@@ -533,8 +550,16 @@ def test_get_modal_image_definition_with_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TEST_SECRET", "secret_value")
+    # With a set secret and no Dockerfile/base, the secrets are resolved from the
+    # environment (a missing var would raise) and the default debian branch runs.
     image = testing_provider._get_modal_image_definition(secrets=["TEST_SECRET"])
-    assert image.get_object_id() is not None
+    assert image.get_object_id().startswith("img-debian")
+
+    # A secret that is not set in the environment must fail loudly rather than
+    # being silently dropped, proving the secrets resolution actually executed.
+    monkeypatch.delenv("DEFINITELY_NOT_SET_SECRET_98765", raising=False)
+    with pytest.raises(MngrError, match="not set"):
+        testing_provider._get_modal_image_definition(secrets=["DEFINITELY_NOT_SET_SECRET_98765"])
 
 
 # ---------------------------------------------------------------------------
@@ -790,24 +815,31 @@ def test_record_snapshot(
     testing_provider: ModalProviderInstance,
     testing_modal: FakeModalInterface,
 ) -> None:
-    """Test the low-level _record_snapshot method which creates a filesystem snapshot
-    and records it in the host record. This avoids the SSH requirement of create_snapshot
-    since _record_snapshot calls get_host which needs SSH for the certified data update.
-    We test the snapshot filesystem + host record logic directly.
+    """The low-level ``_record_snapshot`` snapshots the sandbox filesystem and
+    appends the resulting snapshot to the host record. We pre-populate the host
+    cache with an OfflineHost so the certified-data write inside ``_record_snapshot``
+    does not attempt an SSH connection (mirrors the create_snapshot tests).
     """
     host_id = HostId.generate()
     record = make_host_record(host_id=host_id, host_name="snap-host")
     testing_provider._write_host_record(record)
 
     sandbox = make_sandbox_with_tags(testing_modal, host_id, "snap-host")
+    testing_provider._cache_sandbox(host_id, HostName("snap-host"), sandbox)
 
-    # Directly call sandbox.snapshot_filesystem to verify the testing sandbox supports it
-    snap_image = sandbox.snapshot_filesystem()
-    assert snap_image.get_object_id().startswith("snap-")
+    # Pre-populate host cache so the certified-data write avoids SSH.
+    offline = testing_provider._create_host_from_host_record(record)
+    testing_provider._host_by_id_cache[host_id] = offline
 
-    # Verify the sandbox snapshot creates unique IDs
-    snap_image2 = sandbox.snapshot_filesystem()
-    assert snap_image2.get_object_id() != snap_image.get_object_id()
+    snap_id = testing_provider._record_snapshot(sandbox, host_id, SnapshotName("recorded-snap"))
+
+    # The returned snapshot id must be persisted in the host record under the requested name.
+    updated = testing_provider._read_host_record(host_id, use_cache=False)
+    assert updated is not None
+    assert len(updated.certified_host_data.snapshots) == 1
+    recorded = updated.certified_host_data.snapshots[0]
+    assert recorded.name == "recorded-snap"
+    assert recorded.id == str(snap_id)
 
 
 def test_create_snapshot_no_sandbox_raises(testing_provider: ModalProviderInstance) -> None:
@@ -1275,8 +1307,10 @@ def test_app_registry_persistent_mode(
 
     app, handle = ModalProviderBackend._get_or_create_app("persistent-test", "env1", True, modal_interface)
     assert app.get_app_id().startswith("ap-")
-    # Persistent apps don't use run context
-    assert handle.run_context is None
+    # Observable behavior: the persistent app is registered and its state volume
+    # is retrievable, named "{app_name}{STATE_VOLUME_SUFFIX}".
+    volume = ModalProviderBackend.get_volume_for_app("persistent-test", modal_interface)
+    assert volume.get_name() == f"persistent-test{STATE_VOLUME_SUFFIX}"
 
     ModalProviderBackend.close_app("persistent-test")
 
@@ -1366,11 +1400,37 @@ def test_create_host_raises_on_ssh_setup_failure(
     """create_host raises when SSH setup fails in the testing environment.
 
     The sandbox is created successfully (FakeModalInterface doesn't need real
-    Modal), but SSH setup fails because the testing sandbox can't start sshd
-    as a non-root user. This verifies the error propagation path.
+    Modal), but the SSH-setup phase cannot complete: the fake sandbox runs
+    commands on the local test machine, so either package setup
+    (``mkdir -p /run/sshd`` without privileges) fails, or there is no sshd
+    listening on the fake tunnel endpoint and ``_wait_for_sshd`` times out.
+    Both raise ``MngrError`` inside ``_setup_sandbox_ssh_and_create_host``'s
+    concurrency group, which re-raises it wrapped in a ``ConcurrencyExceptionGroup``.
     """
-    with pytest.raises((MngrError, OSError, ExceptionGroup)):
-        testing_provider.create_host(HostName("will-fail"))
+    name = HostName("will-fail")
+    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
+        testing_provider.create_host(name)
+
+    # The wrapped failure is an MngrError from the SSH-setup phase (package
+    # install or the sshd-readiness wait), not some unrelated exception type.
+    ssh_setup_errors = [
+        exc
+        for exc in exc_info.value.exceptions
+        if isinstance(exc, MngrError)
+        and ("SSH server not ready" in str(exc) or "Failed to install required packages" in str(exc))
+    ]
+    assert len(ssh_setup_errors) == 1, f"expected one SSH-setup MngrError, got {exc_info.value.exceptions}"
+
+    # The SSH failure occurs after the sandbox is created but is NOT routed through
+    # the failed-host-record path (that only covers image build / sandbox creation),
+    # so no *failed* host record is left behind for this name.
+    cg = testing_provider.mngr_ctx.concurrency_group
+    failed_records = [
+        record
+        for record in testing_provider._list_all_host_records(cg)
+        if record.certified_host_data.host_name == name and record.certified_host_data.failure_reason is not None
+    ]
+    assert failed_records == []
 
 
 class _ImageRejectingFakeModalInterface(FakeModalInterface):
@@ -1528,12 +1588,18 @@ def test_modal_volume_wrapper(testing_provider: ModalProviderInstance) -> None:
     entries = vol.listdir("/test")
     assert len(entries) == 1
 
-    # Remove
+    # Remove the file, then confirm it is gone (reading it raises not-found).
     vol.remove_file("/test/data.txt")
+    with pytest.raises(ModalProxyNotFoundError):
+        vol.read_file("/test/data.txt")
+    assert vol.listdir("/test") == []
 
-    # Remove directory
+    # Remove a directory, then confirm it no longer lists.
     vol.write_files({"/rmdir/file.txt": b"x"})
+    assert len(vol.listdir("/rmdir")) == 1
     vol.remove_directory("/rmdir")
+    with pytest.raises(ModalProxyNotFoundError):
+        vol.listdir("/rmdir")
 
 
 def test_modal_volume_translates_rate_limit_error_to_mngr_error() -> None:
@@ -2002,17 +2068,36 @@ def test_modal_provider_app_close(
 def test_provider_instance_get_captured_output(
     testing_provider: ModalProviderInstance,
 ) -> None:
-    """get_captured_output on the instance delegates to the modal_app."""
-    output = testing_provider.get_captured_output()
-    assert output == ""
+    """get_captured_output on the instance delegates to the modal_app's
+    get_output_callback, returning whatever the app captured."""
+    seeded_app = testing_provider.modal_app.model_copy_update(
+        to_update(testing_provider.modal_app.field_ref().get_output_callback, lambda: "seeded build log"),
+    )
+    provider = testing_provider.model_copy_update(
+        to_update(testing_provider.field_ref().modal_app, seeded_app),
+    )
+
+    assert provider.get_captured_output() == "seeded build log"
 
 
 def test_provider_instance_close(
     testing_provider: ModalProviderInstance,
 ) -> None:
-    """close on the instance delegates to the modal_app."""
-    # Should not raise
-    testing_provider.close()
+    """close on the instance delegates to the modal_app's close_callback."""
+    close_called = [False]
+
+    def on_close() -> None:
+        close_called[0] = True
+
+    tracking_app = testing_provider.modal_app.model_copy_update(
+        to_update(testing_provider.modal_app.field_ref().close_callback, on_close),
+    )
+    provider = testing_provider.model_copy_update(
+        to_update(testing_provider.field_ref().modal_app, tracking_app),
+    )
+
+    provider.close()
+    assert close_called[0] is True
 
 
 # ---------------------------------------------------------------------------
@@ -2028,27 +2113,6 @@ def test_proxy_file_entry_type_file_maps_to_volume_file() -> None:
 def test_proxy_file_entry_type_directory_maps_to_volume_directory() -> None:
     result = _proxy_file_entry_type_to_volume_file_type(ProxyFileEntryType.DIRECTORY)
     assert result == FileType.DIRECTORY
-
-
-# ---------------------------------------------------------------------------
-# Parsing Helper Tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [("42", 42), ("  123  ", 123), ("0", 0), ("", None), ("   ", None), ("not_a_number", None), ("12.5", None)],
-)
-def testparse_optional_int(value: str, expected: int | None) -> None:
-    assert parse_optional_int(value) == expected
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [("3.14", 3.14), ("  42.0  ", 42.0), ("0", 0.0), ("100", 100.0), ("", None), ("   ", None), ("abc", None)],
-)
-def testparse_optional_float(value: str, expected: float | None) -> None:
-    assert parse_optional_float(value) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -2271,7 +2335,17 @@ def test_deploy_function(
         testing_provider.environment_name,
         testing_provider._modal_interface,
     )
-    assert "snapshot_and_shutdown" in url
+
+    # Deploying must register the function so it can be looked up afterward,
+    # and the returned URL must be the one resolved from that registered function
+    # (not merely an echo of the requested function name).
+    func = testing_provider._modal_interface.function_from_name(
+        name="snapshot_and_shutdown",
+        app_name=testing_provider.app_name,
+        environment_name=testing_provider.environment_name,
+    )
+    assert url == func.get_web_url()
+    assert url == f"https://testing.modal.run/{testing_provider.app_name}/snapshot_and_shutdown"
 
 
 # ---------------------------------------------------------------------------
@@ -2288,7 +2362,10 @@ def test_list_volumes(
     testing_provider._build_host_volume(host_id2)
 
     volumes = testing_provider.list_volumes()
-    assert len(volumes) >= 2
+    volume_names = {v.name for v in volumes}
+    # Both built host volumes must appear by their derived names.
+    assert testing_provider._get_host_volume_name(host_id1) in volume_names
+    assert testing_provider._get_host_volume_name(host_id2) in volume_names
 
 
 def test_delete_volume(
@@ -2409,25 +2486,89 @@ def test_substitute_dockerfile_build_args_bad_format() -> None:
 def test_build_image_from_dockerfile_contents(
     testing_provider: ModalProviderInstance,
 ) -> None:
-    dockerfile_contents = "FROM debian:bookworm-slim\nRUN echo hello\nRUN echo world\n"
+    # A FROM-only build returns the registry image for the base, so its name
+    # surfaces in the object id; this confirms the FROM base was parsed and used.
+    from_only = _build_image_from_dockerfile_contents(
+        "FROM python:3.11-slim\n",
+        modal_interface=testing_provider._modal_interface,
+        is_each_layer_cached=True,
+    )
+    assert "python" in from_only.get_object_id()
+
+    # With RUN instructions, each layer is applied via dockerfile_commands, so the
+    # final id no longer carries the registry base prefix -- proving the layered
+    # build path executed rather than returning the bare base image.
+    dockerfile_contents = "FROM python:3.11-slim\nRUN echo hello\nRUN echo world\n"
     image = _build_image_from_dockerfile_contents(
         dockerfile_contents,
         modal_interface=testing_provider._modal_interface,
         is_each_layer_cached=True,
     )
-    assert image.get_object_id() is not None
+    object_id = image.get_object_id()
+    assert object_id.startswith("img-")
+    assert "python" not in object_id
 
 
 def test_build_image_from_dockerfile_no_layer_caching(
     testing_provider: ModalProviderInstance,
 ) -> None:
-    dockerfile_contents = "FROM debian:bookworm-slim\nRUN echo hello\n"
+    # With layer caching off, all instructions are applied in a single
+    # dockerfile_commands call, so the final id is again the built-layer id
+    # rather than the bare registry base.
+    dockerfile_contents = "FROM python:3.11-slim\nRUN echo hello\n"
     image = _build_image_from_dockerfile_contents(
         dockerfile_contents,
         modal_interface=testing_provider._modal_interface,
         is_each_layer_cached=False,
     )
-    assert image.get_object_id() is not None
+    object_id = image.get_object_id()
+    assert object_id.startswith("img-")
+    assert "python" not in object_id
+
+
+def test_group_cached_layer_commands_carries_args_forward() -> None:
+    # ARG declarations don't change image content, so they should not produce
+    # their own layers; instead they must be prepended to every later layer so
+    # build args stay in scope for the RUN/ENV instructions that reference them.
+    # (Regression: ARG scope does not survive across the separate per-layer
+    # dockerfile_commands builds, so a later RUN using ${NODE_VERSION} expanded
+    # to an empty string and 404'd.)
+    instructions: list[Mapping[str, object]] = [
+        {"instruction": "ARG", "content": 'ARG NODE_VERSION="24.15.0"'},
+        {"instruction": "COMMENT", "content": "# download node"},
+        {"instruction": "RUN", "content": "RUN curl .../v${NODE_VERSION}/node.tar.gz | tar xz"},
+        {"instruction": "ENV", "content": "ENV NODE_VERSION=${NODE_VERSION}"},
+    ]
+    groups = _group_cached_layer_commands(instructions)
+    assert groups == [
+        ['ARG NODE_VERSION="24.15.0"', "RUN curl .../v${NODE_VERSION}/node.tar.gz | tar xz"],
+        ['ARG NODE_VERSION="24.15.0"', "ENV NODE_VERSION=${NODE_VERSION}"],
+    ]
+
+
+def test_group_cached_layer_commands_accumulates_multiple_args() -> None:
+    # Every ARG seen so far is carried into each subsequent layer, in order.
+    instructions: list[Mapping[str, object]] = [
+        {"instruction": "ARG", "content": "ARG A=1"},
+        {"instruction": "RUN", "content": "RUN echo ${A}"},
+        {"instruction": "ARG", "content": "ARG B=2"},
+        {"instruction": "RUN", "content": "RUN echo ${A} ${B}"},
+    ]
+    groups = _group_cached_layer_commands(instructions)
+    assert groups == [
+        ["ARG A=1", "RUN echo ${A}"],
+        ["ARG A=1", "ARG B=2", "RUN echo ${A} ${B}"],
+    ]
+
+
+def test_group_cached_layer_commands_without_args_is_one_group_per_instruction() -> None:
+    instructions: list[Mapping[str, object]] = [
+        {"instruction": "RUN", "content": "RUN echo hello"},
+        {"instruction": "COMMENT", "content": "# noise"},
+        {"instruction": "RUN", "content": "RUN echo world"},
+    ]
+    groups = _group_cached_layer_commands(instructions)
+    assert groups == [["RUN echo hello"], ["RUN echo world"]]
 
 
 # ---------------------------------------------------------------------------
@@ -2482,14 +2623,17 @@ def test_list_persisted_agent_data_skips_invalid_json(
     host_id = HostId.generate()
     volume = testing_provider.get_state_volume()
     host_dir = f"/hosts/{host_id}"
+    valid_agent = {"id": "agent-bbbb2222cccc3333dddd4444eeee5555", "name": "valid-agent", "type": "claude"}
     volume.write_files(
         {
             f"{host_dir}/agent-aaaa1111bbbb2222cccc3333dddd4444.json": b"not valid json{{{",
+            f"{host_dir}/agent-bbbb2222cccc3333dddd4444eeee5555.json": json.dumps(valid_agent).encode("utf-8"),
         }
     )
 
+    # The invalid file is skipped; exactly the valid agent is returned.
     agents = testing_provider.list_persisted_agent_data_for_host(host_id)
-    assert agents == []
+    assert agents == [valid_agent]
 
 
 # ---------------------------------------------------------------------------
@@ -2761,14 +2905,15 @@ def test_get_modal_image_definition_from_dockerfile_with_context(
     tmp_path: Path,
 ) -> None:
     dockerfile = tmp_path / "Dockerfile"
-    dockerfile.write_text("FROM debian:bookworm-slim\nRUN echo hello\n")
+    dockerfile.write_text("FROM python:3.11-slim\n")
     context_dir = tmp_path / "context"
     context_dir.mkdir()
     image = testing_provider._get_modal_image_definition(
         dockerfile=dockerfile,
         context_dir=context_dir,
     )
-    assert image.get_object_id() is not None
+    # FROM-only Dockerfile: the parsed base ("python") surfaces in the object id.
+    assert "python" in image.get_object_id()
 
 
 # ---------------------------------------------------------------------------
@@ -2814,12 +2959,26 @@ def test_get_modal_image_definition_from_dockerfile_with_build_args(
     tmp_path: Path,
 ) -> None:
     dockerfile = tmp_path / "Dockerfile"
-    dockerfile.write_text('FROM debian:bookworm-slim\nARG VERSION="1.0"\nRUN echo $VERSION\n')
+    dockerfile.write_text('FROM python:3.11-slim\nARG VERSION="1.0"\nRUN echo $VERSION\n')
+    # Build args that match an ARG in the Dockerfile substitute cleanly and the
+    # build proceeds through the Dockerfile path (id from dockerfile_commands,
+    # distinct from the debian/registry branch prefixes).
     image = testing_provider._get_modal_image_definition(
         dockerfile=dockerfile,
         docker_build_args=["VERSION=2.0"],
     )
-    assert image.get_object_id() is not None
+    object_id = image.get_object_id()
+    assert object_id.startswith("img-")
+    assert not object_id.startswith("img-debian")
+    assert not object_id.startswith("img-reg")
+
+    # The build-arg substitution is wired into _get_modal_image_definition: a build
+    # arg whose name is not declared as an ARG fails loudly rather than being ignored.
+    with pytest.raises(MngrError, match="not found as an ARG"):
+        testing_provider._get_modal_image_definition(
+            dockerfile=dockerfile,
+            docker_build_args=["UNDECLARED_ARG=x"],
+        )
 
 
 # ---------------------------------------------------------------------------
