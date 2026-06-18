@@ -481,7 +481,24 @@ def _run_overlay_pipeline(
     )
 
 
-def build_settings_narrowing_message(detail_lines: Sequence[str]) -> str:
+def _extend_example(dotted_path: str) -> str:
+    """Render an ``__extend`` snippet for a dotted key path, for the narrowing remediation.
+
+    The suffix goes on the *top* key of the layer, and each nested segment is itself
+    ``__extend``-ed so deeper levels keep merging rather than replacing: ``permissions.allow``
+    -> ``permissions__extend = {allow__extend = ...}`` and a top-level ``work_dir_extra_paths``
+    -> ``work_dir_extra_paths__extend = ...``. The value is a ``...`` placeholder (the key,
+    not the value, is what the user needs to get right).
+    """
+    segments = dotted_path.split(".")
+    expr = "..."
+    for index in range(len(segments) - 1, -1, -1):
+        is_innermost = index == len(segments) - 1
+        expr = f"{segments[index]}__extend = {expr}" if is_innermost else f"{segments[index]}__extend = {{{expr}}}"
+    return expr
+
+
+def build_settings_narrowing_message(detail_lines: Sequence[str], *, example_key_path: str | None = None) -> str:
     """Build the user-facing settings-narrowing error body shared by config-load and
     provisioning.
 
@@ -489,8 +506,11 @@ def build_settings_narrowing_message(detail_lines: Sequence[str]) -> str:
     dropped-from scopes per key; the claude provision fold lists the dotted key paths.
     The preamble and the remediation footer (the ``__extend`` / ``__assign`` operators and
     the ``allow_settings_key_assignment_narrowing`` flag) are identical in both contexts,
-    so they live here rather than being duplicated per caller.
+    so they live here rather than being duplicated per caller. ``example_key_path`` (a
+    narrowed dotted path) tailors the ``__extend`` example to the user's actual key so the
+    message shows exactly how to fix *their* config; it falls back to a generic example.
     """
+    example = _extend_example(example_key_path) if example_key_path else 'permissions__extend = {allow__extend = ["..."]}'
     return (
         "Settings narrowing detected: a higher-precedence settings layer would assign over "
         "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
@@ -499,6 +519,6 @@ def build_settings_narrowing_message(detail_lines: Sequence[str]) -> str:
         "`allow_settings_key_assignment_narrowing = true` in your mngr config "
         "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
         "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
-        'key in the higher-precedence layer (e.g. `permissions__extend = {allow__extend = ["..."]}`), '
+        f"key in the higher-precedence layer (e.g. `{example}`), "
         "or `__assign` to replace it intentionally without this error."
     )

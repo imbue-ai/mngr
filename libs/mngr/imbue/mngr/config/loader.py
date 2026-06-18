@@ -503,7 +503,8 @@ def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> Confi
         detail_lines.append(f"      assigned by {_describe_source(violation.assigned_by)}")
         if violation.dropped_from is not None:
             detail_lines.append(f"      would drop a value from {_describe_source(violation.dropped_from)}")
-    return ConfigParseError(build_settings_narrowing_message(detail_lines))
+    example_key_path = violations[0].key_path if violations else None
+    return ConfigParseError(build_settings_narrowing_message(detail_lines, example_key_path=example_key_path))
 
 
 def resolve_strict_from_env() -> bool:
