@@ -258,7 +258,8 @@ def _reparse_container_entries(
         reparsed: dict[Any, Any] = {}
         for key, entry in container.items():
             entry_model = entry_models.get(key)
-            assert entry_model is not None, f"no class recovered for {field_name}.{key}"
+            if entry_model is None:
+                raise ConfigParseError(f"no class recovered for {field_name}.{key}")
             reparsed[key] = type(entry_model).model_validate(entry)
         result[field_name] = reparsed
     return result
