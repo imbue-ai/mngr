@@ -2824,37 +2824,18 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
 
     Raises ``MngrCommandError`` for every non-clean outcome, like the rest of
     minds' mngr calls (``run_mngr_create``, the destroy cleanup) -- one domain
-    error the caller catches once. The non-clean outcomes are:
-
-    * a timeout (with ``is_checked_after=False`` a timeout comes back as a
-      finished process flagged ``is_timed_out`` rather than raising);
-    * a nonzero exit;
-    * a failure to launch at all -- ``OSError`` for fork/exec failures, and
-      ``ConcurrencyGroupError`` for the group's own setup / shutdown / strand
-      failures (``ProcessSetupError``, ``StrandTimedOutError``,
-      ``EnvironmentStoppedError``, ``InvalidConcurrencyGroupStateError``).
+    error the caller catches once. Delegates the launch/timeout handling to
+    ``_run_mngr_capturing`` and layers the raise-on-nonzero policy on top, so the
+    subprocess plumbing lives in one place. A timeout therefore surfaces as
+    ``MngrCommandTimeoutError`` (a ``MngrCommandError`` subclass, so existing
+    ``except MngrCommandError`` callers are unaffected), a nonzero exit as a bare
+    ``MngrCommandError`` (discarding stdout, unlike ``_run_mngr_capturing``), and
+    a launch failure as a bare ``MngrCommandError``.
     """
-    try:
-        finished = concurrency_group.run_process_to_completion(
-            argv,
-            timeout=_RESTART_COMMAND_TIMEOUT_SECONDS,
-            is_checked_after=False,
-            env=env,
-        )
-    except (OSError, ConcurrencyGroupError) as exc:
-        # The command never ran (a fork/exec failure, or a concurrency-group
-        # setup/strand/shutdown failure). create/destroy let these propagate to
-        # one outer handler because a launch failure is fatal to the operation;
-        # our callers instead handle failure locally and must keep going (the
-        # host-health probe composes a partial response and cannot 500), so we
-        # wrap it as the single MngrCommandError they already catch rather than
-        # leaving them to also catch this infra-exception tuple.
-        raise MngrCommandError(str(exc)) from exc
-    if finished.is_timed_out:
-        raise MngrCommandError(f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s")
-    if finished.returncode != 0:
-        raise MngrCommandError(f"exited {finished.returncode}: {finished.stderr.strip()}")
-    return finished.stdout
+    stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env)
+    if returncode != 0:
+        raise MngrCommandError(f"exited {returncode}: {stderr.strip()}")
+    return stdout
 
 
 def _run_mngr_capturing(
@@ -2865,15 +2846,17 @@ def _run_mngr_capturing(
 ) -> tuple[str, int, str]:
     """Run an ``mngr`` subprocess, returning ``(stdout, returncode, stderr)`` without raising on a nonzero exit.
 
-    The recovery host-health probe needs ``mngr list``'s JSON body even when the
-    command exits non-zero: with ``--on-error continue`` a provider failure still
-    emits ``{"agents": [...], "errors": [...]}`` to stdout and *then* exits 1, and
-    that ``errors[]`` array is exactly where the provider-reachability signal
-    lives. ``_run_mngr`` discards stdout on a nonzero exit, so this sibling keeps
-    it. A failure to launch the process raises ``MngrCommandError``; a timeout
-    raises the more specific ``MngrCommandTimeoutError`` so the caller can treat
-    "never completed" (no body, provider unreachable) differently from "ran and
-    exited nonzero" (body present to inspect).
+    The shared launch primitive behind ``_run_mngr``. The recovery host-health
+    probe needs ``mngr list``'s JSON body even when the command exits non-zero:
+    with ``--on-error continue`` a provider failure still emits
+    ``{"agents": [...], "errors": [...]}`` to stdout and *then* exits 1, and that
+    ``errors[]`` array is exactly where the provider-reachability signal lives, so
+    this returns the body and exit code rather than raising on a nonzero exit
+    (``_run_mngr`` layers that policy on for its callers). A failure to launch the
+    process raises ``MngrCommandError``; a timeout raises the more specific
+    ``MngrCommandTimeoutError`` so the caller can treat "never completed" (no body,
+    provider unreachable) differently from "ran and exited nonzero" (body present
+    to inspect).
     """
     try:
         finished = concurrency_group.run_process_to_completion(
@@ -2883,6 +2866,14 @@ def _run_mngr_capturing(
             env=env,
         )
     except (OSError, ConcurrencyGroupError) as exc:
+        # The command never ran (a fork/exec failure, or a concurrency-group
+        # setup/strand/shutdown failure -- ``ProcessSetupError``,
+        # ``StrandTimedOutError``, ``EnvironmentStoppedError``,
+        # ``InvalidConcurrencyGroupStateError``). Our callers handle failure
+        # locally and must keep going (the host-health probe composes a partial
+        # response and cannot 500), so we wrap it as the single MngrCommandError
+        # they already catch rather than leaving them to also catch this
+        # infra-exception tuple.
         raise MngrCommandError(str(exc)) from exc
     if finished.is_timed_out:
         raise MngrCommandTimeoutError(f"timed out after {int(timeout_seconds)}s")
@@ -2914,27 +2905,6 @@ def _await_system_interface_ready(
                 return True
             threading.Event().wait(timeout=_RESTART_PROBE_INTERVAL_SECONDS)
     return False
-
-
-def _probe_interface_once(agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str) -> bool:
-    """Single probe of the system interface through the plugin; True iff it answers 200.
-
-    Unlike ``_await_system_interface_ready`` (which polls until a deadline), this
-    asks exactly once -- used as the pre-stop re-confirmation gate, where we want
-    a snapshot of "is the interface answering *right now*", not a wait.
-    """
-    with make_workspace_probe_client(
-        preauth_cookie=preauth_cookie,
-        probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
-    ) as probe_client:
-        status = probe_workspace_through_plugin(
-            mngr_forward_port=mngr_forward_port,
-            preauth_cookie=preauth_cookie,
-            agent_id=agent_id,
-            probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
-            client=probe_client,
-        )
-    return status == 200
 
 
 class _RestartWorkerFailureHandler(MutableModel):
@@ -2993,31 +2963,6 @@ def _run_restart_sequence(
 
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
-
-    # Pre-stop re-confirmation for the destructive host restart: a host restart
-    # bounces the live container (interrupting every agent on it), so just before
-    # tearing it down we re-probe the interface one last time. If it answers now,
-    # the workspace recovered on its own between landing on the recovery page and
-    # the user (or auto-dispatch) committing to a restart -- e.g. a connectivity
-    # blip that cleared -- so we abort the restart and silently return the user to
-    # their still-healthy workspace rather than destroying live work for nothing.
-    # Only the destructive `--stop-host` path is gated: the surgical restart and
-    # the plain `mngr start` (skip_stop, container already fully stopped) have no
-    # live container to protect. Requires a usable plugin route to probe through;
-    # without one we cannot re-confirm and fall through to the stop as before.
-    if (
-        is_host_restart
-        and not skip_stop
-        and mngr_forward_port != 0
-        and mngr_forward_preauth_cookie
-        and _probe_interface_once(workspace_agent_id, mngr_forward_port, mngr_forward_preauth_cookie)
-    ):
-        logger.info(
-            "Pre-stop re-probe for {} found the interface healthy; aborting destructive host restart",
-            workspace_agent_id,
-        )
-        tracker.record_probe_success(workspace_agent_id)
-        return
 
     if skip_stop:
         logger.info("Skipping stop step for {} ({}): container already fully stopped", workspace_agent_id, tier_label)
