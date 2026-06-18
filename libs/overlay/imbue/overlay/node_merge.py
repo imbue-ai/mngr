@@ -309,8 +309,12 @@ def combine_nodes(
       stays deferred (no base yet).
     """
     if is_assign_kind(higher_node):
-        # Narrowing is recorded only when a Default replaces a lower *assign-kind*
-        # node; a lower Extend is an increment, not a base to narrow.
+        # Narrowing is recorded only when a Default replaces a lower *assign-kind* node.
+        # A lower Extend is an unresolved increment, not a set value, so a higher Default
+        # over it is an authoritative assign, not a narrowing: recording it would raise
+        # false positives for the normal "lower extends, higher sets" case, and would make
+        # the narrowing result depend on fold grouping (the compared base differs between
+        # (L*M)*H and L*(M*H)), breaking combine's associativity.
         if isinstance(higher_node, Default) and is_assign_kind(lower_node) and assign_drops is not None:
             assign_drops.append((lower_node.payload, higher_node.payload, ".".join(path)))
         return higher_node

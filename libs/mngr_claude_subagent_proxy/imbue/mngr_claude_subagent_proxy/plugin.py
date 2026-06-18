@@ -379,7 +379,7 @@ def _merge_hooks_into_settings(host: OnlineHostInterface, settings_path: Path, h
         return
 
     merged = merge_hooks_config(existing_settings, hooks_config)
-    if merged is None:
+    if merged == existing_settings:
         logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
         return
     # Ensure the parent exists so this doesn't depend on mngr_claude creating it first.

@@ -49,6 +49,7 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.field_markers import SettingsPatchField
+from imbue.mngr.config.overlay_merge import build_settings_narrowing_message
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
@@ -307,10 +308,8 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
-        description="A patch merged onto your home Claude settings at provisioning, e.g. "
-        "{'model': 'opus[1m]', 'permissions__extend': {'allow__extend': ['Bash(npm *)']}}. Uses the "
-        "standard `__extend` merge scheme and accumulates across config scopes / `parent_type` "
-        "inheritance (see mngr's config README). Not applied in use_env_config_dir mode.",
+        description="A patch merged onto your home Claude settings at provisioning, using the standard "
+        "`__extend` merge scheme (see mngr's config README). Not applied in use_env_config_dir mode.",
     )
     emit_common_transcript: bool = Field(
         default=True,
@@ -596,31 +595,14 @@ def _build_settings_json(
     merged, narrowings = merge_narrowing_allowed(lift(base), lift(config.settings_overrides))
 
     # Narrowing guard: any bare override key (at any depth) that drops a non-empty
-    # aggregate from ``B`` hard-errors unless the escape hatch is set.
+    # aggregate from ``B`` hard-errors unless the escape hatch is set. The message body is
+    # the one shared with the config-load narrowing error (here the detail lines are just
+    # the dotted key paths; the loader names the assigning/dropped scopes per key).
     if narrowings and not allow_narrowing:
-        raise ConfigParseError(_build_settings_overrides_narrowing_message(narrowings))
+        raise ConfigParseError(build_settings_narrowing_message([f"  {path}" for path in narrowings]))
 
     data = finalize(merged)
     return json.dumps(data, indent=2) + "\n"
-
-
-def _build_settings_overrides_narrowing_message(narrowing_keys: Sequence[str]) -> str:
-    """Construct the user-facing error when a bare ``settings_overrides`` key would
-    silently drop entries from a non-empty aggregate in the home settings base.
-
-    Same advice shape as the config-layer narrowing error: name the keys, point
-    at the ``__extend`` suffix for additive merges, and at the escape-hatch flag.
-    """
-    keys_str = ", ".join(narrowing_keys)
-    return (
-        f"Settings narrowing detected: the settings_overrides key(s) [{keys_str}] would assign "
-        "over a non-empty list/dict/set value from your home Claude settings, silently dropping "
-        "the earlier entries.\n"
-        "To merge onto the home value instead (concatenate lists / union sets / merge dicts), "
-        'use the `__extend` suffix on the key (e.g. `permissions__extend = {allow__extend = ["..."]}`).\n'
-        "To opt into the assign-by-default (drop) behavior, set "
-        "`allow_settings_key_assignment_narrowing = true` in your mngr config."
-    )
 
 
 def _build_claude_json(

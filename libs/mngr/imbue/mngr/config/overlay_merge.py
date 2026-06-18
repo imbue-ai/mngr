@@ -34,6 +34,7 @@ specific contracts.
 
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Any
 from typing import TypeVar
 
@@ -476,4 +477,30 @@ def _run_overlay_pipeline(
         merged_patch=merged_patch,
         all_narrowings=all_narrowings,
         merged_entry_models=merged_entry_models,
+    )
+
+
+def build_settings_narrowing_message(detail_lines: Sequence[str]) -> str:
+    """Build the user-facing settings-narrowing error body shared by config-load and
+    provisioning.
+
+    ``detail_lines`` describe what narrowed -- the config loader names the assigning and
+    dropped-from scopes per key; the claude provision fold lists the dotted key paths.
+    The preamble and the remediation footer (the ``__extend`` / ``__assign`` operators and
+    the ``allow_settings_key_assignment_narrowing`` flag) are identical in both contexts,
+    so they live here rather than being duplicated per caller.
+    """
+    return (
+        "Settings narrowing detected: a higher-precedence settings layer would assign over "
+        "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
+        "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
+        "To opt into this assign-by-default behavior (and silence this error), set "
+        "`allow_settings_key_assignment_narrowing = true` in your mngr config "
+        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
+        "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
+        'key in the higher-precedence layer (e.g. `permissions__extend = {allow__extend = ["..."]}`), '
+        "or `__assign` to replace it intentionally without this error.\n"
+        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
+        "in a future version, and support for False may be removed entirely. Migrate now so "
+        "the eventual default flip is a no-op for your config."
     )

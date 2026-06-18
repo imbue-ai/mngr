@@ -1,5 +1,6 @@
 import copy
 import fcntl
+import functools
 import json
 import os
 import re
@@ -329,19 +330,19 @@ def _get_boolean_flag(config_path: Path, key: str) -> bool:
     return bool(config.get(key, False))
 
 
-def _set_boolean_flag(config_path: Path, key: str, log_message: str) -> None:
+def _set_boolean_flag(config_path: Path, key: str) -> bool:
     """Set the given boolean flag to true in the config file. No-op if already set.
 
     Acquires the config lock, reads, and atomically writes the updated config.
+    Returns True if it wrote (the flag was newly set), False if it was already set.
     """
     with _claude_config_lock(config_path):
         config = read_claude_config(config_path)
         if config.get(key, False):
-            return
+            return False
         config[key] = True
         _write_claude_config_atomic(config_path, config)
-
-    logger.trace(log_message)
+    return True
 
 
 def is_effort_callout_dismissed(config_path: Path) -> bool:
@@ -361,7 +362,8 @@ def check_effort_callout_dismissed(config_path: Path) -> None:
 
 def dismiss_effort_callout(config_path: Path) -> None:
     """Set effortCalloutDismissed=true in the given config file. No-op if already set."""
-    _set_boolean_flag(config_path, "effortCalloutDismissed", "Dismissed effort callout in Claude config")
+    if _set_boolean_flag(config_path, "effortCalloutDismissed"):
+        logger.trace("Dismissed effort callout in Claude config")
 
 
 def is_onboarding_completed(config_path: Path) -> bool:
@@ -377,7 +379,8 @@ def check_onboarding_completed(config_path: Path) -> None:
 
 def complete_onboarding(config_path: Path) -> None:
     """Set hasCompletedOnboarding=true in the given config file. No-op if already set."""
-    _set_boolean_flag(config_path, "hasCompletedOnboarding", "Marked onboarding as completed in Claude config")
+    if _set_boolean_flag(config_path, "hasCompletedOnboarding"):
+        logger.trace("Marked onboarding as completed in Claude config")
 
 
 def is_bypass_permissions_accepted(config_path: Path) -> bool:
@@ -393,12 +396,14 @@ def check_bypass_permissions_accepted(config_path: Path) -> None:
 
 def accept_bypass_permissions(config_path: Path) -> None:
     """Set bypassPermissionsModeAccepted=true in the given config file. No-op if already set."""
-    _set_boolean_flag(config_path, "bypassPermissionsModeAccepted", "Accepted bypass permissions in Claude config")
+    if _set_boolean_flag(config_path, "bypassPermissionsModeAccepted"):
+        logger.trace("Accepted bypass permissions in Claude config")
 
 
 def acknowledge_cost_threshold(config_path: Path) -> None:
     """Set hasAcknowledgedCostThreshold=true in the given config file. No-op if already set."""
-    _set_boolean_flag(config_path, "hasAcknowledgedCostThreshold", "Acknowledged cost threshold in Claude config")
+    if _set_boolean_flag(config_path, "hasAcknowledgedCostThreshold"):
+        logger.trace("Acknowledged cost threshold in Claude config")
 
 
 def check_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
@@ -838,17 +843,17 @@ def hook_already_exists(existing_hooks: list[dict[str, Any]], new_hook: dict[str
     return False
 
 
-def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str, Any]) -> dict[str, Any] | None:
+def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str, Any]) -> dict[str, Any]:
     """Merge new hooks into existing settings, skipping duplicates.
 
-    Returns the merged settings dict if any hooks were added, or None if all
-    hooks already existed. Does not mutate the input dict.
+    Returns a new settings dict with any not-yet-present hooks appended -- equal by value
+    to ``existing_settings`` when every hook already existed. Does not mutate the input; a
+    caller that must avoid a redundant write compares the result against its input.
     """
     merged = copy.deepcopy(existing_settings)
     if "hooks" not in merged:
         merged["hooks"] = {}
 
-    any_added = False
     for event_name, event_hooks in hooks_config["hooks"].items():
         if event_name not in merged["hooks"]:
             merged["hooks"][event_name] = []
@@ -856,18 +861,14 @@ def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str
         for new_hook in event_hooks:
             if not hook_already_exists(merged["hooks"][event_name], new_hook):
                 merged["hooks"][event_name].append(new_hook)
-                any_added = True
 
-    return merged if any_added else None
+    return merged
 
 
 def fold_hook_configs(base: dict[str, Any], hook_configs: list[dict[str, Any]]) -> dict[str, Any]:
     """Fold a sequence of hook configs onto a base settings dict via ``merge_hooks_config``.
 
-    Each config is merged in order, skipping duplicates. Returns the resulting
-    settings dict (the base unchanged if every hook already existed).
+    Each config is merged in order, skipping duplicate hooks. Returns the resulting
+    settings dict (equal by value to ``base`` if every hook already existed).
     """
-    data = base
-    for hook_config in hook_configs:
-        data = merge_hooks_config(data, hook_config) or data
-    return data
+    return functools.reduce(merge_hooks_config, hook_configs, base)

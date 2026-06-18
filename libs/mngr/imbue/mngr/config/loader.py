@@ -39,6 +39,7 @@ from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
+from imbue.mngr.config.overlay_merge import build_settings_narrowing_message
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
@@ -499,19 +500,7 @@ def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> Confi
         detail_lines.append(f"      assigned by {_describe_source(violation.assigned_by)}")
         if violation.dropped_from is not None:
             detail_lines.append(f"      would drop a value from {_describe_source(violation.dropped_from)}")
-    return ConfigParseError(
-        "Settings narrowing detected: a higher-precedence settings layer would assign over "
-        "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
-        "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
-        "To opt into this assign-by-default behavior (and silence this error), set "
-        "`allow_settings_key_assignment_narrowing = true` in one of the settings files above "
-        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
-        "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
-        'key in the higher-precedence layer (e.g. `env__extend = ["X=5"]`).\n'
-        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        "in a future version, and support for False may be removed entirely. Migrate now so "
-        "the eventual default flip is a no-op for your config."
-    )
+    return ConfigParseError(build_settings_narrowing_message(detail_lines))
 
 
 def resolve_strict_from_env() -> bool:
