@@ -380,11 +380,13 @@ def test_capture_pane_content_targets_requested_window(
     window's pane rather than the agent's primary one.
     """
     session_name = test_agent.session_name
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
     window_zero_marker = "WINDOW_ZERO_MARKER"
     window_one_marker = "WINDOW_ONE_MARKER"
 
+    # Name the primary window so the default capture (which targets it by name) finds it.
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 'echo {window_zero_marker}; sleep 493827'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' -x 200 -y 24 'echo {window_zero_marker}; sleep 493827'",
         timeout_seconds=5.0,
     )
     try:
