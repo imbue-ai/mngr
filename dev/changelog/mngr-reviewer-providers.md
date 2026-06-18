@@ -1,9 +1,0 @@
-## Provider uniformity review + core provider shape doc + release-test proposal
-
-- `specs/provider-uniformity-review.md`: descriptive cross-provider review covering all nine mngr provider plugins (modal, aws, azure, gcp, vultr, ovh, lima, docker, ssh). Includes a top-20 findings table, six lifecycle matrices (create / stop / stop --stop-host / start / destroy / cleanup) with file:line cites, CleanupFailedGroup adoption matrix, big defaults table, tag/label conventions table, error classification table, snapshot capability matrix, build-args table, test coverage gaps, and a 29-item recommendations punch list.
-
-- `specs/provider-shape.md`: forward-looking prescriptive "core providers doc" describing what an mngr provider OUGHT to look like -- user contract (including §1.8 making the N-agents-per-host invariant explicit), capability-flag honesty, default values that providers should share (security/CIDR, idle, auto-shutdown, resources, regions, sizes, images, tags, keys, exposure), lifecycle override hooks, error classification, operator commands, test requirements, anti-patterns, taxonomy table, 21-box implementer checklist, and open design questions. MUST/SHOULD/MAY language with file:lineno cites.
-
-- `specs/provider-release-tests.md`: proposal for a common release-test suite -- five multi-step "trips" (full lifecycle + sketchy kill + GC; second-agent-on-same-host; idle auto-shutdown contract; snapshot-survives-destroy; error classification) that amortize the per-provider boot cost across many assertions. Each trip step maps to one or more sections of the shape doc; every cross-provider divergence is flagged with an [INCONSISTENT] callout.
-
-- `specs/implementing-a-provider.md`: dev-facing-but-friendly walkthrough for someone adding a new provider plugin. 10 numbered steps from "pick the right base" through "sanity-check against the shape doc", plus a Common Gotchas section flagging the worst documentation/code mismatches in the current tree.
