@@ -31,19 +31,20 @@ from typing import Final
 
 import pytest
 from google.api_core import exceptions as google_api_exceptions
-from google.cloud import compute_v1
 from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
-from imbue.mngr_gcp.cleanup import find_old_test_instances
-from imbue.mngr_gcp.cleanup import force_delete_instances
+from imbue.mngr_gcp.cleanup import gcp_test_created_at
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
-from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
 from imbue.mngr_gcp.testing import GCP_RELEASE_TESTS_OPT_IN
 from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_gcp.testing import gcp_credentials_available
 from imbue.mngr_gcp.testing import get_default_project
+from imbue.mngr_gcp.testing import make_gcp_reaper_client
+from imbue.mngr_vps.errors import VpsError
+from imbue.mngr_vps.leak_cleanup import destroy_leaked_instances
+from imbue.mngr_vps.leak_cleanup import find_old_test_instances
 
 register_plugin_test_fixtures(globals())
 
@@ -134,26 +135,26 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         return
 
     try:
-        instances_client = compute_v1.InstancesClient()
-    except google_api_exceptions.GoogleAPICallError as e:
-        logger.error("Failed to build InstancesClient for session-end leak scan: {}", e)
+        client = make_gcp_reaper_client(project)
+        instances = client.list_instances()
+    except (VpsError, google_api_exceptions.GoogleAPICallError) as e:
+        # A scan that cannot run must fail the session, not silently report "no leaks".
+        logger.error("Failed to scan for leaked GCE test instances: {}", e)
         _mark_session_failed(session)
         return
 
-    orphans = find_old_test_instances(
-        instances_client, project, GCP_DEFAULT_ZONE, _TEST_LEAK_TTL, datetime.now(timezone.utc)
-    )
+    orphans = find_old_test_instances(instances, gcp_test_created_at, _TEST_LEAK_TTL, datetime.now(timezone.utc))
     if not orphans:
         return
 
-    force_delete_instances(instances_client, project, GCP_DEFAULT_ZONE, orphans)
+    destroy_leaked_instances(client, orphans)
     message = (
         "=" * 70
         + "\nGCP SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
         + "=" * 70
         + f"\n\nLeaked GCE instances labeled {GCP_PYTEST_LAUNCHED_LABEL}=true and "
         + f"older than {GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS // 60} minutes:\n  "
-        + "\n  ".join(orphans)
+        + "\n  ".join(inst["id"] for inst in orphans)
         + "\n\nInstances have been force-deleted, but tests should not leak.\n"
     )
     logger.error(message)

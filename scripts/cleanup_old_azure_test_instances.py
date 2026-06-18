@@ -28,15 +28,11 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
-from azure.identity import DefaultAzureCredential
-from azure.mgmt.compute import ComputeManagementClient
-from azure.mgmt.network import NetworkManagementClient
-
 from imbue.imbue_common.logging import setup_logging
 from imbue.mngr_azure.cleanup import cleanup_old_azure_test_instances
-from imbue.mngr_azure.testing import AZURE_DEFAULT_RESOURCE_GROUP
 from imbue.mngr_azure.testing import azure_credentials_available
 from imbue.mngr_azure.testing import get_default_subscription_id
+from imbue.mngr_azure.testing import make_azure_reaper_client
 
 
 def main() -> int:
@@ -61,12 +57,8 @@ def main() -> int:
         print("No Azure subscription could be resolved; skipping Azure test VM cleanup")
         return 0
 
-    compute = ComputeManagementClient(DefaultAzureCredential(), subscription_id)
-    network = NetworkManagementClient(DefaultAzureCredential(), subscription_id)
     cleaned_count = cleanup_old_azure_test_instances(
-        compute,
-        network,
-        resource_group=AZURE_DEFAULT_RESOURCE_GROUP,
+        make_azure_reaper_client(subscription_id),
         max_age=timedelta(hours=args.max_age_hours),
         now=datetime.now(timezone.utc),
     )

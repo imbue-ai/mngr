@@ -1,91 +1,66 @@
-"""Tests for the out-of-band GCP test-instance reaper."""
+"""Tests for the GCP adapter of the shared test-instance reaper.
+
+The reaper mechanics (age filter, destroy, surface-on-failure) are covered by
+``libs/mngr_vps/imbue/mngr_vps/leak_cleanup_test.py``. These tests cover only GCP's plumbing: the
+extractor requires the pytest-launched label (so production instances are never matched) and
+reads the ISO ``mngr-created-at`` value from instance *metadata*, and the thin wrapper delegates
+to the shared reaper.
+"""
 
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-
-from google.api_core import exceptions as google_api_exceptions
-from google.cloud import compute_v1
+from typing import Any
 
 from imbue.mngr_gcp.cleanup import cleanup_old_gcp_test_instances
-from imbue.mngr_gcp.cleanup import find_old_test_instances
-from imbue.mngr_gcp.cleanup import force_delete_instances
+from imbue.mngr_gcp.cleanup import gcp_test_created_at
+from imbue.mngr_gcp.client import CREATED_AT_METADATA_KEY
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
-from imbue.mngr_gcp.testing import FakeInstancesClient
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 _NOW = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
-_PROJECT = "test-project"
-_ZONE = "us-west1-a"
 
 
-def _instance(name: str, created_at: datetime) -> compute_v1.Instance:
-    return compute_v1.Instance(name=name, creation_timestamp=created_at.isoformat())
+def _instance(instance_id: str, created_at: datetime | None, *, launched: bool = True) -> dict[str, Any]:
+    tags = [f"{GCP_PYTEST_LAUNCHED_LABEL}=true"] if launched else []
+    metadata = {CREATED_AT_METADATA_KEY: created_at.isoformat()} if created_at is not None else {}
+    return {"id": instance_id, "tags": tags, "metadata": metadata}
 
 
-def test_find_keeps_only_instances_older_than_max_age() -> None:
-    client = FakeInstancesClient()
-    client.list_result = [
-        _instance("old", _NOW - timedelta(hours=3)),
-        _instance("fresh", _NOW - timedelta(minutes=10)),
-    ]
-    result = find_old_test_instances(client, _PROJECT, _ZONE, max_age=timedelta(hours=1), now=_NOW)
-    assert result == ["old"]
+class _FakeReaperClient:
+    def __init__(self, instances: list[dict[str, Any]]) -> None:
+        self._instances = instances
+        self.destroyed_ids: list[str] = []
+
+    def list_instances(self, tag: str | None = None) -> list[dict[str, Any]]:
+        return self._instances
+
+    def destroy_instance(self, instance_id: VpsInstanceId) -> None:
+        self.destroyed_ids.append(str(instance_id))
 
 
-def test_find_boundary_exactly_max_age_is_not_old() -> None:
-    client = FakeInstancesClient()
-    client.list_result = [_instance("edge", _NOW - timedelta(hours=1))]
-    assert find_old_test_instances(client, _PROJECT, _ZONE, max_age=timedelta(hours=1), now=_NOW) == []
+def test_extractor_reads_created_at_from_metadata() -> None:
+    at = _NOW - timedelta(hours=3)
+    assert gcp_test_created_at(_instance("t", at)) == at
 
 
-def test_find_filters_server_side_on_pytest_launched_label() -> None:
-    # The production-safety guarantee rests on the server-side label filter, so
-    # assert the scan requests it.
-    client = FakeInstancesClient()
-    find_old_test_instances(client, _PROJECT, _ZONE, max_age=timedelta(hours=1), now=_NOW)
-    assert client.last_list_filter == f"labels.{GCP_PYTEST_LAUNCHED_LABEL}=true"
+def test_extractor_requires_pytest_launched_label() -> None:
+    # Production instance: created-at present in metadata but no pytest-launched label.
+    assert gcp_test_created_at(_instance("prod", _NOW - timedelta(days=9), launched=False)) is None
 
 
-def test_find_skips_instance_with_unparseable_creation_timestamp() -> None:
-    # An instance whose age cannot be established from creation_timestamp must
-    # be left alone rather than crashing the scan (which runs in
-    # pytest_sessionfinish), mirroring the AWS / Azure / Vultr reapers.
-    client = FakeInstancesClient()
-    client.list_result = [
-        compute_v1.Instance(name="bad", creation_timestamp="not-a-timestamp"),
-        _instance("old", _NOW - timedelta(hours=3)),
-    ]
-    assert find_old_test_instances(client, _PROJECT, _ZONE, max_age=timedelta(hours=1), now=_NOW) == ["old"]
+def test_extractor_returns_none_without_created_at_metadata() -> None:
+    assert gcp_test_created_at(_instance("t", None)) is None
 
 
-def test_find_scan_error_returns_empty() -> None:
-    client = FakeInstancesClient()
-    client.list_error = google_api_exceptions.ServiceUnavailable("boom")
-    assert find_old_test_instances(client, _PROJECT, _ZONE, max_age=timedelta(hours=1), now=_NOW) == []
-
-
-def test_force_delete_swallows_errors() -> None:
-    client = FakeInstancesClient()
-    client.delete_error = google_api_exceptions.ServiceUnavailable("boom")
-    # Must not raise even though the underlying delete fails.
-    force_delete_instances(client, _PROJECT, _ZONE, ["x"])
-
-
-def test_cleanup_deletes_only_old_instances() -> None:
-    client = FakeInstancesClient()
-    client.list_result = [
-        _instance("old1", _NOW - timedelta(hours=5)),
-        _instance("fresh", _NOW - timedelta(minutes=5)),
-        _instance("old2", _NOW - timedelta(days=2)),
-    ]
-    cleaned = cleanup_old_gcp_test_instances(client, _PROJECT, _ZONE, max_age=timedelta(hours=1), now=_NOW)
-    assert cleaned == 2
-    assert sorted(client.deleted) == ["old1", "old2"]
-
-
-def test_cleanup_returns_zero_when_nothing_old() -> None:
-    client = FakeInstancesClient()
-    client.list_result = [_instance("fresh", _NOW - timedelta(minutes=5))]
-    cleaned = cleanup_old_gcp_test_instances(client, _PROJECT, _ZONE, max_age=timedelta(hours=1), now=_NOW)
-    assert cleaned == 0
-    assert client.deleted == []
+def test_cleanup_destroys_only_old_test_instances() -> None:
+    client = _FakeReaperClient(
+        [
+            _instance("old", _NOW - timedelta(hours=5)),
+            _instance("fresh", _NOW - timedelta(minutes=5)),
+            _instance("prod", _NOW - timedelta(days=2), launched=False),
+        ]
+    )
+    cleaned = cleanup_old_gcp_test_instances(client, max_age=timedelta(hours=1), now=_NOW)
+    assert cleaned == 1
+    assert client.destroyed_ids == ["old"]

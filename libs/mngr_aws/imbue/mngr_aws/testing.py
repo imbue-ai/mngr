@@ -17,6 +17,7 @@ from botocore.exceptions import BotoCoreError
 from pydantic import Field
 
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.config import ExistingSecurityGroup
 
 # Optional prefix release tests use for their agent names so leaked instances
 # (should the scanner ever fail) are still visually identifiable as test-owned.
@@ -63,6 +64,24 @@ def clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ.keys()):
         if key.startswith("AWS_"):
             monkeypatch.delenv(key, raising=False)
+
+
+def make_aws_reaper_client() -> AwsVpsClient:
+    """Build an ``AwsVpsClient`` for the session-end hook / standalone reaper.
+
+    The reaper only calls ``list_instances`` + ``destroy_instance``, which ignore the AMI /
+    security-group fields, so those are placeholders. Region comes from ``AWS_DEFAULT_REGION``
+    (the same region the release tests and orphan scan operate in). Used by both the conftest
+    session-end leak detector and ``scripts/cleanup_old_aws_test_instances.py`` so the two share
+    one client-construction path.
+    """
+    session = boto3.Session(region_name=AWS_DEFAULT_REGION)
+    return AwsVpsClient(
+        session=session,
+        region=AWS_DEFAULT_REGION,
+        ami_id="ami-placeholder",
+        security_group=ExistingSecurityGroup(id="sg-placeholder"),
+    )
 
 
 def aws_credentials_available() -> bool:

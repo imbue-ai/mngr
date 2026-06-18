@@ -48,13 +48,15 @@ from moto import mock_aws
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
-from imbue.mngr_aws.cleanup import find_old_test_instances
-from imbue.mngr_aws.cleanup import terminate_test_instances
+from imbue.mngr_aws.cleanup import aws_test_created_at
 from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
-from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import aws_credentials_available
+from imbue.mngr_aws.testing import make_aws_reaper_client
+from imbue.mngr_vps.errors import VpsError
+from imbue.mngr_vps.leak_cleanup import destroy_leaked_instances
+from imbue.mngr_vps.leak_cleanup import find_old_test_instances
 
 register_plugin_test_fixtures(globals())
 
@@ -172,24 +174,26 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         return
 
     try:
-        ec2 = boto3.Session(region_name=AWS_DEFAULT_REGION).client("ec2")
-    except (BotoCoreError, ClientError) as e:
-        logger.error("Failed to build EC2 client for session-end leak scan: {}", e)
+        client = make_aws_reaper_client()
+        instances = client.list_instances()
+    except (VpsError, BotoCoreError, ClientError) as e:
+        # A scan that cannot run must fail the session, not silently report "no leaks".
+        logger.error("Failed to scan for leaked EC2 test instances: {}", e)
         _mark_session_failed(session)
         return
 
-    orphans = find_old_test_instances(ec2, _TEST_LEAK_TTL, datetime.now(timezone.utc))
+    orphans = find_old_test_instances(instances, aws_test_created_at, _TEST_LEAK_TTL, datetime.now(timezone.utc))
     if not orphans:
         return
 
-    terminate_test_instances(ec2, orphans)
+    destroy_leaked_instances(client, orphans)
     message = (
         "=" * 70
         + "\nAWS SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
         + "=" * 70
         + f"\n\nLeaked EC2 instances tagged {AWS_PYTEST_LAUNCHED_TAG}=true and "
         + f"older than {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS // 60} minutes:\n  "
-        + "\n  ".join(orphans)
+        + "\n  ".join(inst["id"] for inst in orphans)
         + "\n\nInstances have been force-terminated, but tests should not leak.\n"
     )
     logger.error(message)

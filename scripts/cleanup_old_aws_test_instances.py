@@ -26,12 +26,10 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
-import boto3
-
 from imbue.imbue_common.logging import setup_logging
 from imbue.mngr_aws.cleanup import cleanup_old_aws_test_instances
-from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import aws_credentials_available
+from imbue.mngr_aws.testing import make_aws_reaper_client
 
 
 def main() -> int:
@@ -52,9 +50,8 @@ def main() -> int:
         print("AWS credentials could not be resolved; skipping AWS test instance cleanup")
         return 0
 
-    ec2 = boto3.Session(region_name=AWS_DEFAULT_REGION).client("ec2")
     cleaned_count = cleanup_old_aws_test_instances(
-        ec2,
+        make_aws_reaper_client(),
         max_age=timedelta(hours=args.max_age_hours),
         now=datetime.now(timezone.utc),
     )

@@ -26,13 +26,11 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
-from google.cloud import compute_v1
-
 from imbue.imbue_common.logging import setup_logging
 from imbue.mngr_gcp.cleanup import cleanup_old_gcp_test_instances
-from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
 from imbue.mngr_gcp.testing import gcp_credentials_available
 from imbue.mngr_gcp.testing import get_default_project
+from imbue.mngr_gcp.testing import make_gcp_reaper_client
 
 
 def main() -> int:
@@ -57,11 +55,8 @@ def main() -> int:
         print("No default GCP project could be resolved; skipping GCP test instance cleanup")
         return 0
 
-    instances_client = compute_v1.InstancesClient()
     cleaned_count = cleanup_old_gcp_test_instances(
-        instances_client,
-        project=project,
-        zone=GCP_DEFAULT_ZONE,
+        make_gcp_reaper_client(project),
         max_age=timedelta(hours=args.max_age_hours),
         now=datetime.now(timezone.utc),
     )

@@ -31,16 +31,12 @@ from typing import Final
 
 import pytest
 from azure.core.exceptions import AzureError
-from azure.identity import DefaultAzureCredential
-from azure.mgmt.compute import ComputeManagementClient
-from azure.mgmt.network import NetworkManagementClient
 from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
-from imbue.mngr_azure.cleanup import find_old_test_vms
-from imbue.mngr_azure.cleanup import force_delete_vms
-from imbue.mngr_azure.cleanup import reclaim_orphan_test_network
+from imbue.mngr_azure.cleanup import AZURE_REAPER_PROVIDER_NAME
+from imbue.mngr_azure.cleanup import azure_test_created_at
 from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
 from imbue.mngr_azure.testing import AZURE_DEFAULT_REGION
 from imbue.mngr_azure.testing import AZURE_DEFAULT_RESOURCE_GROUP
@@ -48,6 +44,10 @@ from imbue.mngr_azure.testing import AZURE_RELEASE_TESTS_OPT_IN
 from imbue.mngr_azure.testing import AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_azure.testing import azure_credentials_available
 from imbue.mngr_azure.testing import get_default_subscription_id
+from imbue.mngr_azure.testing import make_azure_reaper_client
+from imbue.mngr_vps.errors import VpsError
+from imbue.mngr_vps.leak_cleanup import destroy_leaked_instances
+from imbue.mngr_vps.leak_cleanup import find_old_test_instances
 
 register_plugin_test_fixtures(globals())
 
@@ -136,21 +136,22 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         return
 
     try:
-        compute = ComputeManagementClient(DefaultAzureCredential(), subscription_id)
-        network = NetworkManagementClient(DefaultAzureCredential(), subscription_id)
-    except AzureError as e:
-        logger.error("Failed to build Azure clients for session-end leak scan: {}", e)
+        client = make_azure_reaper_client(subscription_id)
+        # Reclaim orphaned NICs / public IPs (capacity-failed creates) silently -- an Azure-side
+        # artifact, not a test leak -- before scanning for leaked VMs.
+        client.reclaim_orphaned_network_resources(AZURE_REAPER_PROVIDER_NAME)
+        instances = client.list_instances()
+    except (VpsError, AzureError) as e:
+        # A scan that cannot run must fail the session, not silently report "no leaks".
+        logger.error("Failed to scan for leaked Azure test VMs: {}", e)
         _mark_session_failed(session)
         return
 
-    now = datetime.now(timezone.utc)
-    reclaim_orphan_test_network(network, AZURE_DEFAULT_RESOURCE_GROUP, _TEST_LEAK_TTL, now)
-
-    orphans = find_old_test_vms(compute, AZURE_DEFAULT_RESOURCE_GROUP, _TEST_LEAK_TTL, now)
+    orphans = find_old_test_instances(instances, azure_test_created_at, _TEST_LEAK_TTL, datetime.now(timezone.utc))
     if not orphans:
         return
 
-    force_delete_vms(compute, AZURE_DEFAULT_RESOURCE_GROUP, orphans)
+    destroy_leaked_instances(client, orphans)
     message = (
         "=" * 70
         + "\nAZURE SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
@@ -158,7 +159,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         + f"\n\nLeaked Azure VMs tagged {AZURE_PYTEST_LAUNCHED_TAG}=true and "
         + f"older than {AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS // 60} minutes in "
         + f"resource group {AZURE_DEFAULT_RESOURCE_GROUP} (region {AZURE_DEFAULT_REGION}):\n  "
-        + "\n  ".join(orphans)
+        + "\n  ".join(inst["id"] for inst in orphans)
         + "\n\nVMs have been force-deleted, but tests should not leak.\n"
     )
     logger.error(message)
