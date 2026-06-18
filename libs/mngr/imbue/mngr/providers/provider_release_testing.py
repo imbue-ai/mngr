@@ -190,9 +190,9 @@ def _exec_on_host(
 
 
 def _host_state_in_list(settings_dir: Path, workspace: Path, host_name: str) -> str | None:
-    """Return the host_state ``mngr list`` reports for ``host_name``, or None if it is absent.
+    """Return the host state ``mngr list`` reports for ``host_name``, or None if it is absent.
 
-    Reads the explicit ``host_state`` field so the assertion keys on the host lifecycle state
+    Reads the explicit ``host.state`` field so the assertion keys on the host lifecycle state
     (RUNNING / STOPPED / CRASHED / DESTROYED) rather than the agent's session state.
     """
     result = _run_mngr(
