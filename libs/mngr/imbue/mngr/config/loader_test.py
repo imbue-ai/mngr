@@ -2033,6 +2033,28 @@ def test_load_config_narrowing_allowed_when_opted_in(
     assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=5"]
 
 
+def test_load_config_narrowing_skipped_when_guard_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """``enforce_narrowing_guard=False`` loads a narrowing config without raising.
+
+    The ``mngr config`` command relies on this so it can load (and thus edit) a config that
+    would otherwise trip the guard -- otherwise ``config set`` / ``config unset``, the way to
+    fix a narrowing config, would themselves fail with the narrowing error (a catch-22).
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg, enforce_narrowing_guard=False)
+    # Loads without raising; the narrowing is allowed through (higher layer's env wins).
+    assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=5"]
+
+
 def test_load_config_extend_avoids_narrowing_without_opt_in(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:

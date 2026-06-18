@@ -177,7 +177,10 @@ def setup_command_context(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load config (is_interactive will be resolved below)
+    # Load config (is_interactive will be resolved below). The ``mngr config`` command is
+    # exempt from the settings-narrowing guard: it must be able to load a config that would
+    # otherwise narrow in order to *edit* it (otherwise `mngr config set`/`unset` -- the way
+    # to fix a narrowing config -- would themselves fail with the narrowing error).
     pm = ctx.obj
     mngr_ctx = load_config(
         pm,
@@ -187,6 +190,7 @@ def setup_command_context(
         is_interactive=False,
         strict=strict,
         silent_unknown_fields=silent_unknown_fields,
+        enforce_narrowing_guard=command_name != "config",
     )
 
     # Resolve is_interactive from all sources.

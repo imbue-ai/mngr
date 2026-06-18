@@ -139,6 +139,7 @@ def load_config(
     is_interactive: bool = False,
     strict: bool | None = None,
     silent_unknown_fields: bool = False,
+    enforce_narrowing_guard: bool = True,
 ) -> MngrContext:
     """Load and merge configuration from all sources.
 
@@ -258,10 +259,13 @@ def load_config(
         narrowing_violations.extend(_collect_narrowing(env_narrowing_paths, env_source, provenance))
         _record_provenance(provenance, parsed_env_layer, env_source)
 
-    # Raise on collected narrowing assignments unless the user has opted in.
+    # Raise on collected narrowing assignments unless the user has opted in. Skipped when
+    # ``enforce_narrowing_guard`` is False (the ``mngr config`` command, which must be able
+    # to load a narrowing config in order to *edit* it -- otherwise the guard is a catch-22
+    # that blocks the very ``config set``/``unset`` that would resolve it).
     # Done before further config_dict mutation so the error surfaces with the
     # actual settings-file paths in the message.
-    if narrowing_violations and not config.allow_settings_key_assignment_narrowing:
+    if narrowing_violations and enforce_narrowing_guard and not config.allow_settings_key_assignment_narrowing:
         raise _build_narrowing_error(narrowing_violations)
 
     # Build a dict with non-None values for final validation.
