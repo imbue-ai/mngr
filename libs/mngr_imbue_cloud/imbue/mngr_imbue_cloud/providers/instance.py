@@ -95,6 +95,7 @@ from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
+from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
@@ -122,6 +123,8 @@ from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provide
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
+from imbue.mngr_vps_docker.container_setup import exec_in_container
+from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -1517,7 +1520,19 @@ class ImbueCloudProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         snapshot_id: SnapshotId | None = None,
     ) -> Host:
-        """Start the previously-stopped docker container via the outer host and return the Host."""
+        """Start the previously-stopped docker container, re-bootstrap its SSH, and return the Host.
+
+        A bare ``docker start`` is not enough to bring a leased mind back: the
+        in-container sshd is launched via ``docker exec`` (the container's CMD is
+        just a sleep), so it does not survive the stop; and the per-host
+        authorized key and the container host key may not have persisted either.
+        Without re-establishing all three, the subsequent ``mngr start`` SSH into
+        the container fails and the mind is left dead and UI-unrecoverable. So,
+        over the outer root SSH (which works independently of the container's
+        sshd), we relaunch sshd, re-seed the per-host authorized key, wait for
+        sshd, and re-record the served host key -- mirroring what the local
+        docker and vps_docker providers already do on restart.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)
         if leased is None:
@@ -1535,7 +1550,41 @@ class ImbueCloudProvider(BaseProviderInstance):
                 outer, f"start {shlex.quote(container_id)}", host_id=host_id, label="docker-start"
             )
             logger.debug("Started container {} for host {}", container_id, host_id)
+            # sshd was launched via ``docker exec`` and does not survive the stop,
+            # so relaunch it; otherwise the wait below (and the later
+            # ``mngr start`` SSH) would hang until timeout and the mind would be
+            # unrecoverable.
+            start_container_sshd(outer, container_id)
+            # Re-seed the per-host authorized key in case the container's ``/root``
+            # did not persist across the stop/start. The connector installs it at
+            # lease time, but we cannot rely on that surviving a restart.
+            self._reseed_container_authorized_key(outer, container_id, host_id)
+            self._wait_for_container_sshd(leased)
+            # The restarted container may serve a different host key than the one
+            # recorded at lease time; re-scan and update known_hosts so the
+            # ImbueCloudHost's strict host-key checking succeeds.
+            self._scan_and_record_container_host_key(host_id, leased.vps_address, leased.container_ssh_port)
         return self._build_host_object(leased)
+
+    def _wait_for_container_sshd(self, leased: LeasedHostInfo) -> None:
+        """Wait for the container's sshd to accept connections on the leased VPS's port."""
+        wait_for_sshd(leased.vps_address, leased.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
+
+    def _reseed_container_authorized_key(self, outer: OuterHostInterface, container_id: str, host_id: HostId) -> None:
+        """Re-add the per-host public key to the container's root ``authorized_keys``.
+
+        Idempotent at the SSH layer (OpenSSH treats ``authorized_keys`` as a set),
+        so a redundant re-seed on a restart where ``/root`` did persist is benign.
+        """
+        _, public_key_path = self._host_keypair_paths(host_id)
+        if not public_key_path.exists():
+            return
+        public_key = public_key_path.read_text().strip()
+        if not public_key:
+            return
+        command = build_add_authorized_keys_command("root", (public_key,))
+        if command is not None:
+            exec_in_container(outer, container_id, command)
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
         """Wipe user data on the leased VPS and release the lease back to the pool.
