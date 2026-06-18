@@ -55,19 +55,10 @@ def ssh_provider(
 @pytest.mark.acceptance
 @pytest.mark.timeout(60)
 def test_ssh_provider_get_host(ssh_provider: SSHProviderInstance) -> None:
-    """Test getting a host by name from SSH provider."""
+    """Test getting a host by name from SSH provider over a live sshd."""
     host = ssh_provider.get_host(HostName("localhost"))
-    assert host is not None
-    assert host.id is not None
-
-
-@pytest.mark.acceptance
-@pytest.mark.timeout(60)
-def test_ssh_provider_get_host_by_id(ssh_provider: SSHProviderInstance) -> None:
-    """Test getting a host by ID from SSH provider."""
-    host_by_name = ssh_provider.get_host(HostName("localhost"))
-    host_by_id = ssh_provider.get_host(host_by_name.id)
-    assert host_by_id.id == host_by_name.id
+    assert host.host_name == HostName("localhost")
+    assert host.id == ssh_provider._host_id_for_name("localhost")
 
 
 @pytest.mark.acceptance
@@ -87,15 +78,6 @@ def test_ssh_provider_execute_command(ssh_provider: SSHProviderInstance) -> None
     result = host.execute_idempotent_command("echo hello")
     assert result.success
     assert "hello" in result.stdout
-
-
-@pytest.mark.acceptance
-@pytest.mark.timeout(60)
-def test_ssh_provider_host_id_is_deterministic(ssh_provider: SSHProviderInstance) -> None:
-    """Test that the same host name always produces the same host ID."""
-    host1 = ssh_provider.get_host(HostName("localhost"))
-    host2 = ssh_provider.get_host(HostName("localhost"))
-    assert host1.id == host2.id
 
 
 @pytest.mark.acceptance

@@ -7,6 +7,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.providers.registry import _indent_text
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
+from imbue.mngr.providers.registry import get_backend
 
 _TEST_BACKEND_NAME = ProviderBackendName("test-same-help")
 
@@ -81,17 +82,22 @@ def test_get_all_provider_args_help_sections_includes_all_registered_backends() 
 def test_get_all_provider_args_help_sections_includes_build_help_text() -> None:
     sections = get_all_provider_args_help_sections()
     _title, content = sections[0]
-    # Local backend's build help should appear
-    assert "No build arguments are supported for the local provider" in content
+    # The build help is sourced from the backend class itself, not a hard-coded
+    # literal, so a copy edit to the backend's help string keeps this in sync.
+    expected_build_help = get_backend("local").get_build_args_help().strip()
+    assert expected_build_help in content
 
 
 def test_get_all_provider_args_help_sections_includes_start_help_when_different_from_build() -> None:
     sections = get_all_provider_args_help_sections()
     _title, content = sections[0]
-    # Local backend has different build and start help, so both should appear
-    assert "No start arguments are supported for the local provider" in content
-    # SSH backend also has different start help
-    assert "No start arguments are supported for the SSH provider" in content
+    # Both local and ssh have start help that differs from their build help, so
+    # the start help (fetched from the backend, the source of truth) must appear.
+    local_start_help = get_backend("local").get_start_args_help().strip()
+    ssh_start_help = get_backend("ssh").get_start_args_help().strip()
+    assert local_start_help != get_backend("local").get_build_args_help().strip()
+    assert local_start_help in content
+    assert ssh_start_help in content
 
 
 def test_get_all_provider_args_help_sections_omits_start_help_when_same_as_build() -> None:

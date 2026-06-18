@@ -59,21 +59,31 @@ def test_docker_provider_name(temp_mngr_ctx: MngrContext) -> None:
 
 
 def test_docker_provider_supports_snapshots(temp_mngr_ctx: MngrContext) -> None:
+    # Pins the capability contract against an accidental flip. The behavioral
+    # consequence (snapshots actually working) is covered by the snapshot
+    # lifecycle acceptance tests in test_docker_lifecycle.py.
     provider = make_docker_provider(temp_mngr_ctx)
     assert provider.supports_snapshots is True
 
 
 def test_docker_provider_supports_shutdown_hosts(temp_mngr_ctx: MngrContext) -> None:
+    # Pins the capability contract against an accidental flip. The behavioral
+    # consequence (stop/start working) is covered by test_docker_lifecycle.py.
     provider = make_docker_provider(temp_mngr_ctx)
     assert provider.supports_shutdown_hosts is True
 
 
 def test_docker_provider_supports_volumes(temp_mngr_ctx: MngrContext) -> None:
+    # Pins the capability contract against an accidental flip. Volume behavior
+    # is covered by the list/delete volume tests below.
     provider = make_docker_provider(temp_mngr_ctx)
     assert provider.supports_volumes is True
 
 
 def test_docker_provider_does_not_support_mutable_tags(temp_mngr_ctx: MngrContext) -> None:
+    # Pins the capability contract against an accidental flip. The behavioral
+    # consequence (set/add/remove tag methods raising MngrError) is enforced by
+    # test_set_host_tags_raises_mngr_error and its siblings below.
     provider = make_docker_provider(temp_mngr_ctx)
     assert provider.supports_mutable_tags is False
 
@@ -625,6 +635,40 @@ def test_offline_host_from_record_is_writable(
     # mode is not settable on a volume write -- it is ignored, not an error.
     host.write_file(target, b"world", mode="0644")
     assert host.read_file(target) == b"world"
+
+
+def test_save_failed_host_record_writes_readable_record(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """_save_failed_host_record writes a host record with failure metadata and no SSH info.
+
+    _save_failed_host_record only touches the host store (it never creates a
+    container), so a LocalVolume-backed provider exercises it deterministically
+    without a Docker daemon.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    host_id = HostId.generate()
+    provider._save_failed_host_record(
+        host_id=host_id,
+        host_name=HostName("failed-host"),
+        tags={"env": "test"},
+        failure_reason="Container startup failed",
+        build_log="error: something went wrong",
+    )
+
+    record = provider._host_store.read_host_record(host_id)
+    assert record is not None
+    assert record.certified_host_data.host_id == str(host_id)
+    assert record.certified_host_data.host_name == "failed-host"
+    assert record.certified_host_data.failure_reason == "Container startup failed"
+    assert record.certified_host_data.build_log == "error: something went wrong"
+    assert record.certified_host_data.user_tags == {"env": "test"}
+    # Failed hosts have no SSH info and no container.
+    assert record.ssh_host is None
+    assert record.ssh_port is None
+    assert record.ssh_host_public_key is None
+    assert record.container_id is None
 
 
 def test_volume_id_for_host_is_deterministic() -> None:
