@@ -30,6 +30,7 @@ from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.field_markers import SettingsPatchField
@@ -41,6 +42,7 @@ from imbue.mngr.config.provider_config_registry import reset_provider_config_reg
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.logging import LoggingConfig
 
@@ -120,6 +122,37 @@ def test_mngr_container_entry_subclass_is_preserved() -> None:
     entry = actual.agent_types[AgentTypeName("c")]
     assert type(entry) is _MngrClaudeLikeConfig
     assert entry.auto_dismiss_dialogs is True
+
+
+class _PluginWithDirectoryConfig(PluginConfig):
+    """A ``PluginConfig`` subclass carrying a type-specific field, standing in for a real
+    plugin config (e.g. ``LatchkeyPluginConfig``): exercises plugins-registry subclass
+    round-tripping through ``MngrConfig.merge_with`` without depending on a plugin package.
+    """
+
+    directory: str | None = Field(default=None)
+
+
+def test_mngr_plugins_registry_subclass_is_preserved() -> None:
+    """A higher scope touching only the base ``enabled`` field of a ``plugins`` entry keeps
+    the lower scope's subclass type and its type-specific fields: merging a subclass entry
+    with a plain ``PluginConfig`` override round-trips as the subclass, carrying ``directory``
+    through while taking ``enabled`` from the override. This is the plugins-registry analogue
+    of ``test_mngr_container_entry_subclass_is_preserved`` (agent_types) and
+    ``test_container_entry_submodel_carries_base_unset_fields`` (providers), consolidating the
+    per-plugin ``merge_with`` subclass-preservation tests the overlay refactor retired
+    (e.g. ``mngr_latchkey``'s ``test_merge_with_base_plugin_config_only_carries_enabled``).
+    """
+    base = MngrConfig.model_construct(
+        prefix="m-", plugins={PluginName("my_plugin"): _PluginWithDirectoryConfig(directory="/base/dir")}
+    )
+    override = MngrConfig.model_construct(plugins={PluginName("my_plugin"): PluginConfig(enabled=False)})
+    merged, narrowings = base.merge_with(override)
+    entry = merged.plugins[PluginName("my_plugin")]
+    assert type(entry) is _PluginWithDirectoryConfig
+    assert entry.directory == "/base/dir"
+    assert entry.enabled is False
+    assert narrowings == []
 
 
 def test_merge_models_via_overlay_rejects_mismatched_types() -> None:
