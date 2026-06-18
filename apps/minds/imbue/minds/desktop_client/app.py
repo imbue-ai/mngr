@@ -3415,18 +3415,6 @@ def _handle_host_health_probe_api(
     )
 
 
-def _provider_display_label(provider_name: str | None) -> str:
-    """Friendly provider name for the 'Can't connect to ...' page title.
-
-    imbue_cloud is the user-facing cloud, so name it; local backends (docker /
-    lima) fall back to a generic label rather than leaking an internal provider
-    instance name into the UI.
-    """
-    if provider_name is not None and provider_name.startswith(_IMBUE_CLOUD_PROVIDER_PREFIX):
-        return "Imbue Cloud"
-    return "the workspace backend"
-
-
 def _run_host_health_probe(
     agent_id: AgentId,
     request: Request,
@@ -3468,7 +3456,10 @@ def _run_host_health_probe(
         logger.warning("`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error)
     list_json: str | None = list_stdout or None
     provider_error = extract_provider_error(list_json, provider_name)
-    provider_label = _provider_display_label(provider_name)
+    # Friendly provider name for the "Can't connect to ..." page title; reuse the
+    # workspace-listing label map (docker -> "Docker", imbue_cloud_* -> "Imbue
+    # Cloud", ...), falling back to a generic label for an unknown/None provider.
+    provider_label = friendly_provider_label(provider_name) or "the workspace backend"
     # The in-container probe stays quiet at warning level: its argv embeds a
     # long base64 inner script that adds nothing to diagnostics, and the
     # dispatch_tier INFO line already records the outcome. Trust the stdout only
