@@ -534,7 +534,7 @@ def test_destroy_host_offline_dispatch_ignores_stale_cached_record_with_vps_ip(t
     """A stopped host whose cache still holds a vps_ip-set record is destroyed offline, not over SSH.
 
     Regression guard for the warm-cache case (``mngr stop`` then ``mngr destroy``
-    discovery in one process): the cached ``VpsDockerHostRecord`` keeps its
+    discovery in one process): the cached ``VpsHostRecord`` keeps its
     pre-stop ``vps_ip``, so the base ``destroy_host`` would try a doomed SSH
     teardown against a dead address and leak the still-billing instance. Dispatch
     on the instance's own (stopped) power state instead, so the offline terminate
@@ -561,7 +561,7 @@ def test_destroy_host_offline_dispatch_ignores_stale_cached_record_with_vps_ip(t
     )
     # Seed the warm cache with a reachable-looking record (vps_ip + config set), as
     # an in-process ``mngr stop`` leaves it; the dispatch must still go offline.
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+    provider._host_record_cache[host_id] = VpsHostRecord(
         certified_host_data=CertifiedHostData(
             host_id=str(host_id),
             host_name="myhost",
