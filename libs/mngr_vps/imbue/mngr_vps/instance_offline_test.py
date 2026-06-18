@@ -15,6 +15,7 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostCreationError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -22,6 +23,7 @@ from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.interfaces.volume_test import InMemoryVolume
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -330,6 +332,83 @@ def test_realizer_for_vps_ip_falls_back_to_create_time_realizer_for_unknown_ip(t
     """An IP not in the listing (e.g. a just-created host) uses the create-time realizer."""
     provider = _marker_provider(temp_mngr_ctx, instances=[])
     assert provider._realizer_for_vps_ip("10.0.0.99") is provider._realizer
+
+
+# =========================================================================
+# Post-finalize idle-watcher invariant (_on_host_finalized)
+# =========================================================================
+
+
+class _FinalizeProvider(_MarkerProvider):
+    """Drives ``_on_host_finalized``: the host-record presence is injected and the
+    idle-watcher install is recorded rather than run (so no SSH happens)."""
+
+    _record: VpsHostRecord | None = PrivateAttr(default=None)
+    _watcher_installed: bool = PrivateAttr(default=False)
+
+    def _find_host_record(self, host: HostId | HostName) -> VpsHostRecord | None:
+        return self._record
+
+    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
+        self._watcher_installed = True
+
+
+def _finalize_provider(temp_mngr_ctx: MngrContext, isolation: IsolationMode) -> _FinalizeProvider:
+    return _FinalizeProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        config=VpsProviderConfig(backend=ProviderBackendName("offline-test"), isolation=isolation),
+        mngr_ctx=temp_mngr_ctx,
+        vps_client=ExternallyManagedVpsClient(),
+    )
+
+
+def _record_with_config(host_id: HostId) -> VpsHostRecord:
+    return VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="finalize-host",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ),
+        vps_ip="10.0.0.1",
+        config=VpsHostConfig(vps_instance_id=VpsInstanceId("i-finalize"), region="r", plan="p"),
+    )
+
+
+def test_on_host_finalized_raises_when_record_missing_blocks_watcher(temp_mngr_ctx: MngrContext) -> None:
+    """A missing host record at post-finalize, when the idle watcher is due (a container
+    placement that cannot stop its own host), is a broken invariant -- the record was
+    just made durable. ``_on_host_finalized`` must raise (failing create, whose cleanup
+    tears the VPS back down) rather than silently skip the watcher and ship a host that
+    can never auto-stop on idle.
+    """
+    provider = _finalize_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    assert not provider._realizer.idle_shutdown_stops_host
+    provider._record = None
+    with pytest.raises(HostCreationError):
+        provider._on_host_finalized(host_id=HostId.generate(), vps_ip="10.0.0.1")
+    assert not provider._watcher_installed
+
+
+def test_on_host_finalized_installs_watcher_when_record_present(temp_mngr_ctx: MngrContext) -> None:
+    """With the record durable, finalize proceeds to install the watcher (no raise)."""
+    provider = _finalize_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    host_id = HostId.generate()
+    provider._record = _record_with_config(host_id)
+    provider._on_host_finalized(host_id=host_id, vps_ip="10.0.0.1")
+    assert provider._watcher_installed
+
+
+def test_on_host_finalized_skips_record_check_for_self_stopping_placement(temp_mngr_ctx: MngrContext) -> None:
+    """A bare placement self-stops on idle, so no host-side watcher is installed and the
+    record invariant does not apply -- a missing record there must not fail finalize.
+    """
+    provider = _finalize_provider(temp_mngr_ctx, IsolationMode.NONE)
+    assert provider._realizer.idle_shutdown_stops_host
+    provider._record = None
+    provider._on_host_finalized(host_id=HostId.generate(), vps_ip="10.0.0.1")
+    assert not provider._watcher_installed
 
 
 # =========================================================================

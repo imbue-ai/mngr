@@ -1278,6 +1278,12 @@ class VpsProvider(BaseProviderInstance):
         realizer = self._realizer_for_record(host_record)
 
         if create_snapshot:
+            # Warn-not-raise: a stop preserves the volume, so the pre-stop snapshot is
+            # a belt-and-suspenders extra -- a failed snapshot loses no data, and
+            # blocking a requested stop over it would be worse. Mirrors the Modal and
+            # Docker providers (mngr_modal/instance.py "Failed to create snapshot
+            # before termination"; providers/docker/instance.py "Failed to create
+            # snapshot before stop").
             try:
                 self.create_snapshot(host_id)
             except MngrError as e:

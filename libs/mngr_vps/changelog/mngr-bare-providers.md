@@ -200,4 +200,16 @@ container, preserving the prior behavior.
 
 Behavior-preserving dedup in the shared offline layer. The near-identical AWS/Azure bucket-store selection now lives on `OfflineCapableVpsProvider` as `_select_bucket_store` (builds a `BucketHostStateStore`, or raises the actionable `missing_state_bucket_error` when the bucket is absent) and `_select_bucket_host_dir_backend` (bucket-backed when the feature is enabled and the bucket is present, else the no-op `NullHostDirBackend`); the AWS/Azure `_state_store` / `_host_dir_backend` cached properties are now thin wrappers passing only their resolved bucket, label, and prepare-command. The shared offline discovery now has a concrete `_offline_discovered_host_from_instance` default (builds a STOPPED `DiscoveredHost` from the `mngr-host-id` / name identity tags) with a `_host_name_tag_key()` hook; AWS/Azure drop their copies and set only the key (`Name` / `mngr-host-name`). The resume known_hosts rebind's add half is now a shared `_add_known_hosts_for_ip` helper (adds the VPS port-22 and container endpoints, each only when its key is present). GCP is unaffected: it keeps its metadata-backed `_state_store`, the `NullHostDirBackend` default, and its metadata-encoded discovery override. No user-visible behavior change.
 
+Hardened the post-finalize idle-watcher install. A missing host record at
+`_on_host_finalized` -- which runs only after the record has been made durable, so
+a missing record there is a broken invariant rather than a tolerable condition --
+now fails `create_host` (raising `HostCreationError`, whose cleanup tears the VPS
+back down) instead of logging a WARNING and silently shipping a host that can never
+auto-stop on idle. Genuine idle-watcher *install* failures (a network or systemctl
+error) stay best-effort and tolerated as before. Also documented why the remaining
+warn-not-raise sites in the provider (snapshot-before-stop, the activity-watcher
+relaunch on resume, the agent-record id guard, and the malformed-identity skip in
+offline discovery) warn rather than raise, cross-referencing their Modal/Docker and
+online-discovery equivalents.
+
 Performance: `mngr stop` on a bare (`isolation=NONE`) host no longer hangs for minutes while it captures the host's `host_dir`. A bare `host_dir` holds the agent's full working tree (a git checkout is thousands of small files), and the offline capture writes one object per file to the state bucket; these uploads previously ran serially, so one wide-area round-trip per object made the capture take minutes (the EC2 pause only happens after the capture completes). The per-file uploads now run concurrently across a bounded worker pool, turning a minutes-long stop into seconds. Found by a real-cloud smoke test; container hosts were unaffected (their `host_dir` is small).

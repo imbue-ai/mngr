@@ -17,6 +17,7 @@ from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostCreationError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
@@ -662,16 +663,10 @@ class OfflineCapableVpsProvider(VpsProvider):
 
         The path unit watches the outer-filesystem location of the in-container idle
         sentinel and, when it appears, the oneshot service stops the instance (the
-        action is the ``_idle_watcher_service_unit`` hook's body). Returns early
-        (after a WARNING) when the host record is missing.
+        action is the ``_idle_watcher_service_unit`` hook's body). The caller
+        (``_on_host_finalized``) asserts the host record is durable first, since a
+        host that can never auto-stop is a create failure, not a tolerable one.
         """
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            logger.warning(
-                "Idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
-                host_id,
-            )
-            return
         sentinel_on_outer = str(self._idle_sentinel_path_on_outer(host_id))
         with log_span("Installing idle self-stop watcher"):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -796,12 +791,29 @@ class OfflineCapableVpsProvider(VpsProvider):
         fails an already-durable ``create_host`` (the agent simply won't auto-stop
         on idle, but ``mngr stop`` still works).
 
+        The one exception is a *missing host record* when the idle watcher is due to
+        be installed: this method runs only after the record is durable, so a missing
+        record is a broken invariant, not a tolerable install failure. It raises
+        (failing ``create_host``, whose cleanup then tears the VPS back down) rather
+        than silently shipping a host that can never auto-stop.
+
         Offline host_dir needs no create-time provisioning: it is captured
         operator-side at ``mngr stop`` (see ``_capture_host_dir_before_pause``), so
         there is no sync daemon to install and no bucket-write identity to attach.
         """
         steps: list[tuple[str, Callable[[], None]]] = list(self._post_finalize_steps(host_id=host_id, vps_ip=vps_ip))
         if not self._realizer.idle_shutdown_stops_host:
+            # The idle watcher is this host's only auto-stop safety net. We run after
+            # the record is durable, so a missing record is a broken invariant: fail
+            # loudly here (outside the best-effort loop below) rather than skip the
+            # watcher and silently ship a host that can never auto-stop on idle.
+            record = self._find_host_record(host_id)
+            if record is None or record.config is None:
+                raise HostCreationError(
+                    self.name,
+                    f"Host record for {host_id} vanished immediately after finalize; "
+                    "cannot install the idle auto-stop watcher.",
+                )
             steps.append(
                 (
                     "the agent will not auto-stop on idle, but `mngr stop` still works",
@@ -955,6 +967,10 @@ class OfflineCapableVpsProvider(VpsProvider):
             super().persist_agent_data(host_id, agent_data)
         except HostNotFoundError:
             logger.debug("Host {} unreachable; mirroring agent data to the offline store only", host_id)
+        # Warn-not-raise, matching the on-volume writer this mirrors (host_store.py
+        # "Cannot persist agent data without id field") and the Modal provider
+        # (mngr_modal/instance.py, same guard): an id-less record can't be keyed, so
+        # both halves of the write skip it uniformly rather than one raising.
         agent_id = agent_data.get("id")
         if agent_id is None:
             logger.warning("Cannot mirror agent data without an id (name={!r})", agent_data.get("name"))
@@ -989,10 +1005,16 @@ class OfflineCapableVpsProvider(VpsProvider):
         ``mngr start``.
 
         One bad instance never aborts the sweep: a malformed mngr host identity is
-        logged and skipped. The offline check runs only for instances the live
-        sweep did not already surface (and after the cheap not-a-mngr-host / dedup
-        filters), so a healthy ``mngr list`` does no extra per-instance work and a
-        running-but-transiently-unreachable instance is not misreported as STOPPED.
+        logged and skipped. This matches the live path, which warn-and-skips a
+        corrupt on-volume record identically (``host_store.py`` "Failed to parse host
+        record" returns None), and the Modal provider (mngr_modal/instance.py
+        "Skipped sandbox with invalid tags"). Per-instance data corruption is skipped
+        here; only *provider*-level operational failures propagate, where the api/list
+        wrapper honors the caller's ``--on-error`` (a provider-granular control). The
+        offline check runs only for instances the live sweep did not already surface
+        (and after the cheap not-a-mngr-host / dedup filters), so a healthy ``mngr
+        list`` does no extra per-instance work and a running-but-transiently-
+        unreachable instance is not misreported as STOPPED.
         """
         result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
