@@ -54,7 +54,7 @@
   function createAclRow(email, variant) {
     var base = 'flex items-center justify-between px-3 py-2 border rounded-md my-1 ';
     var rowCls = {
-      existing: 'bg-white border-zinc-200',
+      existing: 'bg-white border-default',
       added:    'bg-emerald-50 border-emerald-200',
       removed:  'bg-red-50 border-red-200 line-through',
     }[variant];

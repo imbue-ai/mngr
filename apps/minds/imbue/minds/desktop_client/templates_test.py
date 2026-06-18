@@ -1226,8 +1226,8 @@ def test_card_tag_anchor_renders_anchor_with_href() -> None:
 def test_card_interactive_adds_hover_classes() -> None:
     plain = CATALOG.render("Card", _content="x")
     interactive = CATALOG.render("Card", interactive=True, _content="x")
-    assert "hover:border-zinc-300" not in plain
-    assert "hover:border-zinc-300" in interactive
+    assert "hover:border-strong" not in plain
+    assert "hover:border-strong" in interactive
     assert "cursor-pointer" in interactive
 
 
@@ -1502,7 +1502,7 @@ def test_section_header_divider_renders_top_border() -> None:
     html = CATALOG.render("SectionHeader", divider=True, _content="Sharing")
     assert "Sharing" in html
     assert "border-t" in html
-    assert "border-zinc-200" in html
+    assert "border-default" in html
     assert "mt-8" in html
     assert "pt-5" in html
 

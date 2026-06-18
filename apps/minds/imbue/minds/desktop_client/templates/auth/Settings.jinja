@@ -17,21 +17,21 @@
 <CardPage title="Account settings" max_width="max-w-[480px]" scripts={{ _scripts }}>
   <h1 class="text-2xl font-semibold text-primary mb-2">Account settings</h1>
   <p class="text-secondary mb-6">Manage your Imbue account</p>
-  <div class="flex justify-between items-center py-3 border-b border-zinc-100">
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
     <span class="text-sm text-secondary">Email</span>
     <span class="text-primary font-medium">{{ email }}</span>
   </div>
   {% if display_name %}
-    <div class="flex justify-between items-center py-3 border-b border-zinc-100">
+    <div class="flex justify-between items-center py-3 border-b border-subtle">
       <span class="text-sm text-secondary">Name</span>
       <span class="text-primary font-medium">{{ display_name }}</span>
     </div>
   {% endif %}
-  <div class="flex justify-between items-center py-3 border-b border-zinc-100">
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
     <span class="text-sm text-secondary">Auth provider</span>
     <span class="text-primary font-medium">{{ provider }}</span>
   </div>
-  <div class="flex justify-between items-center py-3 border-b border-zinc-100">
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
     <span class="text-sm text-secondary">User ID prefix</span>
     <span class="text-primary font-medium font-mono text-xs">{{ user_id_prefix }}</span>
   </div>

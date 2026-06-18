@@ -329,7 +329,7 @@
         var isPending = pendingClickedAt && (!lastFullSnapshotAt || pendingClickedAt > snapshotAt);
 
         var btn = document.createElement('button');
-        btn.className = 'px-2 py-1 text-xs rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 text-primary';
+        btn.className = 'px-2 py-1 text-xs rounded-md border border-default bg-white hover:bg-zinc-50 text-primary';
         if (isPending) {
           btn.disabled = true;
           btn.textContent = 'Waiting…';
@@ -669,7 +669,7 @@
        providers_state event. Collapsed by default to a one-line summary
        ("X providers enabled (N errors)" + chevron); user clicks the
        summary to expand into the full list + freshness counters. #}
-    <section class="mt-10 pt-6 border-t border-zinc-200" data-providers-panel hidden>
+    <section class="mt-10 pt-6 border-t border-default" data-providers-panel hidden>
       <button type="button" data-providers-toggle
               class="w-full flex items-center justify-between text-left text-sm text-primary hover:text-primary bg-transparent border-0 cursor-pointer p-0">
         <span data-providers-summary>0 providers enabled</span>

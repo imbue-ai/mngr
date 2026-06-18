@@ -9,5 +9,5 @@
   are stable enough that the default + divider variants cover them.
 #}
 {% set _base = "text-sm font-medium text-secondary mb-3" %}
-{% set _divider = "mt-8 pt-5 border-t border-zinc-200" if divider else "" %}
+{% set _divider = "mt-8 pt-5 border-t border-default" if divider else "" %}
 <h2 class="{{ _base }} {{ _divider }} {{ extra }}">{{ content }}</h2>

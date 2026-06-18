@@ -40,7 +40,7 @@
                 <ButtonSubmit variant="secondary">Set default</ButtonSubmit>
               </form>
             {% else %}
-              <span class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm bg-zinc-100 text-primary border border-zinc-200 opacity-60 cursor-default">Default</span>
+              <span class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm bg-zinc-100 text-primary border border-default opacity-60 cursor-default">Default</span>
             {% endif %}
             <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/logout" }}>
               <ButtonSubmit variant="danger">Log out</ButtonSubmit>

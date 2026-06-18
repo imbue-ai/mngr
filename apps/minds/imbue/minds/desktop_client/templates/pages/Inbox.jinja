@@ -587,7 +587,7 @@
        class="fixed inset-0 bg-black/20 flex justify-start"
        onclick="onBackdropClick(event)">
     <div id="inbox-dialog"
-         class="relative w-[90vw] lg:w-[75vw] max-w-[1100px] h-full flex flex-col bg-white border-r border-zinc-200 shadow-2xl overflow-hidden">
+         class="relative w-[90vw] lg:w-[75vw] max-w-[1100px] h-full flex flex-col bg-white border-r border-default shadow-2xl overflow-hidden">
       {# Header row. 3-column grid so the title sits in the visual
          center regardless of how wide the close button is. The fixed
          height matches the chrome titlebar (h-[38px] in Chrome.jinja)
@@ -599,7 +599,7 @@
          beneath is no-drag while the modal is open). The close button
          is opted back out via inline no-drag so its click is not
          eaten by the drag handler. #}
-      <div class="grid grid-cols-3 items-center px-2 h-[38px] border-b border-zinc-200"
+      <div class="grid grid-cols-3 items-center px-2 h-[38px] border-b border-default"
            style="-webkit-app-region: drag;">
         <div></div>
         <h1 class="text-sm font-semibold text-primary uppercase tracking-wider leading-none text-center">Requests</h1>
@@ -619,11 +619,11 @@
            pinned auto-open footer at the bottom. The footer's horizontal
            alignment flips based on ``#inbox-body.is-empty`` (centered
            when empty, left-aligned otherwise). #}
-        <div id="inbox-left-column" class="flex flex-col w-72 border-r border-zinc-200 bg-zinc-50">
+        <div id="inbox-left-column" class="flex flex-col w-72 border-r border-default bg-zinc-50">
           <div id="inbox-list" class="flex-1 overflow-y-auto">
             <InboxList :cards="cards" :selected_id="selected_id" />
           </div>
-          <div id="inbox-list-footer" class="border-t border-zinc-200 px-3 py-2 flex items-center">
+          <div id="inbox-list-footer" class="border-t border-default px-3 py-2 flex items-center">
             <label class="text-xs text-secondary cursor-pointer flex items-center gap-1.5 leading-none">
               <input type="checkbox" id="inbox-auto-open"
                      {% if auto_open %}checked{% endif %}

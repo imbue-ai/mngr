@@ -17,6 +17,6 @@
 #}
 {%- set _label = {"google": "Continue with Google", "github": "Continue with GitHub"}[provider] -%}
 <button data-oauth="{{ provider }}"
-        class="oauth-btn w-full py-2.5 px-3 bg-white border border-zinc-200 rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-primary hover:bg-zinc-50 {{ extra }}">
+        class="oauth-btn w-full py-2.5 px-3 bg-white border border-default rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-primary hover:bg-zinc-50 {{ extra }}">
   <auth.OauthIcon :provider="provider" /> {{ _label }}
 </button>

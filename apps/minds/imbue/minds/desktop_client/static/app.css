@@ -89,12 +89,11 @@
 }
 
 /*
- * v4 compatibility shim. Tailwind v3 defaulted un-colored borders / dividers
- * to ``gray-200``; v4 defaults them to ``currentColor``. The chrome has many
- * bare ``border`` / ``border-t`` / ... utilities that relied on the old
- * default, so restore it globally in the lowest layer (explicit
- * ``border-zinc-*`` utilities still win). Retire this once those call sites
- * carry explicit token-based border colors.
+ * Default border color. Tailwind v4 defaults un-colored borders / dividers to
+ * ``currentColor``; we instead default them to the themeable ``border-default``
+ * token so every bare ``border`` / ``border-t`` / ... utility is both legible
+ * and theme-aware (light/dark) without each call site naming a color. Explicit
+ * ``border-*`` utilities still win (they live in the higher utilities layer).
  */
 @layer base {
   *,
@@ -102,7 +101,7 @@
   ::before,
   ::backdrop,
   ::file-selector-button {
-    border-color: var(--color-gray-200, currentColor);
+    border-color: var(--c-border-default);
   }
 }
 
@@ -217,7 +216,7 @@ html {
  */
 .minds-card {
   background: #ffffff;
-  border: 1px solid #e4e4e7;
+  border: 1px solid var(--c-border-default);
   border-radius: 0.75rem;
 }
 
