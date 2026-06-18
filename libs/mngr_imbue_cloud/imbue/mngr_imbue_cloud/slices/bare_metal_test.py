@@ -18,13 +18,15 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
-from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_budget_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import is_valid_status_transition
 from imbue.mngr_imbue_cloud.slices.bare_metal import next_server_status
 from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
@@ -32,10 +34,14 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 
 
-def _server(status: str, slot_count: int = 8) -> BareMetalServer:
+def _server(
+    status: str,
+    slot_count: int = 8,
+    server_id: str = "11111111-1111-1111-1111-111111111111",
+) -> BareMetalServer:
     now = datetime.now(timezone.utc)
     return BareMetalServer(
-        id=BareMetalServerDbId("11111111-1111-1111-1111-111111111111"),
+        id=BareMetalServerDbId(server_id),
         plan_code="24rise02-v1-us",
         region="vin",
         slot_count=slot_count,
@@ -45,15 +51,16 @@ def _server(status: str, slot_count: int = 8) -> BareMetalServer:
     )
 
 
-def test_compute_slot_count_floors_by_memory_per_slice() -> None:
-    assert compute_slot_count(64, 8) == 8
-    assert compute_slot_count(128, 8) == 16
-    assert compute_slot_count(32, 8) == 4
-    # 70GB only yields 8 whole 8GB slices (the remainder is host headroom).
-    assert compute_slot_count(70, 8) == 8
+def test_compute_slot_count_reserves_host_and_per_vm_overhead() -> None:
+    # slots = floor((ram - 8 host reserve) GiB / (slice + 0.5 per-VM overhead) GiB).
+    # e.g. 256GB box, 8GB slices: (256-8)*1024 // (8*1024 + 512) = 253952 // 8704 = 29.
+    assert compute_slot_count(256, 8) == 29
+    assert compute_slot_count(64, 8) == 6
+    assert compute_slot_count(128, 8) == 14
+    # Too small to fit even one slice after the host reserve -> 0.
     assert compute_slot_count(4, 8) == 0
     # A larger per-slice RAM yields fewer slots.
-    assert compute_slot_count(64, 16) == 4
+    assert compute_slot_count(64, 16) == 3
 
 
 def test_compute_slot_count_rejects_negative_ram_and_nonpositive_per_slice() -> None:
@@ -63,10 +70,10 @@ def test_compute_slot_count_rejects_negative_ram_and_nonpositive_per_slice() -> 
         compute_slot_count(64, 0)
 
 
-def test_compute_slice_memory_mib_subtracts_overhead() -> None:
-    # 8 GiB advertised minus the 512 MiB per-slice overhead.
-    assert compute_slice_memory_mib(8) == 8 * 1024 - 512
-    assert compute_slice_memory_mib(16) == 16 * 1024 - 512
+def test_compute_slice_memory_mib_is_full_advertised() -> None:
+    # The guest gets the full advertised RAM; per-VM overhead is accounted in slot_count.
+    assert compute_slice_memory_mib(8) == 8 * 1024
+    assert compute_slice_memory_mib(16) == 16 * 1024
 
 
 def test_compute_slice_memory_mib_rejects_too_small() -> None:
@@ -75,15 +82,26 @@ def test_compute_slice_memory_mib_rejects_too_small() -> None:
 
 
 def test_compute_slice_disk_budget_splits_usable_disk() -> None:
-    # (500 - 20 reserve) / 8 slots = 60 GiB total budget each.
-    assert compute_slice_disk_budget_gib(500, 8) == 60
-    # Remainder is dropped (floor).
-    assert compute_slice_disk_budget_gib(477, 8) == (477 - 20) // 8
+    # reserve = max(20, ceil(500 * 0.10)) = 50; (500 - 50) // 8 = 56 GiB budget each.
+    assert compute_slice_disk_budget_gib(500, 8) == 56
+    # Small disk: the fixed 20GiB floor wins over the fraction.
+    assert compute_slice_disk_budget_gib(150, 8) == (150 - 20) // 8
+
+
+def test_compute_slice_disk_budget_does_not_overcommit_nominal_disk() -> None:
+    # A disk_gb registered from the nominal spec (e.g. "8 TB" -> 8000) must leave the
+    # per-slice allocations within the real usable GiB (~0.93 * 8000 = 7440) thanks to
+    # the fraction reserve, so slots * budget never exceeds usable.
+    disk_gb = 8000
+    slot_count = 29
+    budget = compute_slice_disk_budget_gib(disk_gb, slot_count)
+    usable_gib = int(disk_gb * 0.93)
+    assert slot_count * budget <= usable_gib
 
 
 def test_compute_slice_disk_gib_is_budget_minus_boot_disk() -> None:
     # Data disk = total budget minus the fixed boot disk, so boot + data == budget.
-    assert compute_slice_disk_gib(500, 8) == 60 - SLICE_BOOT_DISK_GIB
+    assert compute_slice_disk_gib(500, 8) == compute_slice_disk_budget_gib(500, 8) - SLICE_BOOT_DISK_GIB
     assert compute_slice_disk_gib(500, 8) + SLICE_BOOT_DISK_GIB == compute_slice_disk_budget_gib(500, 8)
 
 
@@ -229,15 +247,50 @@ def test_compute_capacity_rejects_negative_used() -> None:
         compute_capacity(_server(SERVER_STATUS_READY), used_slots=-1)
 
 
-def test_choose_server_for_new_slice_picks_most_free_ready_server() -> None:
-    nearly_full = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=7)
-    roomy = compute_capacity(_server(SERVER_STATUS_READY, slot_count=16), used_slots=2)
-    chosen = choose_server_for_new_slice([nearly_full, roomy])
+def test_find_server_capacity_by_id_returns_the_matching_server() -> None:
+    target_id = BareMetalServerDbId("22222222-2222-2222-2222-222222222222")
+    other = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=1)
+    target = compute_capacity(_server(SERVER_STATUS_READY, slot_count=16, server_id=str(target_id)), used_slots=2)
+    chosen = find_server_capacity_by_id([other, target], target_id)
+    assert chosen.server.id == target_id
     assert chosen.free_slots == 14
 
 
-def test_choose_server_for_new_slice_ignores_non_ready_and_full_servers() -> None:
-    installing = compute_capacity(_server(SERVER_STATUS_INSTALLING, slot_count=16), used_slots=0)
-    full_ready = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=8)
+def test_find_server_capacity_by_id_raises_when_absent() -> None:
+    only = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=0)
     with pytest.raises(SliceCapacityError):
-        choose_server_for_new_slice([installing, full_ready])
+        find_server_capacity_by_id([only], BareMetalServerDbId("99999999-9999-9999-9999-999999999999"))
+
+
+def test_compute_orphan_slice_instance_names_returns_untracked_slice_vms() -> None:
+    # On-box VMs not present in the DB (and only slice-prefixed ones) are orphans.
+    box = {"mngr-slice-aaa", "mngr-slice-bbb", "mngr-slice-ccc"}
+    tracked = {"mngr-slice-aaa"}
+    assert compute_orphan_slice_instance_names(box, tracked) == {"mngr-slice-bbb", "mngr-slice-ccc"}
+
+
+def test_compute_orphan_slice_instance_names_ignores_non_slice_vms() -> None:
+    # A non-slice lima VM on the box must never be considered an orphan to reap.
+    box = {"some-other-vm", "default", "mngr-slice-bbb"}
+    tracked: set[str] = set()
+    assert compute_orphan_slice_instance_names(box, tracked) == {"mngr-slice-bbb"}
+
+
+def test_compute_orphan_slice_instance_names_empty_when_all_tracked() -> None:
+    box = {"mngr-slice-aaa", "mngr-slice-bbb"}
+    tracked = {"mngr-slice-aaa", "mngr-slice-bbb", "mngr-slice-ccc"}
+    assert compute_orphan_slice_instance_names(box, tracked) == set()
+
+
+def test_compute_orphan_slice_disk_names_returns_untracked_slice_disks() -> None:
+    # On-box data disks not present in the DB (and only slice-prefixed ones) are orphans.
+    box = {"mngr-slice-aaa-data", "mngr-slice-bbb-data"}
+    tracked = {"mngr-slice-aaa-data"}
+    assert compute_orphan_slice_disk_names(box, tracked) == {"mngr-slice-bbb-data"}
+
+
+def test_compute_orphan_slice_disk_names_ignores_non_slice_disks() -> None:
+    # A non-slice lima disk on the box must never be considered an orphan to reap.
+    box = {"some-other-disk", "mngr-slice-bbb-data"}
+    tracked: set[str] = set()
+    assert compute_orphan_slice_disk_names(box, tracked) == {"mngr-slice-bbb-data"}

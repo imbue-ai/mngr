@@ -182,6 +182,10 @@ test-integration:
 test-quick args="":
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --no-cov {{args}}
 
+# Regenerate the code-derived agent capability matrix doc (libs/mngr/docs/concepts/agent_capabilities.md)
+regenerate-agent-capabilities-doc:
+  uv run python scripts/make_agent_capabilities_doc.py
+
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "not release"
@@ -251,16 +255,28 @@ minds-tailwind:
   bash apps/minds/scripts/fetch_tailwind.sh
 
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
-# in FCT. Default FCT path is $HOME/project/forever-claude-template; override
-# by passing a positional arg. Run from this repo on the branch you want to
-# vendor (typically main); the recipe archives HEAD, replaces vendor/mngr/
-# contents with that snapshot, and commits in FCT. Does not push. Aborts if
-# FCT has any uncommitted changes -- resolve them first. The full release
-# flow (release branches, push, merge to main) is the release-minds skill.
-sync-vendor-mngr fct="$HOME/project/forever-claude-template":
+# in FCT. The FCT checkout path comes from the positional arg, else FCT_DIR read
+# from a gitignored apps/minds/.env (minds-scoped per-user config -- see
+# apps/minds/.env.example), else $FCT_DIR in your shell. No personal path is
+# baked in, and nothing outside this recipe loads that .env. Position the mngr
+# checkout at the exact commit you want to vendor first -- your release PR branch
+# HEAD / the verified release SHA, NOT blindly `main`, which can drift past it
+# between verification and merge. The recipe archives HEAD, replaces vendor/mngr/
+# with that snapshot, and commits in FCT. Does not push. Aborts if FCT is dirty.
+# Full release flow: apps/minds/docs/release.md.
+sync-vendor-mngr fct="":
     #!/bin/bash
     set -ueo pipefail
     fct="{{fct}}"
+    # Fall back to FCT_DIR -- from a gitignored apps/minds/.env (minds-scoped), or your shell.
+    if [ -z "$fct" ] && [ -f apps/minds/.env ]; then set -a; . ./apps/minds/.env; set +a; fi
+    if [ -z "$fct" ]; then fct="${FCT_DIR:-}"; fi
+    if [ -z "$fct" ]; then
+        echo "error: no forever-claude-template path. Set FCT_DIR in apps/minds/.env, or pass it:" >&2
+        echo "  echo 'FCT_DIR=/path/to/forever-claude-template' >> apps/minds/.env   # gitignored" >&2
+        echo "  just sync-vendor-mngr /path/to/forever-claude-template" >&2
+        exit 2
+    fi
     if [ ! -d "$fct/vendor/mngr" ]; then
         echo "Error: $fct/vendor/mngr not found"
         exit 1
@@ -835,14 +851,64 @@ bake-pool-host-prod region tag count="1" *extra_args:
         --from-tag "{{tag}}" \
         {{extra_args}}
 
+# === minds bare-metal SLICES (carved on a pre-registered OVH bare-metal box) ===
+#
+# Unlike `bake-pool-host-{dev,prod}` (which order a fresh OVH VPS per host), these
+# bake "slices": lima/QEMU VMs carved on a bare-metal box you already ordered,
+# `mngr imbue_cloud admin server register`ed, and `... prep`ped (status `ready`).
+# Slices land in the SAME pool_hosts table as OVH VPSes (backend_kind=slice) and
+# lease identically. They are thin wrappers over `minds pool create --backend
+# slice`, which resolves the tier's pool key (+ host_pool DSN for shared tiers)
+# from Vault just like the OVH path -- so the only manual difference from
+# bake-pool-host-* is the backend.
+#
+# Prereqs: activate a minds env first (`eval "$(uv run minds env activate <name>)"`)
+# AND `vault login -method=oidc` (the wrapper's Vault reads need a live token).
+#
+# `region` is the lease-region LABEL stamped on each row (what the connector
+# region-matches at lease time, e.g. US-EAST-VA) -- NOT the box's raw OVH
+# datacenter code. Server selection picks the `ready` box with the most free
+# slots and is not region-filtered today, so the box must have a free slot.
+
+# Dev slice bake from a working tree (identity = its origin remote + current branch).
+bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+    uv run minds pool create \
+        --backend slice \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --workspace-dir "{{workspace_dir}}" \
+        --skip-deferred-install-wait \
+        {{extra_args}}
+
+# Production slice bake from an exact FCT tag (strict; content provably equals the
+# tag). Pass `--dry-run` through extra args first to confirm server selection +
+# per-slice sizing without baking.
+bake-slice-prod region tag count="1" *extra_args:
+    uv run minds pool create \
+        --backend slice \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --from-tag "{{tag}}" \
+        {{extra_args}}
+
+# Add a paid user to the activated minds env. Resolves the connector URL (from the
+# env's client.toml) and the paid-list admin key (from the tier's Vault) automatically,
+# so this is a one-shot. Activate first: eval "$(uv run minds env activate <name>)" and
+# `vault login`. Use `minds paid remove`/`list` for the other operations.
+#   just add-paid-email someone@example.com
+add-paid-email email:
+    uv run minds paid add "{{email}}"
+
 # List pool_hosts rows for the activated minds env (read-only).
 list-pool-hosts:
     uv run minds pool list
 
-# Destroy a single pool host: cancel its OVH VPS, then drop its pool_hosts row.
+# Destroy a single pool host: tear down its underlying machine, then drop its
+# pool_hosts row. The teardown mirrors the row's backend -- cancel the OVH VPS for
+# an ovh_vps row, or destroy the lima VM (freeing the box slot) for a slice row.
 # Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
 # destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
-# VPS is already gone).
+# underlying machine is already gone).
 #
 #   just destroy-pool-host <pool-host-id>
 #

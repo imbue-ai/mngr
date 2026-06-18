@@ -47,6 +47,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.listing_utils import SEP_AGENT_DATA_END
@@ -68,10 +69,7 @@ from imbue.mngr_vps_docker.instance import _VpsDiscoveryData
 from imbue.mngr_vps_docker.instance import _extract_live_agent_data
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 
 class _NoopVpsClient(VpsClientInterface):
@@ -104,23 +102,11 @@ class _NoopVpsClient(VpsClientInterface):
     def wait_for_instance_active(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
         raise AssertionError("VpsClient.wait_for_instance_active must not be called from discovery tests")
 
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        raise AssertionError("VpsClient.create_snapshot must not be called from discovery tests")
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        raise AssertionError("VpsClient.delete_snapshot must not be called from discovery tests")
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        raise AssertionError("VpsClient.list_snapshots must not be called from discovery tests")
-
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         raise AssertionError("VpsClient.upload_ssh_key must not be called from discovery tests")
 
     def delete_ssh_key(self, key_id: str) -> None:
         raise AssertionError("VpsClient.delete_ssh_key must not be called from discovery tests")
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        raise AssertionError("VpsClient.list_ssh_keys must not be called from discovery tests")
 
 
 class _DiscoveryTestProvider(VpsDockerProvider):
@@ -653,3 +639,80 @@ def test_find_host_record_returns_none_when_discovery_finds_no_match(
     # Discovery still warms the cache with what it did find, so a subsequent
     # lookup for the real host short-circuits.
     assert host_other in provider._host_record_cache
+
+
+# =========================================================================
+# discover_hosts_and_agents -- a cleanly-stopped container is STOPPED + visible,
+# not CRASHED + hidden (the idle-watcher / `mngr stop` reconnection bug)
+# =========================================================================
+
+
+def test_discover_reports_stopped_and_keeps_visible_when_vps_reachable_but_container_down(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """A reachable VPS whose container is stopped is STOPPED and visible to conn/start.
+
+    This is the regression that made an idle-stopped (or `mngr stop`-ed) agent
+    show CRASHED and vanish from ``mngr conn`` (which passes
+    include_destroyed=False): the host was filtered out entirely. A reachable
+    VPS with a stopped container is a clean stop, not a crash.
+    """
+    host_id = HostId.generate()
+    record = _make_record(host_id, "host-stopped", vps_ip="10.0.0.10")
+    provider.hostnames = ["10.0.0.10"]
+    # A reachable VPS whose container is down: the live listing succeeded (so an
+    # is_running_by_host_id entry exists -> reachable) but reports not-running.
+    provider.per_vps_records = {
+        "10.0.0.10": _VpsDiscoveryData(records=(record,), is_running_by_host_id={host_id: False})
+    }
+
+    result = provider.discover_hosts_and_agents(cg=provider.mngr_ctx.concurrency_group, include_destroyed=False)
+
+    hosts = list(result.keys())
+    assert len(hosts) == 1, "a reachable, cleanly-stopped host must remain visible to conn/start"
+    assert hosts[0].host_id == host_id
+    assert hosts[0].host_state == HostState.STOPPED
+
+
+def test_discover_hides_unreachable_vps_host_when_not_including_destroyed(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """An *unreachable* VPS host (the genuine down/crash case) stays hidden from conn.
+
+    Distinct from the stopped-but-reachable case above: here the VPS itself is
+    unreachable, so we cannot confirm a clean stop. With include_destroyed=False
+    (the conn/start path) it is filtered out, preserving the prior behavior for
+    genuinely-down hosts.
+    """
+    host_id = HostId.generate()
+    record = _make_record(host_id, "host-down", vps_ip="10.0.0.11")
+    provider.hostnames = ["10.0.0.11"]
+    # An unreachable VPS: the record is present (from cache) but no
+    # is_running_by_host_id entry exists, so it is not confirmed reachable.
+    provider.per_vps_records = {"10.0.0.11": _VpsDiscoveryData(records=(record,))}
+
+    result = provider.discover_hosts_and_agents(cg=provider.mngr_ctx.concurrency_group, include_destroyed=False)
+
+    assert result == {}
+
+
+def test_discover_reports_unreachable_vps_host_as_crashed_when_including_destroyed(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """The same unreachable host surfaces as CRASHED in the full listing (include_destroyed=True).
+
+    `mngr list` uses include_destroyed=True, so a down VPS with no recorded
+    stop_reason and no snapshots derives to CRASHED -- the genuine failure
+    signal, unchanged by the stopped-but-reachable fix.
+    """
+    host_id = HostId.generate()
+    record = _make_record(host_id, "host-down", vps_ip="10.0.0.12")
+    provider.hostnames = ["10.0.0.12"]
+    provider.per_vps_records = {"10.0.0.12": _VpsDiscoveryData(records=(record,))}
+
+    result = provider.discover_hosts_and_agents(cg=provider.mngr_ctx.concurrency_group, include_destroyed=True)
+
+    hosts = list(result.keys())
+    assert len(hosts) == 1
+    assert hosts[0].host_id == host_id
+    assert hosts[0].host_state == HostState.CRASHED

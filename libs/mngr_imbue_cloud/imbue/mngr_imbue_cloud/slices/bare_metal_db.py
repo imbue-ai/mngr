@@ -48,6 +48,20 @@ _COUNT_SLICES_SQL: Final[str] = (
     "SELECT COUNT(*) FROM pool_hosts WHERE bare_metal_server_id = %s AND status != 'removing'"
 )
 
+# Every slice's lima instance name on a server (any status). Used to reconcile the
+# box's running VMs against the DB and reap orphans (VMs with no row).
+_SELECT_SLICE_INSTANCE_NAMES_SQL: Final[str] = (
+    "SELECT lima_instance_name FROM pool_hosts "
+    "WHERE bare_metal_server_id = %s AND backend_kind = 'slice' AND lima_instance_name IS NOT NULL"
+)
+
+# Sibling of the instance-name query, for reconciling the box's lima data disks
+# against the DB and reaping orphan disks (disks with no row).
+_SELECT_SLICE_DISK_NAMES_SQL: Final[str] = (
+    "SELECT lima_disk_name FROM pool_hosts "
+    "WHERE bare_metal_server_id = %s AND backend_kind = 'slice' AND lima_disk_name IS NOT NULL"
+)
+
 
 @pure
 def build_bare_metal_server_insert_values(server: BareMetalServer) -> tuple[Any, ...]:
@@ -190,6 +204,20 @@ def count_slices_on_server(conn: Any, server_id: BareMetalServerDbId) -> int:
 def fetch_server_capacities(conn: Any) -> list[BareMetalServerCapacity]:
     """Return every server paired with its slice-slot accounting (used / free)."""
     return [compute_capacity(server, count_slices_on_server(conn, server.id)) for server in fetch_servers(conn)]
+
+
+def fetch_slice_instance_names_for_server(conn: Any, server_id: BareMetalServerDbId) -> set[str]:
+    """Return the lima_instance_name of every slice pool_hosts row for ``server_id`` (any status)."""
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_SLICE_INSTANCE_NAMES_SQL, (str(server_id),))
+        return {row[0] for row in cur.fetchall() if row[0]}
+
+
+def fetch_slice_disk_names_for_server(conn: Any, server_id: BareMetalServerDbId) -> set[str]:
+    """Return the lima_disk_name of every slice pool_hosts row for ``server_id`` (any status)."""
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_SLICE_DISK_NAMES_SQL, (str(server_id),))
+        return {row[0] for row in cur.fetchall() if row[0]}
 
 
 def insert_slice_pool_host(conn: Any, values: tuple[Any, ...]) -> None:

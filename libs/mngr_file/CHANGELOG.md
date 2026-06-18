@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.14] - 2026-06-18
+
+## [v0.1.13] - 2026-06-16
+
 ## [v0.1.12] - 2026-06-16
 
 ## [v0.1.11] - 2026-06-15

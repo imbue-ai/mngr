@@ -60,8 +60,14 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
     session_name = agent.session_name
 
     try:
+        # The pane must contain the TUI-ready indicator (Claude's input-prompt
+        # glyph), because send_message now waits for readiness before pasting.
+        # A bare pane without it would (correctly) block on that wait; here we
+        # are exercising the no-dialog path, so the pane stands in for a ready
+        # Claude TUI.
+        ready_glyph = agent.get_tui_ready_indicator()
         agent.host.execute_idempotent_command(
-            f"tmux new-session -d -s '{session_name}' 'echo \"Normal output here\"; sleep {_KEEP_ALIVE_SLEEP_SECONDS}'",
+            f"tmux new-session -d -s '{session_name}' 'echo \"{ready_glyph} Normal output here\"; sleep {_KEEP_ALIVE_SLEEP_SECONDS}'",
             timeout_seconds=5.0,
         )
 

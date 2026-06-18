@@ -88,8 +88,10 @@ transcript`` reads.
 from __future__ import annotations
 
 import importlib.resources
+import re
 import shlex
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
@@ -105,8 +107,20 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
+from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
+from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import iter_agent_session_paths
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import require_unique_match
+from imbue.mngr.api.preservation import run_adopt_session_preflight
+from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -114,13 +128,26 @@ from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CONVERSATIONS_DIR_RELATIVE_TO_HOME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
@@ -132,6 +159,7 @@ from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
@@ -149,6 +177,9 @@ from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_sett
 _DANGEROUSLY_SKIP_PERMISSIONS_FLAG: Final[str] = "--dangerously-skip-permissions"
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
+# The python converter common_transcript.sh invokes (python3
+# <dir>/common_transcript_convert.py); provisioned alongside the .sh.
+_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: Final[str] = "common_transcript_convert.py"
 _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 # The python3 decoder stream_transcript.sh invokes to read agy's SQLite conversation
 # store (agy >= 1.0.4); provisioned alongside the streamer into the commands/ dir.
@@ -228,11 +259,115 @@ _DARWIN_UNAME: Final[str] = "Darwin"
 # machine-shared resource symlinked into the per-agent home.
 _MACOS_KEYCHAINS_SUBPATH: Final[tuple[str, ...]] = ("Library", "Keychains")
 
+# Glob suffixes for agy's per-conversation store files keyed by conversation id.
+# ``<id>.db`` is the current SQLite store (agy >= 1.0.4); ``<id>.pb`` is the
+# legacy protobuf store. The SQLite WAL/SHM sidecars (``.db-wal``/``.db-shm``)
+# are copied wholesale with the store dir but are not themselves match targets.
+_CONVERSATION_STORE_SUFFIXES: Final[tuple[str, ...]] = (".db", ".pb")
+
 
 def _load_antigravity_resource_script(filename: str) -> str:
     """Load a resource script from the mngr_antigravity resources package."""
     resource_files = importlib.resources.files(_antigravity_resources)
     return resource_files.joinpath(filename).read_text()
+
+
+# An mngr agent's per-agent agy conversation store lives at
+# <agent_state_dir>/plugin/antigravity/home/.gemini/antigravity-cli/conversations/,
+# with one <conv_id>.db (or legacy <conv_id>.pb) per conversation. Both live local
+# mngr agents and preserved agents mirror this layout, so an adopt argument can
+# resolve a conversation id against either.
+_AGENT_CONVERSATIONS_RELPATH: Final[Path] = Path(*_AGY_HOME_RELATIVE_PATH) / CONVERSATIONS_DIR_RELATIVE_TO_HOME
+
+
+def _mngr_agent_conversations_dirs(mngr_ctx: MngrContext) -> list[Path]:
+    """Return the per-agent agy ``conversations`` directories on the local host.
+
+    Scans both live local mngr agents (``<host_dir>/agents/<id>/...``) and
+    preserved agents (``<host_dir>/preserved/<name>--<id>/...``; see
+    ``_antigravity_preserved_items``), each of which stores its conversation
+    ``.db`` files under ``plugin/antigravity/home/.gemini/antigravity-cli/conversations/``.
+
+    Only the local host dir is scanned: an adopted store is copied onto the
+    destination host from a path that must already be reachable as a local
+    source, so remote agents' conversation dirs are not searched here.
+    """
+    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
+    return iter_agent_session_paths(local_host_dir, _AGENT_CONVERSATIONS_RELPATH)
+
+
+def _resolve_adopt_session(adopt_arg: str, mngr_ctx: MngrContext) -> tuple[str, Path]:
+    """Resolve an adopt argument to a ``(conversation_id, source_conversations_dir)`` pair.
+
+    Accepts either:
+    - An absolute path to a conversation store file (``<id>.db`` / ``<id>.pb``),
+      whose stem is the conversation id and whose parent is the store dir.
+    - An absolute path to a ``conversations`` directory holding exactly one
+      conversation (so the id is unambiguous).
+    - A conversation id string, searched across (all of):
+      * the user-native store (``~/.gemini/antigravity-cli/conversations/``)
+      * every live local mngr agent's per-agent ``conversations/`` dir
+      * every preserved agent's ``conversations/`` dir
+
+      All of these dirs are searched; an id matching in more than one is rejected
+      as ambiguous (pass the full store-file path to disambiguate). agy resumes
+      purely by conversation id and is directory-agnostic, so no cwd rebind is
+      needed -- the store just has to be present in the new agent's home.
+
+    Returns ``(conversation_id, source_conversations_dir)``.
+    """
+    candidate = Path(adopt_arg)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+        if resolved.is_file() and resolved.suffix in _CONVERSATION_STORE_SUFFIXES:
+            return resolved.stem, resolved.parent
+        if resolved.is_dir():
+            store_files = sorted(
+                path for suffix in _CONVERSATION_STORE_SUFFIXES for path in resolved.glob(f"*{suffix}")
+            )
+            ids = sorted({path.stem for path in store_files})
+            if len(ids) == 1:
+                return ids[0], resolved
+            if not ids:
+                raise UserInputError(
+                    f"No conversation store ({'/'.join(_CONVERSATION_STORE_SUFFIXES)}) found in {resolved}"
+                )
+            raise UserInputError(
+                f"Conversations directory {resolved} holds multiple conversations; "
+                "pass the full path to the <id>.db file to specify which one."
+            )
+        raise UserInputError(f"Adopt-session path not found (or not a conversation store/dir): {resolved}")
+
+    # Treat as a conversation id: search the user-native store and every live
+    # local mngr agent and preserved agent. A match in multiple dirs is ambiguous.
+    candidate_dirs = [get_antigravity_conversations_dir(Path.home())]
+    candidate_dirs.extend(_mngr_agent_conversations_dirs(mngr_ctx))
+    search_dirs = dedupe_by_resolved_path(candidate_dirs)
+
+    matches: list[Path] = []
+    for conversations_dir in search_dirs:
+        if conversations_dir.is_dir():
+            for suffix in _CONVERSATION_STORE_SUFFIXES:
+                match = conversations_dir / f"{adopt_arg}{suffix}"
+                if match.is_file():
+                    matches.append(conversations_dir)
+                    break
+
+    # Don't enumerate the searched dirs in the not-found message: there is one per local mngr
+    # agent, so the list can run long. The searched scope is the user-native store, live
+    # agents, and preserved agents.
+    match = require_unique_match(
+        matches,
+        not_found_message=(
+            f"Conversation {adopt_arg} not found. "
+            "Check that the conversation id is correct, or pass an absolute path to the <id>.db file."
+        ),
+        ambiguous_message=(
+            f"Conversation {adopt_arg} found in multiple conversation directories; "
+            "pass the full path to the <id>.db file to specify which one:"
+        ),
+    )
+    return adopt_arg, match
 
 
 class AntigravityAgentConfig(AgentTypeConfig):
@@ -326,6 +461,10 @@ class AntigravityAgentConfig(AgentTypeConfig):
         description="When True, auto-trust the source repo without prompting. "
         "When False (default), the user is prompted interactively.",
     )
+    check_installation: bool = Field(
+        default=True,
+        description="Check whether agy is installed and install it if missing (if False, assume it is already present).",
+    )
     # emit_common_transcript gates the JSONL -> common-schema converter that
     # writes to ``events/antigravity/common_transcript/events.jsonl``. The raw
     # transcript at ``logs/antigravity_transcript/events.jsonl`` is always
@@ -335,26 +474,40 @@ class AntigravityAgentConfig(AgentTypeConfig):
         default=True,
         description="When True, emit a common-schema transcript that `mngr transcript` reads.",
     )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
+    )
 
 
-class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTranscriptMixin):
+class AntigravityAgent(
+    InteractiveTuiAgent[AntigravityAgentConfig],
+    CliBackedAgentMixin,
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasSessionAdoptionMixin,
+    HasUnattendedModeMixin,
+    HasPermissionPolicyMixin,
+    HasAutoInstallMixin,
+):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
-    # Stable substring of the footer hint that agy renders ONLY once the
-    # input prompt is fully drawn and ready to receive keystrokes. Polled by
-    # ``InteractiveTuiAgent.wait_for_ready_signal``.
+    # Regex (searched against the pane) for the input box agy draws ONLY once the
+    # prompt is ready for keystrokes: a horizontal rule, the ``>`` prompt line, and a
+    # second horizontal rule. Polled by ``InteractiveTuiAgent.wait_for_ready_signal``.
     #
-    # We deliberately do NOT key off the "Antigravity CLI <version>" splash
-    # banner: agy renders an early "Welcome to the Antigravity CLI. You are
-    # currently not signed in." line *before* OAuth completes, which also
-    # contains the substring "Antigravity CLI" but does NOT mean the input
-    # row is ready. If mngr starts pasting at that point, agy drops the
-    # keystrokes on the floor (no input row yet to receive them) and
-    # ``wait_for_paste_visible`` times out, surfacing as a noisy
-    # ``mngr create --message`` timeout. The "? for shortcuts" footer string
-    # appears only with the rendered input prompt, so it's a reliable
-    # ready signal.
-    TUI_READY_INDICATOR: ClassVar[str] = "? for shortcuts"
+    # We key off the box chrome rather than text for two reasons. First, agy 1.0.9
+    # dropped the "? for shortcuts" footer hint that earlier versions rendered with the
+    # input row. Second, the only remaining stable text is the "Antigravity CLI" splash
+    # banner, which is unusable here: it appears in an early "Welcome to the Antigravity
+    # CLI..." line *before* the input row exists (pasting then drops keystrokes), and it
+    # scrolls off the top once a resumed conversation fills the screen. agy keeps both
+    # rules pinned on screen (trimming long input between them), so this box matches on a
+    # fresh start AND a resume, and only once the input row is actually drawn. The rule
+    # spans the terminal width, which at the minimum width is just two ``─`` -- hence
+    # ``{2,}`` rather than a longer run.
+    TUI_READY_INDICATOR: ClassVar[re.Pattern[str]] = re.compile(r"─{2,}\n>.*\n(?:.*\n)*?─{2,}")
 
     def get_expected_process_name(self) -> str:
         # `agy` is a single-file Go binary; ps/tmux show the literal command name.
@@ -365,9 +518,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # per-session channel whenever the agent enters a busy state -- i.e. once
         # it starts processing the just-submitted message (see statusline.sh).
         # Wait for that, exactly as Claude waits for its UserPromptSubmit hook.
-        # Known edge: a model that *refuses* the prompt -- e.g. quota exhausted
-        # -- never enters a busy state, so this times out even though the prompt
-        # was enqueued.
+        # agy waits on the statusLine busy-signal alone -- no acceptance marker is
+        # supplied (agy records none), so the hook signal is the sole confirmation,
+        # which covers the normal and queue-while-busy cases. (Known edge: a model
+        # that *refuses* the prompt -- e.g. quota exhausted -- never enters a busy
+        # state, so this times out even though the prompt was enqueued.)
         send_enter_via_tmux_wait_for_hook(
             self,
             tmux_target,
@@ -397,8 +552,12 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         }
 
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the antigravity common-transcript converter."""
-        return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
+        """Return the antigravity common-transcript converter shell script plus the
+        python module it invokes."""
+        return {
+            name: _load_antigravity_resource_script(name)
+            for name in (_COMMON_TRANSCRIPT_SCRIPT_NAME, _COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME)
+        }
 
     def _get_agy_log_file_path(self) -> Path:
         """Path agy is told to write its --log-file to.
@@ -494,6 +653,166 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         """
         return self._get_agent_dir() / ROOT_CONVERSATION_FILENAME
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_antigravity_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
+
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        # agy's per-resource policy lives in the settings.json `permissions` block.
+        policy = self.agent_config.settings_overrides.get("permissions", {})
+        return policy if isinstance(policy, Mapping) else {}
+
+    def get_install_binary_name(self) -> str:
+        return "agy"
+
+    def get_install_command(self) -> str:
+        return "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+
+    def on_destroy(self, host: OnlineHostInterface) -> None:
+        """Preserve transcripts and conversation-id history before the state dir is deleted."""
+        if self.agent_config.preserve_on_destroy:
+            self.preserve_session_state(host)
+
+    def on_after_provisioning(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Adopt an existing agy conversation after provisioning so the new agent resumes its context."""
+        self.adopt_session(host, options, mngr_ctx)
+
+    def adopt_session(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Resume a prior conversation into this newly provisioned agent.
+
+        Delegates to :func:`~imbue.mngr.api.preservation.adopt_sessions`, which copies every
+        ``--adopt`` conversation (``copy_explicit``) and the ``--from`` clone (``copy_clone``)
+        into this agent's antigravity home, then resumes one (``resume``): the clone when
+        ``--from`` is given, otherwise the LAST ``--adopt`` value (agy resumes a single
+        conversation). Every copied store coexists as a separate ``<id>.db`` in the per-agent
+        ``conversations/`` dir, so the rest stay available to agy's own session switcher. With
+        neither option set nothing is adopted (fresh start).
+
+        - ``--adopt`` (alias ``--adopt-session``): each value (a conversation id or an absolute
+          path to a conversations store / ``<id>.db`` file) is resolved and its store copied in
+          additively; the resolved id is returned.
+        - ``--from <agent>``: a clone copies the source *workspace* but not its state dir, so
+          ``copy_clone`` transfers just the source's conversation store and returns its root
+          conversation id.
+
+        Either way ``assemble_command`` then resumes the recorded id via ``agy --conversation``.
+        """
+        adopt_sessions(
+            options.adopt_session,
+            options.source_agent_state_location,
+            copy_explicit=lambda arg: self._copy_adopted_session(host, arg),
+            copy_clone=lambda location: self._copy_cloned_session(host, location),
+            resume=lambda conversation_id: self._finalize_adopted_session(host, conversation_id),
+        )
+
+    def _copy_adopted_session(self, host: OnlineHostInterface, adopt_arg: str) -> str:
+        """Resolve a ``--adopt`` argument and copy its conversation store into this agent's home.
+
+        agy resumes by conversation id and is directory-agnostic, so adoption is simply:
+        copy the source ``conversations/`` store into this agent's home (additively, so any
+        seeded store and other adopted stores are preserved as separate ``<id>.db`` files).
+        No cwd rebind is needed (unlike claude, whose sessions are filed by encoded work_dir),
+        and no resume pointer is written here -- the caller decides which id to resume.
+
+        Returns the resolved conversation id.
+        """
+        conversation_id, source_conversations_dir = _resolve_adopt_session(adopt_arg, self.mngr_ctx)
+        dest_conversations_dir = get_antigravity_conversations_dir(self._get_agy_home_dir())
+        with log_span("Adopting agy conversation {}", conversation_id):
+            host.copy_directory(host, source_conversations_dir, dest_conversations_dir)
+        logger.info("Adopted agy conversation: {}", conversation_id)
+        return conversation_id
+
+    def _copy_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
+        """Transfer a ``--from <agent>`` clone's conversation store and return its resume id.
+
+        A generic clone copies the source *workspace* but not the source agent's *state dir*,
+        so the source's agy conversation store is transferred into this agent's home via the
+        shared helper (just the ``conversations/`` relpath -- the same one preserved on
+        destroy and scanned by ``_resolve_adopt_session``). agy resumes purely by conversation
+        id and is directory-agnostic, so no cwd rebind is needed (unlike claude, whose
+        sessions are filed by encoded work_dir). No resume pointer is written here -- the
+        caller resumes the returned id.
+
+        The conversation to resume is the source's root conversation (its
+        ``ROOT_CONVERSATION_FILENAME``); if that pointer is absent or its store did not come
+        across, the most-recent transferred ``<id>.db`` is used. Returns ``None`` (after
+        warning) when the clone has nothing to resume (no store, or a store with no usable
+        conversation id) -- ``--from`` is fundamentally a workspace clone, so carrying the
+        source's conversation forward is a bonus, not a requirement; the caller starts fresh.
+        """
+        transferred = transfer_cloned_agent_session_store(
+            host, self._get_agent_dir(), source_location, _AGENT_CONVERSATIONS_RELPATH
+        )
+        if not transferred:
+            logger.warning(
+                "Clone adopt: source agent {} has no agy conversation store to resume; starting fresh.",
+                source_location.path,
+            )
+            return None
+        conversation_id = self._pick_cloned_conversation_id(host, source_location)
+        if conversation_id is None:
+            logger.warning(
+                "Clone adopt: transferred agy store from {} has no resumable conversation; starting fresh.",
+                source_location.path,
+            )
+            return None
+        logger.info("Adopted cloned agy conversation: {}", conversation_id)
+        return conversation_id
+
+    def _pick_cloned_conversation_id(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
+        """Pick the conversation id to resume from a ``--from`` clone's transferred store.
+
+        Prefers the source agent's recorded root conversation (its
+        ``ROOT_CONVERSATION_FILENAME``, the single source of truth for "the agent's current
+        conversation"). Falls back to the most-recently modified ``<id>.db`` / ``<id>.pb`` in
+        the transferred store when the source has no root pointer (e.g. it never ran a turn).
+        Returns ``None`` when neither yields a usable id.
+        """
+        source_root_file = source_location.path / ROOT_CONVERSATION_FILENAME
+        if source_location.host.path_exists(source_root_file):
+            recorded = source_location.host.read_text_file(source_root_file).strip()
+            if recorded:
+                return recorded
+        logger.debug(
+            "Clone adopt: source {} has no recorded root conversation; falling back to the "
+            "most-recently modified store in the transferred conversations dir",
+            source_location.path,
+        )
+        dest_conversations_dir = get_antigravity_conversations_dir(self._get_agy_home_dir())
+        globs = " ".join(
+            f"{shlex.quote(str(dest_conversations_dir))}/*{suffix}" for suffix in _CONVERSATION_STORE_SUFFIXES
+        )
+        latest = host.execute_idempotent_command(f"ls -t {globs} 2>/dev/null | head -n1", timeout_seconds=5.0)
+        if latest.success and latest.stdout.strip():
+            return Path(latest.stdout.strip()).stem
+        return None
+
+    def _finalize_adopted_session(self, host: OnlineHostInterface, conversation_id: str) -> None:
+        """Write the adopted conversation id into the resume pointers.
+
+        ``root_conversation`` is what ``assemble_command`` reads to resume via
+        ``agy --conversation``; ``CONVERSATION_IDS_FILENAME`` (transcript scoping)
+        is seeded with the same id so the streamer tails the adopted conversation
+        from the first turn (subagent ids are appended later by the capture hook).
+        """
+        # The ids file must be newline-terminated: the capture hook's `grep -qxF` whole-line
+        # match (capture_conversation_id.sh) depends on it. The root file holds the bare id.
+        host.write_text_file(self._get_root_conversation_file_path(), conversation_id)
+        host.write_text_file(self._get_conversation_ids_file_path(), f"{conversation_id}\n")
+
     def provision(
         self,
         host: OnlineHostInterface,
@@ -520,6 +839,8 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         4. Install the transcript scripts and the background-tasks supervisor
            under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
+        if self.agent_config.check_installation:
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
         host_home, host_uname = self._resolve_host_home_and_os(host)
         self._ensure_source_repo_trusted(host, host_home, mngr_ctx)
         self._provision_agy_home(host, host_home, host_uname)
@@ -989,7 +1310,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # does not gate run_command confirmations; see the config field comment).
         # A finer-grained policy instead lives in the per-agent settings.json
         # ``permissions`` block (settings_overrides).
-        if self.agent_config.auto_allow_permissions:
+        if self.is_unattended_enabled():
             extra_args.append(_DANGEROUSLY_SKIP_PERMISSIONS_FLAG)
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         background_cmd = self._build_background_tasks_command()
@@ -1023,6 +1344,66 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {cd_cmd} "
             f'&& {{ {resume_prelude}; {home_prefix} {agy_invocation} "$@" ; }}'
         )
+
+
+def _antigravity_preserved_items() -> list[PreservedItem]:
+    """Return the files to preserve from an antigravity agent's state directory.
+
+    The raw and common transcripts plus the conversation-id history: the root
+    conversation (for resume) and the full conversation-ids list (root plus
+    subagents).
+
+    Also agy's native resumable conversation store -- the per-conversation
+    SQLite ``<conv_id>.db`` files that ``agy --conversation`` resumes from. We
+    preserve the ``conversations/`` subdir specifically, which excludes the agy
+    oauth token, ``settings.json``, and the macOS keychain symlink (all siblings
+    elsewhere in the per-agent ``home`` tree, which is otherwise not preserved).
+
+    Known limitation: on macOS the ``.db`` is encrypted by Chromium os_crypt
+    with the "Antigravity Safe Storage" key in the login keychain, so a
+    macOS-created store is not portable to a different machine/user (it is
+    readable when preserved on the same machine, and Linux uses a portable
+    file-based store).
+    """
+    conversations_relpath = (Path(*_AGY_HOME_RELATIVE_PATH) / CONVERSATIONS_DIR_RELATIVE_TO_HOME).as_posix()
+    return [
+        *build_transcript_preserved_items("antigravity"),
+        PreservedItem(rel_path=ROOT_CONVERSATION_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=CONVERSATION_IDS_FILENAME, kind=FileType.FILE),
+        PreservedItem(rel_path=conversations_relpath, kind=FileType.DIRECTORY),
+    ]
+
+
+def _antigravity_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) antigravity agent, or None to skip it."""
+    return flag_gated_items(ref, "preserve_on_destroy", _antigravity_preserved_items())
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve antigravity transcripts from the host's volume before it is destroyed.
+
+    Mirrors ``AntigravityAgent.on_destroy`` for the offline path, where a host is
+    destroyed without per-agent ``on_destroy`` calls but agent state still lives
+    on the host's persisted volume.
+    """
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName("antigravity"), _antigravity_items_to_preserve_for_discovered_agent
+    )
+
+
+@hookimpl
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+    """Antigravity-specific fail-fast pre-resolution of ``--adopt`` conversation ids
+    (resolves each named conversation before any host/worktree is built; see the shared helper)."""
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        AntigravityAgent,
+        lambda adopt_arg: _resolve_adopt_session(adopt_arg, mngr_ctx),
+    )
+    return None
 
 
 @hookimpl

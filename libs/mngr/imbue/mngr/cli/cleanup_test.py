@@ -19,6 +19,8 @@ from imbue.mngr.cli.cleanup import _selected_marker
 from imbue.mngr.cli.cleanup import cleanup
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CleanupAction
@@ -466,7 +468,7 @@ def test_emit_result_human_destroyed(capsys: pytest.CaptureFixture[str]) -> None
     result = CleanupResult(
         destroyed_agents=[AgentName("agent-a"), AgentName("agent-b")],
         stopped_agents=[],
-        errors=[],
+        failures=[],
     )
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     _emit_result(result, output_opts)
@@ -482,7 +484,7 @@ def test_emit_result_human_stopped(capsys: pytest.CaptureFixture[str]) -> None:
     result = CleanupResult(
         destroyed_agents=[],
         stopped_agents=[AgentName("stopped-agent")],
-        errors=[],
+        failures=[],
     )
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     _emit_result(result, output_opts)
@@ -497,7 +499,7 @@ def test_emit_result_human_no_agents(capsys: pytest.CaptureFixture[str]) -> None
     result = CleanupResult(
         destroyed_agents=[],
         stopped_agents=[],
-        errors=[],
+        failures=[],
     )
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     _emit_result(result, output_opts)
@@ -511,7 +513,7 @@ def test_emit_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     result = CleanupResult(
         destroyed_agents=[AgentName("agent-x")],
         stopped_agents=[],
-        errors=["some error"],
+        failures=[CleanupFailure(category=CleanupFailureCategory.OTHER, message="some error")],
     )
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
     _emit_result(result, output_opts)
@@ -519,7 +521,10 @@ def test_emit_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     output = json.loads(captured.out.strip())
     assert output["destroyed_agents"] == ["agent-x"]
     assert output["destroyed_count"] == 1
-    assert output["error_count"] == 1
+    assert output["failure_count"] == 1
+    assert output["failures"][0]["category"] == "OTHER"
+    assert output["failures"][0]["message"] == "some error"
+    assert output["exit_code"] == 1
 
 
 def test_emit_result_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
@@ -527,7 +532,7 @@ def test_emit_result_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     result = CleanupResult(
         destroyed_agents=[],
         stopped_agents=[AgentName("agent-y")],
-        errors=[],
+        failures=[],
     )
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
     _emit_result(result, output_opts)
@@ -639,22 +644,27 @@ def test_emit_result_json_with_errors(capsys: pytest.CaptureFixture[str]) -> Non
     result = CleanupResult()
     result.destroyed_agents = [AgentName("agent-x")]
     result.stopped_agents = [AgentName("agent-y")]
-    result.errors = ["error-1"]
+    result.failures = [CleanupFailure(category=CleanupFailureCategory.OTHER, message="error-1")]
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
     _emit_result(result, output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["destroyed_count"] == 1
     assert data["stopped_count"] == 1
-    assert data["error_count"] == 1
-    assert data["errors"] == ["error-1"]
+    assert data["failure_count"] == 1
+    assert data["failures"] == [{"category": "OTHER", "message": "error-1", "agent_name": None, "host_id": None}]
 
 
-@pytest.mark.allow_warnings(match=r"^(\d+ error\(s\) occurred:|  - (Failed to destroy|Timeout on) agent-)")
+@pytest.mark.allow_warnings(
+    match=r"^(\d+ cleanup failure\(s\) -- resources may remain:|  - \[(HOST_RESOURCE_REMAINS|TIMEOUT)\] (Failed to destroy|Timeout on) agent-)"
+)
 def test_emit_result_human_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
-    """_emit_result should display errors in HUMAN format."""
+    """_emit_result should display failures in HUMAN format."""
     result = CleanupResult()
-    result.errors = ["Failed to destroy agent-x", "Timeout on agent-y"]
+    result.failures = [
+        CleanupFailure(category=CleanupFailureCategory.HOST_RESOURCE_REMAINS, message="Failed to destroy agent-x"),
+        CleanupFailure(category=CleanupFailureCategory.TIMEOUT, message="Timeout on agent-y"),
+    ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     _emit_result(result, output_opts)
     captured = capsys.readouterr()

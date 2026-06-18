@@ -41,7 +41,7 @@ User Machine                              VPS
 
 ## Modules
 
-- `vps_client.py` -- Abstract `VpsClientInterface` that concrete providers implement (create/destroy instances, snapshots, SSH key management)
+- `vps_client.py` -- Abstract `VpsClientInterface` that concrete providers implement (create/destroy instances, SSH key management)
 - `instance.py` -- `VpsDockerProvider` implementation with full lifecycle (create, stop, start, destroy, snapshots, discovery)
 - `host_store.py` -- `VpsDockerHostStore` for reading/writing host records on the unified per-host volume; constructed via `open_host_store(outer, volume_name)`
 - `cloud_init.py` -- Cloud-init user_data generation for VPS provisioning

@@ -437,13 +437,28 @@ def start_container(outer: OuterHostInterface, container_name: str) -> None:
         raise MngrError(f"docker start {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
 
 
-def remove_container(outer: OuterHostInterface, container_name: str, force: bool = False) -> None:
-    """Remove a container. If force=True, kill running containers first."""
+def remove_container(
+    outer: OuterHostInterface, container_name: str, force: bool = False, tolerate_missing: bool = False
+) -> None:
+    """Remove a container. If force=True, kill running containers first.
+
+    If tolerate_missing=True, an already-absent container is a no-op: ``docker rm``
+    reports "No such container" (a stable, well-known docker string), which we treat
+    as success since the postcondition -- the container is gone -- already holds. Any
+    other docker failure still raises, so callers can treat a raised error as a real
+    failure (a container that exists but could not be removed).
+    """
     args: list[str] = ["rm"]
     if force:
         args.append("-f")
     args.append(container_name)
-    run_docker(outer, args)
+    try:
+        run_docker(outer, args)
+    except MngrError as e:
+        if tolerate_missing and "no such container" in str(e).lower():
+            logger.trace("Container {} already gone -- nothing to remove", container_name)
+            return
+        raise
 
 
 def remove_volume(outer: OuterHostInterface, volume_name: str) -> None:

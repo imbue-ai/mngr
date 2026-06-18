@@ -47,6 +47,7 @@ from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -634,7 +635,11 @@ def _build_stream_synthesizer(session: LiveSession) -> StreamEventSynthesizer | 
     host = session.host
     if agent is None or host is None:
         return None
-    return StreamEventSynthesizer(host=host, buffer_path=agent.get_stream_buffer_path())
+    return StreamEventSynthesizer(
+        host=host,
+        buffer_path=agent.get_live_output_path(),
+        reader=agent.make_live_output_reader(),
+    )
 
 
 def _build_turn_result_message(session: LiveSession, turn_messages: Sequence[Message], duration_ms: int) -> Message:
@@ -672,7 +677,13 @@ def restart_agent_with_resume(session: LiveSession) -> None:
     host = session.host
     if agent is None or host is None:
         raise TurnDeliveryError("Cannot restart the agent before it is created")
-    host.stop_agents([agent.id])
+    # Best-effort stop before the relaunch: a leftover-resource cleanup failure
+    # (surfaced as a CleanupFailedGroup) must not abort the restart, matching the
+    # pre-raise behavior where stop_agents' returned failures were discarded here.
+    try:
+        host.stop_agents([agent.id])
+    except CleanupFailedGroup as exc:
+        logger.warning("Cleanup left resources behind while stopping agent {} for restart: {}", agent.name, exc)
     host.start_agents([agent.id])
     is_ready = poll_until(
         lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,

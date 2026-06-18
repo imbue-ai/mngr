@@ -229,7 +229,7 @@ def test_converts_assistant_message(tmp_path: Path, stub_mngr_log_sh: str) -> No
     assert events[0]["text"] == "Hi there!"
     assert events[0]["model"] == "claude-opus-4.6"
     assert events[0]["event_id"] == f"{assistant_uuid}-assistant"
-    assert events[0]["stop_reason"] == "end_turn"
+    assert events[0]["finish_reason"] == "end_turn"
     assert events[0]["usage"]["input_tokens"] == 100
 
 
@@ -341,6 +341,43 @@ def test_handles_malformed_json(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     events = runner.get_output_events()
     assert len(events) == 1
     assert events[0]["content"] == "valid"
+
+
+def test_missing_output_file_emits_nothing_to_pane(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """On the first pass the output file does not exist yet; the watcher must
+    stay completely silent on stdout/stderr while still converting the event.
+    The converter's count is captured by the shell, never echoed to the pane.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input([_make_user_event(uuid4().hex, "2026-01-01T00:00:00Z", text="Hello")])
+    assert not runner.output_file.exists()
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
+    assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
+    # The conversion still happens; only the pane noise is gone.
+    assert len(runner.get_output_events()) == 1
+
+
+def test_dropped_lines_emit_nothing_to_pane(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Malformed and null-message lines are dropped silently and must produce no
+    output on the watcher's stdout/stderr; the valid line still converts.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    null_message = json.dumps(
+        {"type": "user", "uuid": uuid4().hex, "timestamp": "2026-01-01T00:00:00Z", "message": None}
+    )
+    valid = _make_user_event(uuid4().hex, "2026-01-01T00:00:01Z", text="kept")
+    runner.write_input(["not json", null_message, valid])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
+    assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
+    # The bad lines are dropped; the valid one still converts.
+    events = runner.get_output_events()
+    assert [e["content"] for e in events] == ["kept"]
 
 
 def test_skips_events_without_uuid(tmp_path: Path, stub_mngr_log_sh: str) -> None:

@@ -1,0 +1,1 @@
+Clarified `non_issues.md`: the `is_`-prefix exemption and the missing-`Field()`/description exemption apply specifically to CLI command functions and CLI-options data classes (e.g. `ListCliOptions`) that mirror user-facing click options. Internal boolean fields on non-CLI data classes should still use the `is_` prefix. Also fixed a typo in that file ("duplicated" -> "duplicate").

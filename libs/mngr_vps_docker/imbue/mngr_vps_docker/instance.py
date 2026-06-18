@@ -25,6 +25,7 @@ from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -40,8 +41,11 @@ from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -112,7 +116,9 @@ from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_out
 from imbue.mngr_vps_docker.container_setup import setup_container_ssh
 from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_for
 from imbue.mngr_vps_docker.container_setup import start_container
+from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.container_setup import stop_container
+from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
@@ -362,6 +368,24 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
         key, _, value = stripped.partition("=")
         tags[key.strip()] = value.strip()
     return tags
+
+
+# HTTP status codes from the VPS provider API that mean the resource the teardown
+# step targeted was already gone -- a benign outcome that should not be recorded as
+# a cleanup failure.
+_VPS_RESOURCE_ALREADY_GONE_STATUS_CODES: Final = (404, 410)
+
+
+def _is_vps_resource_already_gone(error: MngrError) -> bool:
+    """Return True iff ``error`` is a VPS API "already gone" (not-found) response.
+
+    Both the Vultr and OVH clients raise ``VpsApiError`` carrying the HTTP
+    ``status_code`` (OVH maps its SDK's ``ResourceNotFoundError`` to 404), so we
+    classify by that status rather than fragile error-text matching. A real
+    failure (the resource exists but could not be destroyed) carries some other
+    status and is recorded.
+    """
+    return isinstance(error, VpsApiError) and error.status_code in _VPS_RESOURCE_ALREADY_GONE_STATUS_CODES
 
 
 def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | None:
@@ -639,7 +663,9 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_store = open_host_store(outer, host_volume_name_for(host_id))
                 existing = host_store.read_host_record()
                 if existing is not None:
-                    updated = existing.model_copy(update={"certified_host_data": certified_data})
+                    updated = existing.model_copy_update(
+                        to_update(existing.field_ref().certified_host_data, certified_data)
+                    )
                     host_store.write_host_record(updated)
         except MngrError as e:
             logger.warning("Failed to sync certified data to VPS host volume: {}", e)
@@ -1229,8 +1255,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         self._create_shutdown_script(host)
         with log_span("Starting activity watcher"):
-            start_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
-            exec_in_container(outer, container_name, start_watcher_cmd)
+            self._start_activity_watcher(outer, container_name)
 
         host_record = VpsDockerHostRecord(
             certified_host_data=host_data,
@@ -1340,6 +1365,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         create_snapshot: bool = True,
         timeout_seconds: float = 60.0,
+        stop_reason: HostState | None = None,
     ) -> None:
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
@@ -1362,18 +1388,38 @@ class VpsDockerProvider(BaseProviderInstance):
             with log_span("Stopping container on VPS"):
                 stop_container(outer, host_record.config.container_name, timeout_seconds=int(timeout_seconds))
 
-            # Update host record
+            # Update the host record (bump updated_at). A subclass that stops more
+            # than the container -- e.g. AWS stopping the EC2 instance -- passes a
+            # ``stop_reason`` so the offline-state derivation reports it correctly
+            # (STOPPED, not CRASHED) while the host is down; this single write
+            # carries it, so the subclass needs no second write. The write must
+            # land before any deeper stop, since the volume is unreachable after.
             host_store = open_host_store(outer, host_record.config.volume_name)
-            now = datetime.now(timezone.utc)
-            updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
-            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+            certified = host_record.certified_host_data
+            data_updates = [to_update(certified.field_ref().updated_at, datetime.now(timezone.utc))]
+            if stop_reason is not None:
+                data_updates.append(to_update(certified.field_ref().stop_reason, stop_reason.value))
+            updated_data = certified.model_copy_update(*data_updates)
+            updated_record = host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_data)
+            )
             host_store.write_host_record(updated_record)
 
+        self._host_record_cache[host_id] = updated_record
         logger.info("Host {} stopped", host_id)
 
     # =========================================================================
     # Core Lifecycle: start_host
     # =========================================================================
+
+    def _start_activity_watcher(self, outer: OuterHostInterface, container_name: str) -> None:
+        """Launch the in-container activity watcher (the idle/auto-shutdown driver).
+
+        The watcher is a backgrounded process inside the agent container (not part
+        of its entrypoint), so it does not survive a container stop/start. It is
+        started here at create time and re-started by ``start_host`` on resume.
+        """
+        exec_in_container(outer, container_name, build_start_activity_watcher_command(str(self.host_dir)))
 
     def start_host(
         self,
@@ -1388,14 +1434,49 @@ class VpsDockerProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             with log_span("Starting container on VPS"):
                 start_container(outer, host_record.config.container_name)
+            # sshd is launched via `docker exec` (see start_container_sshd), not the
+            # container's entrypoint, so a `docker start` brings the container back
+            # WITHOUT sshd (the idle watcher's container stop, a manual `mngr stop`, a
+            # VPS reboot, or a host VM stop/start that takes the container down with it
+            # -- e.g. an AWS instance stop/start -- all land here). Re-exec it before
+            # waiting, or `_wait_for_container_sshd` would block until timeout and the
+            # agent would be unrecoverable via `mngr start`/`conn`. `docker start` is a
+            # no-op on an already-running container, so this also repairs the
+            # container-up-but-sshd-down state.
+            with log_span("Restarting sshd in container"):
+                start_container_sshd(outer, host_record.config.container_name)
 
-        # Wait for sshd in container
-        with log_span("Waiting for container SSH"):
-            self._wait_for_container_sshd(host_record.vps_ip)
+            with log_span("Waiting for container SSH"):
+                self._wait_for_container_sshd(host_record.vps_ip)
 
-        host_obj = self._create_host_object(
-            host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip
-        )
+            host_obj = self._create_host_object(
+                host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip
+            )
+
+            # A resume is itself activity: refresh the BOOT activity file (whose
+            # mtime is what the idle watcher reads) so the watcher relaunched just
+            # below starts a fresh idle window. Without this, a resumed-but-idle
+            # host keeps the pre-stop activity mtimes and the watcher re-stops it
+            # within one poll -- so e.g. `mngr start` on an idle host would race a
+            # near-immediate auto-stop. Must happen before the watcher relaunch.
+            host_obj.record_activity(ActivitySource.BOOT)
+
+            # The in-container activity watcher is a backgrounded process that does
+            # not survive the container restart, so relaunch it -- else auto-stop-
+            # on-idle would silently stop working after the first resume (for every
+            # vps_docker provider, not just AWS). Best-effort: a resumed host that
+            # can't auto-stop is better than a failed resume.
+            with log_span("Relaunching activity watcher"):
+                try:
+                    self._start_activity_watcher(outer, host_record.config.container_name)
+                except MngrError as e:
+                    logger.warning(
+                        "Failed to relaunch the activity watcher on resume for host {} ({}); "
+                        "this host will not auto-stop on idle until it is recreated",
+                        host_id,
+                        e,
+                    )
+
         logger.info("Host {} started", host_id)
         return host_obj
 
@@ -1404,6 +1485,19 @@ class VpsDockerProvider(BaseProviderInstance):
     # =========================================================================
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
+        """Destroy a VPS-backed Docker host permanently.
+
+        Best-effort: every teardown step is attempted. A failure that means a
+        resource is already gone is benign (dropped). A failure that means a
+        resource exists but could not be removed is real -- it is recorded as a
+        ``CleanupFailure`` and collected, and the remaining steps still run. The
+        collected failures are raised as a ``CleanupFailedGroup`` rather than
+        aborting early or being silently swallowed. See
+        specs/cleanup-error-aggregation.md.
+
+        A missing host record still raises ``HostNotFoundError``; the
+        orchestration layer classifies that abort.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
 
         # Disconnect SSH before destroying (also disconnect the passed-in host
@@ -1419,71 +1513,128 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_config = host_record.config
         vps_ip = host_record.vps_ip
 
-        if vps_ip is not None:
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # Stop and remove the agent container; removing the volume below
-                # will fail otherwise because the container still holds it open.
+        with collecting_cleanup_failures() as failures:
+            if vps_ip is not None:
+                with self._make_outer_for_vps_ip(vps_ip) as outer:
+                    # Stop and remove the agent container; removing the volume below
+                    # will fail otherwise because the container still holds it open.
+                    # ``tolerate_missing`` makes an already-gone container a no-op, so any
+                    # error raised here means a container that exists but could not be removed.
+                    try:
+                        remove_container(outer, vps_config.container_name, force=True, tolerate_missing=True)
+                    except MngrError as e:
+                        logger.warning("Failed to remove container: {}", e)
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to remove container {vps_config.container_name} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
+
+                    # Delete the per-host btrfs subvolume before the named volume.
+                    # The VPS-destroy that follows takes the whole loop file with it,
+                    # so this is primarily belt-and-suspenders for the rare case of
+                    # a destroy retried on a still-existing VPS (e.g. the operator
+                    # re-runs `mngr destroy` after VPS termination has failed).
+                    # ``delete_btrfs_subvolume_on_outer`` already no-ops on an absent
+                    # subvolume, so any raised error means a present subvolume remains.
+                    subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
+                    try:
+                        delete_btrfs_subvolume_on_outer(outer, subvolume_path)
+                    except MngrError as e:
+                        logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to delete btrfs subvolume {subvolume_path} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
+
+                    # Remove the unified host volume. With bind options the volume
+                    # itself holds no data (the subvolume above did), but the named
+                    # entry still needs cleanup so a later create with the same
+                    # volume name doesn't collide. ``docker volume rm -f`` already
+                    # no-ops on a missing volume, so any raised error means the named
+                    # volume entry remains.
+                    try:
+                        remove_volume(outer, vps_config.volume_name)
+                    except MngrError as e:
+                        logger.warning("Failed to remove host volume: {}", e)
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to remove host volume {vps_config.volume_name} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
+
+                    # Remove the per-host snapshot-trigger volume (the named entry;
+                    # the bind source at OUTER_SNAPSHOT_TRIGGER_DIR is shared across
+                    # all containers on this outer and is left alone). Same ``-f``
+                    # no-op-on-missing semantics as the host volume above.
+                    trigger_volume_name = snapshot_trigger_volume_name_for(host_id)
+                    try:
+                        remove_volume(outer, trigger_volume_name)
+                    except MngrError as e:
+                        logger.warning("Failed to remove snapshot trigger volume: {}", e)
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to remove snapshot trigger volume {trigger_volume_name} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
+
+            # Destroy the VPS instance. An "already gone" (HTTP 404/410) response is benign;
+            # any other error means a VPS instance that may still exist (and incur cost).
+            with log_span("Destroying VPS instance"):
                 try:
-                    remove_container(outer, vps_config.container_name, force=True)
+                    self.vps_client.destroy_instance(vps_config.vps_instance_id)
                 except MngrError as e:
-                    logger.warning("Failed to remove container: {}", e)
+                    logger.warning("Failed to destroy VPS: {}", e)
+                    if not _is_vps_resource_already_gone(e):
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to destroy VPS instance {vps_config.vps_instance_id} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
 
-                # Delete the per-host btrfs subvolume before the named volume.
-                # The VPS-destroy that follows takes the whole loop file with it,
-                # so this is primarily belt-and-suspenders for the rare case of
-                # a destroy retried on a still-existing VPS (e.g. the operator
-                # re-runs `mngr destroy` after VPS termination has failed).
-                subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
+            # Clean up SSH key from provider. An "already gone" (HTTP 404/410) response is
+            # benign; any other error means a key that may still be registered.
+            if vps_config.vps_ssh_key_id is not None:
                 try:
-                    delete_btrfs_subvolume_on_outer(outer, subvolume_path)
+                    self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
                 except MngrError as e:
-                    logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+                    logger.warning("Failed to delete SSH key from provider: {}", e)
+                    if not _is_vps_resource_already_gone(e):
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to delete SSH key {vps_config.vps_ssh_key_id} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
 
-                # Remove the unified host volume. With bind options the volume
-                # itself holds no data (the subvolume above did), but the named
-                # entry still needs cleanup so a later create with the same
-                # volume name doesn't collide.
+            # Clean up local known_hosts. These are cosmetic local-file edits; a
+            # missing file or OS error here leaves no infrastructure behind, so it is
+            # always benign and never recorded as a failure.
+            if vps_ip is not None:
                 try:
-                    remove_volume(outer, vps_config.volume_name)
-                except MngrError as e:
-                    logger.warning("Failed to remove host volume: {}", e)
-
-                # Remove the per-host snapshot-trigger volume (the named entry;
-                # the bind source at OUTER_SNAPSHOT_TRIGGER_DIR is shared across
-                # all containers on this outer and is left alone).
+                    remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.trace("Failed to clean up VPS known_hosts: {}", e)
                 try:
-                    remove_volume(outer, snapshot_trigger_volume_name_for(host_id))
-                except MngrError as e:
-                    logger.warning("Failed to remove snapshot trigger volume: {}", e)
+                    remove_host_from_known_hosts(
+                        self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
+                    )
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.trace("Failed to clean up container known_hosts: {}", e)
 
-        # Destroy the VPS instance
-        with log_span("Destroying VPS instance"):
-            try:
-                self.vps_client.destroy_instance(vps_config.vps_instance_id)
-            except Exception as e:
-                logger.warning("Failed to destroy VPS: {}", e)
-
-        # Clean up SSH key from provider
-        if vps_config.vps_ssh_key_id is not None:
-            try:
-                self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
-            except Exception as e:
-                logger.warning("Failed to delete SSH key from provider: {}", e)
-
-        # Clean up local known_hosts
-        if vps_ip is not None:
-            try:
-                remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
-            except Exception as e:
-                logger.trace("Failed to clean up VPS known_hosts: {}", e)
-            try:
-                remove_host_from_known_hosts(
-                    self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
-                )
-            except Exception as e:
-                logger.trace("Failed to clean up container known_hosts: {}", e)
-
-        logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
+            logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
 
     def delete_host(self, host: HostInterface) -> None:
         """Delete all local records for a destroyed host (does not destroy VPS)."""
@@ -1610,21 +1761,43 @@ class VpsDockerProvider(BaseProviderInstance):
             # Cache the host record for later use by get_host_and_agent_details
             self._host_record_cache[host_id] = record
 
-            # Running status came from the same live listing read. A VPS that
-            # was unreachable during discovery has no entry here, so it falls
-            # through to the offline-state derivation rather than crashing the
-            # listing -- one bad VPS must not drop the other VPSes' hosts.
+            # Running status came from the same live listing read. An entry in
+            # is_running_by_host_id exists only when that read succeeded, which
+            # requires the VPS to have been reachable -- so its presence doubles
+            # as the reachability signal. A VPS that was unreachable during
+            # discovery has no entry here, so it falls through to the
+            # offline-state derivation rather than crashing the listing -- one
+            # bad VPS must not drop the other VPSes' hosts.
             is_running = discovery.is_running_by_host_id.get(host_id, False)
+            is_outer_reachable = host_id in discovery.is_running_by_host_id
 
             has_snapshots = len(record.certified_host_data.snapshots) > 0
             is_failed = record.certified_host_data.failure_reason is not None
+            # A reachable VPS whose container is simply stopped (idle-watcher shutdown,
+            # a manual `mngr stop`, or a VPS reboot) is cleanly STOPPED and restartable
+            # via `mngr start` -- NOT crashed. The live listing read only succeeded
+            # because the VPS is up, so this is never a host crash. Keep such hosts
+            # visible to `mngr conn`/`start` (which pass include_destroyed=False)
+            # instead of hiding them as if destroyed. An *unreachable* VPS with no
+            # recorded stop_reason still derives to CRASHED below -- there the host
+            # itself is down, which is the genuine failure case.
+            is_cleanly_stopped = is_outer_reachable and not is_running
 
-            if not is_running and not is_failed and not has_snapshots and not include_destroyed:
+            if (
+                not is_running
+                and not is_cleanly_stopped
+                and not is_failed
+                and not has_snapshots
+                and not include_destroyed
+            ):
                 continue
 
             if is_running and record.vps_ip is not None:
                 host_state = HostState.RUNNING
                 self._create_host_object(host_id, host_name, record.vps_ip)
+            elif is_cleanly_stopped:
+                host_state = HostState.STOPPED
+                self._create_offline_host(record)
             else:
                 host_state = derive_offline_host_state(
                     certified_data=record.certified_host_data,
@@ -2129,10 +2302,14 @@ class VpsDockerProvider(BaseProviderInstance):
             # Update certified data with new snapshot
             existing_snapshots = host_record.certified_host_data.snapshots
             updated_snapshots = list(existing_snapshots) + [snapshot_record]
-            updated_data = host_record.certified_host_data.model_copy(
-                update={"snapshots": updated_snapshots, "updated_at": datetime.now(timezone.utc)}
+            certified = host_record.certified_host_data
+            updated_data = certified.model_copy_update(
+                to_update(certified.field_ref().snapshots, updated_snapshots),
+                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
             )
-            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+            updated_record = host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_data)
+            )
 
             # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
             host_store = open_host_store(outer, host_record.config.volume_name)
@@ -2195,10 +2372,14 @@ class VpsDockerProvider(BaseProviderInstance):
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
 
-        updated_data = host_record.certified_host_data.model_copy(
-            update={"host_name": str(name), "updated_at": datetime.now(timezone.utc)}
+        certified = host_record.certified_host_data
+        updated_data = certified.model_copy_update(
+            to_update(certified.field_ref().host_name, str(name)),
+            to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
         )
-        updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+        updated_record = host_record.model_copy_update(
+            to_update(host_record.field_ref().certified_host_data, updated_data)
+        )
 
         if host_record.vps_ip is not None:
             if host_record.config is None:
@@ -2274,6 +2455,491 @@ class VpsDockerProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = open_host_store(outer, host_record.config.volume_name)
             host_store.remove_persisted_agent_data(agent_id)
+
+
+# Self-stopping idle watcher, shared by the cloud providers. The in-container
+# activity watcher writes ``IDLE_SENTINEL_FILENAME`` onto the shared volume when
+# idle; a host-side systemd ``.path`` unit observes it and fires a oneshot
+# ``.service`` that pauses the instance (poweroff for AWS/GCP; a self-deallocate
+# script for Azure). A single mngr provider owns a host, so one unit name suffices.
+IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
+IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-idle-watcher"
+
+
+def build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
+    """Build the in-container ``shutdown.sh`` that signals idle by touching the sentinel.
+
+    Unlike the base ``VpsDockerProvider`` script (``kill -TERM 1``, which stops only
+    the container), the cloud variant signals idle by touching a sentinel on the
+    shared volume; a host-side systemd path unit observes it and pauses the whole
+    instance (a container cannot pause its host).
+    """
+    return f'#!/bin/bash\ntouch "{sentinel_in_container}"\n'
+
+
+def build_idle_watcher_path_unit(sentinel_on_outer: str) -> str:
+    """Build the systemd ``.path`` unit that fires the watcher service when the sentinel appears."""
+    return (
+        "[Unit]\n"
+        "Description=Watch for the mngr idle sentinel and pause this instance when idle\n"
+        "[Path]\n"
+        f"PathExists={sentinel_on_outer}\n"
+        f"Unit={IDLE_WATCHER_UNIT_NAME}.service\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def build_poweroff_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
+    """Build the oneshot ``.service`` that powers the host off when idle (AWS/GCP).
+
+    Removes the sentinel BEFORE powering off so that, when the instance is resumed,
+    the re-armed ``.path`` unit does not immediately fire again and re-pause the
+    just-started host. On EC2 the poweroff applies the instance's
+    ``InstanceInitiatedShutdownBehavior``; on GCE a guest poweroff stops the
+    instance -- neither needs an API call or IAM.
+    """
+    return (
+        "[Unit]\n"
+        "Description=Power off this instance when mngr signals the host is idle\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && shutdown -P now'\n"
+    )
+
+
+class OfflineCapableVpsDockerProvider(VpsDockerProvider):
+    """``VpsDockerProvider`` for cloud providers whose hosts can be stopped while
+    their disk persists, with host/agent identity mirrored into instance
+    tags/metadata.
+
+    A stopped (deallocated / powered-off) instance keeps its disk but is
+    SSH-unreachable, so the volume-backed base discovery and host resolution
+    cannot see it. This class adds the shared offline recovery (reconstructing such
+    hosts and their agents from the provider's instance listing) *and* the shared
+    stop/start lifecycle + self-stopping idle watcher. Per-provider specifics are
+    supplied through the hooks below; the cloud-API calls (pause/resume the
+    instance), the agent-record mirror (tags vs metadata), and -- for Azure -- the
+    static-IP/self-deallocate variations are the only parts that differ.
+    """
+
+    # -- Stop/start lifecycle (idle-pause + resume) -----------------------------
+
+    def stop_host(
+        self,
+        host: HostInterface | HostId,
+        create_snapshot: bool = True,
+        timeout_seconds: float = 60.0,
+        stop_reason: HostState | None = None,
+    ) -> None:
+        """Stop the agent container *and* pause the cloud instance, preserving its disk.
+
+        The base ``VpsDockerProvider.stop_host`` only stops the inner Docker
+        container, leaving the instance running and billing. This override reuses
+        that container-stop + record-write via ``super()`` (passing
+        ``stop_reason=STOPPED`` so the single write marks the host STOPPED before
+        its volume goes unreachable), then calls ``_pause_cloud_instance`` to stop /
+        deallocate the instance so a paused agent costs only disk storage. The disk
+        (and all on-disk state) survives, so ``start_host`` can resume it.
+        ``create_snapshot`` is ignored -- pausing preserves the whole filesystem.
+        """
+        del create_snapshot
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._find_host_record(host_id)
+        if host_record is None or host_record.config is None or host_record.vps_ip is None:
+            raise HostNotFoundError(self.name, host_id)
+        super().stop_host(
+            host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
+        )
+        self._pause_cloud_instance(host_record.config.vps_instance_id)
+
+    def start_host(
+        self,
+        host: HostInterface | HostId,
+        snapshot_id: SnapshotId | None = None,
+    ) -> Host:
+        """Resume a paused agent: start the cloud instance, then its container.
+
+        A paused instance is SSH-unreachable, so it is located by its
+        ``mngr-host-id`` tag/label (not the SSH-based record lookup), resumed via
+        ``_resume_cloud_instance`` (which returns the instance's address -- fresh
+        for ephemeral-IP providers, unchanged for Azure's static IP), and its SSH
+        known_hosts re-pointed at that address (a no-op when the IP did not change).
+        We then clear the idle sentinel + ``stop_reason`` and rewrite the record's
+        ``vps_ip`` before delegating the container start to ``super()`` (whose
+        ``_find_host_record`` reads the refreshed cache entry).
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            raise HostNotFoundError(self.name, host_id)
+        instance_id = VpsInstanceId(instance["id"])
+        new_ip = self._resume_cloud_instance(instance_id)
+        # The cached instance list predates the start (stale power state / IP); drop
+        # it so any later discovery sees the running instance and its address.
+        self._instances_cache = None
+        # Rebind known_hosts to the address from mngr's local host keypairs BEFORE
+        # connecting -- the instance kept its host keys across the pause (they live
+        # on the disk), but the record (the other key source) can't be read until we
+        # can SSH in. A no-op for static-IP providers (Azure).
+        self._rebind_known_hosts_pre_connect(new_ip)
+        with log_span("Waiting for VPS SSH after start"):
+            self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
+        with self._make_outer_for_vps_ip(new_ip) as outer:
+            host_store = open_host_store(outer, host_volume_name_for(host_id))
+            record = host_store.read_host_record()
+            if record is None or record.config is None:
+                raise HostNotFoundError(self.name, host_id)
+            self._rebind_known_hosts(record, new_ip)
+            # Clear any stale idle sentinel so the freshly-resumed instance isn't
+            # immediately re-paused by the systemd path unit (belt-and-suspenders;
+            # the self-stop service also removes it when it fires).
+            outer.execute_idempotent_command(f"rm -f {self._idle_sentinel_path_on_outer(host_id)}")
+            certified = record.certified_host_data
+            updated_data = certified.model_copy_update(
+                to_update(certified.field_ref().stop_reason, None),
+                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
+            )
+            updated_record = record.model_copy_update(
+                to_update(record.field_ref().vps_ip, new_ip),
+                to_update(record.field_ref().certified_host_data, updated_data),
+            )
+            host_store.write_host_record(updated_record)
+        # Drop any cached Host bound to the old IP, then seed the record cache so
+        # super().start_host()'s _find_host_record returns the rebound record.
+        self._evict_cached_host(host_id)
+        self._host_record_cache[host_id] = updated_record
+        # The base ``start_host`` relaunches the in-container activity watcher and
+        # refreshes BOOT activity on resume, so auto-stop-on-idle keeps working
+        # across resumes with no provider-specific step here.
+        return super().start_host(host_id, snapshot_id)
+
+    @abstractmethod
+    def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
+        """Stop / deallocate the cloud instance (the provider's own log span + API call)."""
+        ...
+
+    @abstractmethod
+    def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
+        """Start the cloud instance and return its SSH address (fresh IP, or the static one)."""
+        ...
+
+    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
+        """Locate this host's instance by its ``mngr-host-id`` tag/label (works while stopped), or None.
+
+        Reads only the cached instance listing (no SSH), so it resolves an instance
+        that is paused and therefore unreachable. The listing already excludes
+        destroyed instances, so a destroyed host returns ``None``. Refuses (raises)
+        when more than one instance carries the same ``mngr-host-id``: the tag/label
+        is account-writable, so a duplicate could otherwise silently steer ``mngr
+        start`` (and the agent-record writes keyed off this lookup) onto the wrong
+        instance.
+        """
+        matches = self._instances_matching_host_id(host_id)
+        if not matches:
+            # The cached list can predate this instance (e.g. a discovery/name-conflict
+            # check during create populated it first); refresh once and retry.
+            self._instances_cache = None
+            matches = self._instances_matching_host_id(host_id)
+        if len(matches) > 1:
+            ids = sorted(str(m.get("id")) for m in matches)
+            raise MngrError(
+                f"Provider {self.name!r}: {len(matches)} instances are tagged "
+                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
+                "Resolve the duplicate tags/labels (or remove the stray instance) and retry."
+            )
+        return matches[0] if matches else None
+
+    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
+        """Return every cached instance tagged ``mngr-host-id=<host_id>``.
+
+        Providers whose tag/label values are encoded (e.g. GCE labels) override this
+        to match on the encoded value.
+        """
+        wanted = f"mngr-host-id={host_id}"
+        return [instance for instance in self._list_instances_cached() if wanted in instance.get("tags", ())]
+
+    def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
+        """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
+
+        A pause/resume keeps the instance's SSH host keys (on the disk), so only the
+        IP changes. Drop any stale entries for the old IP, then add the new IP with
+        the recorded VPS (port 22) and container host keys. Providers whose IP is
+        stable across a pause (Azure) override this to a no-op.
+        """
+        old_ip = record.vps_ip
+        if old_ip is not None and old_ip != new_ip:
+            remove_host_from_known_hosts(self._vps_known_hosts_path(), old_ip, 22)
+            remove_host_from_known_hosts(self._container_known_hosts_path(), old_ip, self.config.container_ssh_port)
+        if record.ssh_host_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._vps_known_hosts_path(),
+                hostname=new_ip,
+                port=22,
+                public_key=record.ssh_host_public_key,
+            )
+        if record.container_ssh_host_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._container_known_hosts_path(),
+                hostname=new_ip,
+                port=self.config.container_ssh_port,
+                public_key=record.container_ssh_host_public_key,
+            )
+
+    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+        """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
+
+        Runs on resume *before* any SSH connection (the host record, the other key
+        source, can't be read until we can connect). The VPS/container host keypairs
+        are generated and held locally by mngr and injected at create time, so the
+        public keys here are exactly what the resumed instance presents (its host
+        keys persist on the disk across a pause). Providers whose IP is stable across
+        a pause (Azure) override this to a no-op.
+        """
+        add_host_to_known_hosts(
+            known_hosts_path=self._vps_known_hosts_path(),
+            hostname=new_ip,
+            port=22,
+            public_key=self._get_vps_host_keypair()[1],
+        )
+        add_host_to_known_hosts(
+            known_hosts_path=self._container_known_hosts_path(),
+            hostname=new_ip,
+            port=self.config.container_ssh_port,
+            public_key=self._get_container_host_keypair()[1],
+        )
+
+    # -- Self-stopping idle watcher --------------------------------------------
+
+    def _create_shutdown_script(self, host: Host) -> None:
+        """Write an in-container ``shutdown.sh`` that signals idle via a sentinel file.
+
+        The base writes ``kill -TERM 1`` (stops the container); for a cloud provider
+        an idle container should pause the whole *instance* (so a paused agent costs
+        only disk), but a container cannot pause its host. Instead the in-container
+        watcher touches a sentinel on the shared volume; a host-side systemd path
+        unit (installed in ``_on_host_finalized``) observes it and pauses the host.
+        """
+        sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
+        shutdown_script = build_sentinel_shutdown_script(sentinel_in_container)
+        commands_dir = host.host_dir / "commands"
+        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
+        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
+        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+
+    def _idle_sentinel_path_on_outer(self, host_id: HostId) -> Path:
+        """Outer-filesystem path of the in-container idle sentinel for this host.
+
+        The container writes the sentinel at ``<host_dir>/commands/<file>`` on the
+        shared volume; on the outer host that maps to
+        ``<btrfs_mount_path>/<host_id_hex>/host_dir/commands/<file>``.
+        """
+        return (
+            self.config.btrfs_mount_path
+            / host_id.get_uuid().hex
+            / HOST_DIR_SUBPATH
+            / "commands"
+            / IDLE_SENTINEL_FILENAME
+        )
+
+    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Install the host-side systemd idle watcher that self-pauses this instance.
+
+        Runs after the host record is durably written. Best-effort, per the base
+        contract this MUST NOT raise: any failure just means no auto-stop on idle
+        (manual ``mngr stop`` still works). ``_prepare_idle_self_stop`` is a hook for
+        any provider-specific prerequisite (e.g. Azure's self-deallocate role
+        assignment); it must not raise either.
+        """
+        self._prepare_idle_self_stop(host_id)
+        try:
+            self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
+        except MngrError as e:
+            logger.warning(
+                "{} idle watcher install failed for host {} ({}); the agent will not "
+                "auto-stop on idle, but `mngr stop` still works",
+                self.name,
+                host_id,
+                e,
+            )
+
+    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Install the systemd path/service idle watcher on the outer host.
+
+        Writes any provider-specific auxiliary files (``_write_idle_watcher_aux_files``,
+        e.g. Azure's self-deallocate script), the shared ``.path`` unit, and the
+        provider's ``.service`` body (``_idle_watcher_service_unit``), then enables
+        the path unit. Returns early (after a WARNING) when the host record is missing.
+        """
+        record = self._find_host_record(host_id)
+        if record is None or record.config is None:
+            logger.warning(
+                "{} idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
+                self.name,
+                host_id,
+            )
+            return
+        sentinel_on_outer = self._idle_sentinel_path_on_outer(host_id)
+        with log_span("Installing idle self-stop watcher"):
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                self._write_idle_watcher_aux_files(outer, str(sentinel_on_outer))
+                outer.write_text_file(
+                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.path"),
+                    build_idle_watcher_path_unit(str(sentinel_on_outer)),
+                )
+                outer.write_text_file(
+                    Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
+                    self._idle_watcher_service_unit(str(sentinel_on_outer)),
+                )
+                outer.execute_idempotent_command("systemctl daemon-reload")
+                outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
+        logger.info("Idle self-stop watcher installed for host {} on provider {}", host_id, self.name)
+
+    @abstractmethod
+    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
+        """Return the oneshot ``.service`` body that pauses the host when idle.
+
+        AWS/GCP power off (``build_poweroff_idle_watcher_service_unit``); Azure runs
+        its self-deallocate script.
+        """
+        ...
+
+    def _prepare_idle_self_stop(self, host_id: HostId) -> None:
+        """Provider-specific prerequisite for idle self-stop, run before the watcher install.
+
+        Default: nothing. Azure overrides this to assign its self-deallocate role.
+        Best-effort -- it MUST NOT raise (``_on_host_finalized`` relies on that).
+        """
+
+    def _write_idle_watcher_aux_files(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
+        """Write any provider-specific files the watcher service needs (default: none).
+
+        Azure overrides this to install the self-deallocate script (and ensure curl).
+        """
+
+    # -- Offline discovery / resolution ----------------------------------------
+
+    @abstractmethod
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        """Build a STOPPED ``DiscoveredHost`` from an instance's tags/metadata.
+
+        Returns ``None`` when the instance is not a mngr host. Raises ``ValueError``
+        when the instance carries a mngr host identity that is malformed (a
+        corrupt/externally-edited host-id or name).
+        """
+        ...
+
+    @abstractmethod
+    def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
+        """Whether this instance's OS is down (stopped/deallocated, and their in-flight transitions).
+
+        Called only for mngr instances the live SSH sweep did NOT surface, so a
+        provider that must spend a per-instance API call to read power state pays
+        for it only on the unreachable ones.
+        """
+        ...
+
+    @abstractmethod
+    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
+        """Reassemble the host's agent records mirrored into this instance's tags/metadata."""
+        ...
+
+    @abstractmethod
+    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+        """Reconstruct a minimal STOPPED offline host from a stopped instance's tags/metadata."""
+        ...
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        """Augment the SSH-based base discovery with STOPPED instances it cannot reach.
+
+        The base sweep reaches hosts over SSH, so a stopped instance (OS down) is
+        invisible. Here we reconstruct those hosts and their agents from the
+        instance listing so they still appear in ``mngr list`` and resolve for
+        ``mngr start``.
+
+        One bad instance never aborts the sweep: a malformed mngr host identity is
+        logged and skipped. The offline check runs only for instances the live
+        sweep did not already surface (and after the cheap not-a-mngr-host / dedup
+        filters), so a healthy ``mngr list`` does no extra per-instance work and a
+        running-but-transiently-unreachable instance is not misreported as STOPPED.
+        """
+        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
+        online_host_ids = {ref.host_id for ref in result}
+        for instance in self._list_instances_cached():
+            try:
+                host_ref = self._offline_discovered_host_from_instance(instance)
+            except ValueError as e:
+                logger.opt(exception=e).warning(
+                    "Skipping instance {} in offline discovery: malformed mngr host identity",
+                    instance.get("id"),
+                )
+                continue
+            # Drop non-mngr instances and ones already surfaced live BEFORE the
+            # offline check, since that check may cost a per-instance API call.
+            if host_ref is None or host_ref.host_id in online_host_ids:
+                continue
+            if not self._is_instance_offline(instance):
+                continue
+            agent_refs: list[DiscoveredAgent] = []
+            for agent_data in self._persisted_agent_dicts_from_instance(instance):
+                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
+                if ref is not None:
+                    agent_refs.append(ref)
+            result[host_ref] = agent_refs
+        return result
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        """Resolve a host, falling back to the instance-data offline host when stopped.
+
+        The base reads the record over SSH, so a stopped instance raises
+        ``HostNotFoundError``; ``mngr start`` calls this directly, so without the
+        fallback a paused host could not be resumed by name. Only the ``HostId``
+        form is recovered (the resume path passes a ``HostId``); a bare
+        ``HostName`` for a stopped host still surfaces via discovery.
+        """
+        try:
+            return super().get_host(host)
+        except HostNotFoundError:
+            if isinstance(host, HostId):
+                return self.to_offline_host(host)
+            raise
+
+    def to_offline_host(self, host_id: HostId) -> OfflineHost:
+        """Return an offline host, reconstructing a stopped instance's record from instance data."""
+        try:
+            return super().to_offline_host(host_id)
+        except HostNotFoundError:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                raise
+            return self._offline_host_from_instance(host_id, instance)
+
+    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
+        """Return ``[]`` for a stopped host instead of raising.
+
+        ``OfflineHost.get_state`` derives state via ``list_snapshots``; the base
+        reads the list from the on-volume record, which is unreadable while
+        stopped. These providers have no host-snapshot lifecycle, so a stopped
+        host simply has none.
+        """
+        try:
+            return super().list_snapshots(host)
+        except HostNotFoundError:
+            return []
+
+    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
+        """Return the host's persisted agent records, on-volume when reachable else from instance data."""
+        try:
+            return super().list_persisted_agent_data_for_host(host_id)
+        except HostNotFoundError:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                return []
+            return self._persisted_agent_dicts_from_instance(instance)
 
 
 class MinimalVpsDockerProvider(VpsDockerProvider):

@@ -4,6 +4,37 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-17
+
+### Added
+
+- Added: `scripts/make_agent_capabilities_doc.py`, a dev-only generator for a code-derived agent-capability matrix doc. It loads every installed mngr plugin (local backend only), builds the matrix from the agent classes plus their plugins, and either rewrites `libs/mngr/docs/concepts/agent_capabilities.md` or, with `--check`, fails if it is stale. Mirrors `scripts/make_cli_docs.py` and stays out of the shipped `mngr` wheel. Paired with a new `just regenerate-agent-capabilities-doc` recipe.
+- Added: `just bake-slice-dev` and `just bake-slice-prod` recipes for baking bare-metal slices (lima/QEMU VMs on a pre-registered, prepped OVH bare-metal box) into the minds pool. Thin wrappers over `minds pool create --backend slice`, mirroring the existing `bake-pool-host-{dev,prod}` recipes for OVH VPSes.
+- Added: Design specs — `specs/agent-plugin-parity/capability-mixins.md` proposing the code-derived agent capability taxonomy that shipped this run; `specs/gcp-azure-stop-start-lifecycle/spec.md` for bringing the AWS stop/start (idle-pause + resume) lifecycle to GCP and Azure; and `specs/common-transcript-standard/spec.md` tracking the OpenTelemetry GenAI semantic conventions in the agent-agnostic common-transcript schema (a `stop_reason` → `finish_reason` vocabulary alignment across all five emitters, plus a universal ordered `parts[]` field).
+
+### Changed
+
+- Changed: Updated `specs/agent-plugin-parity/spec.md` (new "Ordered assistant parts[]" row, transcript-capture note) and updated `specs/agent-plugin-parity/capability-mixins.md` to match what shipped (the three-state `Y`/`-`/`n/a` matrix with the code-derived `CapabilityScope` model, the positive `CliBackedAgentMixin` kind marker, the unified `live_output` capability, and the `session_resume` capability).
+- Changed: The `just destroy-pool-host` recipe comment now documents that teardown mirrors the row's backend — cancelling the OVH VPS for an `ovh_vps` row, or destroying the lima VM (freeing the box slot) for a `slice` row — and that `--skip-vps-cancel` is for when the underlying machine is already gone.
+
+## 2026-06-16
+
+### Added
+
+- Added: Root-level wiring for the new `azure` provider plugin — `--cov=imbue.mngr_azure` in pytest coverage, `azure` registered in `scripts/make_cli_docs.py` `SECONDARY_COMMANDS` (so `mngr azure` gets a generated doc page alongside `aws` / `gcp`), and an `azure` create template in `.mngr/settings.toml` that builds the project Dockerfile on the VM (so azure agents get `gh` and the full mngr toolchain). `[providers.azure] builder = "DEPOT"` builds on depot's cached remote builders (requires `DEPOT_TOKEN` at create time).
+- Added: Design specs — `specs/agent-usage-plugins/spec.md` (extending `mngr usage` to OpenCode, pi, and Codex), `specs/aws-ec2-stop-start-lifecycle/` (Modal-like idle-paused-but-resumable lifecycle for AWS agents via native EC2 stop/start; phases 1, 2, and 4 marked implemented), and `specs/cleanup-error-aggregation.md` (`mngr stop`/`destroy`/`cleanup` aggregate and classify failures with cause-specific exit codes).
+- Added: Documented the install-wizard surfacing of the usage plugins in `specs/agent-usage-plugins/spec.md` and recorded the antigravity gap in `specs/agent-plugin-parity/spec.md` (new "Usage tracking plugin" row).
+
+### Changed
+
+- Changed: Synced the root design specs to the removed VPS-client snapshot surface and `list_ssh_keys` (`specs/vps-docker-provider/`, `specs/ovh-vps-provider/`, `specs/azure-provider/concise.md`, `specs/aws-ec2-stop-start-lifecycle/spec.md`).
+- Changed: Extended the local-scratch `.gitignore` convention to Python and text files — `**/*.local.py` and `**/*.local.txt` are now ignored, mirroring the existing `**/*.local.md` and `**/*.local.sh` patterns. Lets one-off validation harnesses and probe scripts stay untracked and survive the stop hook's working-tree cleanup.
+- Changed: `justfile`'s `sync-vendor-mngr` recipe realigned with the current release flow — its comment now tells you to position the mngr checkout at the **verified release SHA** (not blindly `main`, which can drift past it), points at `apps/minds/docs/release.md`, and no longer hardcodes a personal FCT path: the FCT checkout path comes from the positional arg, else `FCT_DIR` read from a gitignored minds-scoped `apps/minds/.env` (template: committed `apps/minds/.env.example`), else `$FCT_DIR` in your shell.
+
+### Fixed
+
+- Fixed: `minds-launch-to-msg.yml` now resolves and renders the ref name **and** the resolved commit instead of a tag-object SHA. The Slack notification and step summaries previously resolved `commit_sha` / `template_ref` with `git ls-remote refs/tags/<tag>` (no peel), so a run against an **annotated** tag (e.g. `minds-v0.3.1`) displayed the tag-*object* SHA — a SHA you can't `git checkout`. The `check_should_run` compute step now peels annotated tags (`^{}`), so no step surfaces a tag-object SHA anymore.
+
 ## 2026-06-15
 
 ### Added

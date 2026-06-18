@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+The streaming consumers now delegate their snapshot-diff bookkeeping to the agent's shared `LiveOutputReader` instead of each re-implementing it.
+
+`_StreamBufferConsumer` (CLI orchestrator) and `StreamEventSynthesizer` (Agent SDK driver) both obtain a reader via `agent.make_live_output_reader()` and the buffer path via `agent.get_live_output_path()`, then call `reader.feed()` / `reader.finalize()` rather than tracking `emitted_body` / `last_content` themselves. The `stream_buffer` module (the `compute_stream_delta` diff helpers) moved to `mngr_claude`, where the snapshot format lives; this package imports them from there. No user-visible behavior change.
+
+## 2026-06-16
+
+Best-effort agent teardown (`stop_agent` / `destroy_agent`) and the SDK
+restart-with-resume flow now also swallow the `CleanupFailedGroup` that `Host.stop_agents` /
+`Host.destroy_agent` raise when cleanup leaves a resource behind, matching the existing
+intent of logging and continuing rather than letting a teardown failure abort the run (or,
+for restart, abort the relaunch).
+
 ## 2026-06-15
 
 Fixed the robinhood streaming release tests (`test_streaming.py`), which drive a real
