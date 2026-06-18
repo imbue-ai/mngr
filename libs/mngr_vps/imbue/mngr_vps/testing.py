@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from typing import Any
+from typing import Final
 
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
@@ -15,6 +16,12 @@ from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 from imbue.mngr_vps.vps_client import VpsClientInterface
+
+# Trip 2's idle-watcher timeout for the cloud trio. 45s mirrors the existing per-provider idle
+# tests: the in-host watcher polls every ~15s, so a 45s idle window self-stops reliably while
+# keeping the boot-to-stop wall clock short. With no SSH connection (``--no-connect``) the host
+# is idle from the start, so the stop fires shortly after this window elapses.
+_CLOUD_IDLE_TIMEOUT_SECONDS: Final[int] = 45
 
 
 def find_handle_by_launched_label(instances: Sequence[Mapping[str, Any]], launched_label: str) -> str | None:
@@ -45,6 +52,9 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
     # The container shape snapshots via `docker commit`, which lives on the VPS's own disk and
     # dies with `destroy_host`; so a VPS-family snapshot is not portable.
     snapshot_survives_destroy = False
+    # The cloud trio's idle watcher self-stops into a resumable state (AWS stop / GCP TERMINATED /
+    # Azure deallocated), so Trip 2 resumes via `mngr start` and checks the marker survived.
+    resumes_after_auto_shutdown = True
 
     # Trip 4 (error classification). All three clouds raise the contract
     # ``ProviderUnavailableError`` ("is not available") when credentials are unresolvable, and all
@@ -59,6 +69,12 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
         self._isolation = isolation
         # The container shape snapshots via `docker commit`; the bare shape has no snapshots.
         self.supports_snapshots = isolation is IsolationMode.CONTAINER
+
+    def auto_shutdown_create_args(self) -> Sequence[str]:
+        # Drive the idle watcher: with no SSH connection the in-host watcher sees no activity and
+        # powers the VM off into its resumable stopped state. (The base ``write_auto_shutdown_settings``
+        # is the default; AWS overrides it for the ``terminate_on_shutdown = false`` resumable variant.)
+        return ("--idle-timeout", str(_CLOUD_IDLE_TIMEOUT_SECONDS))
 
     @abstractmethod
     def find_launched_host_handle(self, host_name: str) -> str | None:

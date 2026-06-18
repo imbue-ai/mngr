@@ -52,6 +52,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.providers.provider_release_testing import ProviderReleaseProfile
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip2
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
@@ -77,6 +78,11 @@ _MODAL_PROVIDER_NAME = "modal"
 # Host-name prefix for the trip. Short so the full host name stays well under
 # Modal's tag-value limits; purely cosmetic for identifying test-owned hosts.
 _MODAL_TEST_NAME_PREFIX = "test-modal-"
+
+# Trip 2's sandbox lifetime cap (Modal's auto-shutdown analog). Modal has no idle watcher, so the
+# sandbox just expires after its ``--timeout``; this is a hard max-lifetime, not idle-triggered, so
+# it must be long enough for ``mngr create`` to finish connecting before the sandbox is terminated.
+_MODAL_AUTO_SHUTDOWN_TIMEOUT_SECONDS = 120
 
 
 def _modal_credentials_available() -> bool:
@@ -147,6 +153,9 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
     # Modal snapshots are portable filesystem images that outlive the sandbox, so they survive
     # destroy and can seed a fresh `mngr create --snapshot`.
     snapshot_survives_destroy = True
+    # Modal's idle path lets the sandbox expire and be terminated by Modal's own timeout -- there is
+    # no resumable stopped state, so Trip 2 asserts the termination only and skips the resume.
+    resumes_after_auto_shutdown = False
 
     # Trip 4 (error classification). On the `mngr create` path Modal's bootstrap surfaces a plain
     # ``MngrError`` ("Modal is not authorized") -- NOT the contract ``ProviderUnavailableError``
@@ -175,6 +184,10 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
 
     def create_extra_args(self) -> Sequence[str]:
         return ()
+
+    def auto_shutdown_create_args(self) -> Sequence[str]:
+        # Modal has no idle watcher; cap the sandbox lifetime so Modal's own timeout terminates it.
+        return ("-b", f"--timeout={_MODAL_AUTO_SHUTDOWN_TIMEOUT_SECONDS}")
 
     def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
         # The autouse `_load_modal_test_credentials` fixture loads the token into these env vars
@@ -293,6 +306,27 @@ def test_provider_release_trip1(
 ) -> None:
     provider, user_id, app_name = _modal_release_alignment
     run_provider_release_trip1(
+        _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+@pytest.mark.release
+@pytest.mark.modal
+@pytest.mark.rsync
+@pytest.mark.timeout(1200)
+@pytest.mark.skipif(
+    not (_modal_credentials_available() and MODAL_RELEASE_TESTS_OPT_IN),
+    reason="Modal credentials or MNGR_MODAL_RELEASE_TESTS=1 not set",
+)
+def test_provider_release_trip2(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    _modal_release_alignment: tuple[ModalProviderInstance, str, str],
+) -> None:
+    provider, user_id, app_name = _modal_release_alignment
+    run_provider_release_trip2(
         _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
         tmp_path,
         temp_git_repo,

@@ -48,6 +48,7 @@ from botocore.exceptions import ClientError
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip2
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr.utils.polling import wait_for
@@ -806,6 +807,16 @@ class _AwsReleaseProfile(VpsCloudReleaseProfile):
     def write_settings(self, settings_dir: Path) -> None:
         _write_release_settings(settings_dir, isolation="NONE" if self._isolation is IsolationMode.NONE else None)
 
+    def write_auto_shutdown_settings(self, settings_dir: Path) -> None:
+        # Trip 2's idle poweroff must STOP (not terminate) the instance so `mngr start` can resume
+        # it, which on EC2 requires ``InstanceInitiatedShutdownBehavior = stop`` -- the
+        # ``terminate_on_shutdown = false`` variant the resumable-idle test uses.
+        _write_release_settings(
+            settings_dir,
+            terminate_on_shutdown=False,
+            isolation="NONE" if self._isolation is IsolationMode.NONE else None,
+        )
+
     def create_extra_args(self) -> Sequence[str]:
         return ()
 
@@ -839,6 +850,20 @@ def test_provider_release_trip1(
     _aws_release_test_security_group_prepared: None,
 ) -> None:
     run_provider_release_trip1(
+        _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
+    )
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip2(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+    _aws_release_test_security_group_prepared: None,
+) -> None:
+    run_provider_release_trip2(
         _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
     )
 

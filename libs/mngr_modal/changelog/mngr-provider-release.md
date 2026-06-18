@@ -3,3 +3,5 @@ Added `test_provider_release_trip1` to the Modal release suite: a single-boot fu
 Also added `test_provider_release_trip3` (snapshot survives destroy): Modal snapshots are portable, so the trip snapshots a host, destroys it, then asserts a fresh `mngr create --snapshot` restores the captured filesystem.
 
 Also added `test_provider_release_trip4` (error classification): a no-boot CLI trip asserting `mngr create` with unresolvable Modal credentials surfaces an authorization error. Modal diverges from the contract `ProviderUnavailableError` (it raises a plain `MngrError`), so the trip documents that while still asserting the message points at `uvx modal token set`; the `--vps-*` migration-arg scenario is skipped (Modal has its own build-arg parser).
+
+Also added `test_provider_release_trip2` (idle auto-shutdown contract): it caps the sandbox lifetime via `-b --timeout=120` and asserts the sandbox is terminated by Modal's own timeout. Modal has no resumable stopped state, so the trip asserts the termination only and skips the resume.

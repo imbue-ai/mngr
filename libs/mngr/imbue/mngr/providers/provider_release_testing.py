@@ -24,9 +24,9 @@ the profile declares (so it never imports ``mngr_vps``, which depends on ``mngr`
 provider's own test file owns the ``IsolationMode`` parametrization and the settings.toml
 shape, constructing one profile per (provider, isolation) pair.
 
-Future trips (not yet implemented). This module ships Trip 1, Trip 3, and Trip 4. Still owed,
-per ``specs/provider-release-tests.md``: Trip 1b (N agents per host), Trip 2 (idle
-auto-shutdown), AND a dedicated **offline host_dir** trip -- create with ``is_offline_host_dir_enabled=True``, write
+Future trips (not yet implemented). This module ships Trip 1, Trip 2, Trip 3, and Trip 4. Still
+owed, per ``specs/provider-release-tests.md``: Trip 1b (N agents per host), AND a dedicated
+**offline host_dir** trip -- create with ``is_offline_host_dir_enabled=True``, write
 a file into the host_dir, take the host offline (``stop --stop-host``), and assert that file is
 readable *through the offline host_dir mirror* (the state bucket / metadata), not by reaching
 the live host. Trip 1's ``stop-host`` -> ``start`` path already reads the offline host *record*
@@ -74,6 +74,10 @@ _CLOUD_POLL_INTERVAL_SECONDS: Final[float] = 10.0
 # file in the container's own root would not survive a bare-vs-container or stop/start cycle.
 _MARKER_HOST_PATH: Final[str] = "/mngr/trip1-marker.txt"
 
+# The Trip 2 marker lives under ``/mngr`` (the host_dir mount) so it survives the auto-shutdown
+# stop and the subsequent ``mngr start`` resume -- the same rationale as the Trip 1 marker.
+_TRIP2_MARKER_HOST_PATH: Final[str] = "/mngr/trip2-marker.txt"
+
 
 class ProviderReleaseProfile(abc.ABC):
     """Per-provider plumbing for the shared provider release trip.
@@ -101,6 +105,15 @@ class ProviderReleaseProfile(abc.ABC):
     supports_shutdown_hosts: bool
     supports_snapshots: bool
     snapshot_survives_destroy: bool
+
+    # Capability boolean the harness branches Trip 2 (idle auto-shutdown) on.
+    # ``resumes_after_auto_shutdown`` is whether the provider comes back from its idle
+    # auto-shutdown state via ``mngr start`` (the cloud trio idle-stop into a resumable
+    # state -- AWS stop, GCP TERMINATED, Azure deallocated -- so it is True there; Modal's
+    # idle path lets the sandbox expire and be terminated by Modal's own timeout, with no
+    # resume, so it is False). When False, Trip 2 asserts only the auto-shutdown (the
+    # billing stop / sandbox gone) and skips the resume.
+    resumes_after_auto_shutdown: bool
 
     # Capability booleans the harness branches Trip 4 (error classification) on.
     # ``has_curated_unavailable_help`` is whether the provider's missing-credential error carries
@@ -147,6 +160,29 @@ class ProviderReleaseProfile(abc.ABC):
     @abc.abstractmethod
     def create_extra_args(self) -> Sequence[str]:
         """Provider-specific args appended to ``mngr create`` (e.g. instance size build args)."""
+
+    def write_auto_shutdown_settings(self, settings_dir: Path) -> None:
+        """Write the Trip 2 settings.toml (a short-auto-shutdown variant); defaults to ``write_settings``.
+
+        Trip 2 drives the idle watcher (``mngr create --idle-timeout``) so the host self-stops
+        without activity. The cloud trio's idle poweroff lands the machine in its resumable
+        stopped state, but on AWS that requires ``InstanceInitiatedShutdownBehavior = stop``
+        (the ``terminate_on_shutdown = false`` settings variant) so the poweroff STOPS rather
+        than terminates the instance; AWS overrides this to write that variant. GCP/Azure idle
+        into a resumable state without a settings tweak, and Modal has no resumable path, so
+        they use the normal settings.
+        """
+        self.write_settings(settings_dir)
+
+    @abc.abstractmethod
+    def auto_shutdown_create_args(self) -> Sequence[str]:
+        """Provider-specific ``mngr create`` args that make the host self-stop on the shortest interval.
+
+        For the cloud trio this is the idle-watcher timeout (``--idle-timeout <secs>``): with no
+        SSH connection the in-host watcher sees no activity and powers the machine off into its
+        resumable stopped state. For Modal, which has no idle watcher, this caps the sandbox
+        lifetime instead (``-b --timeout=<secs>``) so Modal's own timeout terminates it.
+        """
 
     @abc.abstractmethod
     def find_launched_host_handle(self, host_name: str) -> str | None:
@@ -404,6 +440,126 @@ def run_provider_release_trip1(
         # orphan scanner in each provider's conftest is the final net.
         if not is_destroyed:
             _run_mngr(settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
+        if handle is not None:
+            profile.force_strand_host(handle)
+
+
+def run_provider_release_trip2(
+    profile: ProviderReleaseProfile,
+    tmp_path: Path,
+    workspace: Path,
+) -> None:
+    """Drive Trip 2 ("idle auto-shutdown contract") for ``profile``.
+
+    Asserts the provider's auto-shutdown honestly stops billing: create a host that self-stops
+    on the shortest reliable interval (the idle watcher for the cloud trio, the sandbox
+    lifetime cap for Modal), then poll the cloud API until the compute genuinely stops/halts
+    (the billing-stop probe). Where the provider resumes from that stopped state (the cloud
+    trio), a marker written before shutdown must survive ``mngr start`` and the host must be
+    running again; where it does not (Modal: the sandbox is gone), the trip asserts the
+    shutdown only and skips the resume.
+
+    The shutdown is driven by the idle watcher (``mngr create --idle-timeout``) rather than the
+    ``auto_shutdown_seconds`` time cap, because the watcher's poweroff lands the cloud trio in a
+    *resumable* stopped state (AWS stop / GCP TERMINATED / Azure deallocated), which the spec's
+    resume step requires -- the release-test time cap, by contrast, terminates/deletes the
+    instance (self-cleaning, but not resumable). This is the same path the per-provider idle
+    tests Trip 2 unifies already exercise.
+
+    Skips (rather than fails) when the provider's credentials / opt-in are absent.
+    """
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    settings_dir = tmp_path
+    profile.write_auto_shutdown_settings(settings_dir)
+    host_name = f"{profile.name_prefix}{get_short_random_string()}"
+    marker_token = f"trip2-{get_short_random_string()}"
+    handle: str | None = None
+
+    try:
+        # 1. Create the host with a short auto-shutdown and no SSH connection, so the idle
+        #    watcher sees no activity and self-stops (or the sandbox lifetime cap expires).
+        create = _run_mngr(
+            settings_dir,
+            workspace,
+            "create",
+            host_name,
+            "--type",
+            "command",
+            "--provider",
+            profile.provider_name,
+            "--no-connect",
+            *profile.auto_shutdown_create_args(),
+            *profile.create_extra_args(),
+            "--",
+            "sleep",
+            "99999",
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}"
+
+        # 2. The cloud resource exists and is running right after create.
+        handle = profile.find_launched_host_handle(host_name)
+        assert handle is not None, f"could not find the launched cloud resource for {host_name}"
+        assert profile.is_host_compute_running(handle), "cloud resource should be running right after create"
+
+        # 3. Where the provider resumes after auto-shutdown, write a marker BEFORE it stops so the
+        #    resume step can prove it survived. (Modal has no resume, so there is nothing to check
+        #    a marker against -- writing it would also just risk resetting the idle timer.)
+        if profile.resumes_after_auto_shutdown:
+            written = _exec_on_host(
+                settings_dir, workspace, host_name, f"echo {marker_token} > {_TRIP2_MARKER_HOST_PATH}"
+            )
+            assert written.returncode == 0, f"writing the pre-shutdown marker failed:\n{written.stdout}"
+
+        # 4. Wait for the auto-shutdown to genuinely stop the compute (billing-stop probe). For the
+        #    cloud trio this is the HALTED state; for Modal the sandbox is gone (its is_backend_clean
+        #    probe), so use whichever signal the provider's auto-shutdown produces.
+        if profile.resumes_after_auto_shutdown:
+            wait_for(
+                lambda: profile.is_host_compute_stopped(handle),
+                timeout=_CLOUD_TRANSITION_TIMEOUT_SECONDS,
+                poll_interval=_CLOUD_POLL_INTERVAL_SECONDS,
+                error_message="host compute did not auto-stop on idle (billing should halt)",
+            )
+        else:
+            wait_for(
+                lambda: profile.is_backend_clean(handle),
+                timeout=_CLOUD_TRANSITION_TIMEOUT_SECONDS,
+                poll_interval=_CLOUD_POLL_INTERVAL_SECONDS,
+                error_message="sandbox was not terminated by its own timeout on auto-shutdown",
+            )
+
+        # 5. Resume from the auto-shutdown state, where supported, and assert the marker survived.
+        #    A resumed host must not immediately re-stop, so confirm it stays running and the
+        #    post-resume exec works (this is the stale-idle-sentinel regression the per-provider
+        #    idle tests guard).
+        if profile.resumes_after_auto_shutdown:
+            started = _run_mngr(
+                settings_dir, workspace, "start", host_name, "--no-connect", timeout=_CREATE_TIMEOUT_SECONDS
+            )
+            assert started.returncode == 0, f"start after auto-shutdown failed:\n{started.stdout}"
+            wait_for(
+                lambda: profile.is_host_compute_running(handle),
+                timeout=_CLOUD_TRANSITION_TIMEOUT_SECONDS,
+                poll_interval=_CLOUD_POLL_INTERVAL_SECONDS,
+                error_message="host compute did not come back running after `mngr start`",
+            )
+            survived = _exec_on_host(settings_dir, workspace, host_name, f"cat {_TRIP2_MARKER_HOST_PATH}")
+            assert marker_token in survived.stdout, (
+                f"marker did not survive the auto-shutdown stop/start:\n{survived.stdout}"
+            )
+        else:
+            logger.info(
+                "Skipped resume step: provider {} does not resume after auto-shutdown (sandbox terminated)",
+                profile.provider_name,
+            )
+    finally:
+        # Best-effort cleanup: destroy through mngr, then force-strand as a backstop so a
+        # failed/partial run cannot leak compute between iterative local runs.
+        _run_mngr(settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
         if handle is not None:
             profile.force_strand_host(handle)
 
