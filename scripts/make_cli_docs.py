@@ -722,6 +722,12 @@ class ConfigTable(NamedTuple):
     field_header: str  # label for column 1 (the field / option / setting name)
     description_header: str  # label for column 3
     rows: tuple[ConfigTableRow, ...]
+    # Fields declared on ``config_cls`` that are intentionally omitted from the table
+    # (advanced/internal tunables documented in prose instead). Every field declared on
+    # ``config_cls`` must be either in ``rows`` or here -- ``_validate_table_coverage``
+    # fails the generator otherwise, so a newly added config field can never silently
+    # vanish from the README (the original bug this guard prevents).
+    excluded_fields: tuple[str, ...] = ()
 
 
 CONFIG_TABLES: tuple[ConfigTable, ...] = (
@@ -745,6 +751,8 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("terminate_on_shutdown", "`false`"),
             ConfigTableRow("auto_shutdown_seconds", "`None`"),
         ),
+        # backend is the fixed provider tag; the offline-state-bucket knobs are documented in prose.
+        excluded_fields=("backend", "state_bucket_name", "is_offline_host_dir_enabled"),
     ),
     ConfigTable(
         readme="libs/mngr_gcp/README.md",
@@ -768,6 +776,8 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("service_account_scopes", '`("https://www.googleapis.com/auth/cloud-platform",)`'),
             ConfigTableRow("auto_shutdown_seconds", "`None`"),
         ),
+        # backend is the fixed provider tag; firewall_name is an advanced rename of the prepare rule.
+        excluded_fields=("backend", "firewall_name"),
     ),
     ConfigTable(
         readme="libs/mngr_ovh/README.md",
@@ -792,6 +802,9 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("recycle_safety_margin_hours", "`2`"),
             ConfigTableRow("recycle_max_candidates_considered", "`10`"),
         ),
+        # backend is the fixed provider tag; project_id is reserved/unused for classic VPS;
+        # ovh_subsidiary rarely needs changing (it tracks the account region).
+        excluded_fields=("backend", "project_id", "ovh_subsidiary"),
     ),
     ConfigTable(
         readme="libs/mngr_vultr/README.md",
@@ -804,6 +817,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("default_plan", "`vc2-2c-4gb`"),
             ConfigTableRow("default_os_id", "`2136`"),
         ),
+        excluded_fields=("backend",),  # fixed provider tag
     ),
     ConfigTable(
         readme="libs/mngr_vps/README.md",
@@ -811,6 +825,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         field_header="Field",
         description_header="Description",
         rows=(
+            ConfigTableRow("isolation", "`CONTAINER`"),
             ConfigTableRow("host_dir", "`/mngr`"),
             ConfigTableRow("default_image", "`debian:bookworm-slim`"),
             ConfigTableRow("default_idle_timeout", "800"),
@@ -821,10 +836,13 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("container_ssh_port", "2222"),
             ConfigTableRow("default_region", "`ewr`"),
             ConfigTableRow("default_start_args", "`()`"),
+            ConfigTableRow("auto_shutdown_seconds", "`None`"),
             ConfigTableRow("btrfs_mount_path", "`/mngr-btrfs`"),
             ConfigTableRow("btrfs_loop_file_path", "`/var/lib/mngr-btrfs.img`"),
             ConfigTableRow("outer_disk_reserved_gb", "`20`"),
         ),
+        # Advanced tunables documented in prose: idle-source selection and the gVisor / depot knobs.
+        excluded_fields=("default_activity_sources", "docker_runtime", "install_gvisor_runtime", "builder"),
     ),
     ConfigTable(
         readme="libs/mngr_opencode/README.md",
@@ -832,14 +850,17 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         field_header="Option",
         description_header="Meaning",
         rows=(
+            ConfigTableRow("command", "`opencode`"),
             ConfigTableRow("cli_args", "`()`"),
             ConfigTableRow("config_overrides", "`{}`"),
             ConfigTableRow("sync_global_config", "`true`"),
             ConfigTableRow("symlink_auth", "`true`"),
             ConfigTableRow("auto_allow_permissions", "`false`"),
+            ConfigTableRow("check_installation", "`true`"),
             ConfigTableRow("version", "unset"),
             ConfigTableRow("update_policy", "unset"),
             ConfigTableRow("emit_common_transcript", "`true`"),
+            ConfigTableRow("preserve_on_destroy", "`true`"),
         ),
     ),
     ConfigTable(
@@ -854,17 +875,50 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("check_installation", "`true`"),
             ConfigTableRow("version", "unset"),
             ConfigTableRow("update_policy", "unset"),
+            ConfigTableRow("auto_allow_permissions", "`true`"),
             ConfigTableRow("resume_session", "`true`"),
             ConfigTableRow("emit_common_transcript", "`true`"),
             ConfigTableRow("emit_raw_transcript", "`true`"),
             ConfigTableRow("auto_dismiss_dialogs", "`false`"),
+            ConfigTableRow("preserve_on_destroy", "`true`"),
         ),
     ),
 )
 
 
+def _own_field_names(config_cls: type[BaseModel]) -> list[str]:
+    """Field names declared directly on ``config_cls`` (not inherited), in declaration order."""
+    return [name for name in getattr(config_cls, "__annotations__", {}) if name in config_cls.model_fields]
+
+
+def _validate_table_coverage(table: ConfigTable) -> None:
+    """Fail loudly if a field declared on ``config_cls`` is neither shown nor excluded.
+
+    The generator only renders the curated ``rows``, so a field added to the model but
+    not to the table would silently disappear from the README. Requiring every own field
+    to be an explicit choice -- a row to show it, or ``excluded_fields`` to omit it --
+    turns that silent drop into a build failure.
+    """
+    own = _own_field_names(table.config_cls)
+    covered = {row.field for row in table.rows} | set(table.excluded_fields)
+    missing = [name for name in own if name not in covered]
+    if missing:
+        raise ValueError(
+            f"{table.readme}: {table.config_cls.__name__} fields {missing} are neither shown in the "
+            f"table nor listed in excluded_fields. Add a ConfigTableRow to document each, or add it to "
+            f"excluded_fields to intentionally omit it."
+        )
+    stale = [name for name in table.excluded_fields if name not in own]
+    if stale:
+        raise ValueError(
+            f"{table.readme}: excluded_fields {stale} are not declared on {table.config_cls.__name__} "
+            f"(inherited or removed); drop them from excluded_fields."
+        )
+
+
 def _render_config_table(table: ConfigTable) -> str:
     """Render a markdown table; the Description column comes from the model's field descriptions."""
+    _validate_table_coverage(table)
     model_fields = table.config_cls.model_fields
     lines = [
         f"| {table.field_header} | Default | {table.description_header} |",

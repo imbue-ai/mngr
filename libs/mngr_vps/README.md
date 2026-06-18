@@ -65,6 +65,7 @@ The base config (`VpsProviderConfig`) provides these settings:
 <!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
 |---|---|---|
+| `isolation` | `CONTAINER` | How the agent is isolated on its VPS. CONTAINER (the default) runs the agent in a Docker container; NONE runs it directly on the VPS OS. Selects the realizer the provider uses; the default preserves the original container behavior. |
 | `host_dir` | `/mngr` | Base directory for mngr data inside containers |
 | `default_image` | `debian:bookworm-slim` | Default Docker image |
 | `default_idle_timeout` | 800 | Idle timeout in seconds |
@@ -75,6 +76,7 @@ The base config (`VpsProviderConfig`) provides these settings:
 | `container_ssh_port` | 2222 | Container sshd port exposed on VPS |
 | `default_region` | `ewr` | Default cloud region (provider subclasses override the default) |
 | `default_start_args` | `()` | Default `docker run` arguments |
+| `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |
 | `btrfs_mount_path` | `/mngr-btrfs` | Path on the outer where the loop-mounted btrfs filesystem holding the per-host unified docker volume is mounted. The per-host subvolume lives at ``<btrfs_mount_path>/<host_id_hex>`` and is bound into the agent container via ``docker volume create --opt device=...``. |
 | `btrfs_loop_file_path` | `/var/lib/mngr-btrfs.img` | Path on the outer's root filesystem where the loop-backed btrfs image file is stored. Allocated with ``fallocate`` and mounted via an ``/etc/fstab`` entry so it survives VPS reboots. |
 | `outer_disk_reserved_gb` | `20` | Gigabytes of free space on the outer's root filesystem to hold back from the btrfs loop file at provisioning time. Loop file size is computed as ``free_gb - outer_disk_reserved_gb``; ``VpsProvisioningError`` is raised when the result is not positive. |

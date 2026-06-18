@@ -62,10 +62,12 @@ Tunables on the `pi-coding` agent type:
 | `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present. |
 | `version` | unset | Pin the pi CLI version to install (e.g., '1.2.3'). When set, installation runs `npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed pi matches, erroring on a mismatch. When None (the default), installs the latest version. |
 | `update_policy` | unset | How to handle pi's startup version check. NEVER sets PI_SKIP_VERSION_CHECK=1 in the agent environment so pi does not phone home to compare against the latest release; AUTO leaves the check enabled. ASK has no interactive flow for pi and behaves like AUTO. When unset (the default), resolves to NEVER (check disabled) -- set AUTO to leave pi's startup version check enabled. (pi only notifies about updates -- it never self-replaces -- so this governs the startup check, not a background update.) |
+| `auto_allow_permissions` | `true` | pi runs every tool without an approval prompt, so it always operates unattended; setting this to False is an error because pi cannot enforce a deny. |
 | `resume_session` | `true` | Resume this agent's pi session on start, so stop/start keeps context. Safe on first start (pi starts fresh when there is no recorded session yet). |
 | `emit_common_transcript` | `true` | Emit the transcript `mngr transcript` reads. The raw pi transcript is always captured; this gates only the common-envelope conversion. |
 | `emit_raw_transcript` | `true` | Capture the raw pi message stream. |
 | `auto_dismiss_dialogs` | `false` | Trust the workspace without prompting, suppressing pi's 'Trust project folder?' dialog. When set, mngr launches pi with `--approve` so pi auto-trusts the project folder for the run. Also implied by `mngr create --yes`. When False and the source repo is not already trusted, mngr prompts interactively and refuses to run non-interactively. |
+| `preserve_on_destroy` | `true` | When destroying this agent, first copy its transcripts and resumable session store to <local_host_dir>/preserved/ so they survive. Set to False to discard them. |
 <!-- END GENERATED CONFIG TABLE -->
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md) for more details.
