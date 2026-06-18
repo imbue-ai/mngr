@@ -364,21 +364,6 @@ wheels = [
 ]
 
 [[package]]
-name = "azure-mgmt-msi"
-version = "7.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "azure-common" },
-    { name = "azure-mgmt-core" },
-    { name = "isodate" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f8/83/f2e8eeca619905ffc48205664ad10e7cdfc168be522a06d04bea54e41556/azure_mgmt_msi-7.1.0.tar.gz", hash = "sha256:1a01a089f1f66cb0d4b2886603d5ba415f360eff0be6f685737ecdd59c78225b", size = 177406, upload-time = "2025-07-21T06:26:50.414Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/38/6c7fee6d6b543c8c2eddb00f4c9584c07ada660b54760bf0a155de41e5b3/azure_mgmt_msi-7.1.0-py3-none-any.whl", hash = "sha256:4810d5559e71bd3c4e3e8bce311753fbe993d2bda23805bb81d3ca66786ad4da", size = 252909, upload-time = "2025-07-21T06:26:51.525Z" },
-]
-
-[[package]]
 name = "azure-mgmt-network"
 version = "30.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2109,7 +2094,6 @@ dependencies = [
     { name = "azure-identity" },
     { name = "azure-mgmt-authorization" },
     { name = "azure-mgmt-compute" },
-    { name = "azure-mgmt-msi" },
     { name = "azure-mgmt-network" },
     { name = "azure-mgmt-resource" },
     { name = "azure-mgmt-storage" },
@@ -2124,7 +2108,6 @@ requires-dist = [
     { name = "azure-identity", specifier = ">=1.25" },
     { name = "azure-mgmt-authorization", specifier = ">=4" },
     { name = "azure-mgmt-compute", specifier = ">=37" },
-    { name = "azure-mgmt-msi", specifier = ">=7" },
     { name = "azure-mgmt-network", specifier = ">=30" },
     { name = "azure-mgmt-resource", specifier = ">=25" },
     { name = "azure-mgmt-storage", specifier = ">=21" },
