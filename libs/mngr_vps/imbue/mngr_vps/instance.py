@@ -187,6 +187,36 @@ def is_vps_resource_already_gone(error: MngrError) -> bool:
     return isinstance(error, VpsApiError) and error.status_code in _VPS_RESOURCE_ALREADY_GONE_STATUS_CODES
 
 
+def attempt_cloud_resource_teardown(
+    teardown: Callable[[], None],
+    *,
+    resource_description: str,
+    host_id: HostId,
+    failures: list[CleanupFailure],
+) -> None:
+    """Run a single cloud-API teardown step, recording a real cleanup failure if it leaks.
+
+    A failure that means the resource is already gone (HTTP 404/410) is benign and
+    dropped; any other ``MngrError`` means a resource that may still exist (and
+    incur cost), so it is recorded as a ``HOST_RESOURCE_REMAINS`` failure (the
+    aggregation boundary later raises these as a ``CleanupFailedGroup``).
+    ``resource_description`` names the leaked resource in the warning + failure
+    message (e.g. ``"VPS instance i-123"``).
+    """
+    try:
+        teardown()
+    except MngrError as e:
+        logger.warning("Failed to tear down {}: {}", resource_description, e)
+        if not is_vps_resource_already_gone(e):
+            failures.append(
+                CleanupFailure(
+                    category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                    message=f"failed to tear down {resource_description} for host {host_id}: {e}",
+                    host_id=host_id,
+                )
+            )
+
+
 def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | None:
     """Return True if the ``mngr-ready`` marker exists, else None (so polling continues).
 
@@ -1311,34 +1341,23 @@ class VpsProvider(BaseProviderInstance):
             # Destroy the VPS instance. An "already gone" (HTTP 404/410) response is benign;
             # any other error means a VPS instance that may still exist (and incur cost).
             with log_span("Destroying VPS instance"):
-                try:
-                    self.vps_client.destroy_instance(vps_config.vps_instance_id)
-                except MngrError as e:
-                    logger.warning("Failed to destroy VPS: {}", e)
-                    if not is_vps_resource_already_gone(e):
-                        failures.append(
-                            CleanupFailure(
-                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                message=f"failed to destroy VPS instance {vps_config.vps_instance_id} for host {host_id}: {e}",
-                                host_id=host_id,
-                            )
-                        )
+                attempt_cloud_resource_teardown(
+                    lambda: self.vps_client.destroy_instance(vps_config.vps_instance_id),
+                    resource_description=f"VPS instance {vps_config.vps_instance_id}",
+                    host_id=host_id,
+                    failures=failures,
+                )
 
             # Clean up SSH key from provider. An "already gone" (HTTP 404/410) response is
             # benign; any other error means a key that may still be registered.
-            if vps_config.vps_ssh_key_id is not None:
-                try:
-                    self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
-                except MngrError as e:
-                    logger.warning("Failed to delete SSH key from provider: {}", e)
-                    if not is_vps_resource_already_gone(e):
-                        failures.append(
-                            CleanupFailure(
-                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                message=f"failed to delete SSH key {vps_config.vps_ssh_key_id} for host {host_id}: {e}",
-                                host_id=host_id,
-                            )
-                        )
+            ssh_key_id = vps_config.vps_ssh_key_id
+            if ssh_key_id is not None:
+                attempt_cloud_resource_teardown(
+                    lambda: self.vps_client.delete_ssh_key(ssh_key_id),
+                    resource_description=f"SSH key {ssh_key_id}",
+                    host_id=host_id,
+                    failures=failures,
+                )
 
             # Clean up local known_hosts. These are cosmetic local-file edits; a
             # missing file or OS error here leaves no infrastructure behind, so it is

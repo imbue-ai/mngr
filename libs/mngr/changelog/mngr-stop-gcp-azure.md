@@ -1,1 +1,0 @@
-Gave `test_cli_create_rejects_dirty_tree_by_default` a 30s pytest timeout (matching the sibling subprocess-create test), since `uv run mngr create` startup intermittently exceeds the default 10s under CI load.

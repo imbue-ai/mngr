@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+Added native GCE stop/start lifecycle (idle-pause + resume) for GCP hosts: `mngr stop` now stops the GCE instance (preserving the boot disk so a paused agent costs only disk storage) and `mngr start` resumes it, reading back the fresh external IP and rebinding known_hosts. Stopped instances stay discoverable -- their host name and per-agent records are mirrored into instance metadata, and labels carry the host id / created-at -- so `mngr list` and `mngr start <agent>` keep working while a host is TERMINATED or mid-stop. An in-container idle watcher self-stops the instance via a host-side systemd path/service unit.
+
+Internal: GCP's stopped-host offline discovery and resolution (listing TERMINATED / mid-stop hosts, resolving them by id, and falling back to instance metadata), plus its stop/start lifecycle, known_hosts rebinding, and idle-watcher install, now come from a shared `OfflineCapableVpsDockerProvider` base instead of GCP-specific copies; GCP supplies only the GCE-specific hooks (stop/start the instance, label-encoded host-id match, poweroff idle action). No behavior change.
+
 ## 2026-06-16
 
 ## GCP provider

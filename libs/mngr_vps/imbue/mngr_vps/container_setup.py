@@ -125,10 +125,13 @@ def ensure_depot_token_available(builder: DockerBuilder) -> None:
 # attempts can resume rather than re-uploading completed bytes.
 _RSYNC_PARTIAL_DIR_REMOTE: Final[str] = "/tmp/mngr-rsync-partial"
 
-# How many times to retry a failed rsync upload before giving up.
-_UPLOAD_MAX_ATTEMPTS: Final[int] = 3
-# Backoff between attempts (entry N is the wait *before* attempt N+1).
+# Backoff between attempts (entry N is the wait *before* attempt N+1). There is
+# one entry per retry gap; the total attempt count is derived from its length so
+# the two can never drift (the loop indexes this tuple on every non-last attempt).
 _UPLOAD_RETRY_BACKOFF_SECONDS: Final[tuple[float, ...]] = (5.0, 15.0)
+# How many times to try a failed rsync upload before giving up (initial attempt
+# plus one retry per backoff entry).
+_UPLOAD_MAX_ATTEMPTS: Final[int] = len(_UPLOAD_RETRY_BACKOFF_SECONDS) + 1
 
 # Substrings in rsync stderr that indicate a transient connection-class
 # failure (broken pipe, dropped TCP, fresh-VPS networking flap). Rsync's
