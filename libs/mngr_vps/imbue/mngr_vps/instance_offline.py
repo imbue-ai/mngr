@@ -234,6 +234,20 @@ class OfflineCapableVpsProvider(VpsProvider):
         self._rebind_known_hosts_pre_connect(new_ip)
         with log_span("Waiting for VPS SSH after start"):
             self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
+        # Mirror create's host-key wait on resume. Backends whose bootstrap re-runs
+        # on every boot (GCP's GCE startup-script) re-install the host key and
+        # ``systemctl restart ssh`` partway through boot, so sshd is briefly down
+        # AND first serves a boot-generated key -- ``wait_for_sshd`` (any-key
+        # handshake) can return inside that window, and the strict-checked connect
+        # just below then hits a refused/mismatched port 22. Polling for the
+        # expected key rides out the restart churn. A no-op for cloud-init backends
+        # (AWS/Azure), which install the key pre-sshd and do not re-bootstrap on
+        # resume, so it returns on the first poll. This matters most for bare
+        # placement, whose agent endpoint *is* port 22.
+        with log_span("Waiting for expected VPS host key after start"):
+            self._wait_for_expected_host_key(
+                new_ip, self._get_vps_host_keypair()[1], timeout_seconds=self.config.ssh_connect_timeout
+            )
         with self._make_outer_for_vps_ip(new_ip) as outer:
             host_store = self._realizer.open_host_store(outer, host_id)
             record = host_store.read_host_record()
