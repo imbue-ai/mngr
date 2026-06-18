@@ -1045,7 +1045,10 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
     )
-    _wait_until_finished(creator, creation_id)
+    # Match the 20s poll deadline used by the imbue-cloud sibling above: the
+    # creation setup (fresh ConcurrencyGroups + recording http server) can take
+    # well over the default 10s under CI load.
+    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
 
     assert cli.create_calls == []
 
@@ -1070,7 +1073,10 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
         launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
-    _wait_until_finished(creator, creation_id)
+    # Match the 20s poll deadline used by the imbue-cloud sibling above: the
+    # creation setup (fresh ConcurrencyGroups + recording http server) can take
+    # well over the default 10s under CI load.
+    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
 
     assert cli.create_calls == []
 
