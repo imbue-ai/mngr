@@ -4,6 +4,32 @@ Full, unedited changelog entries for the `mngr_pi_coding` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+The agent now declares the `HasSessionPreservationMixin` capability mixin: its `on_destroy` session-preservation step was extracted into a `preserve_session_state` method, so preserving session/transcript files on destroy is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact. Behavior is unchanged.
+
+`PiCodingAgent` also declares the `HasUnattendedModeMixin` capability. pi has no tool-approval gate, so it gains an `auto_allow_permissions` config field pinned to True (setting it False is rejected, since pi cannot enforce a deny) -- making "runs unattended" code-detectable and uniform with the other agents.
+
+`PiCodingAgent` now exposes a `waiting_reason` agent field (the `agent_field_generators` hook). pi has no tool-approval gate, so the reason is single-valued (END_OF_TURN when idle), but wiring it through the shared classifier makes it a real extension point and a code-detectable capability.
+
+`PiCodingAgent` now declares `HasAutoInstallMixin` and routes its install-if-missing through the shared `ensure_cli_installed` helper (it now also prompts in interactive mode rather than only honoring `--yes`).
+
+`PiCodingAgent` now also declares `CliBackedAgentMixin`, marking it as wrapping a specific external CLI so the CLI-only capability-matrix rows scope to it positively (rather than by the absence of a command-runner marker). Behavior is unchanged.
+
+`PiCodingAgent` now also declares `InteractiveAgentMixin` -- the marker for agents that accept interactive messages, now that `send_message` is no longer a universal `AgentInterface` method. pi already implemented `send_message` (it appends to its extension inbox), so this only adds the marker. Behavior is unchanged.
+
+Added session adoption for the `pi-coding` agent type: `mngr create pi --adopt <id-or-path>` makes the newly created agent resume an existing pi conversation instead of starting fresh. The flag was previously spelled `--adopt-session`, which is still accepted as an alias.
+
+The session to adopt is resolved (by session id or absolute `.jsonl` path) across the user-native store (`~/.pi/agent/sessions/`), every live mngr agent, and every preserved (destroyed) agent. Each resolved session is copied into the new agent's store and its embedded working directory is rebound to the new agent's work_dir (so pi never stalls at its "working directory does not exist" dialog). `--adopt` may be passed more than once: every named session is made available in the new agent, and the last one is the session that resumes on launch. A bad or ambiguous `--adopt` id is now reported as a clean error before any host is created, rather than as a traceback during provisioning.
+
+Internally, the plugin now reads the adopted session ids from the first-class `CreateAgentOptions.adopt_session` field instead of the previous `plugin_data["adopt_session"]` namespaced key.
+
+A `--from <agent>` clone of a `pi-coding` agent resumes the source agent's pi conversation: the source's native session store is transferred into the clone, its most-recent session (chosen on the source, so it is unaffected by any `--adopt` sessions in the shared store) is rebound to the clone's work_dir, and the resume pointer is written. A `--from` clone whose source has no resumable pi session warns and starts the clone fresh (the clone carries the source's workspace; carrying its conversation forward is a bonus), whereas an explicit `--adopt` that cannot be resolved is still a hard error. `--adopt` and `--from` may now be combined: every `--adopt` session is made available and the clone's session is the one resumed.
+
+When `auto_dismiss_dialogs` is set (also implied by `mngr create --yes`), mngr now launches pi with its native `--approve` flag, so pi auto-trusts the agent's project folder for the run and its "Trust project folder?" dialog never blocks the first message -- without the workspace needing any trust inputs of its own.
+
+The pi-coding common-transcript emitter now emits `finish_reason` (was `stop_reason`, aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records that preserves the source interleaving of text and tool-call blocks (`parts_ordered` true, since pi's native content array is ordered).
+
 ## 2026-06-16
 
 The pi lifecycle extension now also writes per-message usage events (cost + tokens) for `mngr usage`, gated on a `pi_emit_usage` marker that the new `imbue-mngr-pi-coding-usage` package provisions. pi reports cost client-side, so each assistant `message_end` appends a `cost_snapshot` (reported cost, tokens, provider-qualified model) to `events/pi-coding/usage/events.jsonl`. Inert unless the gate marker is present, so behavior is unchanged for agents without the usage plugin installed.

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+Internal: AWS's stopped-host offline discovery and resolution (listing stopped / mid-stop hosts, resolving them by id, and falling back to EC2 tags), plus its stop/start lifecycle, known_hosts rebinding, and idle-watcher install, now come from a shared `OfflineCapableVpsDockerProvider` base instead of AWS-specific copies; AWS supplies only the EC2-specific hooks (stop/start the instance, poweroff idle action). No behavior change.
+
 ## 2026-06-16
 
 AWS agents now have a Modal-like idle-paused-but-resumable lifecycle: `mngr stop --stop-host` stops the EC2 **instance** itself (not just the inner Docker container), so a paused agent costs only EBS storage, and `mngr start` resumes it with the root EBS volume and all on-disk state intact. A stopped host still shows in `mngr list` (with its agents) and resolves by name for `mngr start`.

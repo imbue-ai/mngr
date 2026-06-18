@@ -53,6 +53,7 @@ mngr create my-agent readonly_agy
 - `symlink_oauth_token` (bool, default `true`) — symlink the shared oauth token into each agent's home (so refreshes propagate) or copy it (`false`) for full isolation.
 - `auto_allow_permissions` (bool, default `false`) — auto-approve every tool call via agy's `--dangerously-skip-permissions` flag. When combined with a `permissions` policy in `settings_overrides`, skip-permissions wins (the policy is moot).
 - `auto_dismiss_dialogs` (bool, default `false`) — silently trust the source repo without prompting (see Trust below).
+- `update_policy` (`AUTO`/`ASK`/`NEVER`, default unset) — governs agy's background self-updater. `NEVER` sets `AGY_CLI_DISABLE_AUTO_UPDATE=true` so the installed build stays put; `AUTO` leaves the self-updater enabled; `ASK` behaves like `AUTO` (agy has no interactive update flow). Unset resolves to `NEVER`. agy has no version-pinning (Google's installer always installs the latest build), so there is no `version` field — use `NEVER` to freeze the build.
 - `emit_common_transcript` (bool, default `true`) — stream agy's per-conversation transcripts so `mngr transcript <agent>` can read them.
 
 ## Conversation resume
