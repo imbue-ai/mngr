@@ -1053,9 +1053,10 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     assert cli.create_calls == []
 
 
-# Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout. Mark flaky so offload
-# retries a contended run rather than failing it outright.
+# Same timeout flake as its litellm-key siblings above: the creation setup
+# occasionally exceeds the default 10s _wait_until_finished poll deadline (which
+# the call below widens to 20s). Mark flaky so offload retries a contended run
+# rather than failing it outright.
 @pytest.mark.flaky
 @pytest.mark.timeout(30)
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
