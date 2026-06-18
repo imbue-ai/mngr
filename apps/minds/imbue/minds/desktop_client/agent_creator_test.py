@@ -1057,7 +1057,8 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
 
 
 # Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout.
+# occasionally exceeds the default 10s pytest-timeout (so these carry a 30s
+# timeout, matched by _wait_until_finished's poll deadline).
 @pytest.mark.timeout(30)
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
@@ -1079,6 +1080,10 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     assert cli.create_calls == []
 
 
+# Carries the same 30s pytest-timeout as the other creation tests: this caller
+# also uses _wait_until_finished's 30s default poll deadline, which without this
+# marker would be pre-empted by the global --timeout=10 under heavy parallel load.
+@pytest.mark.timeout(30)
 def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""

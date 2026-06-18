@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from imbue.mngr_imbue_cloud.cli.admin import PoolHostUnderlyingTeardown
 from imbue.mngr_imbue_cloud.cli.admin import _CONTAINER_SSH_PORT
 from imbue.mngr_imbue_cloud.cli.admin import _INSERT_POOL_HOST_SQL
+from imbue.mngr_imbue_cloud.cli.admin import _POOL_HOST_LIST_COLUMNS
 from imbue.mngr_imbue_cloud.cli.admin import _ufw_provision_commands
 from imbue.mngr_imbue_cloud.cli.admin import build_extra_tags_env_value
 from imbue.mngr_imbue_cloud.cli.admin import build_pool_host_insert_values
@@ -118,6 +119,49 @@ def test_pool_hosts_insert_has_required_columns() -> None:
             f"Pool host INSERT is missing required column {column!r}; this is the same drift "
             f"class as the host_name regression. SQL: {_INSERT_POOL_HOST_SQL!r}"
         )
+
+
+def test_pool_list_covers_every_pool_host_column() -> None:
+    """`pool list` must surface every pool_hosts column, not a hand-maintained subset.
+
+    Regression test for the drift where region, backend_kind, and the slice
+    identifiers (bare_metal_server_id / lima_instance_name / lima_disk_name) were
+    absent from the list output -- so a baked slice looked like a region-less OVH
+    VPS. Because `_POOL_HOST_LIST_COLUMNS` now drives both the SELECT and the
+    emitted JSON keys, asserting it equals the full schema keeps the two in
+    lockstep and forces any new pool_hosts migration column to be added here too.
+    """
+    expected_columns = {
+        "id",
+        "vps_address",
+        "vps_instance_id",
+        "agent_id",
+        "host_id",
+        "host_name",
+        "ssh_port",
+        "ssh_user",
+        "container_ssh_port",
+        "status",
+        "attributes",
+        "leased_to_user",
+        "leased_at",
+        "released_at",
+        "created_at",
+        "region",
+        "backend_kind",
+        "bare_metal_server_id",
+        "lima_instance_name",
+        "lima_disk_name",
+    }
+    assert set(_POOL_HOST_LIST_COLUMNS) == expected_columns, (
+        "`pool list` columns drifted from the pool_hosts schema; add (or remove) the column in "
+        f"_POOL_HOST_LIST_COLUMNS so the SELECT and JSON keys stay complete. "
+        f"missing={expected_columns - set(_POOL_HOST_LIST_COLUMNS)} "
+        f"unexpected={set(_POOL_HOST_LIST_COLUMNS) - expected_columns}"
+    )
+    assert len(_POOL_HOST_LIST_COLUMNS) == len(set(_POOL_HOST_LIST_COLUMNS)), (
+        f"_POOL_HOST_LIST_COLUMNS has duplicate entries: {_POOL_HOST_LIST_COLUMNS}"
+    )
 
 
 def _insert_column_to_value(values: tuple[object, ...]) -> dict[str, object]:

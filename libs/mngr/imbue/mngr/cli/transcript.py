@@ -16,7 +16,7 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.config.agent_class_registry import get_agent_class
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -53,8 +53,14 @@ def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ct
     if agent_type is None:
         # Agent's data.json lacks 'type'; defer to downstream error rather than blocking.
         return
-    agent_class = get_agent_class(str(agent_type))
-    if issubclass(agent_class, HasCommonTranscriptMixin):
+    # Resolve through the parent_type chain (and aliases) so a config-defined
+    # subtype (a custom [agent_types.X] whose parent_type is e.g. 'claude') maps
+    # to its parent's class, rather than failing a flat class-registry lookup.
+    # A type we cannot resolve raises here (UnknownAgentTypeError, or MngrError if
+    # its plugin is disabled), which is correct: if we cannot resolve the type we
+    # do not know how to read it, so block rather than fall through to discovery.
+    resolved = resolve_agent_type(agent_type, mngr_ctx.config)
+    if issubclass(resolved.agent_class, HasCommonTranscriptMixin):
         return
     raise UserInputError(
         f"Agent '{agent_ref.agent_name}' has type '{agent_type}', which does not produce a common transcript."

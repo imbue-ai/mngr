@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
@@ -517,6 +518,43 @@ def test_modify_env_vars_reflects_disabled_transcripts(pi_agent: PiCodingAgent, 
     pi_agent.modify_env_vars(_fake_host(tmp_path), env_vars)
     assert env_vars["MNGR_PI_EMIT_COMMON_TRANSCRIPT"] == "0"
     assert env_vars["MNGR_PI_EMIT_RAW_TRANSCRIPT"] == "0"
+
+
+def test_get_install_command_installs_latest_by_default(pi_agent: PiCodingAgent) -> None:
+    assert pi_agent.get_install_command() == "npm install -g @earendil-works/pi-coding-agent"
+
+
+def test_get_install_command_pins_version(make_pi_agent: Callable[..., PiCodingAgent]) -> None:
+    agent = make_pi_agent(agent_config=PiCodingAgentConfig(version="1.2.3"))
+    assert agent.get_install_command() == "npm install -g @earendil-works/pi-coding-agent@1.2.3"
+
+
+def test_modify_env_vars_skips_version_check_when_policy_never(
+    make_pi_agent: Callable[..., PiCodingAgent], tmp_path: Path
+) -> None:
+    agent = make_pi_agent(agent_config=PiCodingAgentConfig(update_policy=AgentUpdatePolicy.NEVER))
+    env_vars: dict[str, str] = {}
+    agent.modify_env_vars(_fake_host(tmp_path), env_vars)
+    assert env_vars["PI_SKIP_VERSION_CHECK"] == "1"
+
+
+def test_modify_env_vars_skips_version_check_by_default_on_attended_local(
+    pi_agent: PiCodingAgent, tmp_path: Path
+) -> None:
+    """The default policy disables pi's startup version check, even on an attended local host."""
+    env_vars: dict[str, str] = {}
+    pi_agent.modify_env_vars(_fake_host(tmp_path, is_local=True), env_vars)
+    assert env_vars["PI_SKIP_VERSION_CHECK"] == "1"
+
+
+def test_modify_env_vars_leaves_version_check_when_policy_auto(
+    make_pi_agent: Callable[..., PiCodingAgent], tmp_path: Path
+) -> None:
+    """Explicit AUTO opts back into pi's startup version check (no PI_SKIP_VERSION_CHECK)."""
+    agent = make_pi_agent(agent_config=PiCodingAgentConfig(update_policy=AgentUpdatePolicy.AUTO))
+    env_vars: dict[str, str] = {}
+    agent.modify_env_vars(_fake_host(tmp_path, is_local=True), env_vars)
+    assert "PI_SKIP_VERSION_CHECK" not in env_vars
 
 
 # =============================================================================

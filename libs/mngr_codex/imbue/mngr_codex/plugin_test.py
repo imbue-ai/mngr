@@ -24,6 +24,7 @@ from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
+from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -132,6 +133,50 @@ def test_get_install_binary_name_is_codex() -> None:
 def test_get_install_command_installs_codex() -> None:
     agent = CodexAgent.model_construct(agent_config=CodexAgentConfig())
     assert agent.get_install_command() == "npm i -g @openai/codex"
+
+
+def test_get_install_command_pins_version() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(version="0.139.0"))
+    assert agent.get_install_command() == "npm i -g @openai/codex@0.139.0"
+
+
+def test_verify_pinned_codex_version_passes_on_match(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    # `sh -c 'echo codex-cli 0.139.0'` ignores the appended --version, so the probe
+    # parses 0.139.0 without a real codex binary.
+    agent = _make_codex_agent(
+        CodexAgent,
+        local_provider,
+        tmp_path,
+        CodexAgentConfig(version="0.139.0", command=CommandString("sh -c 'echo codex-cli 0.139.0'")),
+    )
+    agent._verify_pinned_codex_version(agent.host)
+
+
+def test_verify_pinned_codex_version_raises_on_mismatch(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    agent = _make_codex_agent(
+        CodexAgent,
+        local_provider,
+        tmp_path,
+        CodexAgentConfig(version="0.140.0", command=CommandString("sh -c 'echo codex-cli 0.139.0'")),
+    )
+    with pytest.raises(AgentInstallationError, match="version mismatch"):
+        agent._verify_pinned_codex_version(agent.host)
+
+
+def test_reconcile_verifies_pin_and_skips_update_check_when_pinned() -> None:
+    """With a pinned version, reconcile verifies the pin and does NOT run the update check."""
+    calls: list[str] = []
+
+    class _RecordingAgent(CodexAgent):
+        def _verify_pinned_codex_version(self, host: object) -> None:
+            calls.append("verify")
+
+        def _maybe_check_for_codex_update(self, host: object, user_codex_home: Path, mngr_ctx: object) -> None:
+            calls.append("update_check")
+
+    agent = _RecordingAgent.model_construct(agent_config=CodexAgentConfig(version="0.139.0"))
+    agent.reconcile_installed_version(cast(OnlineHostInterface, object()), cast(MngrContext, object()))
+    assert calls == ["verify"]
 
 
 def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:

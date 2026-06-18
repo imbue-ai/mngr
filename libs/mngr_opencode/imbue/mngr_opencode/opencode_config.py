@@ -244,6 +244,9 @@ _SCHEMA_KEY: str = "$schema"
 _SCHEMA_URL: str = "https://opencode.ai/config.json"
 _PERMISSION_WILDCARD: str = "*"
 _PERMISSION_ALLOW: str = "allow"
+# ``autoupdate`` governs opencode's startup self-update; ``false`` disables it so the
+# installed (possibly pinned) version stays put.
+_AUTOUPDATE_KEY: str = "autoupdate"
 
 
 @pure
@@ -251,6 +254,7 @@ def build_opencode_config(
     base_config: Mapping[str, Any],
     config_overrides: Mapping[str, Any],
     is_auto_allow_permissions: bool,
+    disable_auto_update: bool = False,
 ) -> dict[str, Any]:
     """Build a per-agent ``opencode.json`` body by layering (low -> high precedence).
 
@@ -261,7 +265,9 @@ def build_opencode_config(
        auto-approves every action not explicitly denied (the config analog of
        ``--dangerously-skip-permissions``; a finer policy instead comes via
        ``config_overrides``).
-    3. ``config_overrides`` -- the per-agent-type blob (``model``, ``permission``,
+    3. ``"autoupdate": false`` when ``disable_auto_update`` -- set before
+       ``config_overrides`` so an explicit ``autoupdate`` override still wins.
+    4. ``config_overrides`` -- the per-agent-type blob (``model``, ``permission``,
        ...), applied last so it wins.
 
     A ``$schema`` is always set so the file validates and editors autocomplete.
@@ -270,6 +276,8 @@ def build_opencode_config(
     config[_SCHEMA_KEY] = _SCHEMA_URL
     if is_auto_allow_permissions:
         config[_PERMISSION_KEY] = {_PERMISSION_WILDCARD: _PERMISSION_ALLOW}
+    if disable_auto_update:
+        config[_AUTOUPDATE_KEY] = False
     config.update(config_overrides)
     return config
 
