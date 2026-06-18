@@ -1,1 +1,1 @@
-Trimmed the README to user-relevant content (removed internal implementation details and roadmap notes) and tightened it for concision.
+Trimmed the README to user-relevant content (removed internal implementation details and roadmap notes) and tightened it for concision. The app-server "future direction" roadmap note that was dropped from the README is preserved as an engineering comment on the `CodexAgent` class.

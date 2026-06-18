@@ -329,7 +329,37 @@ class CodexAgent(
     HasVersionManagementMixin,
     HasAutoInstallMixin,
 ):
-    """Agent implementation for the OpenAI Codex CLI (``codex``)."""
+    """Agent implementation for the OpenAI Codex CLI (``codex``).
+
+    Future direction -- an app-server-backed variant:
+    This agent drives the codex **TUI** via ``tmux send-keys`` (paste + Enter) with a
+    banner-poll readiness check (see ``TUI_READY_INDICATOR``). That works but is fragile
+    (screen-scraping) and codex's ``SessionStart`` fires lazily, so there is no clean
+    pre-input readiness signal. codex's **app-server** is a much cleaner surface to drive
+    programmatically -- a JSON-RPC protocol over a socket (``initialize`` -> ``thread/start``
+    -> ``turn/start``), with the ``initialize`` response / ``thread.started`` event as an
+    unambiguous readiness signal, and ``turn.*`` / ``item.*`` events to drive the
+    RUNNING/WAITING marker and transcript directly. A TUI can still attach as a *viewer*
+    via ``codex --remote unix://<sock>``. Hooks/subagents/sandbox/approval are all
+    engine-level (``codex-core``), so they fire identically either way. Invocation (verified
+    against codex 0.138.0): ``codex app-server --listen unix://<sock>`` works with the
+    brew/npm install; avoid the ``codex remote-control start`` / ``app-server daemon``
+    wrapper (needs codex's standalone installer at a fixed path).
+
+    Why the TUI agent exists first, and is not merely a stopgap: on a ChatGPT-subscription
+    login the backend gates some ``*-codex`` models on the **client identity** (the
+    ``originator``, derived from the app-server's ``initialize`` ``clientInfo.name``). The
+    first-party TUI presents as ``codex-tui`` and is entitled to them; a programmatic
+    app-server client identifying honestly as mngr is not. An app-server variant must
+    **identify honestly** -- do NOT set ``clientInfo.name = "codex-tui"`` to bypass the gate
+    (codex treats these names as a trust boundary; the override env var is literally
+    ``CODEX_INTERNAL_ORIGINATOR_OVERRIDE``, and spoofing falls under OpenAI's
+    "circumvent restrictions" clause). For the gated ``*-codex`` models in app-server mode,
+    authenticate with an **API key** (the documented path for programmatic workflows). So
+    the TUI agent remains the legitimate way to use ``*-codex`` models on a ChatGPT login,
+    and the app-server variant is a complement for cases where the identity gap is
+    acceptable -- not a replacement.
+    """
 
     # Stable substring of codex's header box, which renders together with the
     # input composer once the TUI is ready to receive keystrokes (verified live
