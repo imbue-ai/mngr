@@ -12,14 +12,18 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
+@pytest.mark.timeout(30)
 def test_start_restart_running_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     create_test_agent: Callable[..., str],
     mngr_test_prefix: str,
 ) -> None:
-    """start --restart on a running agent should stop it and start it fresh."""
+    """start --restart on a running agent should stop it and start it fresh.
+
+    The timeout is raised because the sequential tmux create/stop/restart
+    operations can exceed the default 10s on a loaded CI runner.
+    """
     create_test_agent("restart-running-agent", "sleep 140101")
     session_name = f"{mngr_test_prefix}restart-running-agent"
     assert tmux_session_exists(session_name)
@@ -36,7 +40,7 @@ def test_start_restart_running_agent(
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
+@pytest.mark.timeout(30)
 def test_start_restart_stopped_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -45,9 +49,8 @@ def test_start_restart_stopped_agent(
 ) -> None:
     """start --restart on a stopped agent should simply start it.
 
-    Marked flaky: this exercises four sequential tmux agent-lifecycle operations
-    (create, stop, restart, readiness wait) against a tight per-test timeout, so it
-    can intermittently exceed the limit on a loaded CI runner.
+    The timeout is raised because the four sequential tmux create/stop/restart/
+    readiness operations can exceed the default 10s on a loaded CI runner.
     """
     create_test_agent("restart-stopped-agent", "sleep 140102")
     session_name = f"{mngr_test_prefix}restart-stopped-agent"
