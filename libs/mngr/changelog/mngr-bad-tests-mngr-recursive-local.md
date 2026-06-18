@@ -1,0 +1,1 @@
+`PluginConfig.merge_with` now returns `Self` (and takes `Self`) instead of the base `PluginConfig`. It already returns the concrete subclass at runtime (via `model_copy_update`), so this just lets plugin configs inherit the base implementation without losing static access to their own fields on the merged result. No behavior change.

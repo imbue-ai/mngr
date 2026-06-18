@@ -93,6 +93,27 @@ def _ensure_uv_available(host: OnlineHostInterface) -> None:
             raise MngrError("uv was installed but cannot be found on PATH")
 
 
+def _resolve_editable_source_dir(direct_url_text: str | None) -> Path:
+    """Resolve the editable-install source directory from a ``direct_url.json`` body.
+
+    ``direct_url_text`` is the raw content of the package's ``direct_url.json``
+    (or None if the package is not installed in editable mode). Raises MngrError
+    if the package is not editable, the JSON is malformed, or the recorded URL is
+    not a ``file://`` URL.
+    """
+    if direct_url_text is None:
+        raise MngrError("mngr is not installed in editable mode; cannot determine repo root")
+
+    try:
+        direct_url = json.loads(direct_url_text)
+    except (json.JSONDecodeError, AttributeError) as e:
+        raise MngrError(f"Failed to parse direct_url.json for mngr: {e}") from e
+    url = direct_url.get("url", "")
+    if not url.startswith("file://"):
+        raise MngrError(f"Unexpected direct_url format: {url}")
+    return Path(url.removeprefix("file://"))
+
+
 def _get_mngr_repo_root() -> Path:
     """Get the git repository root of the mngr monorepo.
 
@@ -104,20 +125,7 @@ def _get_mngr_repo_root() -> Path:
     except importlib.metadata.PackageNotFoundError:
         raise MngrError("mngr package is not installed; cannot determine repo root") from None
 
-    direct_url_text = dist.read_text("direct_url.json")
-    if direct_url_text is None:
-        raise MngrError("mngr is not installed in editable mode; cannot determine repo root") from None
-
-    # Find the source directory from the editable install
-    try:
-        direct_url = json.loads(direct_url_text)
-    except (json.JSONDecodeError, AttributeError) as e:
-        raise MngrError(f"Failed to parse direct_url.json for mngr: {e}") from e
-    url = direct_url.get("url", "")
-    if url.startswith("file://"):
-        source_dir = Path(url.removeprefix("file://"))
-    else:
-        raise MngrError(f"Unexpected direct_url format: {url}") from None
+    source_dir = _resolve_editable_source_dir(dist.read_text("direct_url.json"))
 
     # Find git repo root from source dir
     result = subprocess.run(
@@ -144,6 +152,26 @@ def _build_uv_env_prefix(tool_dir: Path, bin_dir: Path) -> str:
     return f"export UV_TOOL_DIR={shlex.quote(str(tool_dir))} && export UV_TOOL_BIN_DIR={shlex.quote(str(bin_dir))} && "
 
 
+def _build_package_install_command(
+    mngr_package: tuple[str, str],
+    plugin_packages: list[tuple[str, str]],
+    tool_dir: Path,
+    bin_dir: Path,
+) -> str:
+    """Build the ``uv tool install`` command for PyPI package-mode installation.
+
+    Returns the full shell command (PATH + per-agent UV_TOOL_DIR/UV_TOOL_BIN_DIR
+    prefix followed by the install invocation). The ``--force-reinstall`` retry
+    suffix is appended by the caller, not here.
+    """
+    uv_env = _build_uv_env_prefix(tool_dir, bin_dir)
+    mngr_name, mngr_version = mngr_package
+    parts = [f"uv tool install {mngr_name}=={mngr_version}"]
+    for pkg_name, pkg_version in plugin_packages:
+        parts.append(f"--with {pkg_name}=={pkg_version}")
+    return _UV_PATH_PREFIX + uv_env + " ".join(parts)
+
+
 def _install_mngr_package_mode(
     host: OnlineHostInterface,
     packages: list[tuple[str, str]],
@@ -162,13 +190,7 @@ def _install_mngr_package_mode(
     if mngr_package is None:
         raise MngrError("mngr package not found locally; cannot install on host")
 
-    uv_env = _build_uv_env_prefix(tool_dir, bin_dir)
-    mngr_name, mngr_version = mngr_package
-    parts = [f"uv tool install {mngr_name}=={mngr_version}"]
-    for pkg_name, pkg_version in plugin_packages:
-        parts.append(f"--with {pkg_name}=={pkg_version}")
-
-    install_cmd = _UV_PATH_PREFIX + uv_env + " ".join(parts)
+    install_cmd = _build_package_install_command(mngr_package, plugin_packages, tool_dir, bin_dir)
     with log_span("Installing mngr (package mode)"):
         result = host.execute_idempotent_command(install_cmd)
         if not result.success:
@@ -198,6 +220,25 @@ def _install_mngr_editable_mode(
         _install_mngr_editable_remote(host, repo_root, uv_env)
 
 
+def _build_editable_install_command(
+    cd_dir: str,
+    lib_names: list[str],
+    uv_env: str,
+) -> str:
+    """Build the ``uv tool install`` command for editable-mode installation.
+
+    ``cd_dir`` is the (already shell-safe) directory to cd into before installing.
+    Only workspace libs whose names start with ``mngr_`` are added as editable
+    plugins; the base ``mngr`` lib is always installed via ``-e libs/mngr``. The
+    ``--force-reinstall`` retry suffix is appended by the caller, not here.
+    """
+    install_parts = [f"{_UV_PATH_PREFIX}{uv_env}cd {cd_dir} && uv tool install -e libs/mngr"]
+    for lib_name in lib_names:
+        if lib_name != "imbue-mngr" and lib_name.startswith("mngr_"):
+            install_parts.append(f"--with-editable libs/{lib_name}")
+    return " ".join(install_parts)
+
+
 def _install_mngr_editable_local(
     host: OnlineHostInterface,
     repo_root: Path,
@@ -210,12 +251,7 @@ def _install_mngr_editable_local(
     libs_dir = repo_root / "libs"
     lib_names = [d.name for d in libs_dir.iterdir() if d.is_dir()] if libs_dir.is_dir() else []
 
-    install_parts = [f"{_UV_PATH_PREFIX}{uv_env}cd {quoted_root} && uv tool install -e libs/mngr"]
-    for lib_name in lib_names:
-        if lib_name != "imbue-mngr" and lib_name.startswith("mngr_"):
-            install_parts.append(f"--with-editable libs/{lib_name}")
-
-    install_cmd = " ".join(install_parts)
+    install_cmd = _build_editable_install_command(quoted_root, lib_names, uv_env)
     with log_span("Installing mngr (editable mode, local)"):
         result = host.execute_idempotent_command(install_cmd)
         if not result.success:
@@ -266,12 +302,7 @@ def _install_mngr_editable_remote(
                 raise MngrError(f"Failed to list mngr libs: {ls_result.stderr.strip()}")
 
             lib_names = ls_result.stdout.strip().split()
-            install_parts = [f"{_UV_PATH_PREFIX}{uv_env}cd {remote_repo_dir} && uv tool install -e libs/mngr"]
-            for lib_name in lib_names:
-                if lib_name != "imbue-mngr" and lib_name.startswith("mngr_"):
-                    install_parts.append(f"--with-editable libs/{lib_name}")
-
-            install_cmd = " ".join(install_parts)
+            install_cmd = _build_editable_install_command(str(remote_repo_dir), lib_names, uv_env)
             result = host.execute_idempotent_command(install_cmd)
             if not result.success:
                 # Try with --force-reinstall

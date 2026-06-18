@@ -364,6 +364,20 @@ def setup_watchdog_for_directories(
         return observer, False
 
 
+def _unique_parent_dirs(watch_paths: list[Path]) -> list[str]:
+    """Return the distinct parent directories of the given files, preserving order.
+
+    A single directory containing multiple watched files is returned only once,
+    so the caller schedules one watch per directory rather than one per file.
+    """
+    parents: list[str] = []
+    for file_path in watch_paths:
+        parent = str(file_path.parent)
+        if parent not in parents:
+            parents.append(parent)
+    return parents
+
+
 def setup_watchdog_for_files(
     watch_paths: list[Path],
     wake_event: threading.Event,
@@ -376,16 +390,12 @@ def setup_watchdog_for_files(
     handler = ChangeHandler(wake_event)
     observer = Observer()
 
-    watched_dirs: set[str] = set()
-    for file_path in watch_paths:
-        parent = str(file_path.parent)
-        if parent not in watched_dirs:
-            try:
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                observer.schedule(handler, parent, recursive=False)
-                watched_dirs.add(parent)
-            except Exception as exc:
-                logger.warning("Failed to watch {}: {}", parent, exc)
+    for parent in _unique_parent_dirs(watch_paths):
+        try:
+            Path(parent).mkdir(parents=True, exist_ok=True)
+            observer.schedule(handler, parent, recursive=False)
+        except Exception as exc:
+            logger.warning("Failed to watch {}: {}", parent, exc)
 
     try:
         observer.start()
