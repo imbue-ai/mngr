@@ -181,10 +181,8 @@ def test_transcript_default(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None:
     e2e.write_tutorial_block("""
         # view only assistant messages
