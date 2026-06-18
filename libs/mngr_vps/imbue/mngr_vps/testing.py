@@ -9,7 +9,6 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.providers.provider_release_testing import ProviderReleaseProfile
-from imbue.mngr_vps.errors import VpsError
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.primitives import IsolationMode
@@ -62,12 +61,16 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
         return self._client.get_instance_status(VpsInstanceId(handle)) == VpsInstanceStatus.HALTED
 
     def force_strand_host(self, handle: str) -> None:
-        # Terminate the VM directly through the cloud API, bypassing `mngr destroy`; swallow
-        # the not-found case so the call is idempotent (the finally backstop may re-run it).
-        try:
-            self._client.destroy_instance(VpsInstanceId(handle))
-        except VpsError:
-            pass
+        # Terminate the VM directly through the cloud API, bypassing `mngr destroy`. Idempotent
+        # without swallowing errors: if the instance is already gone or terminating (the finally
+        # backstop can re-run this after gc), there is nothing left to strand, so check the state
+        # first and let any genuine destroy failure surface.
+        if self._client.get_instance_status(VpsInstanceId(handle)) in (
+            VpsInstanceStatus.DESTROYING,
+            VpsInstanceStatus.UNKNOWN,
+        ):
+            return
+        self._client.destroy_instance(VpsInstanceId(handle))
 
     def is_backend_clean(self, handle: str) -> bool:
         # A force-terminated instance reports DESTROYING (terminated, still listed briefly) or
