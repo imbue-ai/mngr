@@ -548,11 +548,13 @@ class PluginConfig(FrozenModel):
         description="Whether this plugin is enabled",
     )
 
-    def merge_with(self, override: "PluginConfig") -> "PluginConfig":
+    def merge_with(self, override: "PluginConfig") -> Self:
         """Merge this config with an override config.
 
         Uses ``model_fields_set`` so plugin subclasses that add extra fields
-        get correct assign-by-default semantics on those fields too.
+        get correct assign-by-default semantics on those fields too. Returns
+        ``Self`` so a subclass that inherits this implementation (rather than
+        overriding it) keeps its own static type after merging.
         """
         explicitly_set = override.model_fields_set
         if not explicitly_set:

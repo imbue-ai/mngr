@@ -1,0 +1,1 @@
+`PluginConfig.merge_with` now returns `Self` instead of the base `PluginConfig`, so a plugin config subclass that inherits the base merge (rather than overriding it) keeps its own static type after merging. This is an internal typing improvement with no runtime behavior change.

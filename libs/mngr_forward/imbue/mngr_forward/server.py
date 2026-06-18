@@ -87,7 +87,10 @@ def _is_loopback_url(url: str) -> bool:
     try:
         parsed = urlsplit(url)
     except ValueError:
-        return False
+        # This is a safety guard, so fail closed on an unparseable URL: treat
+        # it as loopback so the no-tunnel callers refuse to dial it, rather
+        # than fail open and proxy to a URL we could not even parse.
+        return True
     raw_host = parsed.hostname
     if raw_host is None:
         return False
@@ -635,8 +638,8 @@ async def _handle_workspace_forward_websocket(
         logger.debug("SSH tunnel setup failed for WS {}: {}", agent_id, e)
         try:
             await websocket.close(code=1011, reason="SSH tunnel failed")
-        except RuntimeError:
-            pass
+        except RuntimeError as close_error:
+            logger.trace("WebSocket already closed while sending close frame: {}", close_error)
         return
 
     if tunnel_socket_path is None and _is_loopback_url(backend_url) and not allow_host_loopback:
@@ -648,8 +651,8 @@ async def _handle_workspace_forward_websocket(
         )
         try:
             await websocket.close(code=1013, reason=_WS_CLOSE_REASON_LOOPBACK_REFUSED)
-        except RuntimeError:
-            pass
+        except RuntimeError as close_error:
+            logger.trace("WebSocket already closed while sending close frame: {}", close_error)
         return
 
     ws_backend = backend_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/")
@@ -683,8 +686,8 @@ async def _handle_workspace_forward_websocket(
         logger.debug("Backend WS connection failed for {}: {}", agent_id, connection_error)
         try:
             await websocket.close(code=1011, reason="Backend connection failed")
-        except RuntimeError:
-            pass
+        except RuntimeError as close_error:
+            logger.trace("WebSocket already closed while sending close frame: {}", close_error)
 
 
 # -- Bare-origin handlers --------------------------------------------------

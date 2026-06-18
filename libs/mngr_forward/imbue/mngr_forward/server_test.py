@@ -439,6 +439,9 @@ def test_is_loopback_url() -> None:
     assert not _is_loopback_url("http://stub-backend:8000")
     assert not _is_loopback_url("http://10.0.0.5:8000")
     assert not _is_loopback_url("http://example.com")
+    # A URL that urlsplit cannot parse fails closed (treated as loopback so
+    # the no-tunnel callers refuse to dial it).
+    assert _is_loopback_url("http://[::1")
 
 
 @pytest.mark.parametrize(

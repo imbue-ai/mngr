@@ -15,13 +15,13 @@ agent is unknown, the requested service URL is not yet discovered, or the
 agent has no SSH info but the strategy requires one.
 """
 
+import io
 import threading
 from typing import assert_never
 
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import BackendUrl
@@ -33,6 +33,22 @@ from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
+def _new_discarded_envelope_writer() -> EnvelopeWriter:
+    """Null-object writer for resolvers constructed without an explicit sink.
+
+    Production always injects the plugin's real stdout-backed ``EnvelopeWriter``
+    (see ``cli.py``); this default exists only so unit tests that don't assert
+    on emission can omit the argument. Emissions go to an in-memory buffer that
+    is never read, which keeps ``envelope_writer`` non-optional -- the type
+    checker proves it is always present, so the mutation paths need no
+    ``is not None`` guard -- without printing test noise to stdout. (A bare
+    ``io.TextIOBase`` discard sink is not assignable to ``IO[str]`` under the
+    type checker, and the buffer only ever fills in tests, where resolvers are
+    short-lived, so ``StringIO`` is the pragmatic choice.)
+    """
+    return EnvelopeWriter(output=io.StringIO())
+
+
 class ForwardResolver(MutableModel):
     """Maps an agent ID to its current backend ``ProxyTarget``."""
 
@@ -40,15 +56,16 @@ class ForwardResolver(MutableModel):
         frozen=True,
         description="Either ForwardServiceStrategy or ForwardPortStrategy; chosen at CLI parse time",
     )
-    envelope_writer: EnvelopeWriter | None = Field(
-        default=None,
+    envelope_writer: EnvelopeWriter = Field(
+        default_factory=_new_discarded_envelope_writer,
         description=(
-            "Optional writer used to emit a ``resolver_snapshot`` envelope on every "
+            "Writer used to emit a ``resolver_snapshot`` envelope on every "
             "mutation of the per-agent services map -- ``update_services`` "
             "(set/replace) plus the destruction paths (``remove_known_agent`` and "
             "``update_known_agents`` when they drop an agent that had services). "
-            "The plugin wires this so a downstream consumer can mirror the per-agent "
-            "service map. None in tests / code paths that don't care about emission."
+            "The plugin (``cli.py``) injects its real stdout-backed writer so a "
+            "downstream consumer can mirror the per-agent service map; the default "
+            "is a no-op sink for tests that don't assert on emission."
         ),
     )
 
@@ -88,7 +105,7 @@ class ForwardResolver(MutableModel):
             self._initial_discovery_done = True
             if services_changed:
                 snapshot = self._snapshot_services_locked()
-        if snapshot is not None and self.envelope_writer is not None:
+        if snapshot is not None:
             self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def add_known_agent(self, agent_id: AgentId) -> None:
@@ -115,7 +132,7 @@ class ForwardResolver(MutableModel):
             self._ssh_by_agent.pop(aid_str, None)
             if services_changed:
                 snapshot = self._snapshot_services_locked()
-        if snapshot is not None and self.envelope_writer is not None:
+        if snapshot is not None:
             self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
@@ -129,8 +146,7 @@ class ForwardResolver(MutableModel):
         with self._lock:
             self._services_by_agent[str(agent_id)] = dict(services)
             snapshot = self._snapshot_services_locked()
-        if self.envelope_writer is not None:
-            self.envelope_writer.emit_resolver_snapshot(snapshot)
+        self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def update_ssh_info(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
         """Set or replace the SSH info for a single agent."""
@@ -173,4 +189,3 @@ class ForwardResolver(MutableModel):
                 return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
             case _ as unreachable:  # pragma: no cover
                 assert_never(unreachable)
-                raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
