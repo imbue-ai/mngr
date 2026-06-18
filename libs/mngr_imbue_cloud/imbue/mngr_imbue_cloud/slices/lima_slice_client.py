@@ -19,10 +19,7 @@ from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 # Lima "Status" strings (from `limactl list --json`) mapped to VPS statuses.
 _LIMA_STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
@@ -276,6 +273,71 @@ class LimaSliceVpsClient(VpsClientInterface):
             logger.debug("Lima disk {} already absent, skipping", disk_name)
         logger.info("Destroyed slice VM {} (disk {}) on {}", instance_name, disk_name, self.box_address)
 
+    def list_instance_names(self) -> set[str]:
+        """Return the names of all lima instances currently on the box."""
+        list_rc, list_out, list_err = self._run_on_box(
+            "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"
+        )
+        if list_rc != 0:
+            raise LimaCommandError("list", list_rc or 1, list_err)
+        names: set[str] = set()
+        for line in list_out.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                instance = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse Lima instance JSON: {}", exc)
+                continue
+            name = instance.get("name")
+            if name:
+                names.add(name)
+        return names
+
+    def list_disk_names(self) -> set[str]:
+        """Return the names of all lima disks currently on the box."""
+        list_rc, list_out, list_err = self._run_on_box(
+            "limactl disk list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-list"
+        )
+        if list_rc != 0:
+            raise LimaCommandError("disk list", list_rc or 1, list_err)
+        names: set[str] = set()
+        for line in list_out.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                disk = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse Lima disk JSON: {}", exc)
+                continue
+            name = disk.get("name")
+            if name:
+                names.add(name)
+        return names
+
+    def destroy_disk(self, disk_name: str) -> None:
+        """Delete a lima data disk on the box, unlocking it first so a leaked locked disk still goes.
+
+        Used to reap an orphan disk (one with no pool DB row) left behind when a failed
+        carve's ``limactl delete`` could not unlock the disk. ``limactl disk delete``
+        refuses a locked disk, so we ``disk unlock`` first (best-effort -- it errors when
+        the disk is not actually locked, which is fine), then force-delete, tolerating the
+        disk already being absent.
+        """
+        self._run_on_box(
+            f"limactl disk unlock {shlex.quote(disk_name)}", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-unlock"
+        )
+        delete_rc, _out, delete_err = self._run_on_box(
+            f"limactl disk delete --force {shlex.quote(disk_name)}",
+            timeout=_LIMA_SHORT_TIMEOUT_SECONDS,
+            label="disk-delete",
+        )
+        if delete_rc != 0 and not _is_already_absent_error(delete_err):
+            raise LimaCommandError("disk delete", delete_rc or 1, delete_err)
+        logger.info("Destroyed orphan slice disk {} on {}", disk_name, self.box_address)
+
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
         list_rc, list_out, list_err = self._run_on_box(
             "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"
@@ -324,20 +386,8 @@ class LimaSliceVpsClient(VpsClientInterface):
     ) -> VpsInstanceId:
         raise self._unavailable("create_instance")
 
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        raise self._unavailable("create_snapshot")
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        raise self._unavailable("delete_snapshot")
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        raise self._unavailable("list_snapshots")
-
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         raise self._unavailable("upload_ssh_key")
 
     def delete_ssh_key(self, key_id: str) -> None:
         raise self._unavailable("delete_ssh_key")
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        raise self._unavailable("list_ssh_keys")

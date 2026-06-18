@@ -60,7 +60,11 @@ from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
-_POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 7200
+# Hard cap on the admin pool-create subprocess. Generous (12h) so a large bulk bake
+# (e.g. `--count 20` in waves of `--max-concurrency`, slow on a loaded box) is never
+# killed mid-run. If it ever does fire, the slice backend reaps its orphans on
+# SIGTERM, but the point of 12h is to not hit it in normal operation.
+_POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 43200
 
 # Flags whose values are secrets and must be masked when the admin command is
 # rendered into the "Running: ..." log line. ``--database-url`` carries the
@@ -96,11 +100,22 @@ _DATABASE_URL_HELP: Final[str] = (
     "for dev/ci it auto-resolves from the activated env's secrets.toml. "
     "Pass explicitly only when overriding."
 )
+# Pool host backends understood by ``mngr imbue_cloud admin pool create``. ``ovh_vps``
+# orders an OVH classic VPS on demand; ``slice`` carves a lima VM on a pre-registered,
+# prepped bare-metal box (see ``mngr imbue_cloud admin server``).
+_BACKEND_OVH_VPS: Final[str] = "ovh_vps"
+_BACKEND_SLICE: Final[str] = "slice"
+# Env var the admin slice path reads the pool management private key from (see
+# ``mngr_imbue_cloud.cli.server._pool_private_key_path``). It is the SAME key whose
+# public form the OVH backend bakes via --management-public-key-file; the slice
+# backend needs the private key itself to SSH the box and carve the lima VM.
+_POOL_PRIVATE_KEY_ENV_VAR: Final[str] = "POOL_SSH_PRIVATE_KEY"
 
 
 def build_create_admin_args(
     *,
     env_name: str,
+    backend: str,
     count: int,
     region: str,
     from_tag: str | None,
@@ -108,17 +123,24 @@ def build_create_admin_args(
     workspace_dir: str | None,
     repo_branch_or_tag_override: str | None,
     attributes_json: str | None,
-    management_public_key_file: str,
+    management_public_key_file: str | None,
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    is_dry_run: bool,
     is_deferred_install_wait_skipped: bool,
+    server_id: str | None = None,
+    max_concurrency: int | None = None,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
 
-    Auto-injects ``--tag minds_env=<env_name>``; forwards every other
-    user-supplied flag verbatim. Split out from the click command so
-    tests can exercise the wiring without faking a subprocess.
+    For the ``ovh_vps`` backend, auto-injects ``--tag minds_env=<env_name>`` (so
+    ``minds env destroy`` can enumerate the VPSes the env owns) and forwards
+    ``--management-public-key-file``. For the ``slice`` backend it emits neither --
+    slices are not OVH-IAM-tagged and authorize the pool key from
+    POOL_SSH_PRIVATE_KEY at carve time. Every other user-supplied flag forwards
+    verbatim. Split out from the click command so tests can exercise the wiring
+    without faking a subprocess.
 
     The bake source is exactly one of ``--from-tag`` (production, clones a tag)
     or ``--workspace-dir`` (dev, a working tree); the admin CLI derives the
@@ -131,20 +153,24 @@ def build_create_admin_args(
     None is passed through here the admin CLI auto-resolves the DSN from the
     activated minds env's ``secrets.toml`` (which the deploy wrote).
 
-    When ``is_recycle_enabled`` is False, forwards ``--no-recycle`` so the
-    OVH provider orders a fresh VPS instead of reclaiming a cancelled one.
+    ``--no-recycle`` (when ``is_recycle_enabled`` is False) is ovh_vps-only;
+    ``--server-id`` (the explicitly-chosen bare-metal box), ``--dry-run`` (when
+    ``is_dry_run`` is True), and ``--max-concurrency`` (when non-None) are
+    slice-only; each is forwarded only when set.
     """
     args = [
         "create",
+        "--backend",
+        backend,
         "--count",
         str(count),
         "--region",
         region,
-        "--tag",
-        f"minds_env={env_name}",
-        "--management-public-key-file",
-        management_public_key_file,
     ]
+    if backend == _BACKEND_OVH_VPS:
+        assert management_public_key_file is not None, "ovh_vps requires a management public key"
+        args.extend(["--tag", f"minds_env={env_name}"])
+        args.extend(["--management-public-key-file", management_public_key_file])
     if from_tag is not None:
         args.extend(["--from-tag", from_tag])
     if repo_url is not None:
@@ -159,8 +185,14 @@ def build_create_admin_args(
         args.extend(["--database-url", database_url])
     if mngr_source is not None:
         args.extend(["--mngr-source", mngr_source])
-    if not is_recycle_enabled:
+    if backend == _BACKEND_OVH_VPS and not is_recycle_enabled:
         args.append("--no-recycle")
+    if backend == _BACKEND_SLICE and server_id is not None:
+        args.extend(["--server-id", server_id])
+    if backend == _BACKEND_SLICE and is_dry_run:
+        args.append("--dry-run")
+    if backend == _BACKEND_SLICE and max_concurrency is not None:
+        args.extend(["--max-concurrency", str(max_concurrency)])
     if is_deferred_install_wait_skipped:
         args.append("--skip-deferred-install-wait")
     return args
@@ -207,21 +239,25 @@ def _stream_subprocess_line(line: str, is_stdout: bool) -> None:
     sys.stderr.flush()
 
 
-def merge_ovh_env_into_subprocess_env(*, shell_env: Mapping[str, str], ovh_env: Mapping[str, str]) -> dict[str, str]:
-    """Build the subprocess env: start from ``shell_env``, then layer ``ovh_env`` on top.
+def merge_extra_env_into_subprocess_env(
+    *, shell_env: Mapping[str, str], extra_env: Mapping[str, str]
+) -> dict[str, str]:
+    """Build the subprocess env: start from ``shell_env``, then layer ``extra_env`` on top.
 
-    OVH values from the activated tier's Vault entry win over whatever the
-    operator may have lying around in their shell. The operator's mental
-    model when running ``minds pool create`` (with an activated env) is
-    "this provisions hosts for the active tier" -- so the active tier's
-    creds are the source of truth, not a stale ``OVH_APPLICATION_KEY``
-    that might still be exported from a different tier's bake last week.
+    Injects per-tier secrets resolved from Vault into the admin subprocess without
+    mutating the parent process's environment: the OVH AK/AS/CK for the ``ovh_vps``
+    backend, or ``POOL_SSH_PRIVATE_KEY`` for the ``slice`` backend. Vault values from
+    the activated tier win over whatever the operator may have lying around in their
+    shell. The operator's mental model when running ``minds pool create`` (with an
+    activated env) is "this provisions hosts for the active tier" -- so the active
+    tier's secrets are the source of truth, not a stale value that might still be
+    exported from a different tier's session last week.
 
     Pure function so the precedence rule is testable without a fake
     subprocess runner or a fake Vault.
     """
     merged = dict(shell_env)
-    merged.update(ovh_env)
+    merged.update(extra_env)
     return merged
 
 
@@ -299,6 +335,27 @@ def resolve_management_public_key_from_vault(
     required private-key field or if ``ssh-keygen -y`` cannot parse it.
     Raises ``VaultReadError`` for any underlying Vault read failure.
     """
+    private_key = read_pool_private_key_from_vault(env_name, parent_cg=parent_cg)
+    return derive_public_key_from_private(private_key, parent_cg=parent_cg)
+
+
+def read_pool_private_key_from_vault(
+    env_name: str,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> str:
+    """Read the activated tier's pool management private key PEM from Vault.
+
+    Reads ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` -- the same entry
+    ``minds env deploy`` pushes into the ``pool-ssh-<tier>`` Modal Secret the
+    connector loads, so the key the slice bake authorizes on the VM matches the one
+    the connector SSHes with at lease/release time. The OVH backend derives the
+    public form of this key for ``--management-public-key-file``; the slice backend
+    needs the private key itself to SSH the box and carve the lima VM.
+
+    Raises ``click.ClickException`` if the entry lacks the private-key field.
+    Raises ``VaultReadError`` for any underlying Vault read failure.
+    """
     tier = tier_for_env_name(env_name)
     deploy_config = load_deploy_config(tier)
     vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
@@ -309,7 +366,7 @@ def resolve_management_public_key_from_vault(
             f"Vault entry {vault_prefix}/pool-ssh is missing {_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD!r}; "
             "see apps/minds/docs/host-pool-setup.md step 2 for the schema."
         )
-    return derive_public_key_from_private(private_key, parent_cg=parent_cg)
+    return private_key
 
 
 @contextlib.contextmanager
@@ -432,16 +489,16 @@ def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None =
 
     Streams the child's output line-by-line so a multi-host bake isn't a
     silent black box. Forwards the current process env, with ``extra_env``
-    layered on top so callers can inject the activated tier's OVH AK/AS/CK
-    (read from Vault by :func:`resolve_ovh_env_from_vault`) without having
-    to mutate the parent process's environment.
+    layered on top so callers can inject the activated tier's per-backend
+    secrets (OVH AK/AS/CK for ovh_vps, POOL_SSH_PRIVATE_KEY for slice; both
+    read from Vault) without mutating the parent process's environment.
     """
     full_command = ["mngr", "imbue_cloud", "admin", "pool"] + args
     loggable_command = redact_secret_flag_values(full_command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
     logger.info("Running: {}", " ".join(shlex.quote(part) for part in loggable_command))
     subprocess_env: dict[str, str] | None = None
     if extra_env:
-        subprocess_env = merge_ovh_env_into_subprocess_env(shell_env=os.environ, ovh_env=extra_env)
+        subprocess_env = merge_extra_env_into_subprocess_env(shell_env=os.environ, extra_env=extra_env)
     cg = ConcurrencyGroup(name="minds-pool")
     with cg:
         return cg.run_process_to_completion(
@@ -458,6 +515,121 @@ def _raise_on_failure(label: str, result: FinishedProcess) -> None:
         raise click.ClickException(f"mngr imbue_cloud admin pool {label} failed (exit {result.returncode}).")
 
 
+def _run_ovh_vps_pool_create(
+    *,
+    env_name: str,
+    count: int,
+    region: str,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
+    management_public_key_file: str | None,
+    database_url: str | None,
+    mngr_source: str | None,
+    is_recycle_enabled: bool,
+    is_deferred_install_wait_skipped: bool,
+) -> None:
+    """Resolve OVH creds + management key from Vault, then bake OVH-VPS pool hosts."""
+    try:
+        ovh_env = resolve_ovh_env_from_vault(env_name)
+    except VaultReadError as exc:
+        raise click.ClickException(f"Could not read OVH credentials from Vault for env '{env_name}': {exc}") from exc
+    try:
+        with resolved_management_public_key_path(
+            env_name, explicit_path=management_public_key_file
+        ) as effective_mgmt_pub_path:
+            args = build_create_admin_args(
+                env_name=env_name,
+                backend=_BACKEND_OVH_VPS,
+                count=count,
+                region=region,
+                from_tag=from_tag,
+                repo_url=repo_url,
+                workspace_dir=workspace_dir,
+                repo_branch_or_tag_override=repo_branch_or_tag_override,
+                attributes_json=attributes_json,
+                management_public_key_file=effective_mgmt_pub_path,
+                database_url=database_url,
+                mngr_source=mngr_source,
+                is_recycle_enabled=is_recycle_enabled,
+                is_dry_run=False,
+                is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+            )
+            _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
+    except VaultReadError as exc:
+        raise click.ClickException(
+            f"Could not read management SSH key from Vault for env '{env_name}': {exc}"
+        ) from exc
+
+
+def _run_slice_pool_create(
+    *,
+    env_name: str,
+    count: int,
+    region: str,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
+    management_public_key_file: str | None,
+    database_url: str | None,
+    mngr_source: str | None,
+    is_recycle_enabled: bool,
+    server_id: str | None,
+    is_dry_run: bool,
+    is_deferred_install_wait_skipped: bool,
+    max_concurrency: int | None,
+) -> None:
+    """Resolve the pool private key from Vault, then bake bare-metal slice pool hosts.
+
+    Rejects the ovh_vps-only flags up front (clearer than silently dropping them):
+    slices authorize the pool key from the tier's Vault entry at carve time and
+    never recycle an OVH VPS. Slice baking targets the explicitly-chosen
+    ``--server-id`` bare-metal box (see ``mngr imbue_cloud admin server list``).
+    """
+    if management_public_key_file is not None:
+        raise click.UsageError(
+            "--management-public-key-file is not applicable to --backend slice "
+            "(slices authorize the pool key from the tier's Vault entry at carve time)"
+        )
+    if not is_recycle_enabled:
+        raise click.UsageError("--no-recycle is not applicable to --backend slice")
+    if not server_id:
+        raise click.UsageError(
+            "--server-id is required for --backend slice (the bare-metal box to bake onto; "
+            "see `mngr imbue_cloud admin server list`)"
+        )
+    try:
+        pool_private_key = read_pool_private_key_from_vault(env_name)
+    except VaultReadError as exc:
+        raise click.ClickException(
+            f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
+        ) from exc
+    args = build_create_admin_args(
+        env_name=env_name,
+        backend=_BACKEND_SLICE,
+        count=count,
+        region=region,
+        from_tag=from_tag,
+        repo_url=repo_url,
+        workspace_dir=workspace_dir,
+        repo_branch_or_tag_override=repo_branch_or_tag_override,
+        attributes_json=attributes_json,
+        management_public_key_file=None,
+        database_url=database_url,
+        mngr_source=mngr_source,
+        is_recycle_enabled=is_recycle_enabled,
+        server_id=server_id,
+        is_dry_run=is_dry_run,
+        is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+        max_concurrency=max_concurrency,
+    )
+    _raise_on_failure("create", _run_admin_command(args, extra_env={_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}))
+
+
 @click.group()
 def pool() -> None:
     """Pool-host orchestration for the currently activated minds env."""
@@ -466,12 +638,26 @@ def pool() -> None:
 @pool.command(name="create")
 @click.option("--count", required=True, type=int, help="Number of pool hosts to create")
 @click.option(
+    "--backend",
+    type=click.Choice([_BACKEND_OVH_VPS, _BACKEND_SLICE]),
+    default=_BACKEND_OVH_VPS,
+    show_default=True,
+    help=(
+        "Which machine backs each pool host. ``ovh_vps`` orders an OVH classic VPS on demand; "
+        "``slice`` carves a lima VM on a pre-registered + prepped bare-metal box (see "
+        "`mngr imbue_cloud admin server`). Both bake the same FCT pool host and insert the same "
+        "kind of leasable row."
+    ),
+)
+@click.option(
     "--region",
     required=True,
     type=str,
     help=(
-        "OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). "
-        "Validated by OVH at order time."
+        "Lease/region code stamped on every new row (e.g. ``US-EAST-VA``, ``US-WEST-OR``) -- what "
+        "the connector region-matches at lease time. For ``ovh_vps`` it is also the OVH datacenter "
+        "the VPS is ordered in; for ``slice`` it is the lease-region label only (NOT the box's raw "
+        "datacenter code)."
     ),
 )
 @click.option(
@@ -515,7 +701,7 @@ def pool() -> None:
     default=None,
     type=click.Path(exists=True),
     help=(
-        "Override path for the management SSH public key injected on the pool VPS+container. "
+        "[ovh_vps only] Override path for the management SSH public key injected on the pool VPS+container. "
         "Default (omitted): derive from the activated tier's Vault entry "
         "`<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY` -- the same private key the connector "
         "loads from its `pool-ssh-<tier>` Modal Secret, which guarantees the lease-time SSH-key "
@@ -541,8 +727,34 @@ def pool() -> None:
     flag_value=False,
     default=True,
     help=(
-        "Force a fresh OVH VPS order instead of reclaiming a cancelled (still-billable) VPS. "
-        "Useful for testing the fresh-provision path. Forwarded to the admin command as --no-recycle."
+        "[ovh_vps only] Force a fresh OVH VPS order instead of reclaiming a cancelled (still-billable) "
+        "VPS. Useful for testing the fresh-provision path. Forwarded to the admin command as --no-recycle."
+    ),
+)
+@click.option(
+    "--server-id",
+    "server_id",
+    default=None,
+    help=(
+        "[slice only, required] The bare_metal_servers row id to bake the slices onto (from "
+        "`mngr imbue_cloud admin server list`). Slice baking targets an explicitly-chosen, ready box."
+    ),
+)
+@click.option(
+    "--dry-run",
+    "is_dry_run",
+    is_flag=True,
+    default=False,
+    help="[slice only] Report the chosen server + per-slice sizing; do not bake.",
+)
+@click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=None,
+    help=(
+        "[slice only] Max slices baked at once; the rest queue. Bounds box contention so each "
+        "`mngr create` stays under its timeout. Omitted: the admin CLI's default applies."
     ),
 )
 @click.option(
@@ -558,6 +770,7 @@ def pool() -> None:
 )
 def pool_create(
     count: int,
+    backend: str,
     region: str,
     from_tag: str | None,
     repo_url: str | None,
@@ -568,50 +781,64 @@ def pool_create(
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    server_id: str | None,
+    is_dry_run: bool,
+    max_concurrency: int | None,
     is_deferred_install_wait_skipped: bool,
 ) -> None:
-    """Create pool hosts for the activated minds env (OVH-backed via admin).
+    """Create pool hosts for the activated minds env (OVH VPS or bare-metal slice).
 
-    Reads the activated tier's OVH AK/AS/CK from Vault before invoking the
-    admin subcommand and injects them into the subprocess env, so the
-    operator never has to manually export them. Likewise derives the
-    management public key from the tier's ``<vault_path_prefix>/pool-ssh``
-    entry (unless ``--management-public-key-file`` overrides) -- the
-    activated env dictates which tier, which keeps "I'm on dev, I bake
-    against the dev OVH account using the dev management keypair" the
-    unambiguous default and makes the keypair-mismatch class of bake
-    failures unreachable for the standard path.
+    Resolves the activated tier's secrets from Vault so the operator never exports
+    them by hand: for ``ovh_vps`` the OVH AK/AS/CK plus the management public key
+    derived from ``<vault_path_prefix>/pool-ssh``; for ``slice`` the
+    POOL_SSH_PRIVATE_KEY (used to SSH the bare-metal box and carve the lima VM). The
+    activated env dictates the tier, keeping "I'm on dev, I bake against the dev
+    account using the dev keypair" the unambiguous default and making the
+    keypair-mismatch class of bake failures unreachable for the standard path.
     """
     env_name = require_activated_env_name()
-    try:
-        ovh_env = resolve_ovh_env_from_vault(env_name)
-    except VaultReadError as exc:
-        raise click.ClickException(f"Could not read OVH credentials from Vault for env '{env_name}': {exc}") from exc
+    if backend == _BACKEND_OVH_VPS and is_dry_run:
+        raise click.UsageError("--dry-run is only supported for --backend slice")
+    if backend == _BACKEND_OVH_VPS and max_concurrency is not None:
+        raise click.UsageError("--max-concurrency is only supported for --backend slice")
+    if backend == _BACKEND_OVH_VPS and server_id is not None:
+        raise click.UsageError("--server-id is only supported for --backend slice")
     effective_database_url = resolve_host_pool_dsn(env_name, database_url)
-    try:
-        with resolved_management_public_key_path(
-            env_name, explicit_path=management_public_key_file
-        ) as effective_mgmt_pub_path:
-            args = build_create_admin_args(
-                env_name=env_name,
-                count=count,
-                region=region,
-                from_tag=from_tag,
-                repo_url=repo_url,
-                workspace_dir=workspace_dir,
-                repo_branch_or_tag_override=repo_branch_or_tag_override,
-                attributes_json=attributes_json,
-                management_public_key_file=effective_mgmt_pub_path,
-                database_url=effective_database_url,
-                mngr_source=mngr_source,
-                is_recycle_enabled=is_recycle_enabled,
-                is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
-            )
-            _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
-    except VaultReadError as exc:
-        raise click.ClickException(
-            f"Could not read management SSH key from Vault for env '{env_name}': {exc}"
-        ) from exc
+    if backend == _BACKEND_SLICE:
+        _run_slice_pool_create(
+            env_name=env_name,
+            count=count,
+            region=region,
+            from_tag=from_tag,
+            repo_url=repo_url,
+            workspace_dir=workspace_dir,
+            repo_branch_or_tag_override=repo_branch_or_tag_override,
+            attributes_json=attributes_json,
+            management_public_key_file=management_public_key_file,
+            database_url=effective_database_url,
+            mngr_source=mngr_source,
+            is_recycle_enabled=is_recycle_enabled,
+            server_id=server_id,
+            is_dry_run=is_dry_run,
+            is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+            max_concurrency=max_concurrency,
+        )
+    else:
+        _run_ovh_vps_pool_create(
+            env_name=env_name,
+            count=count,
+            region=region,
+            from_tag=from_tag,
+            repo_url=repo_url,
+            workspace_dir=workspace_dir,
+            repo_branch_or_tag_override=repo_branch_or_tag_override,
+            attributes_json=attributes_json,
+            management_public_key_file=management_public_key_file,
+            database_url=effective_database_url,
+            mngr_source=mngr_source,
+            is_recycle_enabled=is_recycle_enabled,
+            is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+        )
 
 
 @pool.command(name="list")
@@ -648,26 +875,43 @@ def pool_list(database_url: str | None) -> None:
     "--skip-vps-cancel",
     is_flag=True,
     default=False,
-    help="Only drop the DB row; do NOT cancel the OVH VPS. Use only when the VPS is already gone.",
+    help=(
+        "Only drop the DB row; do NOT tear down the underlying machine (cancel the "
+        "OVH VPS for an ovh_vps row, or destroy the lima VM for a slice row). Use "
+        "only when the machine is already gone."
+    ),
 )
 def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
-    """Full teardown of a pool host: cancel its OVH VPS, then drop the row.
+    """Full teardown of a pool host: tear down its underlying machine, then drop the row.
 
-    Forwards to ``mngr imbue_cloud admin pool destroy``, which by default cancels
-    the underlying OVH VPS (so it can't strand a still-billing host) before
-    deleting the row. OVH credentials are read from the activated tier's Vault
-    entry and injected into the subprocess, mirroring ``pool create``. Pass
-    ``--skip-vps-cancel`` to only drop the row when the VPS is already gone.
+    Forwards to ``mngr imbue_cloud admin pool destroy``, which by default tears down
+    the row's underlying machine before deleting the row -- cancelling the OVH VPS for
+    an ``ovh_vps`` row, or destroying the lima VM (freeing the box slot) for a
+    ``slice`` row. The teardown secrets are read from the activated tier's Vault
+    entries and injected into the subprocess, mirroring ``pool create``. Pass
+    ``--skip-vps-cancel`` to only drop the row when the machine is already gone.
     """
     env_name = require_activated_env_name()
     extra_env: dict[str, str] | None = None
     if not skip_vps_cancel:
+        # The wrapper can't know the row's backend without an extra DB round-trip, so
+        # inject BOTH teardown secrets the admin command might need; it uses only the
+        # one matching the row's backend (OVH AK/AS/CK for an ovh_vps row,
+        # POOL_SSH_PRIVATE_KEY for a slice row). Every tier with pool hosts has both
+        # Vault entries (minds env deploy pushes both).
         try:
-            extra_env = resolve_ovh_env_from_vault(env_name)
+            ovh_env = resolve_ovh_env_from_vault(env_name)
         except VaultReadError as exc:
             raise click.ClickException(
                 f"Could not read OVH credentials from Vault for env '{env_name}': {exc}"
             ) from exc
+        try:
+            pool_private_key = read_pool_private_key_from_vault(env_name)
+        except VaultReadError as exc:
+            raise click.ClickException(
+                f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
+            ) from exc
+        extra_env = {**ovh_env, _POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}
     args = build_destroy_admin_args(
         pool_host_id=pool_host_id,
         database_url=resolve_host_pool_dsn(env_name, database_url),

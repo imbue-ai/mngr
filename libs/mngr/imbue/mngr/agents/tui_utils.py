@@ -64,16 +64,35 @@ def _check_paste_content(pane_content: str, message: str) -> bool:
     return probe in normalized_pane
 
 
-def wait_for_tui_ready(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, indicator: str) -> None:
-    """Wait until the TUI is ready by polling for ``indicator`` in the pane.
+def _pane_matches(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, indicator: str | re.Pattern[str]) -> bool:
+    content = agent._capture_pane_content(tmux_target)
+    if content is None:
+        return False
+    if isinstance(indicator, re.Pattern):
+        return indicator.search(content) is not None
+    return indicator in content
 
-    Raises ``SendMessageError`` on timeout. Without this check, input sent
-    before the TUI finishes rendering may be lost or appear as raw text.
+
+def wait_for_tui_ready(
+    agent: BaseAgent[Any],
+    tmux_target: TmuxWindowTarget,
+    indicator: str | re.Pattern[str],
+    timeout_seconds: float = _TUI_READY_TIMEOUT_SECONDS,
+) -> None:
+    """Wait until the TUI is ready by polling the pane for ``indicator``.
+
+    ``indicator`` is either a plain ``str`` (matched as an exact substring) or a
+    compiled ``re.Pattern`` (matched with ``re.search``) -- the type chooses the
+    matching mode. Raises ``SendMessageError`` on timeout. Without this check,
+    input sent before the TUI finishes rendering -- or while a resumed transcript
+    is still replaying -- may be lost or appear as raw text. Returns immediately
+    when the indicator already matches, so it is a cheap no-op once ready.
     """
-    with log_span("Waiting for TUI to be ready (looking for: {})", indicator):
+    label = indicator.pattern if isinstance(indicator, re.Pattern) else indicator
+    with log_span("Waiting for TUI to be ready (looking for: {})", label):
         if poll_until(
-            lambda: agent._check_pane_contains(tmux_target, indicator),
-            timeout=_TUI_READY_TIMEOUT_SECONDS,
+            lambda: _pane_matches(agent, tmux_target, indicator),
+            timeout=timeout_seconds,
         ):
             return
         pane_content = agent._capture_pane_content(tmux_target)
@@ -83,7 +102,7 @@ def wait_for_tui_ready(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, ind
             logger.error("TUI ready timeout -- failed to capture remote pane content")
         raise SendMessageError(
             str(agent.name),
-            f"Timeout waiting for TUI to be ready (waited {_TUI_READY_TIMEOUT_SECONDS:.1f}s)"
+            f"Timeout waiting for TUI to be ready (waited {timeout_seconds:.1f}s)"
             + (f"\nPane content:\n{pane_content}" if pane_content else ""),
         )
 

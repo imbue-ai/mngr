@@ -6,6 +6,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.13] - 2026-06-16
+
+### Added
+
+- Added: pi-coding agents now preserve transcripts (raw + common), the recorded session-file pointer, and pi's native resumable session store (`plugin/pi_coding/sessions`) on destroy — so the conversation content itself now survives (previously only the dangling pointer was kept once the store was deleted). New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. The credential `auth.json` is a path-separate sibling and is excluded.
+- Added: pi lifecycle extension now writes per-message usage events (cost + tokens) for `mngr usage`, gated on a `pi_emit_usage` marker that the new `imbue-mngr-pi-coding-usage` package provisions. Inert unless the gate marker is present, so behavior is unchanged for agents without the usage plugin installed.
+
 ## [v0.1.12] - 2026-06-16
 
 ## [v0.1.11] - 2026-06-15

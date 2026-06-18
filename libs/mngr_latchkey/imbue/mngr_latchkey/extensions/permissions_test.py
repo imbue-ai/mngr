@@ -17,6 +17,7 @@ Tests skip cleanly when Node is unavailable, mirroring the sibling
 extension test modules.
 """
 
+import contextlib
 import json
 import shutil
 import socket
@@ -28,6 +29,7 @@ import urllib.request
 from collections.abc import Generator
 from pathlib import Path
 from typing import Final
+from urllib.parse import quote
 
 import pytest
 
@@ -111,9 +113,9 @@ def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
     return False
 
 
-@pytest.fixture
-def node_extension() -> Generator[str, None, None]:
-    """Spawn the Node driver and yield the extension's base URL."""
+@contextlib.contextmanager
+def _spawn_node_extension(env: dict[str, str]) -> Generator[str, None, None]:
+    """Spawn the Node driver with ``env`` and yield the extension's base URL."""
     assert _NODE_BINARY is not None
     script = _build_node_driver_script()
     process = subprocess.Popen(
@@ -121,7 +123,7 @@ def node_extension() -> Generator[str, None, None]:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={"PATH": "/usr/bin:/bin"},
+        env=env,
         text=True,
     )
     try:
@@ -136,6 +138,13 @@ def node_extension() -> Generator[str, None, None]:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5.0)
+
+
+@pytest.fixture
+def node_extension() -> Generator[str, None, None]:
+    """Spawn the Node driver and yield the extension's base URL."""
+    with _spawn_node_extension({"PATH": "/usr/bin:/bin"}) as base_url:
+        yield base_url
 
 
 def _get_json(url: str) -> tuple[int, object]:
@@ -220,3 +229,35 @@ def test_available_for_unknown_service_returns_404(node_extension: str) -> None:
     status, _ = _get_json(f"{node_extension}/permissions/available/not-a-real-service")
 
     assert status == 404
+
+
+def _post_json(url: str, body: object) -> tuple[int, object]:
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            return int(response.status), json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        return int(e.code), None
+
+
+def test_post_rule_creates_missing_host_directory(tmp_path: Path) -> None:
+    """``POST /permissions/rules`` materializes the parent host directory if absent.
+
+    Regression test: the minds desktop grant flow targets
+    ``<root>/hosts/<host_id>/latchkey_permissions.json``, whose ``hosts/<id>/``
+    directory may not have been created yet (e.g. agent creation's
+    finalize/link step was skipped or failed). The atomic write must create the
+    directory and succeed rather than failing with ENOENT (a confusing 500).
+    """
+    target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
+    assert not target.parent.exists()
+    env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}
+    with _spawn_node_extension(env) as base_url:
+        url = f"{base_url}/permissions/rules?path={quote(str(target))}&rule_key=slack-api"
+        status, payload = _post_json(url, ["any"])
+
+    assert status == 201, payload
+    assert target.is_file()
+    on_disk = json.loads(target.read_text())
+    assert on_disk["rules"] == [{"slack-api": ["any"]}]

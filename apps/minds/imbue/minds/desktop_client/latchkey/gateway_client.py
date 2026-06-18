@@ -533,7 +533,8 @@ class LatchkeyGatewayClient(MutableModel):
 
         Wraps ``POST /permissions/rules?path=<...>&rule_key=<...>`` with
         a JSON-array body of permission-schema names. The extension
-        creates the target file if it does not yet exist; it refuses
+        creates the target file (and any missing parent directories,
+        e.g. ``hosts/<host_id>/``) if it does not yet exist; it refuses
         any path outside ``LATCHKEY_EXTENSION_PERMISSIONS_ROOT`` with
         a 403, which we surface verbatim so misconfigurations are
         loud.

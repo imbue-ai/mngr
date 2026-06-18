@@ -1,1 +1,0 @@
-In the predefined permission request dialog, the catch-all permission is now labelled `all` instead of `any` so it reads more clearly (the underlying value stored and granted is still `any`). While `all` is checked, the specific-permission checkboxes are disabled (they keep their own checked state); unchecking `all` re-enables them.

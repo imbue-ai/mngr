@@ -6,6 +6,19 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.3] - 2026-06-16
+
+### Added
+
+- Added: codex agents now preserve transcripts (raw + common), the root session-id history, and the native resumable rollout session store (`CODEX_HOME/sessions`) on destroy, closing the carried-forward session-preservation gap and matching the claude plugin. New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. The auth-token symlink and config sit as siblings in `CODEX_HOME` and are excluded.
+- Added: codex background-tasks supervisor launches and supervises an optional usage writer (`codex_usage.sh`) when it's present in the agent's `commands/` dir (installed by the new `imbue-mngr-codex-usage` package), alongside the existing raw/common transcript watchers. No change for agents without the usage plugin installed.
+
+### Changed
+
+- Changed: codex now flushes the common transcript at turn end — when the root turn finishes with no in-flight subagents (the agent goes WAITING), the Stop / SubagentStop hooks run one synchronous `--single-pass` conversion. A consumer harvesting the final message on the WAITING signal no longer races the 5s converter daemon. Matches claude and antigravity.
+- Changed: Common-transcript converter's rollout-to-common conversion logic moved out of the inline `python3` heredoc into a standalone `common_transcript_convert.py` (provisioned alongside `common_transcript.sh`), so it is type-checked, linted, and unit-tested directly. Malformed rollout lines and unreadable existing-output lines are dropped silently.
+- Changed: Common-transcript watcher no longer echoes converter errors to the agent's pane — a genuine conversion error is recorded in the structured log only.
+
 ## [v0.1.2] - 2026-06-16
 
 ### Added

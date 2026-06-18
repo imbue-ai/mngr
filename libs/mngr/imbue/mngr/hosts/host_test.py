@@ -33,6 +33,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
+from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
 from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
@@ -779,6 +780,27 @@ def test_build_start_agent_shell_command_includes_unset_vars(
     unset_pos = result.index("unset")
     new_session_pos = result.index("new-session")
     assert unset_pos < new_session_pos
+
+
+def test_build_start_agent_shell_command_sources_config_after_new_session(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """mngr's config is sourced at agent creation, after new-session.
+
+    The user's own config is pulled in at tmux server start; mngr's is not, so it
+    is sourced explicitly. The step is non-fatal: it is wrapped in a subshell that
+    scopes '|| true' to this step alone, so a cosmetic-config error does not abort
+    the agent-start chain (and a failure of an earlier step is not masked).
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    assert result.index("new-session") < result.index("source-file")
+    # Wrapped in a subshell so '|| true' scopes to this step alone.
+    assert "(tmux source-file" in result
+    assert "|| true)" in result
 
 
 def test_build_start_agent_shell_command_includes_additional_windows(
@@ -3042,28 +3064,38 @@ def test_host_create_host_tmux_config_creates_file(
     assert config_path.exists()
 
     content = config_path.read_text()
-    assert "source-file" in content
     assert "C-q" in content
     assert "C-t" in content
 
 
-def test_host_create_host_tmux_config_widens_status_left_before_user_config(
+def test_host_create_host_tmux_config_contains_mngr_settings(
     local_host: Host,
     temp_host_dir: Path,
 ) -> None:
-    """The config must set status-left-length before sourcing the user's config.
+    """The config sets mngr's status-left-length and set-titles options."""
+    host = local_host
+    content = host._create_host_tmux_config().read_text()
 
-    Ordering is what makes the widening overridable: a status-left-length set in
-    the user's ~/.tmux.conf is sourced afterwards and therefore wins.
+    assert f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}" in content
+    assert "set -g set-titles on" in content
+    assert f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"' in content
+
+
+def test_host_create_host_tmux_config_does_not_source_user_config(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """The generated config must not source the user's ~/.tmux.conf.
+
+    tmux loads ~/.tmux.conf itself when the server starts; re-sourcing it from
+    mngr's config on every agent creation would re-run non-idempotent user
+    config (e.g. 'set -ag', plugin 'run-shell') and corrupt their setup.
     """
     host = local_host
     content = host._create_host_tmux_config().read_text()
 
-    widen_line = f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}"
-    assert widen_line in content
-    assert content.index(widen_line) < content.index("source-file"), (
-        "status-left-length must be set before the user config is sourced so the user can override it"
-    )
+    assert "~/.tmux.conf" not in content
+    assert "source-file" not in content
 
 
 # =========================================================================

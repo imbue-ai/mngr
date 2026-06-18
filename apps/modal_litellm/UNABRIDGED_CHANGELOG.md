@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Added a drift test (`mngr_usage_pricing_drift_test.py`) asserting that every Anthropic model this app prices inline also exists in `mngr_usage`'s token-pricing table with identical per-token prices. `mngr_usage` mirrors these numbers verbatim (it can't share them by import -- this app deploys into a Modal image with none of the imbue packages), so the test makes that mirror enforceable: changing an Anthropic price on either side without the other now fails CI. No runtime change to the app.
+
 ## 2026-06-05
 
 Expanded the LiteLLM proxy's supported model list to cover the full current Anthropic Claude lineup: added `claude-opus-4-8` (latest Opus), `claude-opus-4-6`, `claude-opus-4-5`, `claude-opus-4-1`, `claude-sonnet-4-5`, and the bare `claude-haiku-4-5` alias, alongside the previously supported `claude-opus-4-7`, `claude-sonnet-4-6`, and the dated Opus 4 / Sonnet 4 / Haiku 4.5 ids. Each model now carries inline per-token pricing (input, output, cache-write, cache-read) registered via `litellm_params`, mirrored from litellm's price map, so cost tracking is accurate even on litellm versions whose bundled price map predates a model. Added `config_drift_test.py`, which fails CI if `app.py`'s model list and the local-dev `litellm_proxy/config.yaml` ever diverge.

@@ -4,6 +4,19 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+## GCP provider
+
+- The GCP release-test settings now also disable the `azure` provider (`[providers.azure] is_enabled = false`), mirroring the existing modal/aws/vultr/ovh disables. Without it, `mngr list` inside the GCP lifecycle tests would enumerate the newly-added azure provider and exit non-zero when Azure credentials weren't resolvable in that subprocess, failing the GCP tests for a non-GCP reason.
+
+- `mngr gcp prepare` / `mngr gcp cleanup` group their GCP-specific options under a "Provider" option group, so `--help` and the generated docs list them ahead of the shared common options instead of below them.
+
+Removed the dead VPS client methods `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` (and the now-unused `_boot_disk_source` helper and snapshots compute client) from `GcpVpsClient`. These had no production callers and are being dropped from the shared `VpsClientInterface`. The corresponding unit and release tests, plus the `FakeSnapshotsClient` test helper, were removed as well.
+
+
+The `mngr_gcp` README's snapshot note now states the GCP client exposes no disk-snapshot surface (rather than naming the removed `create_snapshot` / `list_snapshots` / `delete_snapshot` methods).
+
 ## 2026-06-15
 
 ## GCP Compute Engine provider
