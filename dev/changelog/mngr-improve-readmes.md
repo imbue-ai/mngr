@@ -3,3 +3,5 @@ Removed a monorepo-development-only paragraph (the `~/.local/bin` pre-commit shi
 `make_cli_docs.py` now also generates the provider/agent config tables in each plugin README from the Pydantic field descriptions (the source of truth, also shown by `mngr config`), spliced between markers and verified by the docs `--check` gate so the tables can no longer drift from the code.
 
 The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs, and its trigger now includes the provider/agent `config.py` / `plugin.py` sources and generated provider READMEs. Previously, drift in the generated provider README tables could slip past the hook.
+
+`make_cli_docs.py` now fails if a config field is neither shown in its README table nor listed in the table's `excluded_fields`, so a field added to a config model can no longer silently vanish from the generated table.
