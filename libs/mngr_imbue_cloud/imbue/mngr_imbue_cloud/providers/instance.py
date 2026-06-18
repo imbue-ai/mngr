@@ -95,7 +95,7 @@ from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
-from imbue.mngr.providers.ssh_host_setup import get_user_ssh_dir
+from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
@@ -1584,8 +1584,9 @@ class ImbueCloudProvider(BaseProviderInstance):
                 outer, f"start {shlex.quote(container_id)}", host_id=host_id, label="docker-start"
             )
             logger.debug("Started container {} for host {}", container_id, host_id)
-            # sshd was launched via ``docker exec`` and does not survive the stop,
-            # so relaunch it; otherwise the wait below (and the later
+            # The container's CMD is just a sleep, so a freshly started container
+            # is not running sshd (it is launched via ``docker exec``, never the
+            # entrypoint); launch it. Otherwise the wait below (and the later
             # ``mngr start`` SSH) would hang until timeout and the mind would be
             # unrecoverable.
             start_container_sshd(outer, container_id)
@@ -1607,9 +1608,10 @@ class ImbueCloudProvider(BaseProviderInstance):
     def _reseed_container_authorized_key(self, outer: OuterHostInterface, container_id: str, host_id: HostId) -> None:
         """Re-add the per-host public key to the container's root ``authorized_keys``.
 
-        Idempotent at the file level: the key is appended only if it isn't
-        already present, so repeated resumes (on a host where ``/root`` did
-        persist) don't accumulate duplicate lines.
+        Delegates to ``build_add_authorized_keys_command`` -- the same builder
+        that seeds the key at lease time -- which is idempotent: the key is
+        appended only if it isn't already present, so repeated resumes (on a host
+        where ``/root`` did persist) don't accumulate duplicate lines.
         """
         _, public_key_path = self._host_keypair_paths(host_id)
         if not public_key_path.exists():
@@ -1617,15 +1619,9 @@ class ImbueCloudProvider(BaseProviderInstance):
         public_key = public_key_path.read_text().strip()
         if not public_key:
             return
-        ssh_dir = get_user_ssh_dir("root")
-        authorized_keys_path = ssh_dir / "authorized_keys"
-        quoted_key = shlex.quote(public_key)
-        command = (
-            f"mkdir -p {shlex.quote(str(ssh_dir))} && touch {shlex.quote(str(authorized_keys_path))} && "
-            f"chmod 600 {shlex.quote(str(authorized_keys_path))} && "
-            f"grep -qxF {quoted_key} {shlex.quote(str(authorized_keys_path))} || "
-            f"printf '%s\\n' {quoted_key} >> {shlex.quote(str(authorized_keys_path))}"
-        )
+        command = build_add_authorized_keys_command("root", (public_key,))
+        if command is None:
+            return
         exec_in_container(outer, container_id, command)
 
     def destroy_host(self, host: HostInterface | HostId) -> None:

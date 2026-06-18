@@ -246,6 +246,32 @@ def test_build_add_authorized_keys_command_regular_user() -> None:
     assert "/root" not in cmd
 
 
+def test_build_add_authorized_keys_command_is_idempotent(tmp_path: Path) -> None:
+    """Re-running the command must not duplicate entries.
+
+    The imbue_cloud restart re-seed relies on this: on a host whose ``/root``
+    persisted across the stop/start, the key is already present and a second run
+    must leave the file unchanged rather than appending a duplicate line.
+    """
+    key_a = "ssh-ed25519 AAAAkeyA user-a@host"
+    key_b = "ssh-ed25519 AAAAkeyB user-b@host"
+    cmd = build_add_authorized_keys_command("bob", (key_a, key_b))
+    assert cmd is not None
+    # Redirect the hard-coded /home/bob/.ssh path at a writable temp dir so the
+    # generated shell can actually run and we can inspect the file it produces.
+    ssh_dir = tmp_path / "dot_ssh"
+    runnable = cmd.replace("/home/bob/.ssh", str(ssh_dir))
+    authorized_keys = ssh_dir / "authorized_keys"
+
+    for _ in range(2):
+        subprocess.run(["sh", "-c", runnable], check=True)
+
+    lines = authorized_keys.read_text().splitlines()
+    # Both keys present, each exactly once despite running the command twice.
+    assert lines.count(key_a) == 1
+    assert lines.count(key_b) == 1
+
+
 # =============================================================================
 # Activity Watcher Shell Function Tests
 #
