@@ -38,6 +38,7 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
+from collections.abc import Sequence
 from pathlib import Path
 
 import boto3
@@ -45,6 +46,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.client import AwsVpsClient
@@ -55,8 +57,11 @@ from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
+from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.testing import VpsCloudReleaseProfile
+from imbue.mngr_vps.testing import find_handle_by_launched_label
 
 pytestmark = [
     pytest.mark.release,
@@ -765,6 +770,53 @@ def test_bare_provider_idle_watcher_auto_stops_then_resumes(
         _run_mngr(settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
         if instance_id is not None:
             _terminate_instance_best_effort(aws_release_client, VpsInstanceId(instance_id))
+
+
+# =============================================================================
+# Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
+# sketchy kill -> gc), parametrized over isolation mode. See
+# `imbue.mngr.providers.provider_release_testing` and
+# `specs/provider-release-tests.md`.
+# =============================================================================
+
+
+class _AwsReleaseProfile(VpsCloudReleaseProfile):
+    """AWS plumbing for the shared provider release trip."""
+
+    provider_name = "aws"
+    name_prefix = AWS_TEST_NAME_PREFIX
+
+    def __init__(self, client: AwsVpsClient, isolation: IsolationMode) -> None:
+        super().__init__(client, isolation)
+        self._aws_client = client
+
+    def unavailable_reason(self) -> str | None:
+        if not (aws_credentials_available() and AWS_RELEASE_TESTS_OPT_IN):
+            return "AWS credentials or MNGR_AWS_RELEASE_TESTS=1 not set"
+        return None
+
+    def write_settings(self, settings_dir: Path) -> None:
+        _write_release_settings(settings_dir, isolation="NONE" if self._isolation is IsolationMode.NONE else None)
+
+    def create_extra_args(self) -> Sequence[str]:
+        return ()
+
+    def find_launched_host_handle(self, host_name: str) -> str | None:
+        return find_handle_by_launched_label(self._aws_client.list_instances(), AWS_PYTEST_LAUNCHED_TAG)
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip1(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+    _aws_release_test_security_group_prepared: None,
+) -> None:
+    run_provider_release_trip1(
+        _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
+    )
 
 
 # =============================================================================

@@ -34,12 +34,15 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
 
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
@@ -52,6 +55,9 @@ from imbue.mngr_azure.testing import AZURE_TEST_NAME_PREFIX
 from imbue.mngr_azure.testing import AZURE_TEST_VM_SIZE
 from imbue.mngr_azure.testing import azure_credentials_available
 from imbue.mngr_azure.testing import get_default_subscription_id
+from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.testing import VpsCloudReleaseProfile
+from imbue.mngr_vps.testing import find_handle_by_launched_label
 
 pytestmark = [
     pytest.mark.release,
@@ -483,6 +489,61 @@ def test_bare_provider_lifecycle_create_exec_and_destroy(
         assert "azure" in result.stdout
     finally:
         _run_mngr(azure_bare_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
+
+
+# =============================================================================
+# Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
+# sketchy kill -> gc), parametrized over isolation mode. See
+# `imbue.mngr.providers.provider_release_testing` and
+# `specs/provider-release-tests.md`.
+# =============================================================================
+
+
+class _AzureReleaseProfile(VpsCloudReleaseProfile):
+    """Azure plumbing for the shared provider release trip."""
+
+    provider_name = "azure"
+    name_prefix = AZURE_TEST_NAME_PREFIX
+
+    def __init__(self, client: AzureVpsClient, isolation: IsolationMode, subscription_id: str) -> None:
+        super().__init__(client, isolation)
+        self._azure_client = client
+        self._subscription_id = subscription_id
+
+    def unavailable_reason(self) -> str | None:
+        if not (azure_credentials_available() and AZURE_RELEASE_TESTS_OPT_IN):
+            return "Azure credentials or MNGR_AZURE_RELEASE_TESTS=1 not set"
+        return None
+
+    def write_settings(self, settings_dir: Path) -> None:
+        _write_release_settings(
+            settings_dir,
+            self._subscription_id,
+            isolation="NONE" if self._isolation is IsolationMode.NONE else None,
+        )
+
+    def create_extra_args(self) -> Sequence[str]:
+        return ()
+
+    def find_launched_host_handle(self, host_name: str) -> str | None:
+        return find_handle_by_launched_label(self._azure_client.list_instances(), AZURE_PYTEST_LAUNCHED_TAG)
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip1(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    azure_release_client: AzureVpsClient,
+    azure_release_subscription_id: str,
+    _azure_release_test_network_prepared: None,
+) -> None:
+    run_provider_release_trip1(
+        _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
+        tmp_path,
+        temp_git_repo,
+    )
 
 
 # =============================================================================

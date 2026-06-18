@@ -42,11 +42,14 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
+from collections.abc import Sequence
 from pathlib import Path
 
 import google.auth
 import pytest
 
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.testing import GCP_DEFAULT_REGION
 from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
@@ -55,6 +58,9 @@ from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_gcp.testing import GCP_TEST_NAME_PREFIX
 from imbue.mngr_gcp.testing import gcp_credentials_available
 from imbue.mngr_gcp.testing import get_default_project
+from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.testing import VpsCloudReleaseProfile
+from imbue.mngr_vps.testing import find_handle_by_launched_label
 
 pytestmark = [
     pytest.mark.release,
@@ -427,6 +433,57 @@ def test_bare_provider_lifecycle_create_exec_and_destroy(
         assert "gcp" in result.stdout
     finally:
         _run_mngr(gcp_bare_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
+
+
+# =============================================================================
+# Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
+# sketchy kill -> gc), parametrized over isolation mode. See
+# `imbue.mngr.providers.provider_release_testing` and
+# `specs/provider-release-tests.md`.
+# =============================================================================
+
+
+class _GcpReleaseProfile(VpsCloudReleaseProfile):
+    """GCP plumbing for the shared provider release trip."""
+
+    provider_name = "gcp"
+    name_prefix = GCP_TEST_NAME_PREFIX
+
+    def __init__(self, client: GcpVpsClient, isolation: IsolationMode, project: str) -> None:
+        super().__init__(client, isolation)
+        self._gcp_client = client
+        self._project = project
+
+    def unavailable_reason(self) -> str | None:
+        if not (gcp_credentials_available() and GCP_RELEASE_TESTS_OPT_IN):
+            return "GCP ADC or MNGR_GCP_RELEASE_TESTS=1 not set"
+        return None
+
+    def write_settings(self, settings_dir: Path) -> None:
+        _write_release_settings(
+            settings_dir, self._project, isolation="NONE" if self._isolation is IsolationMode.NONE else None
+        )
+
+    def create_extra_args(self) -> Sequence[str]:
+        return ()
+
+    def find_launched_host_handle(self, host_name: str) -> str | None:
+        return find_handle_by_launched_label(self._gcp_client.list_instances(), GCP_PYTEST_LAUNCHED_LABEL)
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip1(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    gcp_release_client: GcpVpsClient,
+    gcp_release_test_project: str,
+    _gcp_release_test_firewall_prepared: None,
+) -> None:
+    run_provider_release_trip1(
+        _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
+    )
 
 
 # =============================================================================
