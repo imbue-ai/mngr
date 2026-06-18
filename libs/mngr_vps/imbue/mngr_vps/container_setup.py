@@ -454,7 +454,7 @@ def start_container(outer: OuterHostInterface, container_name: str) -> None:
     normal start is just one ``docker start``; the cleanup only triggers on the
     gVisor self-overlay filestore collision. Raises ``MngrError`` if the
     container still fails to start. Shared by every docker-based provider
-    (vps_docker / ovh / lima), all of which run the agent container under runsc.
+    (mngr_vps / ovh / lima), all of which run the agent container under runsc.
     """
     script = _build_start_container_script(container_name)
     result = outer.execute_idempotent_command(

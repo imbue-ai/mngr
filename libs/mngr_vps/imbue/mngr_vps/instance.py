@@ -450,13 +450,11 @@ class VpsProvider(BaseProviderInstance):
     # =========================================================================
     # Host Store
     # =========================================================================
-    # The store is opened via ``open_host_store(outer, volume_name)`` (free
-    # function in ``host_store``) which resolves the volume's bind-source path
-    # via ``docker volume inspect --format '{{.Options.device}}'`` -- the docker
-    # named volume is a bind-options entry pointing at the per-host btrfs
-    # subvolume, so ``Options.device`` (not the unused ``Mountpoint``
-    # placeholder under ``/var/lib/docker/volumes``) is the real on-disk path.
-    # This used to be the per-user state container.
+    # The substrate opens the store via ``self._realizer.open_host_store(outer,
+    # host_id)``; where the ``host_state.json`` + ``agents/`` layout physically
+    # lives is the realizer's concern (the container realizer resolves the
+    # per-host docker volume's bind-source path; the bare realizer points at a
+    # fixed root-disk directory).
 
     # =========================================================================
     # Host Object Construction
