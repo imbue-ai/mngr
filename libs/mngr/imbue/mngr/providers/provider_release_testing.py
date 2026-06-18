@@ -93,10 +93,9 @@ class ProviderReleaseProfile(abc.ABC):
     # whether ``mngr stop --stop-host`` is expected to really stop the machine or to refuse
     # loudly. ``supports_snapshots`` is the *effective* value for this profile's shape (the
     # provider sets it False for a bare/no-container shape even when the container shape
-    # supports snapshots). ``has_prepare`` gates the operator-setup expectation.
+    # supports snapshots).
     supports_shutdown_hosts: bool
     supports_snapshots: bool
-    has_prepare: bool
 
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:

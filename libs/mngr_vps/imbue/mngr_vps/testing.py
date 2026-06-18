@@ -42,7 +42,6 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
     """
 
     supports_shutdown_hosts = True
-    has_prepare = True
 
     def __init__(self, client: VpsClientInterface, isolation: IsolationMode) -> None:
         self._client = client

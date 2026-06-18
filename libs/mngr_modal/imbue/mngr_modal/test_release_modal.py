@@ -141,7 +141,6 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
     # so the harness takes the refusal branch for ``mngr stop --stop-host``.
     supports_shutdown_hosts = False
     supports_snapshots = True
-    has_prepare = False
 
     def __init__(self, provider: ModalProviderInstance, user_id: str, app_name: str) -> None:
         self._provider = provider
