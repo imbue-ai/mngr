@@ -22,8 +22,6 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
-from imbue.mngr.interfaces.data_types import CleanupFailure
-from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -45,7 +43,7 @@ from imbue.mngr_vps.host_state_store import NullHostDirBackend
 from imbue.mngr_vps.host_state_store import StateBucket
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
-from imbue.mngr_vps.instance import is_vps_resource_already_gone
+from imbue.mngr_vps.instance import attempt_cloud_resource_teardown
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.systemd import render_systemd_unit
 
@@ -291,18 +289,24 @@ class OfflineCapableVpsProvider(VpsProvider):
         return super().start_host(host_id, snapshot_id)
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
-        """Destroy a host, falling back to a cloud-API teardown when it is stopped.
+        """Destroy a host, taking a cloud-API teardown path when its instance is stopped.
 
-        The base ``VpsProvider.destroy_host`` resolves the instance through the
-        SSH/volume host record, so a STOPPED (deallocated / powered-off) instance --
-        whose disk persists but whose OS is down -- makes it raise
-        ``HostNotFoundError`` and leak the still-billing instance and its mirrored
-        state. This override runs the base teardown first (it succeeds for a running
-        host), and on that ``HostNotFoundError`` falls back to the offline path: it
-        resolves the instance from its ``mngr-host-id`` tag/label (no SSH), terminates
-        it through the same ``vps_client.destroy_instance`` primitive the online path
-        uses, and deletes the external state (host + agent records, and any captured
-        ``host_dir`` objects).
+        The base ``VpsProvider.destroy_host`` tears the host down over SSH using its
+        host record, which works only while the instance is reachable. A STOPPED
+        (deallocated / powered-off) instance -- whose disk persists but whose OS is
+        down -- has no reachable address, so the base path either raises
+        ``HostNotFoundError`` (no record found) or, worse, runs a doomed SSH teardown
+        against a stale cached ``vps_ip`` and leaks the still-billing instance.
+
+        So we dispatch up front on the instance's own power state (resolved from its
+        ``mngr-host-id`` tag/label -- no SSH): a stopped instance goes straight to the
+        offline teardown, which terminates it through the same
+        ``vps_client.destroy_instance`` primitive the online path uses and deletes the
+        external state (host + agent records, captured ``host_dir``). A running
+        instance, or one that cannot be resolved at all, delegates to the base path;
+        if that still raises ``HostNotFoundError`` (the instance is gone from the
+        listing but a stale record remains), we fall back to the offline teardown,
+        which is idempotent for an already-gone instance.
 
         Failing loudly is the point: a termination that could not be carried out
         raises a ``CleanupFailedGroup`` (non-zero exit) rather than reporting success,
@@ -310,51 +314,48 @@ class OfflineCapableVpsProvider(VpsProvider):
         already-gone instance (absent from the listing) is idempotent success -- the
         external state is still cleaned up.
         """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        # Dispatch on the instance's own power state, not the (possibly stale) cached
+        # host record, so a stopped instance never reaches the base SSH teardown.
+        instance = self._find_instance_for_host(host_id)
+        if instance is not None and self._is_instance_offline(instance):
+            logger.info("Host {} is stopped; destroying it via the offline path", host_id)
+            self._destroy_offline_host(host_id, instance)
+            return
         try:
             super().destroy_host(host)
-            return
         except HostNotFoundError:
-            pass
-        host_id = host.id if isinstance(host, HostInterface) else host
-        logger.info("Host {} is unreachable; destroying it via the offline path", host_id)
-        self._destroy_offline_host(host_id)
+            logger.info("Host {} is unreachable; destroying it via the offline path", host_id)
+            # The base could not reach the host but the dispatch above resolved no
+            # *offline* instance; pass the (possibly None) instance through so the
+            # offline teardown does not re-list and an absent instance is idempotent.
+            self._destroy_offline_host(host_id, instance)
 
-    def _destroy_offline_host(self, host_id: HostId) -> None:
+    def _destroy_offline_host(self, host_id: HostId, instance: dict[str, Any] | None) -> None:
         """Terminate a stopped host's instance via the cloud API and delete its external state.
 
-        Resolves the instance from its identity tag/label (the listing excludes
-        already-terminated instances, so an absent instance is benign). Terminates
-        through ``vps_client.destroy_instance`` and records a real failure -- raised as
-        a ``CleanupFailedGroup`` -- when the instance exists but could not be
-        terminated, so the still-billing instance is never reported as gone. The
-        per-host provider SSH key (recovered from the mirrored record) and the external
-        state (host + agent records, captured ``host_dir``) are cleaned up last,
-        including in the already-gone case.
+        ``instance`` is the host's instance as already resolved by the caller from the
+        cheap tag/label listing (``None`` when it is absent -- already terminated --
+        which the listing excludes). Terminates through ``vps_client.destroy_instance``
+        and records a real failure -- raised as a ``CleanupFailedGroup`` -- when the
+        instance exists but could not be terminated, so the still-billing instance is
+        never reported as gone. The per-host provider SSH key (recovered from the
+        mirrored record) and the external state (host + agent records, captured
+        ``host_dir``) are cleaned up last, including in the already-gone case.
         """
         self._evict_cached_host(host_id)
         with collecting_cleanup_failures() as failures:
-            # Terminate the (still-billing) instance first, before any state-store
-            # read -- a flaky mirror read must never block the billing-critical step.
-            instance = self._find_instance_for_host(host_id)
             # An instance still present in the listing must be terminated; an absent
             # one is already gone (benign) and only its external state is cleaned up.
             if instance is not None:
                 instance_id = VpsInstanceId(instance["id"])
                 with log_span("Terminating stopped cloud instance {}", instance_id):
-                    try:
-                        self.vps_client.destroy_instance(instance_id)
-                    except MngrError as e:
-                        logger.warning("Failed to terminate stopped instance {}: {}", instance_id, e)
-                        if not is_vps_resource_already_gone(e):
-                            failures.append(
-                                CleanupFailure(
-                                    category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                    message=(
-                                        f"failed to terminate stopped instance {instance_id} for host {host_id}: {e}"
-                                    ),
-                                    host_id=host_id,
-                                )
-                            )
+                    attempt_cloud_resource_teardown(
+                        lambda: self.vps_client.destroy_instance(instance_id),
+                        resource_description=f"stopped instance {instance_id}",
+                        host_id=host_id,
+                        failures=failures,
+                    )
             else:
                 logger.debug(
                     "No instance found for stopped host {}; treating its termination as already done", host_id
@@ -368,18 +369,12 @@ class OfflineCapableVpsProvider(VpsProvider):
             mirrored_record = self._state_store.read_host_record(host_id)
             ssh_key_id = mirrored_record.config.vps_ssh_key_id if mirrored_record and mirrored_record.config else None
             if ssh_key_id is not None:
-                try:
-                    self.vps_client.delete_ssh_key(ssh_key_id)
-                except MngrError as e:
-                    logger.warning("Failed to delete SSH key from provider: {}", e)
-                    if not is_vps_resource_already_gone(e):
-                        failures.append(
-                            CleanupFailure(
-                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                message=f"failed to delete SSH key {ssh_key_id} for host {host_id}: {e}",
-                                host_id=host_id,
-                            )
-                        )
+                attempt_cloud_resource_teardown(
+                    lambda: self.vps_client.delete_ssh_key(ssh_key_id),
+                    resource_description=f"SSH key {ssh_key_id}",
+                    host_id=host_id,
+                    failures=failures,
+                )
 
             # Delete the external mirror last, so the host stops appearing in offline
             # listings only once the instance is actually gone (or was already gone).
