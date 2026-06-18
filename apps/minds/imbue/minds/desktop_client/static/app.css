@@ -49,39 +49,40 @@
 :root,
 .light {
   /* regular text (on the default surface) -- black in light mode */
-  --c-primary: #000000;
-  --c-secondary: rgb(0 0 0 / 0.65);
-  --c-tertiary: rgb(0 0 0 / 0.45);
+  --c-text-primary: #000000;
+  --c-text-secondary: rgb(0 0 0 / 0.65);
+  --c-text-tertiary: rgb(0 0 0 / 0.45);
   /* inverse text (on an inverted surface) -- white in light mode */
-  --c-inverse-primary: #ffffff;
-  --c-inverse-secondary: rgb(255 255 255 / 0.70);
-  --c-inverse-tertiary: rgb(255 255 255 / 0.50);
-  /* borders -- black at three alpha steps in light mode (Figma 10/16/25%) */
+  --c-text-inverse-primary: #ffffff;
+  --c-text-inverse-secondary: rgb(255 255 255 / 0.70);
+  --c-text-inverse-tertiary: rgb(255 255 255 / 0.50);
+  /* borders -- black at three alpha steps in light mode (10 / 17 / 25%;
+     default nudged up from Figma's 16% for a touch more definition) */
   --c-border-subtle: rgb(0 0 0 / 0.10);
-  --c-border-default: rgb(0 0 0 / 0.16);
+  --c-border-default: rgb(0 0 0 / 0.17);
   --c-border-strong: rgb(0 0 0 / 0.25);
 }
 .dark {
   /* regular text -- white in dark mode */
-  --c-primary: #ffffff;
-  --c-secondary: rgb(255 255 255 / 0.70);
-  --c-tertiary: rgb(255 255 255 / 0.50);
+  --c-text-primary: #ffffff;
+  --c-text-secondary: rgb(255 255 255 / 0.70);
+  --c-text-tertiary: rgb(255 255 255 / 0.50);
   /* inverse text -- black in dark mode */
-  --c-inverse-primary: #000000;
-  --c-inverse-secondary: rgb(0 0 0 / 0.65);
-  --c-inverse-tertiary: rgb(0 0 0 / 0.45);
+  --c-text-inverse-primary: #000000;
+  --c-text-inverse-secondary: rgb(0 0 0 / 0.65);
+  --c-text-inverse-tertiary: rgb(0 0 0 / 0.45);
   /* borders -- white at the same alpha steps in dark mode */
   --c-border-subtle: rgb(255 255 255 / 0.10);
-  --c-border-default: rgb(255 255 255 / 0.16);
+  --c-border-default: rgb(255 255 255 / 0.17);
   --c-border-strong: rgb(255 255 255 / 0.25);
 }
 @theme inline {
-  --color-primary: var(--c-primary);
-  --color-secondary: var(--c-secondary);
-  --color-tertiary: var(--c-tertiary);
-  --color-inverse-primary: var(--c-inverse-primary);
-  --color-inverse-secondary: var(--c-inverse-secondary);
-  --color-inverse-tertiary: var(--c-inverse-tertiary);
+  --color-primary: var(--c-text-primary);
+  --color-secondary: var(--c-text-secondary);
+  --color-tertiary: var(--c-text-tertiary);
+  --color-inverse-primary: var(--c-text-inverse-primary);
+  --color-inverse-secondary: var(--c-text-inverse-secondary);
+  --color-inverse-tertiary: var(--c-text-inverse-tertiary);
   /* borders: utilities border-subtle / border-default / border-strong */
   --color-subtle: var(--c-border-subtle);
   --color-default: var(--c-border-default);
