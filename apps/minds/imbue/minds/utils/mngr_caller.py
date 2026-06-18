@@ -97,7 +97,9 @@ def _resolve_macos_proxy_state() -> _MacosProxyState:
     Cached because proxy configuration is effectively static for a process's
     lifetime and each lookup is a SystemConfiguration syscall. Returns ``None``
     off macOS, where these ``_scproxy`` functions do not exist and the proxy
-    lookup is already fork-safe.
+    lookup is already fork-safe -- and also on macOS if those undocumented
+    functions are ever dropped or renamed (logging a warning), since there is
+    then nothing fork-unsafe for the child to neutralize.
     """
     if sys.platform != "darwin":
         return None
