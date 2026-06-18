@@ -113,6 +113,11 @@ def test_parse_build_args_git_depth() -> None:
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
 
 
+def test_parse_build_args_non_integer_git_depth_raises_mngr_error() -> None:
+    with pytest.raises(MngrError, match="--git-depth must be an integer.*'abc'"):
+        _parse_with_vultr_defaults(["--git-depth=abc"])
+
+
 def test_parse_build_args_aws_prefix_uses_instance_type_arg_name() -> None:
     """When provider_prefix='aws' and plan_arg_name='instance-type', --aws-instance-type= drives plan."""
     parsed = parse_vps_build_args(
