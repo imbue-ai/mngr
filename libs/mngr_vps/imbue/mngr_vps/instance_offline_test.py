@@ -335,6 +335,21 @@ def test_realizer_for_vps_ip_falls_back_to_create_time_realizer_for_unknown_ip(t
     assert provider._realizer_for_vps_ip("10.0.0.99") is provider._realizer
 
 
+def test_realizer_for_vps_ip_raises_mngr_error_on_corrupt_marker(temp_mngr_ctx: MngrContext) -> None:
+    """A corrupt ``mngr-isolation`` marker raises an ``MngrError`` (not a bare ``ValueError``).
+
+    The marker is an account-writable tag, so a corrupt value is a realistic input.
+    Discovery's per-VPS error isolation only catches ``MngrError``; if marker parsing
+    leaked a bare ``ValueError`` it would escape that handling and abort the whole
+    discovery sweep, dropping every other VPS's hosts. Asserting ``MngrError`` here
+    pins the failure into the family that per-VPS degradation handles.
+    """
+    instances = [{"id": "i-bad", "main_ip": "10.0.0.8", "tags": [f"{ISOLATION_TAG_KEY}=gvisor"]}]
+    provider = _marker_provider(temp_mngr_ctx, instances)
+    with pytest.raises(MngrError):
+        provider._realizer_for_vps_ip("10.0.0.8")
+
+
 # =========================================================================
 # Post-finalize idle-watcher invariant (_on_host_finalized)
 # =========================================================================

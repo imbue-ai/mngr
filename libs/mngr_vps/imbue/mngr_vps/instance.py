@@ -1722,8 +1722,10 @@ class VpsProvider(BaseProviderInstance):
         # instance's ``mngr-isolation`` marker, no SSH needed), not the provider's
         # create-time default -- otherwise a bare host probed by the default
         # container realizer finds no container and is invisible to discovery.
-        realizer = self._realizer_for_vps_ip(vps_ip)
+        # Resolved inside the try so a corrupt marker (a VpsError) degrades just
+        # this VPS rather than aborting the whole discovery sweep.
         try:
+            realizer = self._realizer_for_vps_ip(vps_ip)
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 found = realizer.find_host_record(outer)
                 if found is None:

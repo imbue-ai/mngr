@@ -40,6 +40,7 @@ from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
+from imbue.mngr_vps.errors import VpsError
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
@@ -518,7 +519,16 @@ class OfflineCapableVpsProvider(VpsProvider):
 
     def _realizer_for_instance(self, instance: Mapping[str, Any]) -> HostRealizer:
         """The realizer matching a host's placement, read from its instance marker (no SSH)."""
-        return self._realizer_for_isolation(isolation_from_marker(self._isolation_marker_for_instance(instance)))
+        marker_value = self._isolation_marker_for_instance(instance)
+        # ``isolation_from_marker`` raises a bare ``ValueError`` on a corrupt marker
+        # (the marker is an account-writable tag/metadata item). Wrap it as a
+        # ``VpsError`` so discovery's per-VPS ``except MngrError`` degrades just that
+        # host instead of aborting the whole sweep.
+        try:
+            isolation = isolation_from_marker(marker_value)
+        except ValueError as e:
+            raise VpsError(f"Corrupt {ISOLATION_TAG_KEY} marker {marker_value!r} on instance") from e
+        return self._realizer_for_isolation(isolation)
 
     def _realizer_for_host_id(self, host_id: HostId) -> HostRealizer:
         """Resolve a host's realizer from its instance's ``mngr-isolation`` marker.
