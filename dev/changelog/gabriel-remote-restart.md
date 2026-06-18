@@ -1,0 +1,1 @@
+Added the design docs for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds: a blueprint plan under `blueprint/remote-mind-recovery/` and a root-level diagnosis note. No build/tooling behavior change.

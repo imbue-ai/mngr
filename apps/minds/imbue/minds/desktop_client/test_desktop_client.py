@@ -2698,7 +2698,8 @@ class _ProbeRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"ok")
 
     def log_message(self, format: str, *args: object) -> None:
-        del format, args  # silence the default per-request stderr logging
+        # Silence the default per-request stderr logging during tests.
+        del format, args
 
 
 @contextmanager
