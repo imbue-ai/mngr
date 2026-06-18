@@ -4,6 +4,52 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+The agent now declares the `HasSessionPreservationMixin` capability mixin: its `on_destroy` session-preservation step was extracted into a `preserve_session_state` method, so preserving session/transcript files on destroy is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact. Behavior is unchanged.
+
+Also declares the `HasUnattendedModeMixin` capability (`is_unattended_enabled` reports the `auto_allow_permissions` config), so "can run unattended" is a code-detectable capability in the matrix.
+
+Also declares `HasPermissionPolicyMixin` (per-resource permission policy via the `permission` config-override key).
+
+Also declares `HasAutoInstallMixin`: provisioning now checks whether the `opencode` CLI is installed and installs it (`curl -fsSL https://opencode.ai/install | bash`) if missing, gated by consent on local hosts and the remote-install config flag on remote hosts. A new `check_installation` config field (default `True`) disables the check when set to `False`.
+
+The auto-allow permission apply-path (the wildcard `permission` config) now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
+
+`OpenCodeAgent` now also declares `CliBackedAgentMixin`, marking it as wrapping a specific external CLI so the CLI-only capability-matrix rows scope to it positively (rather than by the absence of a command-runner marker). Behavior is unchanged.
+
+`OpenCodeAgent` now also declares `InteractiveAgentMixin` -- the marker for agents that accept interactive messages, now that `send_message` is no longer a universal `AgentInterface` method. OpenCode already implemented `send_message` (it POSTs to its server), so this only adds the marker. Behavior is unchanged.
+
+Added OpenCode session adoption: a newly created opencode agent can now resume an existing OpenCode conversation (via `--adopt` and/or `--from`) instead of starting fresh, including multi-session merge into the single `opencode.db` and rebinding each session's stored worktree path to the new agent's work dir.
+
+At create time the plugin resolves an adopt argument -- a `ses_...` session id (searched across the user-native opencode db and every live/preserved mngr agent's db) or an absolute path to a source `opencode.db` -- then copies the resolved SQLite db (and its `-wal`/`-shm` sidecars) into the new agent's data dir, checkpoints the WAL, rebinds the session's stored source-worktree path to the new agent's work dir (`session.directory`, `project.worktree`, and the `project_directory` upsert), and writes the adopted session id into the resume pointer so the agent's first launch attaches to it.
+
+Triggered by the central `--adopt` flag (`mngr create opencode --adopt <id-or-db-path>`; `--adopt-session` is accepted as an alias). The flag may be passed more than once: because OpenCode's store is a single `opencode.db`, the first adopted session is copied in as a fresh db and each subsequent one is merged into it (its `session` row plus descendant sub-sessions, owning `project`/`permission`/`project_directory` rows, and every `message`/`part`/`todo`/`session_share` row), so all named sessions end up available in the new agent's session switcher. OpenCode resumes one root conversation, so the last named session is the one resumed. Parity with the claude adopt resolver: adoption works from a preserved (destroyed) agent, a live mngr agent, and a plain-CLI run.
+
+`--adopt` and `--from` can be combined: every named session is merged in alongside the `--from` clone, and the clone is the session resumed. A `--from <agent>` clone of an opencode agent resumes the source agent's conversation: a generic clone copies the source workspace but not its state dir, so the plugin transfers just the source's native opencode store (`opencode.db` + its `-wal`/`-shm` sidecars), reads the source's root session id from that store, rebinds it to the clone's work dir, and writes the resume pointer. Because a `--from` clone is fundamentally a workspace clone (carrying the conversation forward is a bonus), a source with no opencode store warns and starts fresh rather than failing; an explicit `--adopt` with an unknown session still errors.
+
+A bad or ambiguous `--adopt` id is now reported as a clean error before any host or worktree is created, rather than surfacing as a traceback during provisioning.
+
+The adopt value is now read from the first-class `CreateAgentOptions.adopt_session` field (and `OnBeforeCreateArgs.agent_options.adopt_session`) instead of the previous `plugin_data["adopt_session"]` namespaced key, following the core migration that promoted it to a typed option.
+
+Adoption no longer requires the `sqlite3` command-line tool on the destination host. The agent's `opencode.db` is now assembled entirely on a local staging copy -- the first source db is copied in, each subsequent `--adopt` (and the `--from` clone) is merged in, and every adopted session is rebound to the new agent's work dir, all via Python's bundled SQLite -- and the finished db is copied onto the (possibly remote) host once at the end. A `--from` clone whose source lives on a remote host has that source db pulled across first. This removes a fragile dependency that could fail on hosts lacking the `sqlite3` CLI.
+
+A corrupt or unreadable opencode db encountered while searching for an adopt session id is now logged as a warning (it is a real anomaly) rather than at trace level; resolution still continues against the other stores.
+
+The opencode common-transcript emitter now emits `finish_reason` instead of `stop_reason` on assistant records (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array built by walking the message's parts in arrival order, so the text/tool-call interleaving is preserved (`parts_ordered` true).
+
+## 2026-06-16
+
+OpenCode agents now preserve their transcripts on destroy, matching the claude plugin.
+
+- New `preserve_on_destroy` config option (default `true`): before an opencode agent's state directory is deleted on destroy, its raw and common transcripts and the root session-id history are copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`, mirroring the agent's state-directory layout. For remote agents the files are pulled to the local machine so they survive host destruction. Set to `false` to discard transcript data on destroy.
+
+- Works for both online destroys and offline host destruction (where the agent state is read off the host's persisted volume).
+
+- The opencode release lifecycle test now asserts the transcripts are actually preserved on destroy (previously destroy was bare cleanup), so the feature is covered end-to-end against the real `opencode` binary.
+
+- OpenCode's native resumable session store (the SQLite `opencode.db` plus its `-wal`/`-shm` write-ahead-log sidecars, and `storage/`) is now also preserved on destroy, targeting those specific paths so the session can be resumed/adopted; the sibling `auth.json` (a symlink to shared credentials) and `log/` are deliberately excluded. The WAL sidecars are copied alongside the db so recent (not-yet-checkpointed) turns are not lost.
+
 ## 2026-06-15
 
 Implemented the `waiting_reason` listing field for the `opencode` agent type, matching claude and codex. `mngr list` now reports *why* a WAITING opencode agent is blocked: `PERMISSIONS` when a tool is waiting on an approval prompt (an `ask` permission policy), or `END_OF_TURN` when the agent is idle with its turn complete.

@@ -275,13 +275,14 @@ def test_compute_slice_pricing_rows_sorts_by_price_per_slice_and_computes_sizing
     assert cheapest.plan_code == "24rise02-v1-us"
     assert cheapest.server_ram_gb == 64
     assert cheapest.region == "vin"
-    assert cheapest.slot_count == 8
-    # floor(16 threads * 2.0 overcommit / 8 slots) = 4 vCPUs; (512 usable - 20 reserve) // 8 = 61 GiB.
-    assert cheapest.cpus_per_slice == 4
-    assert cheapest.disk_gb_per_slice == 61
-    # $93/mo (80 base + 13 RAM) + $80 setup amortized over 12 months, divided by 8 slots.
+    # 64GB box, 8GB slices: (64-8)*1024 // (8*1024 + 512) = 6 slots after host reserve.
+    assert cheapest.slot_count == 6
+    # floor(16 threads * 2.0 overcommit / 6 slots) = 5 vCPUs; (512 - max(20, ceil(512*0.10))=52) // 6 = 76 GiB.
+    assert cheapest.cpus_per_slice == 5
+    assert cheapest.disk_gb_per_slice == 76
+    # $93/mo (80 base + 13 RAM) + $80 setup amortized over 12 months, divided by 6 slots.
     assert cheapest.recurring_monthly_usd == Decimal(93)
-    assert cheapest.price_per_slice_usd == Decimal("12.46")
+    assert cheapest.price_per_slice_usd == Decimal("16.61")
     assert cheapest.delivery_hours == 1 and cheapest.stock_level == "low"
     # Only the base storage is available for the 64GB config, so there are no upgrade options.
     assert cheapest.storage_options == ()
@@ -310,7 +311,8 @@ def test_compute_slice_pricing_rows_lists_storage_upgrades_as_per_slice_deltas()
     assert upgrade.storage_plan_code == "softraid-2x1920nvme-24rise02-v1-us"
     assert upgrade.usable_disk_gb == 1920
     # 1408 extra usable GB over the 512GB base, spread across 4 slots = 352 GB/slice; $36/mo / 1408 GB.
-    assert upgrade.extra_disk_gb_per_slice == (1920 - 512) // 4
+    # 32GB box -> 2 slots, so the extra 1408 GiB of usable disk splits 2 ways.
+    assert upgrade.extra_disk_gb_per_slice == (1920 - 512) // 2
     assert upgrade.extra_monthly_usd == Decimal(36)
     assert upgrade.dollars_per_extra_gb == Decimal("0.0256")
 
@@ -381,10 +383,12 @@ def test_compute_slice_pricing_rows_uses_cheapest_viable_storage_when_smallest_i
     )
     assert len(rows) == 1
     row = rows[0]
-    assert row.slot_count == 16
+    # 128GB box, 8GB slices: (128-8)*1024 // (8*1024 + 512) = 14 slots after host reserve.
+    assert row.slot_count == 14
     # The too-small 2x512 is skipped; the base is the cheapest storage that can actually host a slice.
     assert row.base_storage_label == "softraid-2x1920nvme"
-    assert row.disk_gb_per_slice == (1920 - 20) // 16
+    # reserve = max(20, ceil(1920*0.10)) = 192; (1920 - 192) // 14 budget per slice.
+    assert row.disk_gb_per_slice == (1920 - 192) // 14
     assert row.recurring_monthly_usd == Decimal(140)
     # The smaller (unsliceable) storage is not offered as an upgrade.
     assert row.storage_options == ()

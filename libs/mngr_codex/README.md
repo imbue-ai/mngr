@@ -56,9 +56,13 @@ Set fields under an `[agent_types.codex]` table in your mngr config, or pass ove
 - `config_overrides` — free-form key/values merged last into the per-agent `config.toml`.
 - `auto_dismiss_dialogs` — when `true`, trust the repo and allow the hook bypass without
   prompting. Default: `false`.
+- `version` — pin the codex CLI version to install (e.g. `"0.139.0"`). When set, installation runs
+  `npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches, erroring
+  on a mismatch. A pin also suppresses the provision-time update check below (`update_policy` is
+  ignored), since updating would defeat the pin. Default: unset (latest).
 - `update_policy` — how mngr handles an outdated codex CLI at provision (see "Updates" below):
   `AUTO` (run `codex update`, no prompt), `ASK` (prompt on an attended local run, else just
-  notify), or `NEVER` (only notify). Default: `ASK`.
+  notify), or `NEVER` (only notify). Default: `ASK`. Ignored when `version` is pinned.
 - `emit_common_transcript` — emit the common-schema transcript. Default: `true`.
 
 ### Updates
@@ -125,9 +129,8 @@ authoritative app-server-backed variant (see below) would remove the ambiguity.
 
 ## Not yet implemented
 
-Relative to `mngr_claude`, these are not yet ported (tracked for follow-up): session
-preservation on destroy, deploy/scheduling contributions, the streaming snapshot, and
-installation/version management.
+Relative to `mngr_claude`, these are not yet ported (tracked for follow-up):
+deploy/scheduling contributions and the streaming snapshot.
 
 ## Future direction: an app-server-backed agent variant
 

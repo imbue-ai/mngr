@@ -4,6 +4,183 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+Added a code-derived agent capability registry: a description of which agent types have which capabilities, where each capability declares how its presence is detected (a class mixin via `issubclass`, a `waiting_reason` field generator, a plugin hookimpl, or a sibling usage plugin).
+
+The registry introspects a loaded plugin manager to determine each registered agent type's capabilities, and a generated doc (`libs/mngr/docs/concepts/agent_capabilities.md`) renders the full capability matrix. A drift guard fails if the committed doc disagrees with the code; regenerate it with `just regenerate-agent-capabilities-doc`. This is the basis for replacing the hand-maintained parity matrix.
+
+The registry/generator and its tests are dev-only tooling and live in `scripts/make_agent_capabilities_doc.py` (see the `dev` changelog), so they are not shipped in the `mngr` wheel. What *is* in the `mngr` package is the set of capability marker mixins in `imbue.mngr.interfaces.agent` (`CliBackedAgentMixin`, `HasSessionAdoptionMixin`, `HasStreamingSnapshotMixin`, `HasUnattendedModeMixin`, etc.), which agent classes inherit at runtime and which the generator detects.
+
+Added contract-bearing capability mixins to `imbue.mngr.interfaces.agent`: `HasStreamingSnapshotMixin`, `HasSessionPreservationMixin`, and `HasUnattendedModeMixin`. Agent types declare these to make the corresponding capabilities (live response streaming, session preservation on destroy, unattended/auto-allow operation) code-detectable in the capability matrix.
+
+Added `HasPermissionPolicyMixin` (per-resource allow/deny/ask policy) and `HasVersionManagementMixin` (version pin or update policy) capability mixins.
+
+Added module-level capabilities to the matrix: `deploy_contributions` (the `get_files_for_deploy` hookimpl) and `usage_tracking` (a sibling `mngr_<harness>_usage` plugin), both detected by the agent's owning plugin entry-point name.
+
+Made auto-install a base capability: added `HasAutoInstallMixin` (per-CLI `get_install_command`) and a shared `ensure_cli_installed` helper that checks for the binary at provision time and installs it if missing (gated by consent locally, `is_remote_agent_installation_allowed` remotely). All five agents now declare it; antigravity, opencode, and codex gain auto-install they previously lacked. Adds the `auto_install` row to the capability matrix and a new `AgentInstallationError`.
+
+Verified opencode and antigravity auto-install end-to-end on real Modal hosts (which ship without the CLIs).
+
+Architecture-review refinements: excluded the task-specialized skill variants (code-guardian, fixme-fairy) from the matrix (kept headless_claude, which runs genuinely different logic); added a dedicated `get_install_binary_name()` to `HasAutoInstallMixin` (decoupling the install check from the lifecycle-detection process name); and a construction-time validator on `AgentCapability` for the detection-kind/field invariant. The registry-driven behavioral exercise of each capability against a live agent is deferred to a follow-up release-test harness; detection is covered in CI by the drift guard and the builder integration test.
+
+Gave the capability matrix a fixed column order (claude, headless_claude, antigravity, codex, opencode, pi-coding, command, headless_command) instead of alphabetical, and excluded the internal `mngr-proxy-child` agent. Rendering now raises if a registered agent type is neither in the fixed order nor the exclusion list, so a newly added agent can never be silently dropped from the table. Moved the `headless_output` row to the bottom of the matrix.
+
+Added a third matrix state, `n/a`, for capabilities that do not apply to an agent kind (distinct from `-`, which means applicable but absent). Each capability now declares a code-derived scope based on the agent's kind:
+
+- CLI-backed-only (`raw_transcript`, `common_transcript`, `auto_install`, `permission_policy`, `version_management`, `usage_tracking`): `n/a` for the bare command runners.
+
+- Interactive-only (`waiting_reason_field`, `session_resume`): `n/a` for headless and bare-command agents.
+
+- Headless-only (`headless_output`): `n/a` for every non-headless agent, since exposing `output()` non-interactively is meaningless for an interactive agent.
+
+A genuinely-registered capability (field generator, usage source, deploy hook) that lands out of scope raises, keeping the matrix honest; an inherited capability mixin that lands out of scope just renders `n/a`.
+
+CLI-backed scope is derived from a positive marker, `CliBackedAgentMixin`, inherited by every agent that wraps a specific external CLI (claude, codex, antigravity, opencode, pi, and headless variants). A bare command runner is simply the agent without that marker, so it needs no command-specific class for scoping; a minimal `CommandAgent` subclass of `BaseAgent` survives only to declare `HasUnattendedModeMixin`. `unattended_operation` shows present for every agent: interactive coding agents earn it by auto-allowing in-run tool prompts, while headless and bare-command agents have it by construction (no prompt to gate on), declared via `BaseHeadlessAgent` and `CommandAgent`.
+
+Unified the TUI streaming snapshot and headless incremental output into a single `live_output` capability via a shared bare marker, `SupportsLiveOutputMixin`, inherited by both `HasStreamingSnapshotMixin` (the TUI agent's snapshot file) and `StreamingHeadlessAgentMixin` (a headless agent's incremental stdout). `headless_output` (plain `HeadlessAgentMixin`) remains a separate row.
+
+Added a `session_resume` capability (the read-side counterpart to `session_preservation`) via `HasSessionAdoptionMixin`, whose `adopt_session` contract method an agent's `on_after_provisioning` calls to resume an existing conversation. Interactive-only: it resumes a live session, so it is `n/a` for headless and bare-command agents (e.g. `headless_claude` inherits the mixin from `ClaudeAgent` but is headless, so it renders `n/a`). Currently claude-only (its `--adopt-session` / `--from` carry-forward); other interactive CLI agents show it as an available-but-absent gap.
+
+Scoped the send-message flow to interactive agents. `send_message` is no longer an abstract method on `AgentInterface` (so it is not a universal contract). The send-keys delivery (`send_message` + `_preflight_send_message` + `_send_message_simple` + `_send_tmux_literal_keys`) moved off `BaseAgent` onto a new `SendKeysAgent(InteractiveAgentMixin, BaseAgent)`, which `InteractiveTuiAgent` and the bare `command` runner extend; opencode/pi declare the new `InteractiveAgentMixin` directly (they deliver via their own server/extension APIs). Headless agents (`headless_claude`, `headless_command`) no longer have `send_message` at all, so `BaseHeadlessAgent`'s rejecting `_preflight_send_message` override was removed. A new `require_interactive_agent` helper narrows an agent to `InteractiveAgentMixin` (used by the `mngr message` command and the initial/resume-message paths). User-visible change: `mngr message <headless-agent>` now fails with a clear "agent type ... does not accept interactive messages" error instead of a generic send failure; `mngr message` for a bare `command` agent still works (it keeps send-keys).
+
+Made `HasVersionManagementMixin` a functional contract: its descriptive `get_version_policy()` label is replaced by `reconcile_installed_version(host, mngr_ctx)`, which a version-managing agent calls during provisioning (once the binary is present) to enforce its intent -- a pinning agent verifies the installed version and raises on mismatch, an update-policy agent runs its update check. `version_management` is still detected in the capability matrix by `issubclass(HasVersionManagementMixin)`, unchanged.
+
+Regenerated the `mngr imbue_cloud admin pool destroy` CLI reference docs to reflect its now backend-aware teardown: `--skip-vps-cancel` is documented as skipping the underlying-machine teardown (cancel the OVH VPS for an `ovh_vps` row, or destroy the lima VM for a `slice` row), used only when the machine is already gone.
+
+Regenerated the `mngr imbue_cloud admin pool create` CLI reference docs to include the new `--max-concurrency` option (caps how many bare-metal slices bake at once). Docs-only change.
+
+Removed superfluous `@pytest.mark.modal`/`@pytest.mark.rsync` marks from two transcript release tests (`test_transcript_assistant_only`, `test_tips_transcript_tail_assistant`). Both run entirely against a local command agent with a locally-seeded transcript, so they never invoke modal or rsync; the marks tripped the resource guard and failed the otherwise-passing tests.
+
+- `mngr rsync` and `mngr git push`/`mngr git pull` now skip host/agent discovery when given a bare local path (the previous implementation always ran a full provider scan), and narrow discovery to the named provider when the address pins one (e.g. `@host.modal:/work` only queries the Modal provider, not Docker). Behaviour for fully qualified addresses is unchanged.
+
+- `mngr create --from` similarly narrows the cached host/agent loader: when the source, the target host, and `--reuse` (if used) all pin a provider, only those providers are queried; otherwise the loader falls back to a full scan exactly as before. Bare local sources and git URLs continue to skip provider discovery entirely.
+
+- New `imbue.mngr.api.find.resolve_host_location(parsed, mngr_ctx, *, is_start_desired=True)` helper consolidates the local-path shortcut and the discover-then-resolve flow that `mngr rsync` and `mngr git` previously duplicated. The lower-level `resolve_host_location_address(parsed, agents_by_host, mngr_ctx, ...)` is unchanged and remains the right entry point for callers (like `mngr create`) that drive discovery themselves to share a single result across multiple resolutions.
+
+Regenerated the bundled `mngr imbue_cloud` CLI reference docs to cover the new
+`admin server order --option` flag (explicit choice for multi-offer mandatory
+option families like bandwidth/vrack) and the now-required `admin pool create
+--backend slice --server-id` flag (explicitly chosen bare-metal box).
+
+The plugin install wizard (`mngr extras plugins` / `mngr plugin install-wizard`) now recommends and pre-selects the AWS, GCP, and Azure provider plugins when their CLI is detected on your system (`aws`, `gcloud`, and `az` respectively), mirroring how the Claude and Modal plugins are detected. The Lima provider plugin is now likewise recommended and pre-selected when `limactl` is detected (its CLI detection previously had no effect).
+
+Extended the shared agent release-test harness (`imbue.mngr.agents.agent_release_testing`) to exercise session adoption end-to-end: after an agent is destroyed, the arc creates a fresh agent (in a new worktree) that adopts the just-preserved session via `--adopt` and asserts it recalls the pre-destroy secret -- proving the preserved store actually resumes, not merely that its bytes landed on disk.
+
+Adoption is no longer opt-in: the arc runs it unconditionally for every agent that preserves on destroy (`preserves_on_destroy`, default on), and every such profile must implement `adopt_session_arg(preserved_dir)` (the session id or native-store path to adopt), else it fails loudly. Adoption is now a baseline capability -- if an agent preserves its session on destroy, the harness proves that session actually resumes into a fresh worktree. This makes the strongest assertion the default and removes the silent-skip risk of the former per-profile opt-in flag.
+
+Standardized session adoption as a first-class create capability for any agent type that supports it (`HasSessionAdoptionMixin`). The CLI option is now `--adopt` (with `--adopt-session` kept as a backward-compatible alias), declared like every other create option in `cli/create.py` rather than through the plugin-extension hook. The adopted session id(s)/path(s) ride a typed `adopt_session` field on `CreateAgentOptions` (previously the namespaced `plugin_data["adopt_session"]` key); all five adoption-capable plugins (claude, antigravity, codex, opencode, pi-coding) read `options.adopt_session` / `args.agent_options.adopt_session`. The agent-agnostic validation (the type must support session adoption; mutually exclusive with cloning via `--from`) now runs in `imbue.mngr.api.create` for every create path (CLI and programmatic); each plugin keeps its own `on_before_create` fail-fast session-id pre-resolution. The former claude-only / built-in-plugin wiring (`builtin_adopt_session`) is removed.
+
+Added a shared `iter_agent_session_paths(local_host_dir, relpath)` helper to `imbue.mngr.api.preservation` that enumerates a per-agent path across every live and preserved local agent. The five agent plugins' session-store scanners (claude, antigravity, codex, opencode, pi-coding) now route through it instead of each re-implementing the live+preserved directory walk.
+
+Added a `transfer_cloned_agent_session_store(...)` helper to `imbue.mngr.api.preservation` for `--from <agent>` clone-and-resume: a generic clone copies the source workspace but not the source agent's state dir, so each adoption-capable agent transfers just its native session-store relpath from the source and rebinds it. Previously only claude resumed the source's conversation on `--from`; antigravity, codex, opencode, and pi-coding now do too.
+
+An interactive TUI agent's `TUI_READY_INDICATOR` (the readiness signal `mngr` polls the pane for before sending keystrokes) may now be either a plain string (matched as an exact substring, as before) or a compiled `re.Pattern` (matched with `re.search`). The matching mode is chosen by the value's type, not by its contents, so a plain string containing regex metacharacters still matches literally. This lets an agent whose ready state can't be captured by a single substring (e.g. an input box bounded by horizontal rules) express it as a regex.
+
+In the shared agent release-test harness, observing the RUNNING marker is now required of every agent (previously a per-profile `observes_running_marker` opt-in). Forcing a bash tool call (which asserts the common transcript carries a tool_call nested on the assistant turn plus its tool_result) is enabled for claude, codex, opencode, and pi-coding; it stays gated off for antigravity, whose async tool execution records the result only at the next turn boundary, so a single forced-tool turn never carries a tool_result.
+
+Fixed a bug where sending a message to a resumed interactive TUI agent could time out. The TUI-ready wait now runs inside `send_message` (not only when an agent is first created), so every send path -- including the resume message and on-demand restart -- waits for the TUI to finish rendering before pasting. This prevents keystrokes from being dropped into a session that is still replaying its restored transcript.
+
+Gave `test_cli_create_rejects_dirty_tree_by_default` a 30s pytest timeout (matching the sibling subprocess-create test), since `uv run mngr create` startup intermittently exceeds the default 10s under CI load.
+
+Unified the two live-output surfaces (a TUI agent's streaming-snapshot buffer and a headless agent's captured stdout) onto one shared shape, so `SupportsLiveOutputMixin` is no longer a bare marker.
+
+It now declares `get_live_output_path()` (the host file the agent publishes live output to) and `make_live_output_reader()` (a `LiveOutputReader` that turns successive reads of that file into text deltas). The shared poll-read-extract tail loop both surfaces build on lives in `imbue.mngr.agents.live_output_tail.tail_live_output()` (the implementation layer, where it can reference the host interface directly), keeping `SupportsLiveOutputMixin` a pure-abstract capability declaration. The former `HasStreamingSnapshotMixin` is removed -- a TUI agent now inherits `SupportsLiveOutputMixin` directly and supplies a snapshot-diff reader, while a headless agent supplies a raw-text or stream-json reader. The new `imbue.mngr.interfaces.live_output` module holds the `LiveOutputReader` contract and the `RawTextReader` implementation.
+
+No user-visible behavior change: `mngr ask` / `mngr create --stream` and the robinhood streaming paths emit the same output as before.
+
+- `libs/mngr`: agent tmux sessions now apply the mngr host tmux config even
+  when a tmux server is already running. Previously the config was passed only
+  via `tmux -f <config> new-session`, which tmux honors solely when it *starts*
+  a new server; any session created on an already-running server (the common
+  case once one agent is up) silently inherited tmux defaults. That dropped the
+  widened `status-left-length` (so `[mngr-<agent>]` was clipped to 10 chars) and
+  the `Ctrl-q` / `Ctrl-t` destroy/stop hotkeys. Session creation now runs
+  `tmux source-file <config>` right after `new-session`, so these apply
+  regardless of server state.
+
+- `libs/mngr`: the host tmux config now enables `set-titles` (`set -g
+  set-titles on` with `set-titles-string "#S  #T"`), so the agent's session
+  name and pane title are forwarded to the outer terminal's tab (e.g. the
+  iTerm2 tab title) instead of falling back to `<profile>(tmux)`.
+
+- `libs/mngr`: mngr's generated `~/.mngr/tmux.conf` no longer sources the
+  user's `~/.tmux.conf`, and the agent's tmux server is no longer started with
+  `-f` pointing at the mngr config. tmux loads `~/.tmux.conf` itself, once, when
+  the server starts; mngr's config (sourced at agent creation) now contains only
+  mngr's own settings. Re-sourcing `~/.tmux.conf` on every agent creation could
+  re-run non-idempotent user config (e.g. `set -ag`, plugin `run-shell`) and
+  corrupt the user's setup.
+
+Aligned the common-transcript schema with the OpenTelemetry GenAI semantic conventions: the assistant record's `stop_reason` field is now `finish_reason` (the OTel term).
+
+Every assistant record now carries an ordered `parts[]` array (text and tool_call segments, modelled on the OTel message parts) that preserves the intra-turn interleaving of text and tool calls -- the canonical, agent-agnostic view that `mngr transcript` renders. A `parts_ordered` flag marks whether the order is faithful (true for claude, pi-coding, opencode, and trivially for codex, whose assistant turns are each either text-only or a single tool_call) or best-effort (false for antigravity, whose native format does not record where tool calls sat relative to the text). The flat `text` + `tool_calls` fields are kept as a convenience baseline. Because every emitter fills `parts[]`, the reader renders it directly with no per-agent fallback.
+
+## 2026-06-16
+
+Loosened the `create_test_agent` test helper's `agent_class` parameter (and return type) to accept any `BaseAgent` subclass, including ones parameterized on a specific `AgentTypeConfig` subclass (e.g. `OpenCodeAgent`). The generic is invariant, so the previous base parameterization rejected such agents, making it impossible to type-check a test that provisions a concrete agent type. No runtime behavior change.
+
+The plugin install wizard (`mngr plugin install-wizard`, `mngr extras -i`) now knows about the usage plugins. Phase 1 recommends the base `imbue-mngr-usage` plugin for everyone. Phase 2 offers each per-agent usage provider (`imbue-mngr-claude-usage`, `imbue-mngr-codex-usage`, `imbue-mngr-opencode-usage`, `imbue-mngr-pi-coding-usage`) only when both its agent plugin and the base usage plugin are present -- already installed or selected earlier in the wizard. This is expressed by a per-entry `gate` field on catalog entries -- a `SignalGate` (detected tool) or `RequiredPackagesGate` (other packages must be present) -- which replaces the previous separate `signal` / `requires_packages` fields and lets the wizard ask each entry whether it is unlocked rather than branching on shape. Antigravity has no usage provider, so none is offered for it.
+
+Added shared agent-preservation wiring so any plugin can mirror the claude/usage preserve-on-destroy behavior with minimal code.
+
+- `build_transcript_preserved_items(event_source)` returns the standard raw (`logs/<source>_transcript`) and common (`events/<source>/common_transcript`) transcript directories an agent writes, centralizing the on-disk convention.
+
+- `preserve_agent_state(items, agent, host)` is a thin online-path wrapper (for a plugin's `on_destroy`) that resolves the agent's state directory and local preserved-files destination.
+
+- `preserve_host_agents_on_destroy(host, mngr_ctx, agent_type, items_for_agent)` is the shared body for a plugin's `on_before_host_destroy` hookimpl: it skips hosts with no readable volume, filters discovered agents by `agent_type`, and preserves each opted-in agent straight off the host volume.
+
+- `flag_gated_items(ref, flag_name, items)` is the shared offline selector helper: it returns `items` only when the discovered agent's persisted `agent_config[flag_name]` is truthy (else `None`), so plugins no longer hand-roll the same opt-in dict-walk for `on_before_host_destroy`.
+
+- The shared agent release lifecycle (`run_agent_release_lifecycle`) now asserts preservation: its destroy step verifies the agent's raw and common transcripts actually landed in `<local_host_dir>/preserved/<agent-name>--<agent-id>/` (keyed on the seeded secret), so a swallowed preservation failure can no longer pass silently. Every plugin built on the shared lifecycle inherits the check.
+
+- Profiles can declare `native_session_preserved_relpaths` so the lifecycle also asserts the agent's native resumable session store was preserved on destroy (not just the transcripts). A FIXME marks where this should grow into an actual resume-from-preserved-store check once `--adopt-session` lands for these agents.
+
+## Azure provider registration
+
+- Added `azure` to the set of remote provider backends that are skipped when tests load local-only backends (`_REMOTE_BACKEND_NAMES` in `providers/registry.py`), so the new `mngr_azure` plugin behaves like `aws` / `gcp` / `vultr` during test isolation.
+
+- `ProviderUnavailableError` now accepts an optional `user_help_text` override. The default still tells the user to start Docker / disable the provider, but cloud providers (whose "unavailable" cause is a credential/subscription problem, not a local daemon) can pass curated guidance instead -- so a cloud auth failure no longer advises "start Docker". Used by the Azure provider.
+
+- Regenerated `mngr azure` and `mngr ovh` CLI docs: `mngr azure prepare` / `mngr azure cleanup` and `mngr ovh list` now take a `--provider` option (and the standard common options) so they read defaults from the selected `[providers.NAME]` settings.toml block.
+
+- Added the `azure` provider backend (`imbue-mngr-azure`) to the install-wizard plugin catalog (`PLUGIN_CATALOG`), so `mngr plugin install` offers it alongside `aws` / `gcp` / `ovh` / `vultr`.
+
+- `mngr gc` gained a provider garbage-collection hook (`ProviderInstanceInterface.gc_provider_resources`, a no-op by default) so a provider can reclaim orphaned cloud resources that are not attached to any host. Reclaimed resources are reported in the gc summary (human / JSON / JSONL) under "Provider resources" and honor `--dry-run`. The Azure provider uses it to reap NIC / public-IP orphans from failed VM creates; that cleanup previously ran at the start of the next `create_instance`.
+
+Changed: `mngr_common_transcript_flush` (shared common-transcript helper) now takes an
+optional lock-acquire timeout (seconds), exported as `MNGR_CONVERT_LOCK_TIMEOUT` to each
+synchronous converter pass. This lets a latency-sensitive caller (e.g. a SIGTERM/SIGINT
+handler) cap how long the flush blocks waiting for the convert lock -- its only
+potentially-slow step. Implemented without `timeout(1)` so it stays portable to macOS.
+Callers that pass no argument are unchanged (default 30s).
+
+- `mngr git push`, `mngr git pull`, and `mngr rsync` now run the underlying `git` / `rsync` binary as a plain subprocess with the user's stdout/stderr (no redirection), so progress, errors, and pager-style output flow directly to the terminal. stdin is redirected to /dev/null, so the underlying binary can't block waiting for input (credential prompts, host-key confirmations, merge-message editors, etc.) -- those are misconfigurations and we'd rather fail fast than have the agent hang. mngr still waits for the underlying process to exit, so destination-side cleanup -- including `mngr rsync --uncommitted-changes=merge`'s stash pop -- continues to run as before. The `_complete` JSONL terminating events (`{"success": true}` for git, `{"event": "rsync_complete", ...}` for rsync) and the trailing "Rsync complete: N files, M bytes transferred" human line are gone; on a non-zero exit, mngr raises its own `GitSyncError` / `MngrError` so the CLI still surfaces the failure (the underlying exit code is included in the message).
+- `imbue.mngr.api.git.git_push` / `git_pull` and `imbue.mngr.api.rsync.rsync` / `rsync_to_remote` / `rsync_from_remote` grow an optional `run_in_terminal: bool = False` parameter. Default behavior (captured stdout/stderr via `ConcurrencyGroup`) is unchanged, so in-process callers like `mngr_pair` and `mngr_mapreduce` are unaffected; only the `mngr` CLI passes `True`. The terminal-stdio path goes through the existing `imbue.mngr.utils.interactive_subprocess.run_interactive_subprocess` helper, called with `stdin=subprocess.DEVNULL`.
+- `RsyncResult`, `imbue.mngr.utils.rsync_utils.parse_rsync_output`, and the whole `rsync_utils` module are removed. The rsync API functions now return `None` -- the existing callers (the `mngr rsync` CLI and `mngr_mapreduce`) already discarded the return value, and the `files_transferred` / `bytes_transferred` counts were already useless in `run_in_terminal=True` mode. rsync still runs with `--stats`, so CLI users still see the summary block in their terminal at the end of a transfer.
+
+`mngr stop`, `mngr destroy`, and `mngr cleanup` now aggregate and classify cleanup failures instead of hanging on, or silently swallowing, problems.
+
+Previously the stop path ran its tmux/process-collection shell commands (`tmux list-windows`, `tmux list-panes`, `tmux kill-session`, the `pgrep` descendant walk, the `MNGR_AGENT_ID` env scan, and the SIGTERM/SIGKILL loop) without a timeout, so a wedged `tmux list-panes` could block `Host.stop_agents` indefinitely; and both the stop and destroy paths swallowed most other failures (logging a warning and exiting 0), so a partially-failed cleanup looked identical to a clean one.
+
+Now every cleanup step is bounded and its outcome is classified as either benign (the target was already gone -- no error, exit 0) or a real failure (a resource is actually left behind). Real failures are aggregated across all steps/agents/hosts (cleanup continues rather than failing fast), each tagged with a cause category, and surfaced two ways:
+
+- The process exits with a cause-specific, informative exit code (the most severe cause when several occur): `2` timeout, `3` processes remain, `4` local state remains, `5` host/infrastructure remains, `6` provider inaccessible, `1` other. A clean or only-benign run still exits `0`.
+
+- Structured output (`--format json`) now reports a `failures` list (each with `category`, `message`, `agent_name`, `host_id`) and an `exit_code` field, replacing the old `errors` string list.
+
+Benign detection: shell commands (stop, `rm`) classify by stderr message matching (e.g. tmux "can't find session", kill "No such process"); the destroy path classifies by provider exception type (e.g. Docker `NotFound`). Timeouts are treated as one failure cause among many. Stopping an agent on an offline host is now reported as a real `PROVIDER_INACCESSIBLE` failure (the host is unreachable so the agents cannot be verified stopped) rather than a silent skip.
+
+`Host.stop_agents`, `Host.destroy_agent`, and `ProviderInstance.destroy_host` now raise a `CleanupFailedGroup` (an `ExceptionGroup` whose leaves carry the classified `CleanupFailure`s) when a real resource is left behind, and return normally otherwise -- so a caller can never silently drop a leftover-resource failure by ignoring a return value. `execute_idempotent_command` gains an opt-in `raise_on_timeout` flag that normalizes the two backends' differing timeout signals (local: a killed process; remote: `socket.timeout`) into a single `CommandTimeoutError`; other callers are unchanged. See `specs/cleanup-error-aggregation.md`.
+
+`mngr gc` now reports cleanup failures as structured, categorized failures (consistent with `mngr destroy`/`stop`/`cleanup`) and **exits with a cause-specific exit code** (`2`/`3`/`4`/`5`/`6`, most severe when several occur) when garbage collection leaves a resource behind -- e.g. a snapshot or volume that could not be deleted (`5` host/infrastructure remains), a work dir, source dir, log, or build-cache entry that could not be removed (`4` local state remains), or an explicitly-requested provider that was unavailable (`6` provider inaccessible). Previously gc only exited non-zero when an explicitly-requested provider was skipped, so failed snapshot/volume/work-dir deletions did not affect the exit code. Structured output (`--output json`/`jsonl`) now includes a `failures` list (each with `category`, `message`, `agent_name`, `host_id`) alongside the existing `errors` strings.
+
+Gave `test_cli_create_rejects_dirty_tree_by_default` a 30s `@pytest.mark.timeout` (matching its sibling `test_cli_create_via_subprocess`) so a cold `uv run mngr create` startup under load no longer races the global 10s pytest timeout.
+
+- **Concurrent SSH keypair creation is now race-free.** `load_or_create_ssh_keypair` (`providers/ssh_utils.py`) serializes first-time creation behind an exclusive file lock, and `save_ssh_keypair` writes both key files atomically (temp file + `os.replace`, via the shared `atomic_write` helper) before applying their permissions. The parallel host-discovery fan-out opens one SSH connection per VPS and each lazily creates this keypair on first use; previously racing writers could leave a transient zero-byte or mismatched `.pub`, which surfaced as `ValueError: Not enough fields for public blob` deep in paramiko's certificate probe and aborted `mngr create`. This was observed intermittently on the OVH (and, via the same discovery path, Vultr) release tests.
+
+- **paramiko's bare key-probe `ValueError` is now surfaced as a structured `HostConnectionError`.** `OuterHost._ensure_connected` wraps the `ValueError` paramiko raises when it parses a malformed/half-written `.pub` next to the private key, so callers that catch `MngrError` (e.g. best-effort host discovery) treat it as an ordinary per-host connection failure instead of letting it abort the whole operation.
+
 ## 2026-06-15
 
 Regenerated the bundled CLI reference docs to include the new `mngr imbue_cloud admin server pricing` command (per-slice OVH bare-metal pricing table).

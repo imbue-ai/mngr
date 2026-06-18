@@ -4,6 +4,25 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+Added native GCE stop/start lifecycle (idle-pause + resume) for GCP hosts: `mngr stop` now stops the GCE instance (preserving the boot disk so a paused agent costs only disk storage) and `mngr start` resumes it, reading back the fresh external IP and rebinding known_hosts. Stopped instances stay discoverable -- their host name and per-agent records are mirrored into instance metadata, and labels carry the host id / created-at -- so `mngr list` and `mngr start <agent>` keep working while a host is TERMINATED or mid-stop. An in-container idle watcher self-stops the instance via a host-side systemd path/service unit.
+
+Internal: GCP's stopped-host offline discovery and resolution (listing TERMINATED / mid-stop hosts, resolving them by id, and falling back to instance metadata), plus its stop/start lifecycle, known_hosts rebinding, and idle-watcher install, now come from a shared `OfflineCapableVpsDockerProvider` base instead of GCP-specific copies; GCP supplies only the GCE-specific hooks (stop/start the instance, label-encoded host-id match, poweroff idle action). No behavior change.
+
+## 2026-06-16
+
+## GCP provider
+
+- The GCP release-test settings now also disable the `azure` provider (`[providers.azure] is_enabled = false`), mirroring the existing modal/aws/vultr/ovh disables. Without it, `mngr list` inside the GCP lifecycle tests would enumerate the newly-added azure provider and exit non-zero when Azure credentials weren't resolvable in that subprocess, failing the GCP tests for a non-GCP reason.
+
+- `mngr gcp prepare` / `mngr gcp cleanup` group their GCP-specific options under a "Provider" option group, so `--help` and the generated docs list them ahead of the shared common options instead of below them.
+
+Removed the dead VPS client methods `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` (and the now-unused `_boot_disk_source` helper and snapshots compute client) from `GcpVpsClient`. These had no production callers and are being dropped from the shared `VpsClientInterface`. The corresponding unit and release tests, plus the `FakeSnapshotsClient` test helper, were removed as well.
+
+
+The `mngr_gcp` README's snapshot note now states the GCP client exposes no disk-snapshot surface (rather than naming the removed `create_snapshot` / `list_snapshots` / `delete_snapshot` methods).
+
 ## 2026-06-15
 
 ## GCP Compute Engine provider

@@ -115,6 +115,17 @@ class FakeInstancesClient:
         # (zone_scope, instances) pairs returned by ``aggregated_list``.
         self.aggregated_result: list[tuple[str, list[compute_v1.Instance]]] = []
         self.aggregated_list_error: Exception | None = None
+        # Instance names passed to ``stop`` / ``start`` (one entry per call).
+        self.stopped: list[str] = []
+        self.started: list[str] = []
+        self.stop_error: Exception | None = None
+        self.start_error: Exception | None = None
+        # ``set_metadata`` requests (the merged Metadata resource per call).
+        self.set_metadata_calls: list[compute_v1.Metadata] = []
+        # Errors raised by ``set_metadata``, consumed one per call (head popped),
+        # so a ``[PreconditionFailed(...)]`` makes the first call fail and the
+        # retry succeed. An entry of ``None`` is a successful call.
+        self.set_metadata_errors: list[Exception | None] = []
 
     def insert(self, *, project: str, zone: str, instance_resource: compute_v1.Instance) -> FakeOperation:
         self.inserted.append(instance_resource)
@@ -131,6 +142,30 @@ class FakeInstancesClient:
             raise self.get_error
         assert self.get_result is not None, "get_result not set"
         return self.get_result
+
+    def stop(self, *, project: str, zone: str, instance: str) -> FakeOperation:
+        if self.stop_error is not None:
+            raise self.stop_error
+        self.stopped.append(instance)
+        return FakeOperation()
+
+    def start(self, *, project: str, zone: str, instance: str) -> FakeOperation:
+        if self.start_error is not None:
+            raise self.start_error
+        self.started.append(instance)
+        return FakeOperation()
+
+    def set_metadata(
+        self, *, project: str, zone: str, instance: str, metadata_resource: compute_v1.Metadata
+    ) -> FakeOperation:
+        # Mirror the real ``setMetadata`` enough for the optimistic-concurrency
+        # path: record the merged resource, then (if scripted) raise a preset
+        # error for this call so a 412 fingerprint conflict can be exercised.
+        self.set_metadata_calls.append(metadata_resource)
+        error = self.set_metadata_errors.pop(0) if self.set_metadata_errors else None
+        if error is not None:
+            raise error
+        return FakeOperation()
 
     def list(self, *, request: compute_v1.ListInstancesRequest) -> list[compute_v1.Instance]:
         # Mirror the real google-cloud-compute API: ``filter`` is carried on the

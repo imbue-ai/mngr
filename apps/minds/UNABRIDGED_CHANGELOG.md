@@ -4,6 +4,66 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+Reworked how workspace accent colors interact with the minds app shell:
+
+- Non-workspace minds screens (Home, Create, accounts, inbox, auth, ...) and the startup/quitting/error loading screen now paint a pure-white neutral background instead of the previous light-gray / dark chrome. (Light-mode only for now; a pure-black dark-mode variant is a deferred follow-up.)
+
+- The titlebar now shows the neutral white chrome on those general screens and only adopts a workspace's accent color while you're on a workspace-scoped screen -- the workspace itself plus its settings, sharing, destroying, and recovery screens. Previously the titlebar kept the last-opened workspace's accent even after navigating away to a general screen.
+
+- Removed pure black and pure white from the workspace color swatches, so a workspace's accent can no longer be indistinguishable from the neutral chrome. You can still type either value into the workspace-settings hex input if you want it.
+
+- Cancelling out of the Create form now clears the previewed color from the titlebar and returns it to the neutral chrome, instead of leaving the previewed color stranded on the bar.
+
+Fixed a rare bug where approving a latchkey permission request could fail with "Could not apply grant through the latchkey gateway: ... 500 ... ENOENT" when the agent's per-host permissions file had never been created (e.g. agent creation's finalize/link step was skipped or failed).
+
+The desktop client now self-heals: when a new permission request arrives, it checks whether the host's canonical `latchkey_permissions.json` exists and, if not, recreates it from the agent's opaque permissions handle (read from the streamed request's `target` field) so the user's approval takes effect without re-creating the agent. It also idempotently re-registers the requesting agent in the host's allowlist, covering the case where discovery-time auto-registration skipped the agent while the host file was missing. The underlying gateway extension also now creates the host directory on write, so grants no longer 500 on a missing directory.
+
+`minds pool destroy` (and the `just destroy-pool-host` recipe that wraps it) now fully tears down bare-metal `slice` pool hosts, not just OVH VPSes. Previously destroying a slice either failed trying to cancel a non-existent OVH VPS, or -- with `--skip-vps-cancel` -- dropped the DB row while leaving the slice's lima VM running on the box (a stranded slot).
+
+The wrapper now injects both teardown secrets from the activated tier's Vault (OVH AK/AS/CK and `POOL_SSH_PRIVATE_KEY`) so the underlying `admin pool destroy` can tear down whichever backend the row uses -- the connector's region/keypair conventions are unchanged. `just destroy-pool-host <id>` now works for a slice with no extra flags: it destroys the lima VM (freeing the box slot) and then drops the row.
+
+`minds pool create` now supports a `--backend {ovh_vps,slice}` option (default `ovh_vps`, unchanged behavior). With `--backend slice` it bakes a bare-metal slice (a lima VM carved on a pre-registered, prepped bare-metal box) instead of ordering an OVH VPS.
+
+Both backends resolve the activated tier's secrets from Vault so the operator never exports them by hand: the slice path reads the tier's `pool-ssh` private key and injects it as `POOL_SSH_PRIVATE_KEY` for the carve (mirroring how the OVH path injects the OVH AK/AS/CK and the management public key). The slice path also accepts `--dry-run` (report the chosen server + per-slice sizing without baking) and `--max-concurrency` (cap how many slices bake at once; forwarded to the admin CLI, which defaults to 4), and rejects the OVH-only flags (`--management-public-key-file`, `--no-recycle`) with a clear error.
+
+Added a `minds paid {add,remove,list}` command group (and a `just add-paid-email <email>` one-liner) for managing the connector's paid-user allowlist from an activated env. Like `minds pool`, it resolves the connector URL (from the env's `client.toml`) and the paid-list admin key (from the tier's `<vault_prefix>/supertokens` Vault entry) automatically, so the operator never hand-passes `--connector-url`/`--api-key`.
+
+- Mark the two forkserver-based `MngrCaller` end-to-end tests as `@pytest.mark.flaky` so offload retries them: forkserver cold-start can exceed the 10s pytest timeout under CI load.
+
+`minds pool create --backend slice` now requires `--server-id` (the bare-metal
+box to bake the slices onto, from `mngr imbue_cloud admin server list`), forwarded
+to the underlying `mngr imbue_cloud admin pool create`. Slice baking now targets
+an explicitly-chosen, ready server rather than auto-selecting one.
+
+Gave the three desktop-client litellm-key tests (`test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key`, `..._api_key_ai_does_not_mint_litellm_key`, `..._subscription_ai_does_not_mint_litellm_key`) a `@pytest.mark.timeout(30)` budget (replacing `@pytest.mark.flaky`): they are deterministic sync tests but their setup (fresh ConcurrencyGroups + a recording http-server fixture) can exceed the default 10s pytest-timeout when offload sandboxes are contended. No behavior change.
+
+## 2026-06-16
+
+In the predefined permission request dialog, the catch-all permission is now labelled `all` instead of `any` so it reads more clearly (the underlying value stored and granted is still `any`). While `all` is checked, the specific-permission checkboxes are disabled (they keep their own checked state); unchecking `all` re-enables them.
+
+Sped up in-app `mngr` invocations (e.g. the `mngr message` sent when a permission request is approved or denied) by adding `MngrCaller`, which runs the `mngr` CLI in a child forked from a pre-warmed `multiprocessing` forkserver instead of spawning a fresh Python interpreter each time.
+
+The forkserver imports `imbue.mngr.main` once at app startup (on a background thread, off the request path), so subsequent calls skip the multi-second interpreter-and-plugin import cost. Running in a forked child also keeps `mngr`'s global-state changes (loguru, `sys.argv`, stdout/stderr) out of the long-lived backend process.
+
+`MngrMessageSender` now always routes through this caller (defaulting to the shared, pre-warmed instance), so approving or denying a permission request no longer spawns a fresh `mngr` process. Other direct `mngr` CLI call sites can migrate onto `MngrCaller` incrementally.
+
+Approving or denying a permission request (both file-sharing and predefined-credential dialogs) no longer blocks on the agent nudge: `MngrMessageSender.send` now dispatches the `mngr message` onto a background thread tracked by the app's concurrency group and returns immediately, so the dialog responds without waiting for the (network-bound) delivery to complete.
+
+Correct `apps/minds/docs/release.md`: tag the **verified** mngr SHA, not `main` HEAD.
+
+The merge/tag steps assumed the merged `main` HEAD equals the SHA you built and verified in step 4. In practice `main` can advance past that SHA between verification and merge (unrelated PRs landing), so tagging `main` HEAD ships an unverified, vendor-mismatched tree. `release.md` now:
+
+- **Merge the mngr release PR with a merge commit, not a squash**, so the verified SHA stays reachable on `main` as the merge parent.
+- **Tag `minds-v<version>` on that verified SHA** (`GREEN_MNGR_SHA` from step 4) and on the FCT commit whose `vendor/mngr` is its archive — never `main` HEAD.
+- The step-6 vendor-match check now verifies the **commit that actually gets tagged** (FCT `origin/main` post-merge, extracted via `git archive origin/main:vendor/mngr`), not the local working copy — so a stale checkout can't pass the check while a different tree gets tagged. A `main`-HEAD mismatch is documented as **expected drift**, not an error.
+- The close-loop CI now reuses the already-verified build (the tag is the step-4 SHA), instead of repackaging.
+- Step 3 (vendor refresh) now points at the `just sync-vendor-mngr` recipe instead of inline `git archive`, so the doc and the recipe stay in sync, and documents the per-user `FCT_DIR` (set once in a gitignored, minds-scoped `apps/minds/.env`, alongside `GH_TOKEN`) so a release agent knows where to point the recipe, with explicit guidance to ask the user if `apps/minds/.env` is unset.
+- The runbook is now copy-paste-correct end to end: a new **Session setup** section defines `GH_TOKEN`, `MNGR`, `FCT`, and `FCT_DIR` once up front (steps 4/6/7 no longer reference undefined vars), **no personal path is hardcoded anywhere** (steps 6/7 use `$MNGR`/`$FCT`), and the FCT-PR-review note's verification command is fixed (`git archive <sha> | tar -x … && diff -r …` — the previous `git archive | diff -r` could not run).
+
+Caught while cutting `minds-v0.3.1`: `main` HEAD had drifted +58 unrelated files past the verified SHA, so the tag was placed on the verified merge parent.
+
 ## 2026-06-15
 
 Remove potentially confusing parts of the messages sent to agents after approving or denying permission requests

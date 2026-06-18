@@ -6,6 +6,38 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.8] - 2026-06-18
+
+### Added
+
+- Added: Session adoption — `mngr create antigravity --adopt <id>` (or absolute store path) makes a newly created agent resume an existing agy conversation. The conversation is resolved across the user-native agy store, every live local mngr antigravity agent, and every preserved (destroyed) antigravity agent; ambiguous ids are rejected. `--adopt-session` is accepted as an alias. The flag is repeatable (each conversation coexists in the new agent's switcher; the last value is resumed) and may be combined with `--from` (the clone's conversation is the one resumed).
+- Added: `--from <agent>` cloning now carries the source agy conversation forward — the clone transfers the source's agy conversation store and resumes its root conversation. If the source has no resumable conversation, the clone warns and starts fresh rather than failing.
+- Added: `AntigravityAgent` declares the new capability mixins (`HasSessionPreservationMixin`, `HasUnattendedModeMixin`, `HasPermissionPolicyMixin`, `HasAutoInstallMixin`, `CliBackedAgentMixin`), so these capabilities are code-detectable in the agent capability matrix.
+- Added: Auto-install of the `agy` CLI — provisioning installs it (`curl -fsSL https://antigravity.google/cli/install.sh | bash`) when missing, gated by consent on local hosts and the remote-install config flag on remote hosts. New `check_installation` config field (default `True`) disables the check.
+
+### Changed
+
+- Changed: The antigravity common-transcript converter now emits `finish_reason` instead of `stop_reason` on assistant records (aligning with the OpenTelemetry GenAI vocabulary) and a `parts[]` array. antigravity's native format records text and tool calls separately with no relative ordering, so `parts[]` is a best-effort order and `parts_ordered` is false.
+
+### Fixed
+
+- Fixed: antigravity TUI-readiness detection for agy 1.0.9 (which removed the "? for shortcuts" footer hint mngr polled). `mngr message` / `create --message` no longer time out with "Timeout waiting for TUI to be ready" even though agy is up. The readiness signal now matches the input box itself (rule, `>`, rule) via a regex.
+
+## [v0.1.7] - 2026-06-16
+
+### Added
+
+- Added: agy (antigravity) agents now preserve transcripts (raw + common) and conversation-id history on destroy, mirroring the claude plugin. New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. agy's native resumable conversation store (`plugin/antigravity/home/.gemini/antigravity-cli/conversations/`) is preserved too, so the agent can be resumed or adopted. Known limitation: on macOS the store is encrypted by the login-keychain "Antigravity Safe Storage" key, so a macOS-created store is not portable to another machine or user.
+
+### Changed
+
+- Changed: Common-transcript converter's event-conversion logic moved out of the inline `python3` heredoc into a standalone `common_transcript_convert.py` (provisioned alongside `common_transcript.sh`), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, non-string USER_INPUT content, and CODE_ACTION records with non-string content are dropped silently rather than crashing the converter.
+- Changed: Common-transcript watcher no longer echoes converter errors to the agent's pane — a genuine conversion error is recorded in the structured log only.
+
+### Fixed
+
+- Fixed: Stale `queue_log_path_template=None` kwarg in the antigravity submission path's call to `send_enter_via_tmux_wait_for_hook`; the parameter was removed upstream. agy supplies no acceptance marker so behavior is unchanged, but the plugin now type-checks against the current `tui_utils` signature.
+
 ## [v0.1.6] - 2026-06-16
 
 ### Changed

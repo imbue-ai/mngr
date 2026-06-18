@@ -54,7 +54,9 @@ def _node_supports_typescript(node: str, work_dir: Path) -> bool:
     return result.returncode == 0
 
 
-def _run_extension(tmp_path: Path, events: list[dict[str, Any]], *, emit_common: bool = True) -> Path:
+def _run_extension(
+    tmp_path: Path, events: list[dict[str, Any]], *, emit_common: bool = True, emit_usage: bool = False
+) -> Path:
     """Run the extension over ``events`` under a fresh state dir; return the state dir."""
     node = shutil.which("node")
     if node is None:
@@ -72,6 +74,9 @@ def _run_extension(tmp_path: Path, events: list[dict[str, Any]], *, emit_common:
 
     state_dir = tmp_path / "state"
     state_dir.mkdir(exist_ok=True)
+    if emit_usage:
+        # The usage writer is gated on this marker (provisioned by mngr_pi_coding_usage).
+        (state_dir / "pi_emit_usage").write_text("1")
     result = subprocess.run(
         [node, str(driver_path), str(events_path)],
         capture_output=True,
@@ -197,6 +202,11 @@ def test_common_transcript_records_for_each_role(tmp_path: Path) -> None:
     assert records[1]["text"] == "ok"
     assert records[1]["tool_calls"] == [
         {"tool_call_id": "c1", "tool_name": "bash", "input_preview": '{"command":"ls"}'}
+    ]
+    # parts preserve the source order of the text and tool_call blocks.
+    assert records[1]["parts"] == [
+        {"type": "text", "content": "ok"},
+        {"type": "tool_call", "tool_call_id": "c1", "tool_name": "bash", "input_preview": '{"command":"ls"}'},
     ]
     assert records[1]["usage"] == {
         "input_tokens": 7,
@@ -489,3 +499,62 @@ def test_inbox_watcher_swallows_rejected_inject(tmp_path: Path) -> None:
     # The rejecting line still advanced the offset (no retry), and the watcher kept
     # running to inject the following line.
     assert injected == ["boom", "after"]
+
+
+_USAGE_EVENTS = Path("events") / "pi-coding" / "usage" / "events.jsonl"
+
+
+def _assistant_message_end(session_file: str, usage: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event": "message_end",
+        "sessionId": "s1",
+        "sessionFile": session_file,
+        "payload": {
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "model": "claude-opus-4-8",
+                "provider": "anthropic",
+                "usage": usage,
+            }
+        },
+    }
+
+
+def test_usage_writer_emits_cost_snapshot_when_gated(tmp_path: Path) -> None:
+    session_file = "/sessions/2056-01-01T00-00-00Z_abc-uuid.jsonl"
+    state = _run_extension(
+        tmp_path,
+        [
+            {"event": "session_start", "sessionId": "s1", "sessionFile": session_file},
+            _assistant_message_end(
+                session_file,
+                {"input": 2, "output": 7, "cacheRead": 9133, "cacheWrite": 21, "cost": {"total": 0.00488275}},
+            ),
+        ],
+        emit_usage=True,
+    )
+    records = _read_jsonl(state / _USAGE_EVENTS)
+    assert len(records) == 1
+    record = records[0]
+    assert record["source"] == "pi-coding/usage"
+    assert record["type"] == "cost_snapshot"
+    # session_id is the session file's basename (timestamp + uuid), stripped of .jsonl.
+    assert record["session_id"] == "2056-01-01T00-00-00Z_abc-uuid"
+    assert record["cost"] == {"total_cost_usd": 0.00488275}
+    assert record["tokens"] == {"input": 2, "output": 7, "cache_read": 9133, "cache_creation": 21}
+    assert record["model"] == "anthropic/claude-opus-4-8"
+    assert record["cost_mode"] == "API_KEY"
+
+
+def test_usage_writer_is_inert_without_the_gate_marker(tmp_path: Path) -> None:
+    session_file = "/sessions/x.jsonl"
+    state = _run_extension(
+        tmp_path,
+        [
+            {"event": "session_start", "sessionId": "s1", "sessionFile": session_file},
+            _assistant_message_end(session_file, {"input": 1, "cost": {"total": 0.5}}),
+        ],
+        emit_usage=False,
+    )
+    assert not (state / _USAGE_EVENTS).exists()

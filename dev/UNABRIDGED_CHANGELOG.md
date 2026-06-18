@@ -4,6 +4,84 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+Added a design doc (`specs/agent-plugin-parity/capability-mixins.md`) proposing a code-derived agent capability taxonomy: capability mixins plus a registry that generates the parity matrix from the agent classes, replacing the hand-maintained table and guarding against doc/code drift.
+
+Added `scripts/make_agent_capabilities_doc.py`, the dev-only generator for the code-derived agent capability matrix doc. It loads every installed mngr plugin (local backend only, so no docker/modal SDKs), builds the matrix from the agent classes + their plugins, and either rewrites `libs/mngr/docs/concepts/agent_capabilities.md` or, with `--check`, fails if it is stale. This mirrors `scripts/make_cli_docs.py` and keeps the generator out of the shipped `mngr` wheel (it has no runtime importers); the capability mixins it detects remain in `imbue.mngr.interfaces.agent`. The registry/detection logic and its tests moved here from the package (`scripts/make_agent_capabilities_doc_test.py`).
+
+Added a `just regenerate-agent-capabilities-doc` recipe that runs the generator (`uv run python scripts/make_agent_capabilities_doc.py`).
+
+Removed the throwaway synthetic-base doc (`dev/agent-mixins-synthetic-base.md`); the synthetic base branch is no longer needed.
+
+Updated the capability-mixins design doc to match what shipped: the three-state `Y`/`-`/`n/a` matrix with the code-derived `CapabilityScope` model, the positive `CliBackedAgentMixin` kind marker, the unified `live_output` capability, and the `session_resume` capability (the original doc forbade `n/a` entirely).
+
+The `just destroy-pool-host` recipe comment now documents that teardown mirrors the row's backend -- cancelling the OVH VPS for an `ovh_vps` row, or destroying the lima VM (freeing the box slot) for a `slice` row -- and that `--skip-vps-cancel` is for when the underlying machine is already gone (not just the OVH VPS).
+
+Added `just bake-slice-dev` and `just bake-slice-prod` recipes for baking bare-metal slices (lima/QEMU VMs carved on a pre-registered, prepped OVH bare-metal box) into the minds pool.
+
+They are thin wrappers over `minds pool create --backend slice` (which resolves the tier's pool key, and the host_pool DSN for shared tiers, from Vault), mirroring the existing `bake-pool-host-{dev,prod}` recipes for OVH VPSes -- the only difference is the backend. Both require an activated minds env and `vault login` first.
+
+Updated the agent capability-matrix generator's test (`scripts/make_agent_capabilities_doc_test.py`) to expect the `session_resume` capability on every interactive agent (claude, codex, opencode, pi-coding, antigravity), not just claude. This reflects session adoption being generalized from a claude-only feature to a shared capability declared by `HasSessionAdoptionMixin`, which the generated `agent_capabilities.md` matrix now reports for all five interactive agents.
+
+Added a design spec (`specs/gcp-azure-stop-start-lifecycle/spec.md`) for bringing
+the AWS stop/start (idle-pause + resume) lifecycle to the GCP and Azure providers:
+`mngr stop` halts live-instance compute billing (disk preserved), `mngr start`
+resumes the session with all files intact, and a stopped VM stays visible in
+`mngr list` and resumable by name.
+
+Updated the agent-capability-doc generator's test (`scripts/make_agent_capabilities_doc_test.py`) for the live-output mixin unification: its TUI-snapshot fixture now inherits `SupportsLiveOutputMixin` directly, since the `HasStreamingSnapshotMixin` it used was removed when the TUI snapshot and headless streaming surfaces were unified onto one `live_output` capability.
+
+Added a design spec (`specs/common-transcript-standard/spec.md`) for tracking the OpenTelemetry GenAI semantic conventions in the agent-agnostic common-transcript schema instead of bespoke field names: a vocabulary alignment (`stop_reason` -> `finish_reason`) across all five emitters, and a universal ordered `parts[]` field that every emitter fills (with a `parts_ordered` flag marking antigravity's best-effort order), so the reader renders one uniform shape with no per-agent fallback.
+
+Recorded the change in the agent-plugin parity reference (`specs/agent-plugin-parity/spec.md`): a new "Ordered assistant parts[]" row in the capability matrix and a note in the transcript-capture dimension.
+
+## 2026-06-16
+
+Regenerated `uv.lock` to match the version revert of `imbue-mngr-opencode-usage` and `imbue-mngr-pi-coding-usage` back to 0.1.0.
+
+## 2026-06-16
+
+Added `specs/agent-usage-plugins/spec.md`: a design spec for extending `mngr usage` cost/usage tracking beyond Claude to the OpenCode, pi, and Codex harnesses. The spec generalizes the usage event schema to report raw token counts (with the reader deriving and provenance-flagging cost via a canonical pricing table), keeps dollars as the cross-harness comparable unit, and lays out three thin per-harness writer plugins. Antigravity and the Claude-subagent-proxy are documented as out of scope. The
+per-harness data exposure was verified against the locally installed harnesses
+(OpenCode 1.16.2, Codex 0.138.0, pi 0.79.1): OpenCode reports cost+tokens
+directly; Codex's `token_count` events expose cumulative tokens plus rate-limit
+windows (so Codex subscription agents get Claude-style windows as a bonus). A
+live two-turn `pi-coding` agent confirmed pi reports cost natively
+(`usage.cost.total`, matching the canonical Anthropic prices exactly) with
+non-overlapping cache-exclusive token buckets, so pi is reported-cost (estimate
+only as a fallback), leaving Codex as the only purely token-derived harness.
+
+Documented the install-wizard surfacing of the usage plugins: added an "Install-wizard recommendation" section to `specs/agent-usage-plugins/spec.md`, and recorded the antigravity gap (the one agent type with no usage provider, so the wizard offers none for it) in the `specs/agent-plugin-parity/spec.md` current-state matrix (new "Usage tracking plugin" row) and its observations.
+
+Extended the local-scratch gitignore convention to Python and text files: `**/*.local.py` and `**/*.local.txt` are now ignored, mirroring the existing `**/*.local.md` and `**/*.local.sh` patterns. Lets one-off validation harnesses and probe scripts (named `whatever.local.py` / `whatever.local.txt`) stay untracked and survive the stop hook's working-tree cleanup.
+
+Add a design spec (`specs/aws-ec2-stop-start-lifecycle/`) for giving AWS agents a Modal-like idle-paused-but-resumable lifecycle via native EC2 stop/start (instead of EBS snapshots). Phases 1 (native EC2 instance stop/start), 2 (the self-stopping idle watcher), and 4 (offline EC2-tag discovery so stopped hosts stay resumable by name) are marked implemented.
+
+The idle watcher is a host-side systemd path unit that powers the host off (`shutdown -P now`) when an in-container sentinel goes stale; EC2's `InstanceInitiatedShutdownBehavior` (new `terminate_on_shutdown` config flag, default `stop`) decides whether that shutdown stops the instance (resumable via `mngr start`, EBS-only cost) or terminates it. The spec documents the single-flag tradeoff (resumable-on-idle OR self-terminating, not both) in Decision #3, plus the `prepare`/`cleanup` permission notes.
+
+## Azure provider wiring
+
+- Added `--cov=imbue.mngr_azure` to the root pytest coverage config so the new `mngr_azure` package is covered alongside the other provider plugins. The package is picked up automatically by the `libs/*` uv workspace glob.
+
+- Registered the `azure` command group in `scripts/make_cli_docs.py` (`SECONDARY_COMMANDS`) so `mngr azure` gets a generated doc page, alongside `aws` / `gcp`.
+
+- The `azure` create template now builds the project Dockerfile on the VM (so azure agents get `gh` and the full mngr toolchain) instead of coming up on a bare `debian:bookworm-slim` base. It mirrors the `gcp` template: `build_arg = ["--azure-vm-size=...", "--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]` -- the context is the worktree, which the shared `mngr_vps_docker` build flow clones (overlaying uncommitted changes) and uploads, resolving `--file` inside it. Also forwards `GH_TOKEN` + runs `gh auth setup-git` (via the `github_setup` window), sets `agent_args=--dangerously-skip-permissions` and `target_path=/code/mngr`.
+
+- `[providers.azure] builder = "DEPOT"` builds on depot's cached remote builders (like `gcp`) so azure creates after the first reuse cached layers instead of building cold. Requires `DEPOT_TOKEN` exported at `mngr create -t azure` time (read from the create shell, not `pass_env`); `depot.json` in the repo supplies the project id. Drop the block to fall back to a native `docker build` on the VM.
+
+Synced the root design specs to the removed VPS-client snapshot surface: `specs/vps-docker-provider/spec.md` and `concise.md` no longer declare `create_snapshot` / `delete_snapshot` / `list_snapshots` on `VpsClientInterface`; `specs/ovh-vps-provider/spec.md` drops the OVH snapshot-wrapper bullet and its snapshot test scenarios; `specs/azure-provider/concise.md` drops the managed-disk-snapshot client bullet; and `specs/aws-ec2-stop-start-lifecycle/spec.md` no longer says the `AwsVpsClient` snapshot methods exist-but-unwired.
+
+Also synced the matching `list_ssh_keys` references (removed alongside the snapshot methods): `specs/ovh-vps-provider/spec.md` no longer lists `list_ssh_keys` as a client method, and `specs/azure-provider/concise.md`'s method count drops from ~11 to ~7.
+
+Added `specs/cleanup-error-aggregation.md`, a design spec for making `mngr stop`/`destroy`/`cleanup` aggregate and classify failures (benign "already gone" vs. real "resource left behind"), with cause-specific exit codes, across both the stop and destroy paths.
+
+`minds-launch-to-msg.yml`: show the ref name **and** the resolved commit, not the tag object.
+
+The Slack notification and step summaries resolved `commit_sha` / `template_ref` with `git ls-remote refs/tags/<tag>` (no peel), so a run against an **annotated** tag (e.g. `minds-v0.3.1`) displayed the tag-*object* SHA — a SHA you can't `git checkout` and that doesn't match the commit the run actually built. The `check_should_run` compute step now peels annotated tags (`^{}`) to the commit they point at (also making the pair-key / marker cache consistent between tag and SHA reruns), carries the input ref through as new `mngr_ref` / `fct_ref` outputs, and the Slack line + should-run summary now render `` `<ref>` (`<commit>`) `` — e.g. `` `minds-v0.3.1` (`d05797429`) ``. Raw-SHA inputs still render just the commit. The `launch_to_msg` job's own `resolve FCT template ref` step (its per-job summary) is peeled the same way, so no step surfaces a tag-object SHA anymore.
+
+`justfile`: realign the `sync-vendor-mngr` recipe with the current release flow — its comment now tells you to position the mngr checkout at the **verified release SHA** (not blindly `main`, which can drift past it), points at `apps/minds/docs/release.md` instead of the stale `release-minds` skill, and **no longer hardcodes a personal FCT path** — the FCT checkout path comes from the positional arg, else `FCT_DIR` read from a gitignored, **minds-scoped** `apps/minds/.env` (template: committed `apps/minds/.env.example`), else `$FCT_DIR` in your shell. No shell-rc edit, it reaches non-interactive agent shells, nothing personal is committed, and **only this recipe** loads that `.env` (no repo-wide `set dotenv-load`). Errors with usage if none is set. `release.md` documents this up front for release agents.
+
 ## 2026-06-15
 
 `just bake-pool-host-dev` now passes `--skip-deferred-install-wait` so dev pool bakes don't wait the extra few minutes for the deferred Playwright/apt install before stopping the services agent.

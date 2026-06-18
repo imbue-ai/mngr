@@ -176,6 +176,8 @@ Y = implemented, partial = present but incomplete, - = absent (a gap), n/a = not
 | Onboarding NUX seed | Y | Y | n/a (no NUX) | n/a (no NUX) | Y (`.personality_migration` + `[notice]` suppressors) |
 | Raw transcript | Y | Y | Y | Y (in-process, raw-seeded) | Y (tail rollout JSONL) |
 | Common transcript | Y | Y | Y | Y (in-process, rebuilt on idle) | Y (converter, derived from raw) |
+| Ordered assistant parts[] | Y | Y (best-effort order) | Y | Y | Y (text-only) |
+| Usage tracking plugin | Y (`mngr_claude_usage`) | - (deferred; no cost/token source) | Y (`mngr_pi_coding_usage`) | Y (`mngr_opencode_usage`) | Y (`mngr_codex_usage`) |
 | Conversation resume (stop/start) | Y | Y | Y (`--session`) | Y (`attach --session`) | Y (`codex resume <id>`) |
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
@@ -226,6 +228,12 @@ Notable observations:
 - **`antigravity` is missing session-preservation-on-destroy, the streaming snapshot,
   deploy contributions, and field generators** relative to claude. These are the claude
   features no port has yet matched.
+- **`antigravity` is the one port with no usage-tracking plugin** -- claude, codex,
+  opencode, and pi each ship a `mngr_<harness>_usage` provider, but `agy`'s statusline
+  payload exposes no cost / token / rate-limit data, so there is nothing to write (deferred;
+  see the [agent-usage-plugins spec](../agent-usage-plugins/spec.md)). Consequently the
+  `mngr plugin install-wizard` offers a per-agent usage provider for every agent type except
+  antigravity.
 
 ---
 
@@ -818,6 +826,16 @@ launch+supervise them from a backgrounded helper (`claude_background_tasks.sh` /
 lives. Shared helpers: `agents/common_transcript.py`. In both, the **common layer is
 *derived* from the raw stream** (the converter reads the raw JSONL), which is why the raw
 layer is foundational and always-on.
+
+The common envelope's field vocabulary tracks the OpenTelemetry GenAI semantic conventions
+(e.g. `finish_reason`, not a bespoke name); the canonical schema is
+`agents/common_transcript_records.py`. Every assistant record carries an ordered `parts[]`
+(text/tool_call segments, modelled on the OTel message `parts`) -- the agent-agnostic view the
+reader renders -- with a `parts_ordered` flag. The order is faithful for claude, pi-coding,
+opencode (all iterate their native ordered content) and trivially so for codex (text-only
+assistant messages); only antigravity is best-effort (`parts_ordered=False`), because its native
+format does not record where tool calls sat relative to the text. See
+[`../common-transcript-standard/spec.md`](../common-transcript-standard/spec.md).
 
 **pi-coding emits the two layers *independently*, not derived.** pi has no convenient
 always-current flat session file to tail (its native store is tree-structured JSONL), so the

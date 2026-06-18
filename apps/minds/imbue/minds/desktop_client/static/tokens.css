@@ -56,12 +56,18 @@ html {
  * referencing the variables directly so the alpha levels stay
  * consistent across the chrome.
  *
+ * The fallbacks below are the *neutral* (workspace-less) chrome: a pure
+ * white bar (set in Chrome.jinja) with dark "0 0 0" foreground. They
+ * take over whenever chrome.js clears the variables -- i.e. on any
+ * non-workspace minds screen (Home, Create, accounts, ...). A workspace
+ * (or a workspace-scoped settings / sharing screen) overrides both.
+ *
  * Why an RGB triple, not a full color: ``rgb(var(--titlebar-fg) / 0.55)``
  * lets every consumer dial in its own alpha for the visual hierarchy
  * (title bold, icons mid, hover tints low) off a single source of truth.
  */
 .titlebar-title {
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.9);
+  color: rgb(var(--titlebar-fg, 0 0 0) / 0.9);
 }
 .titlebar-btn {
   background: transparent;
@@ -70,15 +76,15 @@ html {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.55);
+  color: rgb(var(--titlebar-fg, 0 0 0) / 0.55);
   transition: color 100ms, background-color 100ms;
 }
 .titlebar-btn:hover {
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.95);
-  background-color: rgb(var(--titlebar-fg, 255 255 255) / 0.06);
+  color: rgb(var(--titlebar-fg, 0 0 0) / 0.95);
+  background-color: rgb(var(--titlebar-fg, 0 0 0) / 0.06);
 }
 .titlebar-btn:active {
-  background-color: rgb(var(--titlebar-fg, 255 255 255) / 0.10);
+  background-color: rgb(var(--titlebar-fg, 0 0 0) / 0.10);
 }
 /* Close-button hover overrides the accent-aware tint with a destructive
  * red regardless of the active workspace color. */
@@ -207,7 +213,7 @@ html {
  * the same attribute selector so the two stay in lockstep. The 2px
  * black-25% inset shadow gives every swatch a thin dark rim that's
  * legible against any background -- including the lightest palette
- * entries (white / clarity) over the zinc-50 page.
+ * entry (clarity, #fcefd4) over the page surface.
  */
 .color-swatch {
   box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);

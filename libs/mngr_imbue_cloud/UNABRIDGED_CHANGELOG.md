@@ -4,6 +4,62 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+`mngr imbue_cloud admin pool destroy` is now backend-aware, mirroring the `--backend` branch in `pool create`. Previously it only knew the OVH-VPS teardown path: cancel the OVH VPS, then drop the row. Run against a bare-metal `slice` row it would try to cancel a non-existent OVH VPS (404) and, with `--skip-vps-cancel`, drop the row while leaving the slice's lima VM running on the box -- stranding a slot indefinitely (no cron reaps slice-VM orphans; only a subsequent bake does).
+
+Now the teardown follows the row's `backend_kind`: a `slice` row destroys its lima VM (and data disk) on the bare-metal box -- freeing the slot -- before the row is dropped, while an `ovh_vps` row (including legacy rows written before the column existed) cancels its OVH VPS as before. Either teardown runs before the row delete, so a failure keeps the row and the operation stays retryable. The slice teardown reads the pool management key from `POOL_SSH_PRIVATE_KEY` (the same key the carve authorizes), so direct `admin pool destroy` of a slice requires that env var (the `minds pool destroy` wrapper injects it from Vault). `--skip-vps-cancel` still drops the row only, for any backend.
+
+`mngr imbue_cloud admin server prep` now pre-installs the pinned Docker Engine (the same version the OVH VPS path pins) and inotify-tools into the staged golden slice image via `virt-customize` (adds a `libguestfs-tools` box dependency).
+
+Because each slice VM's first-boot provisioning guards on presence (`command -v docker` / `command -v inotifywait`), baking these into the golden image makes those steps skip entirely — so slice carves no longer download/install Docker per VM. This speeds up baking (especially in parallel) and removes a per-slice network dependency. To re-stage an already-prepped box with the new image, delete the staged image and re-run `prep` (the step is idempotent and re-customizes on a fresh download).
+
+`mngr imbue_cloud admin pool create --backend slice` now bounds parallelism with `--max-concurrency` (default 4): it bakes at most that many slices at once and queues the rest, reporting progress as each completes. This keeps box contention low enough that each `mngr create` finishes within its per-create timeout (raised to 45 minutes for slices). The timeout is per single create, so one slice timing out no longer aborts the others.
+
+After the bakes finish, the slice backend reconciles the box's lima VMs against the pool DB and reaps any orphan — a VM with no `pool_hosts` row, e.g. one left by a create that was killed by its own timeout after carving but before the row insert (the provider's rollback can't run on a hard kill). Only slice-prefixed VMs absent from the DB are deleted; tracked slices (any status) are kept. The reap also runs on a top-level SIGTERM/SIGINT (e.g. the caller's subprocess timeout): the bake first kills its in-flight `mngr create` workers so they can't keep carving VMs, then reaps, so a killed bake never leaks worker processes or VMs.
+
+Corrected bare-metal slice sizing so a box's slot count reflects what it can *realistically* run (this also flows into `admin server pricing`, which divides amortized cost by the slot count):
+
+- RAM overhead is now modeled in two parts: a per-machine host reserve (`HOST_RAM_RESERVE_GIB`, kernel/OS + headroom, subtracted once) and a per-VM overhead (`PER_VM_RAM_OVERHEAD_MIB`, QEMU + lima supervisor, added to each slice's footprint). The guest now gets its full advertised `memory_per_slice_gb` (previously it was silently shortchanged by the overhead). `slot_count = (ram - host_reserve) / (slice + per_vm_overhead)`, so the box keeps real host headroom instead of being packed to 100%.
+
+- Disk no longer overcommits: the reserve is now `max(DISK_RESERVE_GB, ceil(disk_gb * DISK_RESERVE_FRACTION))`, which absorbs the GB-vs-GiB gap (a nominal "N TB" spec is ~0.93·N GiB) plus partition/filesystem overhead, so per-slice disk allocations stay within the real usable filesystem.
+
+`server prep` now also provisions a 32 GiB swapfile (the OS-install default of two ~0.5 GiB partitions was useless on a RAM-committed slice host).
+
+`mngr imbue_cloud admin server order` now lets you order plans whose mandatory
+option families (e.g. bandwidth, vrack) offer more than one choice. Previously the
+cart build failed with "expected exactly one X option to auto-pick" on such plans
+(e.g. the `24sys*` SYS line). Choose the offer per family explicitly with the new
+repeatable `--option <planCode>` flag; single-offer families are still auto-selected.
+Run `order` without it once and the error lists each ambiguous family's offers and
+their monthly prices so you can re-run with the right `--option` values.
+
+`mngr imbue_cloud admin pool create --backend slice` now requires `--server-id`
+(the bare-metal box to bake the slices onto, from `admin server list`). It no
+longer auto-selects the box with the most free slots -- baking always targets an
+explicitly-chosen, ready server.
+
+Fixed a bare-metal box-prep bug that made every slice bake fail with `mkdir
+~/.cache/lima: permission denied`. The prep script (run as root) staged the slice
+base image under the lima user's `~/.cache` but left `~/.cache` itself root-owned,
+so `limactl` (run as the lima user) could not create `~/.cache/lima`. Prep now
+creates and chowns the cache dir chain to the lima user (and repairs an
+already-root-owned `~/.cache` when re-run on an existing box).
+
+The post-bake orphan reap now also reaps leaked lima **data disks**, not just VM
+instances. A failed carve whose rollback `limactl delete` could not unlock the
+disk leaves the disk behind (the VM is gone but the disk keeps holding the box
+slot); the reap now reconciles the box's disks against the pool DB and force-deletes
+(unlocking first) any slice disk with no row.
+
+Removed the dead disk-snapshot and `list_ssh_keys` stubs from `LimaSliceVpsClient`, matching the slimmed-down `VpsClientInterface` (which no longer declares `create_snapshot`/`delete_snapshot`/`list_snapshots`/`list_ssh_keys`). Slice snapshots, like other host snapshots, go through the provider layer. No user-facing behavior change: these methods only ever raised "unavailable".
+
+## 2026-06-16
+
+Dropped the dead `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` stub overrides from `LimaSliceVpsClient`, matching the removal of those abstract methods from the shared `VpsClientInterface`. These had no production callers and only raised "unavailable". The now-unused `VpsSnapshotId` / `VpsSnapshotInfo` / `VpsSshKeyInfo` imports and the unit-test calls that exercised the stubs were removed as well.
+
+`destroy_host` now raises a `CleanupFailedGroup` carrying the classified cleanup failures (instead of returning them, or swallowing errors as warnings) when a resource is left behind, and returns normally otherwise. A resource that was already gone is treated as benign (no failure); a resource that exists but could not be destroyed is recorded as a `HOST_RESOURCE_REMAINS` failure (or `OTHER` for a bookkeeping/record write failure), so `mngr destroy`/`cleanup` can surface it and exit with an informative, cause-specific code. See `specs/cleanup-error-aggregation.md`.
+
 ## 2026-06-15
 
 Added a `--skip-deferred-install-wait` flag to `admin pool create` (slice + ovh_vps): when set, the bake does NOT wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to finish before stopping the baked services agent. Saves a few minutes per bake for dev/throwaway hosts; the tradeoff is the baked container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg), so it must never be used for production pool hosts.

@@ -17,7 +17,7 @@ dependencies = [
 # only ever forward -- pushing it back would re-exclude a deliberately-pinned
 # fresh dep and break resolution. This only buys a detection delay;
 # it can't catch a compromise that stays undetected past the window.
-exclude-newer = "2026-06-02T00:00:00Z"
+exclude-newer = "2026-06-04T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
@@ -82,6 +82,9 @@ addopts = [
   "--cov=imbue.mngr_kanpan",
   "--cov=imbue.mngr_usage",
   "--cov=imbue.mngr_claude_usage",
+  "--cov=imbue.mngr_opencode_usage",
+  "--cov=imbue.mngr_pi_coding_usage",
+  "--cov=imbue.mngr_codex_usage",
   "--cov=imbue.mngr_recursive",
   "--cov=imbue.mngr_latchkey",
   "--cov=imbue.mngr_notifications",

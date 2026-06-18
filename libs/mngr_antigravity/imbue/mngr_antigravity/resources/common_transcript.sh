@@ -43,6 +43,11 @@
 
 set -euo pipefail
 
+# Directory this script was installed into; the converter module is installed
+# alongside it (in the agent's commands/ dir in production, in resources/ under
+# test), so resolve it relative to ourselves.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
 INPUT_FILE="$AGENT_DATA_DIR/logs/antigravity_transcript/events.jsonl"
 OUTPUT_FILE="$AGENT_DATA_DIR/events/antigravity/common_transcript/events.jsonl"
@@ -73,204 +78,22 @@ convert_new_events() {
 
     local convert_stderr
     convert_stderr=$(mktemp)
+    # The converter prints the count of appended events to stdout; capture it
+    # here so it never reaches this watcher's stdout (which would surface in the
+    # agent's pane). Genuine errors go to stderr.
     local result
-    result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" python3 << 'CONVERT_SCRIPT' 2>"$convert_stderr" || true
-import json
-import os
-import sys
-
-_MAX_INPUT_PREVIEW_LENGTH = 200
-_MAX_OUTPUT_LENGTH = 2000
-
-def _extract_user_text(content, conv_id, step_index):
-    """Return the user's typed text from a USER_INPUT record.
-
-    agy's SQLite store (the decode_agy_transcript.py source) records the clean typed text
-    directly in ``CortexStepUserInput.query``, so ``content`` is already the user's message --
-    we only strip surrounding whitespace. A non-string content is a real schema break, so we
-    log it and drop the event.
-    """
-    if not isinstance(content, str):
-        sys.stderr.write(
-            f"USER_INPUT content is not a string for conv={conv_id} step={step_index}; dropping event\n"
-        )
-        return None
-    return content.strip()
-
-
-def _short_value(value):
-    """Render an arbitrary JSON value as a short string for an input preview."""
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, separators=(",", ":"))
-
-
-def _tool_call_id(conv_id, step_index, idx):
-    return f"{conv_id}-{step_index}-tc{idx}"
-
-
-def _truncate(text, limit):
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "..."
-
-
-def _load_existing_ids(output_file):
-    ids = set()
-    if not os.path.isfile(output_file):
-        return ids
-    with open(output_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ids.add(json.loads(line)["event_id"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-    return ids
-
-
-def convert():
-    input_file = os.environ["_INPUT_FILE"]
-    output_file = os.environ["_OUTPUT_FILE"]
-    existing_ids = _load_existing_ids(output_file)
-    if not os.path.isfile(input_file):
-        print("0")
-        return
-
-    new_events = []
-    # Track the last assistant tool call we emitted, per conversation, so
-    # CODE_ACTION events can be paired with their originating tool call.
-    last_tool_call_by_conv = {}
-
-    with open(input_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
-
-            conv_id = raw.get("_mngr_conv_id", "")
-            if not conv_id:
-                continue
-            step_index = raw.get("step_index")
-            if step_index is None:
-                continue
-            timestamp = raw.get("created_at", "")
-            source = raw.get("source", "")
-            type_ = raw.get("type", "")
-
-            if source == "USER_EXPLICIT" and type_ == "USER_INPUT":
-                event_id = f"{conv_id}-{step_index}-user"
-                if event_id in existing_ids:
-                    continue
-                text = _extract_user_text(raw.get("content"), conv_id, step_index)
-                # _extract_user_text returns the stripped typed text, or None (already logged)
-                # when content is not a string. Empty results -- a None or otherwise empty
-                # content -- are dropped here as they carry no signal.
-                if not text:
-                    continue
-                new_events.append((timestamp, {
-                    "timestamp": timestamp,
-                    "type": "user_message",
-                    "event_id": event_id,
-                    "source": "antigravity/common_transcript",
-                    "role": "user",
-                    "content": text,
-                    "conversation_id": conv_id,
-                    "step_index": step_index,
-                }))
-
-            elif source == "MODEL" and type_ == "PLANNER_RESPONSE":
-                text = raw.get("content", "")
-                raw_tool_calls = raw.get("tool_calls") or []
-                tool_calls = []
-                for idx, tc in enumerate(raw_tool_calls):
-                    if not isinstance(tc, dict):
-                        continue
-                    name = tc.get("name", "")
-                    args = tc.get("args", {})
-                    input_preview = _truncate(_short_value(args), _MAX_INPUT_PREVIEW_LENGTH)
-                    call_id = _tool_call_id(conv_id, step_index, idx)
-                    tool_calls.append({
-                        "tool_call_id": call_id,
-                        "tool_name": name,
-                        "input_preview": input_preview,
-                    })
-
-                event_id = f"{conv_id}-{step_index}-assistant"
-                if event_id not in existing_ids:
-                    new_events.append((timestamp, {
-                        "timestamp": timestamp,
-                        "type": "assistant_message",
-                        "event_id": event_id,
-                        "source": "antigravity/common_transcript",
-                        "role": "assistant",
-                        "model": None,
-                        "text": text if isinstance(text, str) else "",
-                        "tool_calls": tool_calls,
-                        "stop_reason": None,
-                        "usage": None,
-                        "conversation_id": conv_id,
-                        "step_index": step_index,
-                    }))
-                if tool_calls:
-                    last_tool_call_by_conv[conv_id] = tool_calls[-1]
-
-            elif source == "MODEL" and type_ == "CODE_ACTION":
-                pending = last_tool_call_by_conv.pop(conv_id, None)
-                if pending is None:
-                    continue
-                event_id = f"{conv_id}-{step_index}-tool_result"
-                if event_id in existing_ids:
-                    continue
-                output = _truncate(raw.get("content", ""), _MAX_OUTPUT_LENGTH)
-                new_events.append((timestamp, {
-                    "timestamp": timestamp,
-                    "type": "tool_result",
-                    "event_id": event_id,
-                    "source": "antigravity/common_transcript",
-                    "tool_call_id": pending["tool_call_id"],
-                    "tool_name": pending["tool_name"],
-                    "output": output,
-                    "is_error": raw.get("status", "DONE") != "DONE",
-                    "conversation_id": conv_id,
-                    "step_index": step_index,
-                }))
-
-    if not new_events:
-        print("0")
-        return
-
-    new_events.sort(key=lambda x: x[0])
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "a") as f:
-        for _, event in new_events:
-            f.write(json.dumps(event, separators=(",", ":")) + "\n")
-
-    print(str(len(new_events)))
-
-
-convert()
-CONVERT_SCRIPT
-)
+    result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" \
+        python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
     # The read-modify-write is done; drop the lock before the (lock-free)
     # logging below so a concurrent pass can proceed immediately.
     mngr_common_transcript_release_lock
 
     if [ -s "$convert_stderr" ]; then
-        # Forward the heredoc Python's stderr to both the structured log
-        # (via log_warn) and the process's stderr -- the latter is what tests
-        # and operators read when something has gone wrong with conversion.
+        # A genuine converter error is logged (to events/logs/common_transcript)
+        # but never echoed to this watcher's stdout/stderr -- that would surface
+        # in the agent's pane.
         log_warn "convert error: $(cat "$convert_stderr")"
-        cat "$convert_stderr" >&2
     fi
     rm -f "$convert_stderr"
 

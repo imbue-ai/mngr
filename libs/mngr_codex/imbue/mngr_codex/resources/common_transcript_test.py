@@ -16,14 +16,17 @@ Each test sets up:
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
@@ -60,10 +63,16 @@ def _event_msg_user(text: str) -> str:
 
 @pytest.fixture
 def state_dir(tmp_path: Path, stub_mngr_log_sh: str) -> Path:
+    """Per-test fake $MNGR_AGENT_STATE_DIR with stub mngr_log.sh + the real
+    shared common-transcript lib installed (the converter sources it for the
+    convert lock), mirroring Host._ensure_shared_shell_libs."""
     state = tmp_path / "agent"
     (state / "commands").mkdir(parents=True)
     (state / "logs" / "codex_transcript").mkdir(parents=True)
     (state / "commands" / "mngr_log.sh").write_text(stub_mngr_log_sh)
+    (state / "commands" / "mngr_common_transcript_lib.sh").write_text(
+        importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+    )
     return state
 
 
@@ -82,6 +91,17 @@ def _run_converter(state_dir: Path) -> str:
     )
     assert "Traceback" not in result.stderr, result.stderr
     return result.stderr
+
+
+def _run_single_pass(state_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Run one pass and return the full process so callers can inspect stdout/stderr."""
+    return subprocess.run(
+        ["bash", str(_SCRIPT_PATH), "--single-pass"],
+        env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
 
 
 def _read_common_events(state_dir: Path) -> list[dict[str, Any]]:
@@ -150,8 +170,13 @@ def test_assistant_message_is_converted(state_dir: Path) -> None:
     assert assistant["tool_calls"] == []
 
 
-def test_function_call_and_output_pair_into_tool_result(state_dir: Path) -> None:
-    """function_call + function_call_output (same call_id) -> tool_result."""
+def test_function_call_emits_assistant_message_with_tool_call(state_dir: Path) -> None:
+    """function_call -> assistant_message whose tool_calls carry the invocation.
+
+    codex models the call as a standalone rollout item (no assistant `message`),
+    so the converter surfaces it on an assistant turn -- matching the other ports.
+    The assistant tool_call_id must match the paired tool_result's.
+    """
     _write_raw_stream(
         state_dir,
         [
@@ -164,13 +189,19 @@ def test_function_call_and_output_pair_into_tool_result(state_dir: Path) -> None
     _run_converter(state_dir)
 
     events = _read_common_events(state_dir)
-    types = [e["type"] for e in events]
-    assert types == ["user_message", "tool_result"]
-    tool_result = events[1]
+    assert [e["type"] for e in events] == ["user_message", "assistant_message", "tool_result"]
+    assistant, tool_result = events[1], events[2]
+    assert assistant["text"] == ""
+    assert len(assistant["tool_calls"]) == 1
+    call = assistant["tool_calls"][0]
+    assert call["tool_name"] == "shell_command"
+    assert call["input_preview"] == '{"command":"ls"}'
     assert tool_result["tool_name"] == "shell_command"
     assert tool_result["output"] == "file_a\nfile_b\n"
     assert tool_result["is_error"] is False
-    # The tool_result references the synthetic id minted on the function_call line.
+    # The assistant tool_call and its tool_result share the synthetic id minted on
+    # the function_call line, so a reader can pair them.
+    assert call["tool_call_id"] == "line-2-tc"
     assert tool_result["tool_call_id"] == "line-2-tc"
 
 
@@ -313,6 +344,34 @@ def test_malformed_lines_are_skipped_not_fatal(state_dir: Path) -> None:
     assert events[0]["content"] == "after the broken line"
 
 
+def test_missing_output_file_emits_nothing_to_pane(state_dir: Path) -> None:
+    """On the first pass the output file does not exist yet; the watcher must
+    stay completely silent on stdout/stderr while still converting the event.
+    The converter's count is captured by the shell, never echoed to the pane.
+    """
+    _write_raw_stream(state_dir, [_user("Hello")])
+    output_path = state_dir / "events" / "codex" / "common_transcript" / "events.jsonl"
+    assert not output_path.exists()
+
+    result = _run_single_pass(state_dir)
+    assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
+    assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
+    assert len(_read_common_events(state_dir)) == 1
+
+
+def test_dropped_lines_emit_nothing_to_pane(state_dir: Path) -> None:
+    """Malformed lines are dropped silently and must produce no output on the
+    watcher's stdout/stderr; the valid line still converts.
+    """
+    _write_raw_stream(state_dir, ["not json", _user("kept")])
+
+    result = _run_single_pass(state_dir)
+    assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
+    assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
+    events = _read_common_events(state_dir)
+    assert [e["content"] for e in events] == ["kept"]
+
+
 def test_event_ids_are_stable_per_line(state_dir: Path) -> None:
     """Event ids derive from the line index, so they're stable across restarts."""
     _write_raw_stream(state_dir, [_user("a-message"), _assistant("b-message")])
@@ -322,3 +381,68 @@ def test_event_ids_are_stable_per_line(state_dir: Path) -> None:
     events = _read_common_events(state_dir)
     ids = [e["event_id"] for e in events]
     assert ids == ["line-1-user", "line-2-assistant"]
+
+
+def _lock_dir(state_dir: Path) -> Path:
+    return state_dir / ".common_transcript_convert.lock"
+
+
+def test_held_convert_lock_skips_pass(state_dir: Path) -> None:
+    """A pass that cannot take the convert lock (held by a concurrent pass)
+    skips conversion rather than racing into duplicate output. Simulated by
+    pre-creating the (fresh) lock dir and giving the pass a short timeout."""
+    _write_raw_stream(state_dir, [_user("hello")])
+    _lock_dir(state_dir).mkdir(parents=True)
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir), "MNGR_CONVERT_LOCK_TIMEOUT": "1"}
+    result = subprocess.run(
+        ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
+    )
+    assert "Traceback" not in result.stderr, result.stderr
+    assert _read_common_events(state_dir) == []
+
+    _lock_dir(state_dir).rmdir()
+    _run_converter(state_dir)
+    assert len(_read_common_events(state_dir)) == 1
+
+
+def test_stale_convert_lock_is_broken(state_dir: Path) -> None:
+    """A convert lock older than a minute is treated as stale and broken, so the
+    converter never wedges permanently."""
+    _write_raw_stream(state_dir, [_user("hello")])
+    lock = _lock_dir(state_dir)
+    lock.mkdir(parents=True)
+    stale = time.time() - 120
+    os.utime(lock, (stale, stale))
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir), "MNGR_CONVERT_LOCK_TIMEOUT": "1"}
+    result = subprocess.run(
+        ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
+    )
+    assert "Traceback" not in result.stderr, result.stderr
+    assert len(_read_common_events(state_dir)) == 1
+
+
+def test_concurrent_passes_do_not_duplicate(state_dir: Path) -> None:
+    """Two passes racing over the same input must not both append the same
+    events: the lock serializes them so the second sees the first's output in
+    its dedup set. Without the lock this produces duplicate event_ids."""
+    _write_raw_stream(state_dir, [_user(f"msg {i}") for i in range(20)])
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)}
+    procs = [
+        subprocess.Popen(
+            ["bash", str(_SCRIPT_PATH), "--single-pass"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    for proc in procs:
+        assert proc.wait(timeout=30) == 0
+
+    events = _read_common_events(state_dir)
+    event_ids = [e["event_id"] for e in events]
+    assert len(event_ids) == len(set(event_ids)), "convert lock failed to prevent duplicate events"
+    assert len(events) == 20

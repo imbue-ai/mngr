@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Bumped the timeout for `test_schedule_run_local_deployed_trigger` to 30s to reduce flakiness. No user-facing changes.
+
+## Test reliability
+
+- Marked `test_schedule_run_local_deployed_trigger` with `@pytest.mark.flaky` so offload retries it. It passes locally (~5s) but occasionally exceeds the 10s pytest-timeout under offload load. This is unrelated to the Azure-provider work on this branch -- it just surfaced on this PR's CI run.
+
 ## 2026-06-15
 
 Marked the `test_schedule_run_local_deployed_trigger` integration test `@pytest.mark.flaky` with a longer per-test timeout. The test executes a deployed trigger's `run.sh`, which shells out to `mngr`; that subprocess startup is slow and variable under CI load and intermittently exceeded the default 10s pytest-timeout. No change to `mngr_schedule` runtime behavior.

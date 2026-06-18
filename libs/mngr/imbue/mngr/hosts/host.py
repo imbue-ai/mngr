@@ -286,6 +286,10 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
 # mngr's preferred length of tmux's status-left.
 _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 
+# Format tmux uses for the outer terminal's tab title (set-titles-string):
+# session name then pane title, e.g. 'mngr-foo  Fix the bug'.
+_TMUX_SET_TITLES_STRING: Final[str] = "#S  #T"
+
 # Per-command timeout for the individual shell steps that make up the
 # stop/cleanup path (tmux list-windows/list-panes/kill-session, the pgrep
 # descendant walk, and the MNGR_AGENT_ID env scan). A wedged tmux client can
@@ -2646,9 +2650,12 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def _create_host_tmux_config(self) -> Path:
         """Create a tmux config file for the host with hotkeys for agent management.
 
+        The config holds only mngr's own settings; tmux loads the user's
+        ~/.tmux.conf itself when the server starts.
+
         The config:
         1. Use mngr's preferred status-left-length (tmux default is 10)
-        2. Sources the user's default tmux config if it exists (~/.tmux.conf)
+        2. Enable set-titles so the agent's title reaches the outer terminal tab
         3. Adds a Ctrl-q binding that detaches and destroys the current agent
         4. Adds a Ctrl-t binding that detaches and stops the current agent
 
@@ -2677,8 +2684,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "# Widen status-left to show more session name, i.e. '[mngr-<agent_name>]'",
             f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}",
             "",
-            "# Source user's default tmux config if it exists",
-            "if-shell 'test -f ~/.tmux.conf' 'source-file ~/.tmux.conf'",
+            "# Forward the agent's title to the outer terminal tab (tmux default is off)",
+            "set -g set-titles on",
+            f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"',
             "",
         ]
 
@@ -2731,8 +2739,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         original default-command (queried via tmux show-option), so that
         user-created windows get both the env vars and the user's shell.
 
-        A custom tmux config is used that:
-        - Sources the user's default ~/.tmux.conf if it exists
+        A custom tmux config (holding only mngr's own settings; tmux loads the
+        user's ~/.tmux.conf itself at server start) is used that:
+        - Widens status-left-length and enables set-titles
         - Adds a Ctrl-q binding to detach and destroy the current agent
         - Adds a Ctrl-t binding to detach and halt (stop) the current agent
 
@@ -3330,12 +3339,18 @@ def _build_start_agent_shell_command(
     tmux_width = int(tmux_options.width) if tmux_options.width is not None else _DEFAULT_TMUX_WIDTH
     tmux_height = int(tmux_options.height) if tmux_options.height is not None else _DEFAULT_TMUX_HEIGHT
     steps.append(
-        f"tmux -f {shlex.quote(str(tmux_config_path))} new-session -d"
+        "tmux new-session -d"
         f" -s {shlex.quote(session_name)}"
         f" -x {tmux_width} -y {tmux_height}"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
+
+    # Source mngr's own tmux config (options and key bindings) at agent creation;
+    # the user's own config is pulled in at tmux server start. Parenthesized so the
+    # '|| true' (a cosmetic-config error must not block startup) scopes to this step,
+    # not the whole && chain.
+    steps.append(f"(tmux source-file {shlex.quote(str(tmux_config_path))} || true)")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
 
