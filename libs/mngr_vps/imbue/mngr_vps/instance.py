@@ -175,7 +175,7 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
 _VPS_RESOURCE_ALREADY_GONE_STATUS_CODES: Final = (404, 410)
 
 
-def _is_vps_resource_already_gone(error: MngrError) -> bool:
+def is_vps_resource_already_gone(error: MngrError) -> bool:
     """Return True iff ``error`` is a VPS API "already gone" (not-found) response.
 
     Both the Vultr and OVH clients raise ``VpsApiError`` carrying the HTTP
@@ -1315,7 +1315,7 @@ class VpsProvider(BaseProviderInstance):
                     self.vps_client.destroy_instance(vps_config.vps_instance_id)
                 except MngrError as e:
                     logger.warning("Failed to destroy VPS: {}", e)
-                    if not _is_vps_resource_already_gone(e):
+                    if not is_vps_resource_already_gone(e):
                         failures.append(
                             CleanupFailure(
                                 category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
@@ -1331,7 +1331,7 @@ class VpsProvider(BaseProviderInstance):
                     self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
                 except MngrError as e:
                     logger.warning("Failed to delete SSH key from provider: {}", e)
-                    if not _is_vps_resource_already_gone(e):
+                    if not is_vps_resource_already_gone(e):
                         failures.append(
                             CleanupFailure(
                                 category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
