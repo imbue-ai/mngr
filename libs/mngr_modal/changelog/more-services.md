@@ -1,0 +1,1 @@
+Mark the Modal acceptance tests `test_mngr_create_echo_command_on_modal` and `test_exec_cwd_override_on_modal` as flaky so offload retries them through a transient modal-side deploy race (`Function <id> not found` while deploying `snapshot_and_shutdown.py`) that can occur during host creation. Test-only change; no runtime behavior change.
