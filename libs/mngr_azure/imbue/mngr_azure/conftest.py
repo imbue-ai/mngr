@@ -27,7 +27,6 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import Final
 
 import pytest
@@ -39,6 +38,9 @@ from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
+from imbue.mngr_azure.cleanup import find_old_test_vms
+from imbue.mngr_azure.cleanup import force_delete_vms
+from imbue.mngr_azure.cleanup import reclaim_orphan_test_network
 from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
 from imbue.mngr_azure.testing import AZURE_DEFAULT_REGION
 from imbue.mngr_azure.testing import AZURE_DEFAULT_RESOURCE_GROUP
@@ -79,110 +81,6 @@ def setup_test_mngr_env(
 # shared ``AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS`` constant (the same value
 # release tests propagate into cloud-init) so the two TTLs can never drift.
 _TEST_LEAK_TTL: Final[timedelta] = timedelta(seconds=AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS)
-
-
-def _force_delete_vms(compute: Any, vm_names: list[str]) -> None:
-    for vm_name in vm_names:
-        try:
-            # Await the delete (``.result()``): ``begin_delete`` returns an
-            # LROPoller immediately, so a server-side delete failure only
-            # surfaces on ``.result()``. Without it, the ``except`` arm can only
-            # catch request-submission errors and a delete the server later
-            # rejects is silently dropped -- the session would then report the
-            # leak as cleaned when it was not. Mirrors the production
-            # ``destroy_instance`` path (which awaits) and the GCP conftest fix.
-            compute.virtual_machines.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, vm_name).result()
-        except AzureError as e:
-            logger.warning("Failed to delete leaked Azure VM {}: {}", vm_name, e)
-
-
-def _find_orphan_test_vms(compute: Any) -> list[str]:
-    """Return VM names tagged ``mngr-pytest-launched=true`` and older than the TTL.
-
-    ``AzureVpsClient.create_instance`` adds the tag to every VM launched while
-    ``PYTEST_CURRENT_TEST`` is set, plus an ISO ``mngr-created-at`` tag used here
-    for the age check (Azure VM list does not reliably expose creation time).
-    Younger VMs are intentionally skipped so this never races a parallel worker's
-    in-flight test.
-    """
-    cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
-    leaked: list[str] = []
-    try:
-        for vm in compute.virtual_machines.list(AZURE_DEFAULT_RESOURCE_GROUP):
-            tags = dict(vm.tags or {})
-            if tags.get(AZURE_PYTEST_LAUNCHED_TAG) != "true":
-                continue
-            created_raw = tags.get("mngr-created-at")
-            if created_raw is None:
-                continue
-            try:
-                created_at = datetime.fromisoformat(created_raw)
-            except ValueError:
-                continue
-            if created_at < cutoff:
-                leaked.append(vm.name)
-    except AzureError as e:
-        logger.warning("Failed to scan for orphaned Azure test VMs: {}", e)
-    return leaked
-
-
-def _reclaim_orphan_test_network(network: Any) -> None:
-    """Best-effort delete unattached pytest-launched NICs / public IPs at session end.
-
-    A test create that fails *after* provisioning the NIC + public IP but before
-    the VM (e.g. ``SkuNotAvailable``) leaves those orphaned, and the production
-    reclaim runs at GC time (``mngr gc``) -- which may never run in a finished
-    session. These are not a test bug (they stem from Azure capacity), so they are
-    cleaned silently rather than failing the session. NICs go first (they hold the
-    public IPs). Only mngr pytest-launched resources are touched.
-    """
-    cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
-    try:
-        nics = list(network.network_interfaces.list(AZURE_DEFAULT_RESOURCE_GROUP))
-    except AzureError as e:
-        logger.warning("Failed to list NICs for session-end orphan reclaim: {}", e)
-        nics = []
-    for nic in nics:
-        if nic.virtual_machine is not None or not _is_orphan_test_resource(nic, cutoff):
-            continue
-        try:
-            # Await the delete: ``begin_delete`` is async, and awaiting it both
-            # surfaces server-side failures into the ``except`` arm (so a failed
-            # reclaim is logged, not silently dropped) and ensures the NIC is
-            # gone before we try to delete the public IP it holds below.
-            network.network_interfaces.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, nic.name).result()
-            logger.info("Reclaimed orphaned test NIC {}", nic.name)
-        except AzureError as e:
-            logger.warning("Failed to reclaim orphaned test NIC {}: {}", nic.name, e)
-    try:
-        public_ips = list(network.public_ip_addresses.list(AZURE_DEFAULT_RESOURCE_GROUP))
-    except AzureError as e:
-        logger.warning("Failed to list public IPs for session-end orphan reclaim: {}", e)
-        public_ips = []
-    for public_ip in public_ips:
-        if public_ip.ip_configuration is not None or not _is_orphan_test_resource(public_ip, cutoff):
-            continue
-        try:
-            # Await the delete so a server-side failure surfaces into the
-            # ``except`` arm and is logged rather than silently dropped.
-            network.public_ip_addresses.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, public_ip.name).result()
-            logger.info("Reclaimed orphaned test public IP {}", public_ip.name)
-        except AzureError as e:
-            logger.warning("Failed to reclaim orphaned test public IP {}: {}", public_ip.name, e)
-
-
-def _is_orphan_test_resource(resource: Any, cutoff: datetime) -> bool:
-    tags = dict(resource.tags or {})
-    if tags.get(AZURE_PYTEST_LAUNCHED_TAG) != "true":
-        return False
-    created_raw = tags.get("mngr-created-at")
-    if created_raw is None:
-        return False
-    try:
-        created_at = datetime.fromisoformat(created_raw)
-    except ValueError:
-        return False
-    return created_at < cutoff
 
 
 def _mark_session_failed(session: pytest.Session) -> None:
@@ -245,13 +143,14 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         _mark_session_failed(session)
         return
 
-    _reclaim_orphan_test_network(network)
+    now = datetime.now(timezone.utc)
+    reclaim_orphan_test_network(network, AZURE_DEFAULT_RESOURCE_GROUP, _TEST_LEAK_TTL, now)
 
-    orphans = _find_orphan_test_vms(compute)
+    orphans = find_old_test_vms(compute, AZURE_DEFAULT_RESOURCE_GROUP, _TEST_LEAK_TTL, now)
     if not orphans:
         return
 
-    _force_delete_vms(compute, orphans)
+    force_delete_vms(compute, AZURE_DEFAULT_RESOURCE_GROUP, orphans)
     message = (
         "=" * 70
         + "\nAZURE SESSION CLEANUP FOUND LEAKED RESOURCES!\n"

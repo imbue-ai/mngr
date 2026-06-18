@@ -37,7 +37,6 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import Final
 
 import boto3
@@ -48,6 +47,8 @@ from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
+from imbue.mngr_aws.cleanup import find_old_test_instances
+from imbue.mngr_aws.cleanup import terminate_test_instances
 from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
@@ -106,34 +107,6 @@ def setup_test_mngr_env(
 _TEST_LEAK_TTL: Final[timedelta] = timedelta(seconds=AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS)
 
 
-def _find_orphan_test_instances(ec2: Any) -> list[str]:
-    """Return instance IDs tagged ``mngr-pytest-launched=true`` and older than the TTL.
-
-    ``AwsVpsClient.create_instance`` adds the tag to every EC2 instance
-    launched while ``PYTEST_CURRENT_TEST`` is set, so this scanner only
-    matches instances we created here. Younger instances are intentionally
-    skipped so this never races a parallel worker's in-flight test.
-    """
-    cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
-    leaked: list[str] = []
-    try:
-        paginator = ec2.get_paginator("describe_instances")
-        for page in paginator.paginate(
-            Filters=[
-                {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]},
-                {"Name": f"tag:{AWS_PYTEST_LAUNCHED_TAG}", "Values": ["true"]},
-            ]
-        ):
-            for reservation in page.get("Reservations", []):
-                for instance in reservation.get("Instances", []):
-                    launch_time = instance.get("LaunchTime")
-                    if isinstance(launch_time, datetime) and launch_time < cutoff:
-                        leaked.append(instance["InstanceId"])
-    except (BotoCoreError, ClientError) as e:
-        logger.warning("Failed to scan for orphaned EC2 test instances: {}", e)
-    return leaked
-
-
 def _mark_session_failed(session: pytest.Session) -> None:
     """Fail the session, but only if it was otherwise passing.
 
@@ -185,14 +158,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         _mark_session_failed(session)
         return
 
-    orphans = _find_orphan_test_instances(ec2)
+    orphans = find_old_test_instances(ec2, _TEST_LEAK_TTL, datetime.now(timezone.utc))
     if not orphans:
         return
 
-    try:
-        ec2.terminate_instances(InstanceIds=orphans)
-    except (BotoCoreError, ClientError) as e:
-        logger.warning("Failed to terminate leaked EC2 instances {}: {}", orphans, e)
+    terminate_test_instances(ec2, orphans)
     message = (
         "=" * 70
         + "\nAWS SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
