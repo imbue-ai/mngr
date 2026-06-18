@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-18
+
 ### Changed
 
 - Changed: Streaming consumers (`_StreamBufferConsumer` and `StreamEventSynthesizer`) now delegate snapshot-diff bookkeeping to the agent's shared `LiveOutputReader` (`agent.make_live_output_reader()`/`agent.get_live_output_path()`) instead of each tracking `emitted_body` / `last_content` themselves. The `stream_buffer` module (the `compute_stream_delta` diff helpers) moved to `mngr_claude`, where the snapshot format lives; this package imports them from there. No user-visible behavior change.

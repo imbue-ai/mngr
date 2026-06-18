@@ -309,6 +309,62 @@ def test_gather_plugin_info_reflects_disabled_status() -> None:
     assert my_plugin.is_enabled is False
 
 
+def test_gather_plugin_info_reports_blocked_plugin_as_disabled() -> None:
+    """A blocked opt-in plugin must report disabled even when config does not list it.
+
+    Opt-in plugins (e.g. claude_subagent_proxy) are blocked in
+    create_plugin_manager via read_disabled_plugins() but never reach
+    config.disabled_plugins. pluggy still lists the blocked name with a None
+    plugin object, so without consulting pm.is_blocked() the plugin would be
+    mislabeled enabled. This asserts the reported state matches the block state.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+
+    # Block a name without registering it and without listing it in config --
+    # exactly the opt-in-plugin shape.
+    pm.set_blocked("opt-in-plugin")
+    assert pm.is_blocked("opt-in-plugin")
+
+    config = MngrConfig()
+    mngr_ctx = MngrContext(
+        config=config,
+        pm=pm,
+        profile_dir=_fake_profile_dir(),
+    )
+
+    plugins = _gather_plugin_info(mngr_ctx)
+    opt_in = next(p for p in plugins if p.name == "opt-in-plugin")
+    assert opt_in.is_enabled is False
+
+
+def test_gather_plugin_info_reports_unblocked_plugin_as_enabled() -> None:
+    """A registered, unblocked plugin not listed as disabled reports enabled.
+
+    The complement of the blocked case: when an opt-in plugin is explicitly
+    enabled it is registered and not blocked, so it must report enabled=true.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+
+    class OptInPlugin:
+        pass
+
+    pm.register(OptInPlugin(), name="opt-in-plugin")
+    assert not pm.is_blocked("opt-in-plugin")
+
+    config = MngrConfig()
+    mngr_ctx = MngrContext(
+        config=config,
+        pm=pm,
+        profile_dir=_fake_profile_dir(),
+    )
+
+    plugins = _gather_plugin_info(mngr_ctx)
+    opt_in = next(p for p in plugins if p.name == "opt-in-plugin")
+    assert opt_in.is_enabled is True
+
+
 def test_gather_plugin_info_skips_internal_plugins() -> None:
     """_gather_plugin_info should skip plugins with names starting with underscore."""
     pm = pluggy.PluginManager("mngr")

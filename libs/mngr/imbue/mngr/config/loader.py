@@ -275,15 +275,32 @@ def load_config(
     config_dict["create_templates"] = config.create_templates
 
     # Apply CLI plugin overrides
-    config_dict["plugins"], config_dict["disabled_plugins"] = _apply_plugin_overrides(
+    config_dict["plugins"], cli_disabled_plugins = _apply_plugin_overrides(
         config_dict["plugins"],
         enabled_plugins,
         disabled_plugins,
     )
 
-    # Block disabled plugins so their hooks don't fire. This covers
-    # CLI-level --disable-plugin flags that weren't known at startup.
-    block_disabled_plugins(pm, config_dict["disabled_plugins"], is_strict=True)
+    # Block the CLI/[plugins.*] disabled set so their hooks don't fire. This covers
+    # CLI-level --disable-plugin flags that weren't known at startup; is_strict
+    # catches --disable-plugin typos (a name that is neither registered nor already
+    # blocked). Opt-in plugins are intentionally excluded here: create_plugin_manager
+    # already blocked them, so re-blocking would add nothing in production while
+    # tripping the strict check in the bare-pm path.
+    block_disabled_plugins(pm, cli_disabled_plugins, is_strict=True)
+
+    # Record disabled_plugins as the faithful union with the opt-in-derived set
+    # (OPT_IN_PLUGINS not explicitly enabled). _apply_plugin_overrides only sees
+    # [plugins.*] enabled flags, so on its own the field drops opt-in plugins (e.g.
+    # claude_subagent_proxy) that create_plugin_manager blocks -- which made
+    # `mngr plugin list` mislabel them enabled. Gated on MNGR_LOAD_ALL_PLUGINS
+    # exactly like create_plugin_manager, so tooling that loads every plugin keeps
+    # them enabled here too. Blocking is one-way (there is no unblock), so the union
+    # also stays truthful under --enable-plugin, which cannot un-block an opt-in plugin.
+    if parse_bool_env(os.environ.get("MNGR_LOAD_ALL_PLUGINS", "")):
+        config_dict["disabled_plugins"] = cli_disabled_plugins
+    else:
+        config_dict["disabled_plugins"] = cli_disabled_plugins | config_disabled_plugins
 
     # Include retry if not None
     if config.retry is not None:

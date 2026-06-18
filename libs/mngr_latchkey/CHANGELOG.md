@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-18
+
 ### Added
 
 - Added: `maybe_recover_host_permissions_for_agent` in `agent_setup`: a best-effort repair that, given an agent's opaque permissions handle, host id, and agent id, materializes the canonical per-host permissions file (recreating the opaque handle's symlink if needed) when missing and idempotently re-registers the agent in the host's `minds-api-proxy` allowlist. Cheap when the canonical file already exists.
