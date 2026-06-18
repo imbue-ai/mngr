@@ -1,4 +1,4 @@
-"""Tests for VPS Docker provider instance utilities."""
+"""Tests for VPS provider instance utilities."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -43,7 +43,7 @@ from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 # =============================================================================
 
 
-def test_minimal_vps_docker_provider_parse_build_args_empty() -> None:
+def test_minimal_vps_provider_parse_build_args_empty() -> None:
     """No build args -> no git_depth, no docker args; region/plan defaults are unused sentinels."""
     minimal = MinimalVpsProvider.model_construct()
     parsed = minimal._parse_build_args(None)
@@ -51,7 +51,7 @@ def test_minimal_vps_docker_provider_parse_build_args_empty() -> None:
     assert parsed.docker_build_args == ()
 
 
-def test_minimal_vps_docker_provider_parse_build_args_extracts_git_depth() -> None:
+def test_minimal_vps_provider_parse_build_args_extracts_git_depth() -> None:
     """--git-depth=N is consumed and surfaced separately; not forwarded to docker."""
     minimal = MinimalVpsProvider.model_construct()
     parsed = minimal._parse_build_args(["--git-depth=1", "--file=Dockerfile", "."])
@@ -59,7 +59,7 @@ def test_minimal_vps_docker_provider_parse_build_args_extracts_git_depth() -> No
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
 
 
-def test_minimal_vps_docker_provider_parse_build_args_passes_through_unknown() -> None:
+def test_minimal_vps_provider_parse_build_args_passes_through_unknown() -> None:
     """Docker flags and positional args pass through verbatim."""
     minimal = MinimalVpsProvider.model_construct()
     parsed = minimal._parse_build_args(["--build-arg=FOO=bar", "--no-cache", "."])
@@ -67,7 +67,7 @@ def test_minimal_vps_docker_provider_parse_build_args_passes_through_unknown() -
     assert parsed.docker_build_args == ("--build-arg=FOO=bar", "--no-cache", ".")
 
 
-def test_minimal_vps_docker_provider_parse_build_args_rejects_dropped_vps_prefix() -> None:
+def test_minimal_vps_provider_parse_build_args_rejects_dropped_vps_prefix() -> None:
     """A caller still using --vps-* gets a clear migration error rather than silently forwarding to docker."""
     minimal = MinimalVpsProvider.model_construct()
     with pytest.raises(MngrError, match="no longer supported"):
