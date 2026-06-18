@@ -167,8 +167,8 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description=(
             "S3 bucket where mngr stores a stopped instance's state so it is readable without "
-            "starting the instance. When None, named 'mngr-state-<account_id>-<region>'. Without a "
-            "bucket, mngr falls back to EC2 tags, which hold less and cap the number of agents."
+            "starting the instance. When None, named 'mngr-state-<account_id>-<region>'. The bucket "
+            "is required infrastructure (run `mngr aws prepare`); there is no tag fallback."
         ),
     )
     is_offline_host_dir_enabled: bool = Field(
@@ -232,8 +232,9 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         ``state_bucket_name`` wins when set. Otherwise derive
         ``mngr-state-<account_id>-<region>`` (lowercased, DNS-valid), resolving
         the account id from ``sts:GetCallerIdentity`` (cached). Returns None when
-        the account id can't be fetched (e.g. missing STS permission) so callers
-        degrade to the no-bucket path rather than failing.
+        the account id can't be fetched (e.g. missing STS permission); the bucket
+        is required, so callers turn a None into an actionable "run `mngr aws
+        prepare`" error rather than silently proceeding without it.
 
         ``region`` overrides the region embedded in the derived name (the runtime
         path passes nothing and uses ``default_region``); the operator CLI passes
