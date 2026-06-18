@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.8] - 2026-06-18
+
 ### Added
 
 - Added: Session adoption — `mngr create antigravity --adopt <id>` (or absolute store path) makes a newly created agent resume an existing agy conversation. The conversation is resolved across the user-native agy store, every live local mngr antigravity agent, and every preserved (destroyed) antigravity agent; ambiguous ids are rejected. `--adopt-session` is accepted as an alias. The flag is repeatable (each conversation coexists in the new agent's switcher; the last value is resumed) and may be combined with `--from` (the clone's conversation is the one resumed).

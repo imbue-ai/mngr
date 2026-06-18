@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.17] - 2026-06-18
+
 ### Added
 
 - Added: Code-derived agent capability registry. Capability marker mixins in `imbue.mngr.interfaces.agent` (`CliBackedAgentMixin`, `InteractiveAgentMixin`, `HasSessionAdoptionMixin`, `SupportsLiveOutputMixin`, `HasUnattendedModeMixin`, `HasPermissionPolicyMixin`, `HasVersionManagementMixin`, `HasSessionPreservationMixin`, `HasAutoInstallMixin`) declare each agent's capabilities, detected via `issubclass`, `waiting_reason` field generators, plugin hookimpls, or a sibling usage plugin. A generated doc (`libs/mngr/docs/concepts/agent_capabilities.md`) renders the matrix; a drift guard fails if it disagrees with the code. Regenerate with `just regenerate-agent-capabilities-doc`.

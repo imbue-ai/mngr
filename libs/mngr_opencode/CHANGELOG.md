@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.17] - 2026-06-18
+
 ### Added
 
 - Added: Session adoption — `mngr create opencode --adopt <id-or-db-path>` makes a fresh opencode agent resume an existing conversation. The plugin resolves the id across the user-native opencode db and every live/preserved mngr agent's db, copies the source db (and `-wal`/`-shm` sidecars) into the new agent, rebinds the session's stored worktree path to the new agent's work dir, and writes a resume pointer. The flag is repeatable (subsequent sessions are merged into the single `opencode.db` so all appear in the switcher; the last one is resumed) and may be combined with `--from`. `--adopt-session` is accepted as an alias.

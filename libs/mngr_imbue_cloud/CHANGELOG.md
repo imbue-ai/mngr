@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-18
+
 ### Added
 
 - Added: `mngr imbue_cloud admin server order --option <planCode>` (repeatable) lets you order plans whose mandatory option families (e.g. bandwidth, vrack) offer more than one choice. Previously the cart build failed with "expected exactly one X option to auto-pick" on such plans (e.g. the `24sys*` SYS line). Single-offer families are still auto-selected; an `order` run without `--option` on an ambiguous plan now lists each family's offers and their monthly prices so you can re-run with the right values.

@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.14] - 2026-06-18
+
 ### Added
 
 - Added: Session adoption — `mngr create pi --adopt <id-or-path>` makes a fresh pi-coding agent resume an existing conversation. Each resolved session is copied into the new agent's store and its embedded working directory is rebound to the new agent's work_dir (so pi never stalls at its "working directory does not exist" dialog). Resolved across the user-native store, every live mngr agent, and every preserved (destroyed) agent. The flag is repeatable and may be combined with `--from`. `--adopt-session` is accepted as an alias.

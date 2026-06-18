@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.4] - 2026-06-18
+
 ### Added
 
 - Added: Session adoption — `mngr create codex --adopt <id>` (or absolute rollout `.jsonl` path) makes a fresh agent resume an existing codex conversation. Resolved across `~/.codex/sessions`, every live local mngr codex agent, and every preserved (destroyed) codex agent; ambiguous matches are rejected with a clear message. The recorded working directory in the rollout is rewritten to the new agent's work dir, so `codex resume` does not pop the "Choose working directory" modal. The flag is repeatable (each rollout coexists in codex's session switcher; the last one is resumed) and may be combined with `--from`. `--adopt-session` is accepted as an alias.

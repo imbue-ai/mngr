@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.17] - 2026-06-18
+
 ### Added
 
 - Added: `ClaudeAgent` declares the new capability mixins (`HasStreamingSnapshotMixin` → `SupportsLiveOutputMixin`, `HasUnattendedModeMixin`, `HasVersionManagementMixin`, `CliBackedAgentMixin`, `HasSessionAdoptionMixin`), so these capabilities are code-detectable in the agent capability matrix. Session-adoption logic moved from `on_after_provisioning` into an `adopt_session` method.
