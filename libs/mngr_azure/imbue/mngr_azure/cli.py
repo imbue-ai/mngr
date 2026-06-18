@@ -39,6 +39,7 @@ from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_azure.state_bucket import BlobStateBucketError
 
 
 class _AzureOperatorCliOptions(CommonCliOptions):
@@ -198,9 +199,25 @@ def _ensure_state_bucket(bucket: BlobStateBucket) -> tuple[str, bool]:
     Azure control-plane roles (the account creator) do NOT include blob data
     access, so without this the operator's offline reads/writes would fail with
     AuthorizationPermissionMismatch.
+
+    The blob-data grant needs ``Microsoft.Authorization/roleAssignments/write``,
+    which an operator who can create storage may legitimately lack. When the grant
+    fails, the account already exists (it is created first), so the error is
+    re-raised with actionable guidance: the role can be granted out of band and
+    ``prepare`` re-run -- rather than leaving the operator with only the low-level
+    ``AuthorizationFailed`` message.
     """
     was_created = bucket.ensure_bucket()
-    bucket.ensure_operator_blob_access()
+    try:
+        bucket.ensure_operator_blob_access()
+    except BlobStateBucketError as e:
+        raise AzureProviderError(
+            f"Created the Azure state storage account {bucket.account_name!r}, but could not grant the "
+            "operator principal data-plane blob access (Storage Blob Data Contributor). This needs the "
+            "`Microsoft.Authorization/roleAssignments/write` permission. Grant the role out of band (or "
+            "re-run `mngr azure prepare` as a principal that can assign roles) -- without it, offline "
+            f"host state reads/writes fail with AuthorizationPermissionMismatch. Underlying error: {e}"
+        ) from e
     return bucket.account_name, was_created
 
 

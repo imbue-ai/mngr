@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from azure.core.exceptions import HttpResponseError
 from click.testing import CliRunner
 
 from imbue.mngr.primitives import HostId
@@ -50,6 +51,23 @@ def test_ensure_state_bucket_creates_account_and_grants_operator() -> None:
     assert len(authorization.role_assignments.created) == 1
     _scope, _name, parameters = authorization.role_assignments.created[0]
     assert parameters.principal_id == "operator-oid-1"
+
+
+def test_ensure_state_bucket_wraps_blob_grant_failure_with_actionable_guidance() -> None:
+    """A failed operator blob-data grant surfaces an actionable error, not the bare Azure message.
+
+    The grant needs ``Microsoft.Authorization/roleAssignments/write``, which an
+    operator able to create storage may lack; the account is created first, so the
+    error must tell the operator they can grant the role out of band and re-run.
+    """
+    authorization = FakeAuthorizationClient()
+    authorization.role_assignments.create_error = HttpResponseError(message="AuthorizationFailed")
+    bucket = _stubbed_bucket(FakeBlobStorageBackend(), authorization=authorization)
+    with pytest.raises(AzureProviderError, match="roleAssignments/write"):
+        _ensure_state_bucket(bucket)
+    # The account was still created (the grant is the step that failed), so the
+    # error message names it and points at re-running prepare.
+    assert bucket.account_exists() is True
 
 
 def test_perform_state_bucket_cleanup_deletes_when_empty() -> None:
