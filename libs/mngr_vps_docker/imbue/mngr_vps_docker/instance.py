@@ -2946,10 +2946,13 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
 
         Every offline-capable provider selects exactly one store (implemented as a
         cached property so any bucket-existence probe runs at most once): the
-        object-storage ``BucketHostStateStore`` (AWS S3, Azure Blob), the GCP
-        instance-metadata store, or ``MissingBucketHostStateStore`` when a required
-        bucket has not yet been provisioned. Selecting it here lets the persist /
-        remove / list / read paths below stop branching on the backing store.
+        object-storage ``BucketHostStateStore`` (AWS S3, Azure Blob) or the GCP
+        instance-metadata store. When a required object-storage bucket has not yet
+        been provisioned the property raises an actionable error (see
+        ``missing_state_bucket_error``) rather than returning a degraded store, so
+        every persist / remove / list / read below fails loudly and uniformly.
+        Selecting the store here lets those paths stop branching on the backing
+        store.
         """
         ...
 
@@ -2982,27 +2985,31 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         Keyed by ``host_id``; the ``instance`` argument is accepted (the discovery
         loop passes the instance it is already iterating) but unused, since the
         store resolves everything from ``host_id``. A read against a provider whose
-        required bucket is absent raises an actionable error (see
-        ``MissingBucketHostStateStore``), which the discovery wrapper attributes to
-        this provider and surfaces per the caller's ``--on-error``.
+        required bucket is absent (or a bucket storage error) raises, which the
+        discovery wrapper attributes to this provider and surfaces per the caller's
+        ``--on-error``.
         """
         del instance
         return self._state_store.list_agent_records(host_id)
 
     def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror one agent record into the external state store (upsert; best-effort)."""
+        """Mirror one agent record into the external state store (upsert).
+
+        Propagates a storage/missing-bucket error: the bucket is required, so a
+        dropped mirror would let a stopped host show stale agents.
+        """
         self._state_store.persist_agent_record(host_id, agent_id, agent_data)
 
     def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        """Remove one agent's mirrored record from the external state store. Idempotent, best-effort."""
+        """Remove one agent's mirrored record from the external state store (idempotent; errors propagate)."""
         self._state_store.remove_agent_record(host_id, agent_id)
 
     def _persist_host_record_externally(self, record: VpsDockerHostRecord) -> None:
-        """Mirror the full host record into the external state store (best-effort)."""
+        """Mirror the full host record into the external state store (errors propagate)."""
         self._state_store.persist_host_record(record)
 
     def _delete_host_record_externally(self, host_id: HostId) -> None:
-        """Delete the host's state from the external state store (best-effort, idempotent)."""
+        """Delete the host's state from the external state store (idempotent; errors propagate)."""
         self._state_store.delete_host_state(host_id)
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
@@ -3164,7 +3171,6 @@ class BucketHostDirBackend(HostDirBackend):
 
     provider: OfflineCapableVpsDockerProvider
     bucket: StateBucket
-    bucket_error_type: type[MngrError]
 
     @abstractmethod
     def _sync_unit_name(self) -> str:
@@ -3180,14 +3186,10 @@ class BucketHostDirBackend(HostDirBackend):
         return HostVolume(volume=self.bucket.volume_for_host(host_id))
 
     def volume(self, host_id: HostId) -> HostVolume | None:
-        try:
-            if not self.bucket.host_dir_prefix_has_objects(host_id):
-                self._warn_if_identity_missing(host_id)
-                return None
-        except self.bucket_error_type as e:
-            logger.warning(
-                "Could not probe host_dir prefix for host {}; treating volume as unavailable: {}", host_id, e
-            )
+        # A bucket probe error propagates (operational failure, surfaced per
+        # --on-error); only a genuinely empty prefix yields None.
+        if not self.bucket.host_dir_prefix_has_objects(host_id):
+            self._warn_if_identity_missing(host_id)
             return None
         return self.volume_reference(host_id)
 

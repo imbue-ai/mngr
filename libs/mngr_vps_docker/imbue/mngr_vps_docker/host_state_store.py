@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from typing import Protocol
 from typing import runtime_checkable
 
-from loguru import logger
 from pydantic import ConfigDict
 
 from imbue.imbue_common.mutable_model import MutableModel
@@ -24,16 +23,19 @@ class HostStateStore(MutableModel, ABC):
     ``mngr start`` / ``mngr event`` etc. still work offline.
 
     Every offline-capable provider selects exactly one implementation:
-    ``BucketHostStateStore`` over an object-storage bucket (AWS S3, Azure Blob),
-    the GCP instance-metadata store, or -- when a required bucket has not been
-    provisioned -- ``MissingBucketHostStateStore`` (writes no-op, reads raise an
-    actionable error). Exposing them behind one interface lets the provider select
-    a store once and stop branching at every call site.
+    ``BucketHostStateStore`` over an object-storage bucket (AWS S3, Azure Blob)
+    or the GCP instance-metadata store. The object-storage bucket is required
+    infrastructure: a provider whose bucket has not been provisioned raises an
+    actionable error (pointing at its ``prepare`` command) when its state store is
+    accessed -- see :func:`missing_state_bucket_error` -- rather than selecting a
+    degraded store. Exposing the stores behind one interface lets the provider
+    select a store once and stop branching at every call site.
 
-    All methods are best-effort and idempotent: mirroring must never break the
-    primary on-volume write/destroy path, and removals tolerate an already-absent
-    record. ``host_id`` is the only key; an implementation that needs the
-    underlying instance/VM resolves it itself (from a cached listing).
+    Bucket reads and writes propagate the backing store's errors: a mirror write
+    that failed silently would let a stopped host show stale state, and a
+    swallowed read would make it vanish. Removals are idempotent and tolerate an
+    already-absent record. ``host_id`` is the only key; an implementation that
+    needs the underlying instance/VM resolves it itself (from a cached listing).
     """
 
     @abstractmethod
@@ -71,8 +73,14 @@ class HostDirBackend(MutableModel, ABC):
     does the real work, and ``NullHostDirBackend`` is the no-op fallback. This is
     the host_dir sibling of the ``HostStateStore`` select-once strategy.
 
-    All methods are best-effort and never raise -- a host_dir failure only costs
-    offline readability, never the primary create/stop path.
+    The *launch* methods (``create_identity``, ``install_sync``) raise on failure:
+    with the bucket required, an instance that cannot be wired up to push its
+    host_dir is a setup failure, surfaced at create rather than silently yielding
+    an unreadable offline host_dir later. The *read*/*pause* methods stay
+    best-effort: ``volume``/``volume_reference`` return None for a genuinely empty
+    host_dir (but raise on a bucket probe *error*), and ``trigger_final_sync``
+    only logs -- the periodic sync means a missed final sync costs freshness, not
+    the offline copy.
     """
 
     @abstractmethod
@@ -149,102 +157,62 @@ class StateBucket(Protocol):
 class BucketHostStateStore(HostStateStore):
     """Bucket-backed mirror: full host + agent records in object storage (no size limit).
 
-    Provider-agnostic over a ``StateBucket``. Every storage call is wrapped so a
-    bucket failure is logged and swallowed (mirroring must never break the primary
-    on-volume write/destroy path). ``bucket_error_type`` is the bucket's
-    operation-failure exception and ``bucket_label`` names the bucket in logs
-    (e.g. "S3 state bucket" / "Azure state bucket").
+    Provider-agnostic over a ``StateBucket``. Storage errors propagate -- the
+    bucket is required, so a failed mirror write or read must surface rather than
+    let a stopped host show stale state or vanish from listings. ``bucket_label``
+    names the bucket in error messages (e.g. "S3 state bucket" / "Azure state
+    bucket").
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     bucket: StateBucket
-    bucket_error_type: type[MngrError]
     bucket_label: str
 
     def persist_host_record(self, record: VpsDockerHostRecord) -> None:
         host_id = HostId(record.certified_host_data.host_id)
-        try:
-            self.bucket.write_host_record_json(host_id, record.model_dump_json(indent=2))
-        except self.bucket_error_type as e:
-            logger.warning("Failed to mirror host record for {} to {}: {}", host_id, self.bucket_label, e)
+        self.bucket.write_host_record_json(host_id, record.model_dump_json(indent=2))
 
     def delete_host_state(self, host_id: HostId) -> None:
-        try:
-            self.bucket.delete_host_state(host_id)
-        except self.bucket_error_type as e:
-            logger.warning("Failed to delete host state for {} from {}: {}", host_id, self.bucket_label, e)
+        self.bucket.delete_host_state(host_id)
 
     def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        try:
-            self.bucket.write_agent_record(host_id, agent_id, agent_data)
-        except self.bucket_error_type as e:
-            logger.warning("Failed to mirror agent {} for host {} to {}: {}", agent_id, host_id, self.bucket_label, e)
+        self.bucket.write_agent_record(host_id, agent_id, agent_data)
 
     def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        try:
-            self.bucket.remove_agent_record(host_id, agent_id)
-        except self.bucket_error_type as e:
-            logger.warning(
-                "Failed to remove agent {} for host {} from {}: {}", agent_id, host_id, self.bucket_label, e
-            )
+        self.bucket.remove_agent_record(host_id, agent_id)
 
     def list_agent_records(self, host_id: HostId) -> list[dict]:
         return self.bucket.list_agent_records(host_id)
 
     def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        """Read+parse the host record from the bucket's ``host_state.json``. None on absent / error / malformed."""
-        try:
-            record_json = self.bucket.read_host_record_json(host_id)
-        except self.bucket_error_type as e:
-            logger.warning("Failed to read host record for {} from {}: {}", host_id, self.bucket_label, e)
-            return None
+        """Read+parse the host record from the bucket. None only when genuinely absent.
+
+        A storage error propagates (the caller surfaces it per ``--on-error``); a
+        malformed record raises rather than returning None, since silently
+        dropping it would make an otherwise-known stopped host vanish.
+        """
+        record_json = self.bucket.read_host_record_json(host_id)
         if record_json is None:
             return None
         try:
             return VpsDockerHostRecord.model_validate_json(record_json)
         except ValueError as e:
-            logger.warning("Malformed host record for {} in {}: {}", host_id, self.bucket_label, e)
-            return None
+            raise MngrError(f"Malformed host record for {host_id} in {self.bucket_label}: {e}") from e
 
 
-class MissingBucketHostStateStore(HostStateStore):
-    """The selected store when a provider's required object-storage bucket is absent.
+def missing_state_bucket_error(store_label: str, prepare_command: str) -> MngrError:
+    """Actionable error for a provider whose required object-storage bucket is absent.
 
-    The offline mirror lives in the state bucket; with the instance-tag fallback
-    removed, there is nothing to mirror to until ``prepare`` provisions it. So
-    *writes* are no-ops -- a *running* host is still fully usable (creating /
-    labelling agents over SSH works; only the offline mirror is skipped) -- while
-    any *read* raises an actionable :class:`MngrError` pointing the operator at the
-    provider's prepare command, instead of silently making a stopped host vanish.
-
-    ``store_label`` names the missing store (e.g. "S3 state bucket") and
-    ``prepare_command`` is the command that creates it (e.g. ``mngr aws prepare``).
+    The offline mirror lives in the state bucket and there is no degraded
+    fallback, so a provider raises this the moment its state store is accessed
+    without a provisioned bucket -- whether that is an offline read (a stopped
+    host cannot be listed or resumed) or a create/label write (the bucket is a
+    prerequisite). ``store_label`` names the missing store (e.g. "S3 state
+    bucket") and ``prepare_command`` is the command that creates it (e.g.
+    ``mngr aws prepare``).
     """
-
-    store_label: str
-    prepare_command: str
-
-    def _missing_store_error(self) -> MngrError:
-        return MngrError(
-            f"The {self.store_label} has not been provisioned, so offline host state is unavailable "
-            f"(a stopped host cannot be listed or resumed). Run `{self.prepare_command}` to create it."
-        )
-
-    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
-        logger.debug("No {}; skipping offline host-record mirror (run `{}`)", self.store_label, self.prepare_command)
-
-    def delete_host_state(self, host_id: HostId) -> None:
-        pass
-
-    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        logger.debug("No {}; skipping offline agent-record mirror (run `{}`)", self.store_label, self.prepare_command)
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        pass
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        raise self._missing_store_error()
-
-    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
-        raise self._missing_store_error()
+    return MngrError(
+        f"The {store_label} has not been provisioned, so offline host state is unavailable "
+        f"(a stopped host cannot be listed or resumed). Run `{prepare_command}` to create it."
+    )

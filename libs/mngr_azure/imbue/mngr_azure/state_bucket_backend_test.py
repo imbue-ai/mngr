@@ -8,6 +8,7 @@ import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -17,6 +18,7 @@ from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_azure.backend import AzureProvider
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.testing import FakeAuthorizationClient
 from imbue.mngr_azure.testing import FakeBlobStorageBackend
 from imbue.mngr_azure.testing import FakeComputeClient
@@ -162,13 +164,15 @@ def test_delete_host_externally_removes_bucket_state(temp_mngr_ctx: MngrContext)
     assert bucket.has_any_host_state() is False
 
 
-def test_no_bucket_persist_agent_data_no_ops_without_writing_vm_tags(temp_mngr_ctx: MngrContext) -> None:
-    """Without a resolved bucket, the agent-record mirror is a no-op -- no VM tag patch, no raise.
+def test_no_bucket_persist_agent_data_raises_prepare_pointer_without_writing_vm_tags(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Without a resolved bucket, the agent-record mirror raises -- and writes no VM tag patch.
 
-    The VM tag mirror was removed: with no bucket, ``_state_store`` is a
-    ``MissingBucketHostStateStore`` whose writes no-op (so a running host stays
-    usable). Pre-seeding ``_state_bucket`` with None must NOT take the persist down
-    any tag path -- the fake resource client records no Merge patch.
+    The VM tag mirror was removed and the bucket is required: with no bucket,
+    ``_state_store`` raises the actionable prepare-pointer error, so the write fails
+    loudly. Pre-seeding ``_state_bucket`` with None must NOT take the persist down
+    any tag path -- the fake resource client records no Merge patch before the raise.
     """
     config = AzureProviderConfig(subscription_id="sub-123", auto_shutdown_seconds=3600)
     compute = FakeComputeClient()
@@ -206,7 +210,8 @@ def test_no_bucket_persist_agent_data_no_ops_without_writing_vm_tags(temp_mngr_c
             instance_view=None,
         )
     ]
-    provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
+    with pytest.raises(MngrError, match="mngr azure prepare"):
+        provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
     # No tag path: no server-side tag Merge patch was recorded.
     assert resource.tags.updates == []
 
@@ -355,9 +360,16 @@ def test_host_dir_sync_identity_resource_id_returned_when_identity_exists(temp_m
     assert resource_id.endswith(f"/userAssignedIdentities/mngrid-{_ACCOUNT_NAME}")
 
 
-def test_host_dir_sync_identity_resource_id_none_when_identity_absent(temp_mngr_ctx: MngrContext) -> None:
+def test_host_dir_sync_identity_resource_id_raises_when_identity_absent(temp_mngr_ctx: MngrContext) -> None:
+    """With host_dir sync on but the managed identity not provisioned, the launch path raises.
+
+    The identity is required infrastructure for offline host_dir, so a VM launched
+    without it is a create-time setup failure rather than a silently unreadable
+    offline host_dir later.
+    """
     provider, _compute = _build_provider_with_identity(temp_mngr_ctx, identity_exists=False)
-    assert provider._host_dir_sync_identity_resource_id() is None
+    with pytest.raises(BlobStateHostIdentityError, match="mngr azure prepare"):
+        provider._host_dir_sync_identity_resource_id()
 
 
 def test_host_dir_sync_identity_resource_id_none_when_feature_disabled(temp_mngr_ctx: MngrContext) -> None:

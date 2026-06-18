@@ -131,11 +131,14 @@ Blob data-plane access uses AAD (the same `DefaultAzureCredential` the provider
 already uses), so to read/write host state you need the **`Storage Blob Data
 Contributor`** role on the state storage account, in addition to the
 storage-account create/delete permission `prepare`/`cleanup` use
-(`Microsoft.Storage/storageAccounts/write` + `delete`). A missing storage
-permission during `prepare` is **not fatal**: it degrades to a warning and the
-network prepare still succeeds, but offline host state is then **unavailable** --
-a deallocated VM cannot be listed or resumed until `prepare` is re-run with the
-storage permission. Creating and operating a *running* VM is unaffected.
+(`Microsoft.Storage/storageAccounts/write` + `delete`). The state account is
+**required** infrastructure, with no VM-tag fallback: creating it is `prepare`'s
+primary job, so a missing storage permission (or any account/container create
+failure) **fails** the command rather than continuing with a network-only
+prepare. Once provisioned, when it is absent mngr raises an actionable error
+pointing at `mngr azure prepare` -- on the `mngr create` / `mngr label` write path
+as well as on offline reads -- and a transient Blob error on a mirror read or
+write propagates rather than being swallowed.
 
 ### Offline `host_dir` (on by default)
 
@@ -150,22 +153,24 @@ box), excluding large transient caches (`*.tmp`, `__pycache__`, `node_modules`).
 Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to disable it
 (offline host metadata still works via the bucket).
 
-The instance-push needs a cloud identity, which `prepare` provisions
-**best-effort** when `is_offline_host_dir_enabled` is on (the default):
+The instance-push needs a cloud identity, which `prepare` provisions when
+`is_offline_host_dir_enabled` is on (the default):
 
 ```bash
-mngr azure prepare   # provisions the identity best-effort; warns + continues if permissions are denied
+mngr azure prepare   # creates the bucket and (when enabled) the host-dir managed identity; fails if denied
 ```
 
 `prepare` provisions a **user-assigned managed identity** plus a **`Storage Blob
 Data Contributor`** role assignment scoped to **just the state storage account**
-(least privilege -- never the resource group or subscription). Any missing-
-permission / API failure downgrades to a **warning** (the network + bucket
-prepare still succeed; only offline `host_dir` is unavailable until `prepare` is
-re-run with sufficient permissions). Set `is_offline_host_dir_enabled = false` in
-`[providers.azure]` to skip the identity entirely. `mngr azure cleanup` deletes
-the identity. `mngr create` attaches it to the VM when the feature is on and the
-identity exists (an operator-supplied identity takes precedence).
+(least privilege -- never the resource group or subscription). When the feature
+is on, this is part of `prepare`, so a missing-permission / API failure **fails**
+the command. Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to
+skip the identity entirely. At `mngr create`, with the feature on, the VM is
+attached to the identity and the sync daemon installed -- both raise (failing
+create) if they cannot complete, since a VM that cannot push its `host_dir` would
+otherwise be silently unreadable offline (an operator-supplied identity takes
+precedence). `mngr azure cleanup` deletes the identity (idempotent when already
+absent; a delete failure raises).
 
 Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write`
 + `Microsoft.Authorization/roleAssignments/write` (Owner or User Access

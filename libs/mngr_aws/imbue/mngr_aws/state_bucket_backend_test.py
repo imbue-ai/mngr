@@ -4,6 +4,7 @@ from datetime import datetime
 from datetime import timezone
 
 import boto3
+import pytest
 from botocore.stub import Stubber
 
 from imbue.mngr.config.data_types import MngrContext
@@ -18,6 +19,7 @@ from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.state_bucket import S3StateBucket
+from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
@@ -268,10 +270,18 @@ def test_host_dir_sync_instance_profile_returned_when_identity_exists(
     assert provider._host_dir_sync_instance_profile() == identity.identity_name
 
 
-def test_host_dir_sync_instance_profile_none_when_identity_absent(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
-    """No attachment (None) when the identity was never provisioned by prepare."""
+def test_host_dir_sync_instance_profile_raises_when_identity_absent(
+    aws_mock: None, temp_mngr_ctx: MngrContext
+) -> None:
+    """create_identity raises when the identity was never provisioned by prepare.
+
+    With the bucket required and host_dir sync on, an instance that cannot attach
+    the bucket-write identity is a create-time setup failure, so the create path
+    raises rather than silently launching without offline host_dir.
+    """
     provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
-    assert provider._host_dir_sync_instance_profile() is None
+    with pytest.raises(S3StateHostIdentityError, match="does not exist"):
+        provider._host_dir_sync_instance_profile()
 
 
 def test_host_dir_sync_instance_profile_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:

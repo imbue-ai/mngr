@@ -39,9 +39,7 @@ from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
-from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
-from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 
 
 class _AzureOperatorCliOptions(CommonCliOptions):
@@ -191,23 +189,14 @@ def _build_state_bucket(base: AzureProviderConfig, client: AzureVpsClient) -> Bl
     )
 
 
-def _ensure_state_bucket_best_effort(bucket: BlobStateBucket) -> tuple[str | None, bool]:
-    """Ensure the state account + container exist, returning ``(account_name, was_created)``.
+def _ensure_state_bucket(bucket: BlobStateBucket) -> tuple[str, bool]:
+    """Create (idempotently) the required state account + container, returning ``(account_name, was_created)``.
 
-    Best-effort for ``mngr azure prepare``: a missing-permission / API failure is
-    logged at WARNING and surfaces as ``(None, False)`` so the network prepare
-    still succeeds even when the operator's credential cannot manage storage.
+    The bucket is required infrastructure, so this is the primary job of ``mngr
+    azure prepare``: a missing-permission / API failure raises (a network-only
+    prepare would be misleading -- a stopped host could not be listed or resumed).
     """
-    try:
-        was_created = bucket.ensure_bucket()
-    except BlobStateBucketError as e:
-        logger.warning(
-            "Failed to create the Azure state storage account {!r}; offline host state will be unavailable "
-            "(a stopped host cannot be listed or resumed) until prepare succeeds: {}",
-            bucket.account_name,
-            e,
-        )
-        return None, False
+    was_created = bucket.ensure_bucket()
     return bucket.account_name, was_created
 
 
@@ -251,65 +240,39 @@ def _build_host_identity(base: AzureProviderConfig, client: AzureVpsClient) -> B
     )
 
 
-def _provision_host_identity(identity: BlobStateHostIdentity) -> str | None:
-    """Provision the bucket-write managed identity best-effort, returning its name or None.
+def _provision_host_identity(identity: BlobStateHostIdentity) -> str:
+    """Provision the bucket-write managed identity, returning its name.
 
-    A permission/API failure degrades to a WARNING so the network + bucket prepare
-    still succeed -- offline host_dir just won't work until prepare is re-run with
-    sufficient role-assignment permissions. Mirrors
-    ``mngr_aws.cli._provision_host_identity``.
+    With offline host_dir enabled the identity is part of ``mngr azure prepare``'s
+    setup, so a permission/API failure raises rather than leaving offline host_dir
+    quietly broken. Mirrors ``mngr_aws.cli._provision_host_identity``.
     """
-    try:
-        identity.ensure_host_identity()
-    except BlobStateHostIdentityError as e:
-        logger.warning(
-            "Failed to provision the host-dir managed identity {!r} (offline host_dir reads will be "
-            "unavailable until prepare is re-run with sufficient permissions): {}",
-            identity.identity_name,
-            e,
-        )
-        return None
+    identity.ensure_host_identity()
     return identity.identity_name
 
 
-def _provision_host_identity_for_prepare(
-    base: AzureProviderConfig, client: AzureVpsClient, *, was_account_set_up: bool
-) -> str | None:
-    """Provision the host-dir identity during prepare best-effort, gating on the state account.
+def _provision_host_identity_for_prepare(base: AzureProviderConfig, client: AzureVpsClient) -> str:
+    """Provision the host-dir identity during prepare (raises on failure).
 
     The identity's Storage Blob Data Contributor role assignment is scoped to the
-    state account, so provisioning is only meaningful once that account is set up.
-    When the account setup was skipped (``was_account_set_up`` is False), degrades
-    to a WARNING and returns None. Called only when ``is_offline_host_dir_enabled``
-    is set.
+    state account, which ``_ensure_state_bucket`` has already created (it raises
+    otherwise). Called only when ``is_offline_host_dir_enabled`` is set. Mirrors
+    ``mngr_aws.cli._resolve_and_provision_host_identity``.
     """
-    if not was_account_set_up:
-        logger.warning(
-            "Cannot provision the host-dir managed identity: the state storage account could not be set up "
-            "(its Storage Blob Data Contributor role assignment is scoped to that account). Re-run with "
-            "sufficient Microsoft.Storage permissions."
-        )
-        return None
     return _provision_host_identity(_build_host_identity(base, client))
 
 
 def _perform_host_identity_cleanup(identity: BlobStateHostIdentity) -> str | None:
-    """Delete the bucket-write managed identity, best-effort. Returns its name or None.
+    """Delete the bucket-write managed identity. Returns its name, or None when absent.
 
-    Idempotent: a missing identity is a no-op. A permission/API failure is logged
-    at WARNING and swallowed so it never blocks the rest of ``mngr azure cleanup``
-    (the RG + bucket teardown still proceed). Mirrors
+    Idempotent: a missing identity is a no-op (returns None). A permission/API
+    failure raises so ``mngr azure cleanup`` reports an incomplete teardown rather
+    than silently leaving the identity behind. Mirrors
     ``mngr_aws.cli._perform_host_identity_cleanup``.
     """
     if not identity.host_identity_exists():
         return None
-    try:
-        identity.delete_host_identity()
-    except BlobStateHostIdentityError as e:
-        logger.warning(
-            "Failed to delete the host-dir managed identity {!r}; skipping it: {}", identity.identity_name, e
-        )
-        return None
+    identity.delete_host_identity()
     return identity.identity_name
 
 
@@ -486,22 +449,19 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # self-deallocate is then disabled but `mngr stop`/`start` still work, so this
     # never fails prepare.
     client.ensure_self_deallocate_role()
-    # Best-effort: create the state storage account + container that hold the full
+    # Required: create the state storage account + container that hold the full
     # host record and per-agent records (so a deallocated VM's state is readable
-    # offline). A missing storage permission degrades to a warning so the network
-    # prepare still succeeds (offline host state is then unavailable until prepare
-    # is re-run with sufficient permissions).
-    state_account_name, was_bucket_created = _ensure_state_bucket_best_effort(_build_state_bucket(base, client))
-    # Provision the bucket-write managed identity (best-effort) when the offline
-    # host_dir feature is enabled. The bucket-only steps above are unconditional,
-    # so flipping is_offline_host_dir_enabled on and re-running prepare adds just
-    # the identity. The identity's role assignment is scoped to the state account,
-    # so it is only meaningful when the account was set up.
-    host_identity_name = None
+    # offline). A missing storage permission or API failure raises (the bucket is
+    # prepare's primary job; a network-only prepare would leave offline host state
+    # unavailable).
+    state_account_name, was_bucket_created = _ensure_state_bucket(_build_state_bucket(base, client))
+    # Provision the bucket-write managed identity when the offline host_dir feature
+    # is enabled (raises on failure). The bucket-only steps above are
+    # unconditional, so flipping is_offline_host_dir_enabled on and re-running
+    # prepare adds just the identity.
+    host_identity_name: str | None = None
     if base.is_offline_host_dir_enabled:
-        host_identity_name = _provision_host_identity_for_prepare(
-            base, client, was_account_set_up=state_account_name is not None
-        )
+        host_identity_name = _provision_host_identity_for_prepare(base, client)
     _output_prepare_result(
         result, state_account_name, was_bucket_created, host_identity_name, output_opts.output_format
     )
@@ -583,9 +543,10 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     # account lives in the resource group, so it is deleted first (its own
     # delete, before the RG cascade).
     deleted_account_name = _perform_state_bucket_cleanup(_build_state_bucket(base, client), force=opts.force)
-    # Delete the bucket-write managed identity (best-effort, idempotent) before the
-    # RG cascade. The RG delete would reap it anyway, but the explicit delete keeps
-    # cleanup well-defined when the identity outlives a partial prior cleanup.
+    # Delete the bucket-write managed identity (idempotent; raises on a delete
+    # failure) before the RG cascade. The RG delete would reap it anyway, but the
+    # explicit delete keeps cleanup well-defined when the identity outlives a
+    # partial prior cleanup.
     deleted_host_identity_name = _perform_host_identity_cleanup(_build_host_identity(base, client))
     # _perform_cleanup raises AzureProviderError when a VM still exists, and
     # delete_managed_resource_group raises VpsApiError when the group lacks the

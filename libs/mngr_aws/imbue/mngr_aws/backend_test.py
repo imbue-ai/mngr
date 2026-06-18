@@ -28,7 +28,6 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
-from imbue.mngr_vps_docker.host_state_store import MissingBucketHostStateStore
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -237,28 +236,30 @@ def _instance_with_tags(instance_id: str, state: str, public_ip: str, tags: dict
     return entry
 
 
-def test_state_store_is_missing_store_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
-    """``_state_store`` is the missing-store placeholder when no bucket is resolvable.
+def test_state_store_raises_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
+    """``_state_store`` raises an actionable error when no bucket is resolvable.
 
-    With the EC2 tag mirror removed the S3 state bucket is the sole offline store:
-    when absent, ``_state_store`` is a ``MissingBucketHostStateStore`` that no-ops
-    writes but raises on offline reads. (The bucket-present case -- a
-    ``BucketHostStateStore`` -- is covered in ``state_bucket_backend_test.py``.)
+    With the EC2 tag mirror removed the S3 state bucket is required infrastructure
+    (there is no degraded fallback): when absent, accessing ``_state_store`` raises
+    a MngrError pointing at ``mngr aws prepare`` rather than selecting a no-op
+    store. (The bucket-present case -- a ``BucketHostStateStore`` -- is covered in
+    ``state_bucket_backend_test.py``.)
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     # No bucket name configured and STS unresolvable => _state_bucket is None.
     provider.__dict__["_state_bucket"] = None
-    assert isinstance(provider._state_store, MissingBucketHostStateStore)
+    with pytest.raises(MngrError, match="mngr aws prepare"):
+        _ = provider._state_store
 
 
-def test_persist_agent_data_no_bucket_does_not_raise_for_stopped_host(temp_mngr_ctx: MngrContext) -> None:
-    """With no state bucket, mirroring an agent for a stopped host is a no-op write that does not raise.
+def test_persist_agent_data_no_bucket_raises_for_stopped_host(temp_mngr_ctx: MngrContext) -> None:
+    """With no state bucket, mirroring an agent raises (the bucket is required).
 
     The base on-volume write short-circuits with ``HostNotFoundError`` (seeded
-    ``vps_ip=None``), then the offline mirror is attempted. The missing-store
-    placeholder no-ops the write so a running host stays usable; here the host is
-    stopped, but the contract is the same: the write must not raise. No EC2 tag
-    calls are made (the stubber has no queued responses).
+    ``vps_ip=None``), then the offline mirror is attempted. With no bucket the
+    state store raises an actionable error pointing at ``mngr aws prepare`` rather
+    than silently dropping the record (which would make the stopped host's agents
+    vanish). No EC2 tag calls are made (the stubber has no queued responses).
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     provider.__dict__["_state_bucket"] = None
@@ -267,10 +268,11 @@ def test_persist_agent_data_no_bucket_does_not_raise_for_stopped_host(temp_mngr_
     seed_stopped_host_record(provider, host_id)
     stubber.activate()
     try:
-        provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "a1", "type": "command"})
+        with pytest.raises(MngrError, match="mngr aws prepare"):
+            provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "a1", "type": "command"})
     finally:
         stubber.deactivate()
-    # No EC2 calls were made (the agent record is no longer mirrored to tags).
+    # No EC2 calls were made before the raise.
     stubber.assert_no_pending_responses()
 
 

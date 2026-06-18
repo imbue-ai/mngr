@@ -29,15 +29,14 @@ from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.state_bucket import S3StateBucket
-from imbue.mngr_aws.state_bucket import S3StateBucketError
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
 from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 from imbue.mngr_aws.state_bucket import host_dir_sync_target_for
 from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import HostDirBackend
 from imbue.mngr_vps_docker.host_state_store import HostStateStore
-from imbue.mngr_vps_docker.host_state_store import MissingBucketHostStateStore
 from imbue.mngr_vps_docker.host_state_store import NullHostDirBackend
+from imbue.mngr_vps_docker.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps_docker.instance import BucketHostDirBackend
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
@@ -178,54 +177,50 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
         """Return the S3 state bucket when it actually exists, else None.
 
         The bucket is the sole source of truth for agent records and the offline
-        host record. When None (no bucket configured/derivable, or one whose name
-        resolves but does not yet exist because ``mngr aws prepare`` was never run),
-        offline host state is unavailable -- ``_state_store`` becomes a
-        ``MissingBucketHostStateStore`` that raises an actionable error on offline
-        reads. The existence probe runs at most once per provider lifetime (cached).
+        host record. None means the bucket does not exist yet (no name
+        configured/derivable, or one whose name resolves but ``mngr aws prepare``
+        was never run); ``_state_store`` then raises an actionable error. A storage
+        error while probing existence propagates rather than masquerading as
+        "absent". The existence probe runs at most once per provider lifetime
+        (cached).
         """
         return self._resolve_existing_state_bucket()
 
     def _resolve_existing_state_bucket(self) -> S3StateBucket | None:
-        """Build the configured/derived bucket and return it only if it exists."""
+        """Build the configured/derived bucket and return it only if it exists.
+
+        Returns None only when the bucket genuinely does not exist (or its name is
+        unresolvable). A ``bucket_exists`` storage error propagates -- the bucket
+        is required, so an inability to check is an operational failure, not a
+        silent "no bucket".
+        """
         bucket = self.aws_config.build_state_bucket(self.aws_client.session)
         if bucket is None:
             return None
-        try:
-            if not bucket.bucket_exists():
-                logger.debug(
-                    "S3 state bucket {} does not exist; offline host state is unavailable "
-                    "(run `mngr aws prepare` to create it)",
-                    bucket.bucket_name,
-                )
-                return None
-        except S3StateBucketError as e:
-            logger.warning(
-                "Could not check S3 state bucket {}; treating offline host state as unavailable: {}",
+        if not bucket.bucket_exists():
+            logger.debug(
+                "S3 state bucket {} does not exist; offline host state is unavailable "
+                "(run `mngr aws prepare` to create it)",
                 bucket.bucket_name,
-                e,
             )
             return None
         return bucket
 
     @cached_property
     def _state_store(self) -> HostStateStore:
-        """The external host/agent-record mirror: the S3 bucket, or a raise-on-read placeholder when absent.
+        """The external host/agent-record mirror: the S3 bucket, or raise when it is absent.
 
         Selecting one store here lets the persist / remove / list / read paths stop
-        branching on bucket presence. With no bucket the placeholder no-ops writes
-        (a running host stays usable) but raises an actionable error on offline
-        reads. Offline ``host_dir`` reads are a separate, bucket-only feature keyed
-        off ``_state_bucket``.
+        branching on bucket presence. The bucket is required: when it does not
+        exist, accessing this property raises an actionable error pointing at
+        ``mngr aws prepare`` (so create / label / offline reads all fail loudly and
+        uniformly). Offline ``host_dir`` reads are a separate, bucket-only feature
+        keyed off ``_state_bucket``.
         """
         bucket = self._state_bucket
-        if bucket is not None:
-            return BucketHostStateStore(
-                bucket=bucket,
-                bucket_error_type=S3StateBucketError,
-                bucket_label="S3 state bucket",
-            )
-        return MissingBucketHostStateStore(store_label="S3 state bucket", prepare_command="mngr aws prepare")
+        if bucket is None:
+            raise missing_state_bucket_error("S3 state bucket", "mngr aws prepare")
+        return BucketHostStateStore(bucket=bucket, bucket_label="S3 state bucket")
 
     @cached_property
     def _host_dir_backend(self) -> HostDirBackend:
@@ -423,19 +418,13 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
         """Install the base idle watcher and, when enabled, the host_dir-to-bucket sync daemon.
 
-        Best-effort per the base contract: a host_dir-sync install failure only costs
-        offline host_dir readability, so it is logged rather than failing create_host.
+        The sync install raises on failure (per the ``HostDirBackend`` launch
+        contract): with host_dir sync on, a host that cannot install the daemon
+        would silently have an unreadable offline host_dir, so it is a create-time
+        setup failure. When offline host_dir is disabled the backend is a no-op.
         """
         super()._on_host_finalized(host_id=host_id, vps_ip=vps_ip)
-        try:
-            self._host_dir_backend.install_sync(host_id=host_id, vps_ip=vps_ip)
-        except MngrError as e:
-            logger.warning(
-                "AWS host_dir sync install failed for host {} ({}); the stopped host's host_dir "
-                "will not be readable offline",
-                host_id,
-                e,
-            )
+        self._host_dir_backend.install_sync(host_id=host_id, vps_ip=vps_ip)
 
     # =========================================================================
     # Offline discovery (so STOPPED hosts list + resolve by name from the bucket)
@@ -483,7 +472,6 @@ class _S3HostDirBackend(BucketHostDirBackend):
 
     provider: AwsProvider
     bucket: S3StateBucket
-    bucket_error_type: type[MngrError] = S3StateBucketError
 
     def _sync_unit_name(self) -> str:
         return HOST_DIR_SYNC_UNIT_NAME
@@ -491,25 +479,27 @@ class _S3HostDirBackend(BucketHostDirBackend):
     def _pause_action(self) -> str:
         return "stop"
 
-    def create_identity(self) -> str | None:
+    def create_identity(self) -> str:
+        """The bucket-write IAM identity to attach at launch.
+
+        Raises when the identity is missing or cannot be resolved (a
+        ``host_identity_exists`` storage error propagates): with host_dir sync on,
+        an instance launched without it could never push its host_dir, so this is
+        a create-time setup failure rather than a silently unreadable offline
+        host_dir later. Set ``is_offline_host_dir_enabled = false`` to skip it.
+        """
         identity = self.provider._host_identity()
         if identity is None:
-            return None
-        try:
-            if not identity.host_identity_exists():
-                logger.warning(
-                    "host_dir sync is on but the bucket-write IAM identity {} does not exist; launching "
-                    "without it (re-run `mngr aws prepare` with sufficient IAM to enable offline host_dir)",
-                    identity.identity_name,
-                )
-                return None
-        except S3StateHostIdentityError as e:
-            logger.warning(
-                "Could not check the bucket-write IAM identity {}; launching without it: {}",
-                identity.identity_name,
-                e,
+            raise S3StateHostIdentityError(
+                "host_dir sync is on but the bucket-write IAM identity could not be resolved; re-run "
+                "`mngr aws prepare` with sufficient IAM, or set is_offline_host_dir_enabled = false."
             )
-            return None
+        if not identity.host_identity_exists():
+            raise S3StateHostIdentityError(
+                f"host_dir sync is on but the bucket-write IAM identity {identity.identity_name} does not "
+                "exist; re-run `mngr aws prepare` with sufficient IAM to enable offline host_dir, "
+                "or set is_offline_host_dir_enabled = false."
+            )
         return identity.identity_name
 
     def install_sync(self, *, host_id: HostId, vps_ip: str) -> None:
