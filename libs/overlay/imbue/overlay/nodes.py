@@ -62,7 +62,7 @@ class Extend:
 
 # A node is one of the three operator wrappers; a patch maps field names to nodes.
 Node = Default | Assign | Extend
-Patch = dict[str, "Node"]
+Patch = dict[str, Node]
 
 
 def is_assign_kind(node: Node) -> bool:
