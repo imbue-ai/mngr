@@ -14,6 +14,7 @@ Splits the test surface into two layers:
 
 import json
 
+import click
 import pluggy
 import pytest
 from click.testing import CliRunner
@@ -23,6 +24,7 @@ from google.cloud import compute_v1
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
@@ -30,13 +32,18 @@ from imbue.mngr_gcp.backend import GCP_BACKEND_NAME
 from imbue.mngr_gcp.cli import _output_cleanup_result
 from imbue.mngr_gcp.cli import _output_prepare_result
 from imbue.mngr_gcp.cli import _perform_cleanup
+from imbue.mngr_gcp.cli import _perform_state_bucket_cleanup
+from imbue.mngr_gcp.cli import _refuse_cleanup_if_instances_exist
 from imbue.mngr_gcp.cli import _resolve_provider_config
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
+from imbue.mngr_gcp.testing import _FAKE_CREDENTIALS
+from imbue.mngr_gcp.testing import _FakeStorageClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
+from imbue.mngr_gcp.testing import _StubbedGcsStateBucket
 from imbue.mngr_vps.errors import ManagedResourcesExistError
 
 
@@ -120,6 +127,92 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
     assert "Refusing" in str(exc_info.value)
     # The firewall must NOT have been deleted while an instance still exists.
     assert firewalls.deleted == []
+
+
+# =============================================================================
+# Cleanup-helpers: instance-exists guard + bucket teardown contract
+# =============================================================================
+
+
+def _make_state_bucket(fake_gcs: _FakeStorageClient, bucket_name: str) -> _StubbedGcsStateBucket:
+    return _StubbedGcsStateBucket(
+        credentials=_FAKE_CREDENTIALS,
+        project_id="test-project",
+        region="us-west1",
+        bucket_name=bucket_name,
+        stubbed_storage_client=fake_gcs,
+    )
+
+
+def test_refuse_cleanup_if_instances_exist_aborts_before_teardown() -> None:
+    """The instance-exists guard runs before any teardown, so the bucket survives.
+
+    Reproduces the callback ordering: when an instance is still alive, the guard
+    raises before the bucket is touched, so a bucket holding host state stays
+    intact for the operator to inspect after destroying the lingering host.
+    """
+    firewalls = FakeFirewallsClient()
+    firewalls.existing = compute_v1.Firewall(name="mngr-gcp-ssh")
+    instances = FakeInstancesClient()
+    instances.aggregated_result = [
+        (
+            "zones/us-west1-a",
+            [compute_v1.Instance(name="mngr-host-live", status="RUNNING", labels={"mngr-provider": "gcp"})],
+        )
+    ]
+    client = _cleanup_client(instances, firewalls)
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-refuse-first")
+    bucket.ensure_bucket()
+    bucket.write_host_record_json(HostId.generate(), "{}")
+    with pytest.raises(ManagedResourcesExistError, match="Refusing"):
+        _refuse_cleanup_if_instances_exist(client)
+    # The guard raised before any teardown, so the bucket and its state survive.
+    assert bucket.bucket_exists() is True
+    assert bucket.has_any_host_state() is True
+
+
+def test_perform_state_bucket_cleanup_refuses_while_host_state_remains() -> None:
+    """The bucket cleanup refuses (deletes nothing) while any host state remains.
+
+    Without ``--force``, orphaned offline state from a removed host must not be
+    silently dropped: the helper raises a ``click.ClickException`` pointing the
+    operator at ``--force``, and the bucket is left untouched.
+    """
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-refuse")
+    bucket.ensure_bucket()
+    bucket.write_host_record_json(HostId.generate(), "{}")
+    with pytest.raises(click.ClickException, match="still holds offline host state"):
+        _perform_state_bucket_cleanup(bucket, force=False)
+    # The bucket must still exist after a refusal.
+    assert bucket.bucket_exists() is True
+
+
+def test_perform_state_bucket_cleanup_force_deletes_despite_host_state() -> None:
+    """``--force`` deletes the bucket (and its leftover state) instead of refusing."""
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-purge")
+    bucket.ensure_bucket()
+    bucket.write_host_record_json(HostId.generate(), "{}")
+    assert _perform_state_bucket_cleanup(bucket, force=True) == "mngr-state-cleanup-purge"
+    assert bucket.bucket_exists() is False
+
+
+def test_perform_state_bucket_cleanup_deletes_empty_bucket() -> None:
+    """With no host state, the bucket cleanup deletes the bucket and returns its name."""
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-empty")
+    bucket.ensure_bucket()
+    assert _perform_state_bucket_cleanup(bucket, force=False) == "mngr-state-cleanup-empty"
+    assert bucket.bucket_exists() is False
+
+
+def test_perform_state_bucket_cleanup_is_noop_when_bucket_absent() -> None:
+    """Calling cleanup on a bucket that was never created returns None (idempotent)."""
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-absent")
+    assert _perform_state_bucket_cleanup(bucket, force=False) is None
 
 
 # =============================================================================
