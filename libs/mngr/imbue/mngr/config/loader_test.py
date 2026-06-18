@@ -26,9 +26,10 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _FileSettingsSource
 from imbue.mngr.config.loader import _NarrowingViolation
+from imbue.mngr.config.loader import _SettingsSource
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _collect_env_overrides
-from imbue.mngr.config.loader import _collect_layer_narrowing
+from imbue.mngr.config.loader import _collect_narrowing
 from imbue.mngr.config.loader import _display_path
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
@@ -38,6 +39,7 @@ from imbue.mngr.config.loader import _parse_logging_config
 from imbue.mngr.config.loader import _parse_mngr_env_overrides
 from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
+from imbue.mngr.config.loader import _record_provenance
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.loader import load_config
@@ -2234,6 +2236,183 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
 
 
 # =============================================================================
+# Tests for cross-scope settings_overrides narrowing (the SettingsPatchField case).
+#
+# A ``SettingsPatchField`` (claude's ``settings_overrides``) accumulates across
+# config scopes, so the field as a whole is never a superset-narrowing. But a higher
+# scope with a *bare* key nested inside the patch can still drop a non-empty aggregate a
+# lower scope set -- that is real narrowing. These tests verify the overlay merge
+# surfaces it through the loader's existing flag-gated aggregation.
+# =============================================================================
+
+
+# The claude agent type (``ClaudeAgentConfig``, with a ``SettingsPatchField``
+# ``settings_overrides``) is registered by the autouse ``plugin_manager`` fixture --
+# claude is in the default ``enabled_plugins`` set -- so these tests parse
+# ``settings_overrides`` as a real accumulating patch field without any extra setup.
+# Each agent_types block declares ``parent_type = "claude"`` in *every* layer that
+# writes it, so the per-layer parse resolves ``my_claude`` to ``ClaudeAgentConfig``
+# (a layer omitting ``parent_type`` would fall back to the base ``AgentTypeConfig``,
+# which has no ``settings_overrides`` field).
+
+
+def _write_settings_overrides_narrowing_config(project_dir: Path, *, higher_key: str = "allow") -> None:
+    """Project layer sets ``settings_overrides.permissions.allow = ["A"]`` on a
+    claude-derived agent type; local layer assigns ``["B"]`` (dropping ``A``).
+
+    ``higher_key`` lets the caller use ``allow__extend`` to opt into additive
+    behavior instead of the bare (narrowing) assign.
+    """
+    (project_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow = ["A"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        f'{higher_key} = ["B"]\n'
+    )
+
+
+def test_load_config_narrowing_raises_on_settings_overrides_bare_drop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A local layer whose bare ``settings_overrides`` key drops a non-empty
+    aggregate set by the project layer now raises the standard narrowing error.
+
+    This is the previously-silent cross-scope ``settings_overrides`` drop: because the
+    patch field accumulates, the drop only shows up *inside* it -- where the overlay
+    merge surfaces it. The bare ``permissions`` dict in the local layer assign-replaces
+    the project layer's ``permissions`` dict, so the narrowing is recorded at the
+    ``permissions`` path.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    _write_settings_overrides_narrowing_config(project_dir)
+    with pytest.raises(ConfigParseError) as exc_info:
+        load_config(pm=pm, concurrency_group=cg)
+    message = str(exc_info.value)
+    assert "narrowing" in message
+    assert "agent_types.my_claude.settings_overrides.permissions" in message
+
+
+def test_load_config_settings_overrides_narrowing_allowed_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """Setting ``allow_settings_key_assignment_narrowing = true`` silences the
+    cross-scope ``settings_overrides`` narrowing; the local layer's value wins."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n"
+        "allow_settings_key_assignment_narrowing = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow = ["A"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow = ["B"]\n'
+    )
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
+    assert settings_overrides["permissions"]["allow"] == ["B"]
+
+
+def test_load_config_extend_avoids_settings_overrides_narrowing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """Using ``allow__extend`` inside the local ``settings_overrides`` accumulates
+    onto the project layer's entries rather than narrowing, so no opt-in is needed."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    _write_settings_overrides_narrowing_config(project_dir, higher_key="allow__extend")
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
+    assert settings_overrides["permissions"]["allow"] == ["A", "B"]
+
+
+def test_load_config_settings_overrides_accumulation_does_not_narrow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A cross-scope ``settings_overrides`` that only *adds* a new key (a superset,
+    never dropping a lower-scope aggregate) loads fine without any opt-in -- the
+    accumulating-patch behavior is unchanged for the non-narrowing case."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow = ["A"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides]\n"
+        'model = "sonnet"\n'
+    )
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
+    # The lower scope's permissions patch is preserved (accumulation, not dropped)
+    # and the higher scope's new key is added alongside it.
+    assert settings_overrides["permissions"]["allow"] == ["A"]
+    assert settings_overrides["model"] == "sonnet"
+
+
+def test_load_config_settings_overrides_narrowing_error_attributes_both_sides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """The cross-scope ``settings_overrides`` narrowing error names both the
+    assigning local layer and the dropped-from project layer, with scopes and
+    paths, reusing the standard ``_build_narrowing_error`` attribution path."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    _write_settings_overrides_narrowing_config(project_dir)
+    with pytest.raises(ConfigParseError) as exc_info:
+        load_config(pm=pm, concurrency_group=cg)
+    message = str(exc_info.value)
+    # Assigning side: the local file, with its scope flag.
+    assert "settings.local.toml" in message
+    assert "mngr config set --scope local" in message
+    # Dropped-from side: the project file, with its scope flag.
+    assert "assigned by" in message
+    assert "would drop a value from" in message
+    assert "mngr config set --scope project" in message
+
+
+def test_load_config_narrowing_attributes_dropped_from_for_suffixed_lower_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """When the dropped value was set via an operator suffix (here ``__assign``) in a
+    *deferred* settings-patch field, the narrowing's ``dropped_from`` still names that
+    layer. The lower layer's parsed dump carries the suffixed key (``allow__assign``)
+    while the narrowing path is bare (``...allow``), so provenance attribution must
+    normalize the operator suffix to match.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow__assign = ["A"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow = ["B"]\n'
+    )
+    with pytest.raises(ConfigParseError) as exc_info:
+        load_config(pm=pm, concurrency_group=cg)
+    message = str(exc_info.value)
+    assert "settings_overrides.permissions.allow" in message
+    # The dropped value belongs to the project layer, which set it via ``allow__assign``.
+    assert "would drop a value from" in message
+    assert "mngr config set --scope project" in message
+
+
+# =============================================================================
 # Tests for narrowing diagnostics: both-sides attribution (which layer assigns
 # over which layer's dropped value).
 # =============================================================================
@@ -2248,7 +2427,7 @@ def test_display_path_contracts_home_dir(tmp_path: Path) -> None:
     assert _display_path(outside) == str(outside)
 
 
-def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> None:
+def test_collect_narrowing_attributes_highest_precedence_lower_layer() -> None:
     """The dropped-from side is the highest-precedence already-merged layer whose
     value the new layer narrows. Because the merge is assign-by-default, that
     layer holds the merged base value being dropped.
@@ -2260,15 +2439,17 @@ def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> 
     project_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A", "B"]})})
     # ``base`` is the accumulated merge the local layer is detected against; under
     # assign-by-default it equals the project layer's value (the highest prior).
-    base = user_layer.merge_with(project_layer)
+    base, _ = user_layer.merge_with(project_layer)
     local_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["C"]})})
 
-    violations = _collect_layer_narrowing(
-        base,
-        local_layer,
-        local_source,
-        [(user_source, user_layer), (project_source, project_layer)],
-    )
+    _, narrowing_paths = base.merge_with(local_layer)
+    # Build the provenance map the loader threads through its fold: each prior layer's
+    # assigned paths, recorded in precedence order so the highest-precedence prior
+    # owner wins.
+    provenance: dict[str, _SettingsSource] = {}
+    _record_provenance(provenance, user_layer, user_source)
+    _record_provenance(provenance, project_layer, project_source)
+    violations = _collect_narrowing(narrowing_paths, local_source, provenance)
     assert violations == [
         _NarrowingViolation(
             key_path="commands.create.defaults.env",

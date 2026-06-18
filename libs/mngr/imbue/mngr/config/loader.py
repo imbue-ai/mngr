@@ -1,6 +1,7 @@
 import os
 import re
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -34,16 +35,11 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
-from imbue.mngr.config.data_types import StringDerivedTuple
-from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
-from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
-from imbue.mngr.config.key_resolver import bare_key
-from imbue.mngr.config.key_resolver import is_extend_key
-from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
+from imbue.mngr.config.overlay_merge import build_settings_narrowing_message
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
@@ -63,6 +59,13 @@ from imbue.mngr.utils.env_utils import parse_bool_env
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.overlay.markers import ScalarTuple
+from imbue.overlay.operators import EXTEND_SUFFIX
+from imbue.overlay.operators import assign_bare_key
+from imbue.overlay.operators import bare_key
+from imbue.overlay.operators import is_assign_key
+from imbue.overlay.operators import is_extend_key
+from imbue.overlay.operators import parse_scalar_value
 
 # Prefix and shape for dynamic ``MNGR__*`` env var overrides. Each
 # ``__``-separated segment after the prefix is lowercased and treated as a
@@ -216,10 +219,11 @@ def load_config(
     # value from a lower-precedence layer -- are collected as we go, then turned
     # into a single error after all layers are merged (when the final
     # ``allow_settings_key_assignment_narrowing`` resolves to False).
-    # ``processed_sources`` lets each violation be attributed to the specific
+    # ``provenance`` maps each assigned path to the highest-precedence source that
+    # has assigned it so far, so each violation can be attributed to the specific
     # lower-precedence layer whose value is being dropped.
     narrowing_violations: list[_NarrowingViolation] = []
-    processed_sources: list[tuple[_SettingsSource, MngrConfig]] = []
+    provenance: dict[str, _SettingsSource] = {}
     for scope, config_path, raw in loaded_layers:
         file_source = _FileSettingsSource(scope=scope, path=config_path)
         parsed_layer = _parse_config_with_extends(
@@ -229,9 +233,11 @@ def load_config(
             strict=strict,
             silent=silent_unknown_fields,
         )
-        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_layer, file_source, processed_sources))
-        config = config.merge_with(parsed_layer)
-        processed_sources.append((file_source, parsed_layer))
+        config, narrowing_paths = config.merge_with(parsed_layer)
+        # Read provenance BEFORE this layer updates it: a dropped value belongs to
+        # a prior layer, so its source is whatever held the path before now.
+        narrowing_violations.extend(_collect_narrowing(narrowing_paths, file_source, provenance))
+        _record_provenance(provenance, parsed_layer, file_source)
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
     # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
@@ -248,9 +254,9 @@ def load_config(
             strict=strict,
             silent=silent_unknown_fields,
         )
-        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_env_layer, env_source, processed_sources))
-        config = config.merge_with(parsed_env_layer)
-        processed_sources.append((env_source, parsed_env_layer))
+        config, env_narrowing_paths = config.merge_with(parsed_env_layer)
+        narrowing_violations.extend(_collect_narrowing(env_narrowing_paths, env_source, provenance))
+        _record_provenance(provenance, parsed_env_layer, env_source)
 
     # Raise on collected narrowing assignments unless the user has opted in.
     # Done before further config_dict mutation so the error surfaces with the
@@ -364,43 +370,89 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
-def _collect_layer_narrowing(
-    base: MngrConfig,
+def _assigned_paths(parsed_layer: MngrConfig) -> list[str]:
+    """Return every dotted node-and-leaf path the layer assigns, in the same format
+    as the overlay merge's narrowing paths.
+
+    Derived from the layer's sparse dump (``exclude_unset=True``, ``serialize_as_any=True``)
+    -- the exact dump the merge lifts to compute narrowings -- so a narrowing path the
+    merge surfaces (which may be a field prefix for a whole-aggregate replacement or a
+    deep leaf for a same-keys nested drop; see ``overlay.narrowing.narrowing_paths``) is
+    always one of these paths. Recording every node and leaf, rather than only leaves,
+    is what lets a prefix-level narrowing path find its owner.
+    """
+    dumped = parsed_layer.model_dump(exclude_unset=True, serialize_as_any=True)
+    return list(_walk_dotted_paths(dumped, ()))
+
+
+def _strip_operator_suffix(key: str) -> str:
+    """Strip an outermost ``__extend`` / ``__assign`` operator suffix from a single key.
+
+    A *deferred* settings-patch field (``settings_overrides`` / ``create_templates``)
+    carries its operator markers verbatim into the parsed layer's dump, so a path like
+    ``...permissions.allow__assign`` would not match the bare ``...permissions.allow`` the
+    overlay narrowing reports. Normalizing the suffix (the same single-strip ``lift`` does)
+    lets provenance attribute the dropped value to the layer that set it via an operator.
+    """
+    if is_extend_key(key):
+        return bare_key(key)
+    if is_assign_key(key):
+        return assign_bare_key(key)
+    return key
+
+
+def _walk_dotted_paths(value: Any, prefix: tuple[str, ...]) -> "Iterator[str]":
+    """Yield the dotted path of every node and leaf reachable in ``value``.
+
+    Recurses into dict values (the only mapping shape config dumps produce), yielding a
+    path for each nested dict node as well as its leaves; non-dict values are leaves.
+    Each key segment has its operator suffix normalized (``_strip_operator_suffix``) so the
+    paths match the bare paths the overlay narrowing reports. The empty root path is not
+    yielded.
+    """
+    if prefix:
+        yield ".".join(prefix)
+    if isinstance(value, dict):
+        for key, sub_value in value.items():
+            yield from _walk_dotted_paths(sub_value, prefix + (_strip_operator_suffix(str(key)),))
+
+
+def _record_provenance(
+    provenance: dict[str, _SettingsSource],
     parsed_layer: MngrConfig,
     source: _SettingsSource,
-    processed_sources: Sequence[tuple[_SettingsSource, MngrConfig]],
-) -> list["_NarrowingViolation"]:
-    """Detect narrowing of ``base`` by ``parsed_layer`` and attribute each side.
+) -> None:
+    """Mark ``source`` as the owner of every path this layer assigns.
 
-    ``source`` is the layer doing the assignment. The lower-precedence layer
-    whose value is dropped is attributed by re-running ``detect_settings_narrowing``
-    of ``parsed_layer`` against each already-merged layer: because the merge is
-    assign-by-default, the merged base value at any path equals the value written
-    by the highest-precedence layer that set it, so the highest-precedence prior
-    layer that ``parsed_layer`` narrows at a given path is the one whose value is
-    being dropped. Reusing ``detect_settings_narrowing`` here (rather than walking
-    field values directly) keeps the field traversal in one place -- the place the
-    ``PREVENT_GETATTR`` ratchet already accounts for. ``dropped_from`` is ``None``
-    only if no contributing layer is found (should not happen for a real
-    violation, but keeps the diagnostic robust).
+    Called after a layer is folded in (and after its narrowings are attributed against
+    the prior provenance), so each path maps to the highest-precedence source that has
+    assigned it so far.
     """
-    violation_paths = detect_settings_narrowing(base, parsed_layer)
-    if not violation_paths:
-        return []
-    # For each already-merged layer (highest precedence first), the set of paths
-    # where ``parsed_layer`` narrows that specific layer.
-    narrowed_paths_by_prior_source = [
-        (prior_source, set(detect_settings_narrowing(prior_layer, parsed_layer)))
-        for prior_source, prior_layer in reversed(processed_sources)
+    for path in _assigned_paths(parsed_layer):
+        provenance[path] = source
+
+
+def _collect_narrowing(
+    narrowing_paths: Sequence[str],
+    source: _SettingsSource,
+    provenance: Mapping[str, _SettingsSource],
+) -> list["_NarrowingViolation"]:
+    """Build narrowing violations for the cross-scope bare-drops the overlay merge
+    surfaced, attributing each side.
+
+    ``narrowing_paths`` is the full list ``MngrConfig.merge_with`` returned
+    for merging this layer onto the accumulated config -- both assign-by-default field
+    drops and ``SettingsPatchField`` drops inside an accumulating patch. ``source`` is the
+    layer doing the assignment. ``dropped_from`` is read from ``provenance`` (the
+    highest-precedence prior layer that assigned the path), which must reflect state
+    *before* this layer's own assignments are recorded -- the dropped value belongs to a
+    prior layer. ``dropped_from`` is ``None`` only if no prior layer owns the path (should
+    not happen for a real violation, but keeps the diagnostic robust).
+    """
+    return [
+        _NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=provenance.get(key_path))
+        for key_path in narrowing_paths
     ]
-    violations: list[_NarrowingViolation] = []
-    for key_path in violation_paths:
-        dropped_from = next(
-            (prior_source for prior_source, paths in narrowed_paths_by_prior_source if key_path in paths),
-            None,
-        )
-        violations.append(_NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=dropped_from))
-    return violations
 
 
 def _display_path(path: Path) -> str:
@@ -448,19 +500,7 @@ def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> Confi
         detail_lines.append(f"      assigned by {_describe_source(violation.assigned_by)}")
         if violation.dropped_from is not None:
             detail_lines.append(f"      would drop a value from {_describe_source(violation.dropped_from)}")
-    return ConfigParseError(
-        "Settings narrowing detected: a higher-precedence settings layer would assign over "
-        "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
-        "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
-        "To opt into this assign-by-default behavior (and silence this error), set "
-        "`allow_settings_key_assignment_narrowing = true` in one of the settings files above "
-        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
-        "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
-        'key in the higher-precedence layer (e.g. `env__extend = ["X=5"]`).\n'
-        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        "in a future version, and support for False may be removed entirely. Migrate now so "
-        "the eventual default flip is a no-op for your config."
-    )
+    return ConfigParseError(build_settings_narrowing_message(detail_lines))
 
 
 def resolve_strict_from_env() -> bool:
@@ -661,17 +701,16 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
     cli_args gets special shell-splitting behavior for single strings.
     All other tuple fields just convert list -> tuple.
 
-    When the source value is a string, the result is a ``StringDerivedTuple``
-    so narrowing detection (``_check_narrowing`` / ``would_assignment_narrow``)
-    can recognise the scalar-replacement intent and skip the per-entry
-    narrowing check against the lower-precedence layer.
+    When the source value is a string, the result is a ``ScalarTuple`` (a ``Static*``
+    marker) so the overlay narrowing detector recognises the scalar-replacement intent
+    and exempts it from the per-entry narrowing check against the lower-precedence layer.
     """
     result = raw_config
     if "cli_args" in result:
         cli_args = result["cli_args"]
         if isinstance(cli_args, str):
             tokens = split_cli_args_string(cli_args) if cli_args else ()
-            normalized: Any = StringDerivedTuple(tokens)
+            normalized: Any = ScalarTuple(tokens)
         elif isinstance(cli_args, (list, tuple)):
             normalized = tuple(cli_args)
         else:
@@ -684,7 +723,7 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
         value = result[field_name]
         if isinstance(value, str):
             # Single string -> wrap in a one-element tuple (no shell splitting for these fields)
-            result = {**result, field_name: StringDerivedTuple((value,))}
+            result = {**result, field_name: ScalarTuple((value,))}
         elif isinstance(value, (list, tuple)):
             result = {**result, field_name: tuple(value)}
         else:
@@ -936,7 +975,7 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     first-class field.
 
     Only fields actually present in ``raw_defaults`` end up in
-    ``model_fields_set`` so ``CommandDefaults.merge_with`` can distinguish
+    ``model_fields_set`` so the overlay config merge can distinguish
     "layer touched defaults" from "layer touched only default_subcommand".
     """
     commands: dict[str, CommandDefaults] = {}

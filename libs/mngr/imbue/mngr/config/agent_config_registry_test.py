@@ -1,5 +1,8 @@
 """Tests for agent_config_registry and agent_class_registry modules."""
 
+from typing import Annotated
+from typing import Any
+
 import pytest
 from pydantic import Field
 
@@ -17,6 +20,7 @@ from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
@@ -28,16 +32,39 @@ class _SubclassAgentConfig(AgentTypeConfig):
 
     extra_bool: bool = Field(default=False)
     extra_str: str | None = Field(default=None)
+    settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(default_factory=dict)
+
+
+def test_apply_custom_overrides_combines_settings_patch_field() -> None:
+    """A ``SettingsPatchField`` accumulates across parent_type inheritance: the
+    parent's non-overlapping keys survive into the child, and a shared ``__extend``
+    key combines rather than being replaced."""
+    parent = _SubclassAgentConfig(
+        settings_overrides={"model": "opus", "permissions__extend": {"allow__extend": ["P"]}},
+    )
+    child = _SubclassAgentConfig.model_construct(
+        settings_overrides={"permissions__extend": {"allow__extend": ["C"]}},
+    )
+    result = _apply_custom_overrides_to_parent_config(parent, child)
+    assert isinstance(result, _SubclassAgentConfig)
+    assert result.settings_overrides == {
+        "model": "opus",
+        "permissions__extend": {"allow__extend": ["P", "C"]},
+    }
 
 
 def test_apply_custom_overrides_returns_parent_when_no_overrides() -> None:
-    """_apply_custom_overrides_to_parent_config should return parent unchanged when custom has no overrides."""
+    """_apply_custom_overrides_to_parent_config returns a config equal to the parent when
+    custom has no overrides. (The overlay pipeline re-validates into a fresh, ``==``-equal
+    instance rather than returning the same object -- identity is irrelevant for an immutable
+    frozen model, and this matches the AgentTypeConfig/MngrConfig merges, which also return
+    fresh instances.)"""
     parent = AgentTypeConfig(cli_args=("--model", "opus"))
     custom = AgentTypeConfig()
 
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
-    assert result is parent
+    assert result == parent
     assert result.cli_args == ("--model", "opus")
 
 

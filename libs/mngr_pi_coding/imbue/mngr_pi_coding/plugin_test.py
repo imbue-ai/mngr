@@ -19,6 +19,7 @@ from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
@@ -160,7 +161,7 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
     base = PiCodingAgentConfig()
     override = PiCodingAgentConfig(cli_args=("--verbose",))
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert isinstance(merged, PiCodingAgentConfig)
     assert merged.cli_args == ("--verbose",)

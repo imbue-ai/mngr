@@ -26,11 +26,6 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.config.data_types import detect_settings_narrowing
-from imbue.mngr.config.data_types import would_assignment_narrow
-from imbue.mngr.config.key_resolver import bare_key
-from imbue.mngr.config.key_resolver import is_extend_key
-from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.loader import block_disabled_plugins
@@ -45,6 +40,12 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+from imbue.overlay.errors import OverlayError
+from imbue.overlay.narrowing import would_assignment_narrow
+from imbue.overlay.node_merge import extend_plain_value
+from imbue.overlay.operators import bare_key
+from imbue.overlay.operators import is_extend_key
+from imbue.overlay.operators import parse_scalar_value
 
 # The set of built-in format names (case-insensitive). Any --format value not
 # matching one of these is treated as a format template string.
@@ -482,11 +483,10 @@ def apply_settings_to_config(
     # ``--setting`` cannot silently drop entries from the merged config either.
     # Honor the existing setting on ``config``, since ``--setting`` runs after
     # config-file loading, so the resolved value is already known here.
-    if not config.allow_settings_key_assignment_narrowing:
-        violations = detect_settings_narrowing(config, settings_config)
-        if violations:
-            raise _build_setting_narrowing_error(violations)
-    return config.merge_with(settings_config)
+    merged, violations = config.merge_with(settings_config)
+    if violations and not config.allow_settings_key_assignment_narrowing:
+        raise _build_setting_narrowing_error(violations)
+    return merged
 
 
 # Top-level setting key segments whose effect is consumed earlier in
@@ -846,45 +846,20 @@ def _apply_template_extend(
     param_name: str,
 ) -> Any:
     """Apply a single template's ``<key>__extend = ...`` against the existing
-    parameter value.
+    parameter value, delegating to the shared ``extend_plain_value`` algebra.
 
-    Mirrors the leaf semantics of ``_apply_extend`` in the key resolver -- list/
-    tuple/set/dict shape rules are the same -- but operates against in-flight
-    click param values rather than against parsed pydantic models, so the
-    coercion bias is toward the click-native tuple shape.
+    Operates against in-flight click param values rather than parsed pydantic
+    models; ``extend_plain_value`` preserves tuple-ness when the base is a tuple, which
+    keeps the click-native tuple shape downstream code expects. The dict branch is
+    recursive (a nested ``key__extend`` extends rather than replaces). Re-raise the
+    overlay's ``OverlayError`` as a ``ConfigParseError`` so the template-specific
+    ``field_path`` still appears in the message.
     """
     field_path = f"create_templates.{template_name}.{param_name}__extend"
-    if not isinstance(extend_value, (list, tuple, dict, set, frozenset)):
-        raise ConfigParseError(
-            f"{field_path} requires a list, tuple, dict, set, or frozenset value; got: {type(extend_value).__name__}"
-        )
-    if existing_value is None:
-        # Field unset in base. Extend acts like assign, matching ``_apply_extend``.
-        return extend_value
-    if isinstance(existing_value, (list, tuple)):
-        if not isinstance(extend_value, (list, tuple)):
-            raise ConfigParseError(
-                f"{field_path} (list/tuple) requires a JSON array value; got: {type(extend_value).__name__}"
-            )
-        merged = list(existing_value) + list(extend_value)
-        return tuple(merged) if isinstance(existing_value, tuple) else merged
-    if isinstance(existing_value, (set, frozenset)):
-        if not isinstance(extend_value, (set, frozenset, list, tuple)):
-            raise ConfigParseError(
-                f"{field_path} (set) requires a JSON array value; got: {type(extend_value).__name__}"
-            )
-        merged_set = set(existing_value) | set(extend_value)
-        return frozenset(merged_set) if isinstance(existing_value, frozenset) else merged_set
-    if isinstance(existing_value, dict):
-        if not isinstance(extend_value, dict):
-            raise ConfigParseError(
-                f"{field_path} (dict) requires a JSON object value; got: {type(extend_value).__name__}"
-            )
-        return {**existing_value, **extend_value}
-    raise ConfigParseError(
-        f"{field_path} is not valid: target field is a scalar "
-        f"({type(existing_value).__name__}); use bare assignment instead."
-    )
+    try:
+        return extend_plain_value(existing_value, extend_value, field_path)
+    except OverlayError as e:
+        raise ConfigParseError(str(e)) from e
 
 
 def _build_template_narrowing_message(template_name: str, param_name: str) -> str:
@@ -910,16 +885,6 @@ def _build_template_narrowing_message(template_name: str, param_name: str) -> st
 def is_param_explicit(ctx: click.Context, param_name: str) -> bool:
     """Check whether a CLI parameter was explicitly set on the command line."""
     return ctx.get_parameter_source(param_name) == ParameterSource.COMMANDLINE
-
-
-def error_if_param_explicit(ctx: click.Context, param_name: str, error_message: str) -> None:
-    """Raise UserInputError if the user explicitly set this parameter on the command line.
-
-    Use this when another flag implies a specific value for this parameter, and the
-    user explicitly chose a conflicting value.
-    """
-    if is_param_explicit(ctx, param_name):
-        raise UserInputError(error_message)
 
 
 @pure
