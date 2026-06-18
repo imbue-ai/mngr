@@ -698,8 +698,6 @@ def test_to_offline_host_raises_when_no_host_state_metadata(temp_mngr_ctx: MngrC
     """
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    instances.list_result = [
-        _instance("i-1", "TERMINATED", labels={"mngr-host-id": _host_id_label(host_id)})
-    ]
+    instances.list_result = [_instance("i-1", "TERMINATED", labels={"mngr-host-id": _host_id_label(host_id)})]
     with pytest.raises(HostNotFoundError):
         provider.to_offline_host(host_id)
