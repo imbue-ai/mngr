@@ -31,7 +31,6 @@ from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
-from imbue.mngr_vps.host_state_store import MissingBucketHostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.testing import seed_stopped_host_record
 
@@ -216,7 +215,7 @@ def _build_stubbed_provider(
     Returns the provider, the fake compute client (so a test can seed
     ``virtual_machines.list_result`` -- the host-id lookup and offline discovery
     read it) and the fake resource client. No ``_state_bucket`` is seeded, so the
-    provider's ``_state_store`` resolves to a ``MissingBucketHostStateStore``.
+    provider's ``_state_store`` raises the actionable missing-bucket error.
     Mirrors the AWS / GCP ``_build_stubbed_provider``.
     """
     config = AzureProviderConfig(subscription_id="sub-123", auto_shutdown_seconds=3600)
@@ -241,9 +240,9 @@ def _build_stubbed_provider(
         azure_client=client,
         azure_config=config,
     )
-    # No state bucket: seed the cached_property to None so ``_state_store`` resolves
-    # to a ``MissingBucketHostStateStore`` (writes no-op, offline reads raise) and
-    # the existence probe never hits real Azure.
+    # No state bucket: seed the cached_property to None so ``_state_store`` raises
+    # the actionable missing-bucket error (the bucket is required) and the existence
+    # probe never hits real Azure.
     provider.__dict__["_state_bucket"] = None
     return provider, compute, resource
 
@@ -347,23 +346,24 @@ def test_find_instance_for_host_refuses_duplicate_host_id_tag(temp_mngr_ctx: Mng
         provider._find_instance_for_host(host_id)
 
 
-def test_no_bucket_persist_agent_data_does_not_raise_and_writes_no_vm_tags(temp_mngr_ctx: MngrContext) -> None:
-    """With no state bucket, mirroring an agent record is a no-op write -- it must not raise.
+def test_no_bucket_persist_agent_data_raises_prepare_pointer(temp_mngr_ctx: MngrContext) -> None:
+    """With no state bucket, mirroring an agent record raises the prepare-pointer error.
 
-    The per-agent VM tag mirror is gone; ``_state_store`` is a
-    ``MissingBucketHostStateStore`` whose write methods no-op so a running host
-    stays usable. The seeded ``vps_ip=None`` record makes ``super().persist_agent_data``
-    short-circuit with ``HostNotFoundError``, so the only remaining step is the
-    (no-op) offline mirror. No server-side tag patch is ever recorded.
+    The per-agent VM tag mirror is gone and the bucket is required: ``_state_store``
+    raises the actionable missing-bucket error, so even a write fails loudly rather
+    than silently dropping the mirror. The seeded ``vps_ip=None`` record makes
+    ``super().persist_agent_data`` short-circuit with ``HostNotFoundError``, so the
+    raise comes from the offline mirror step. No server-side tag patch is recorded.
     """
     provider, _compute, resource = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     seed_stopped_host_record(provider, host_id)
-    provider.persist_agent_data(
-        host_id,
-        {"id": str(agent_id), "name": "a1", "type": "command", "labels": {"env": "prod"}},
-    )
+    with pytest.raises(MngrError, match="mngr azure prepare"):
+        provider.persist_agent_data(
+            host_id,
+            {"id": str(agent_id), "name": "a1", "type": "command", "labels": {"env": "prod"}},
+        )
     assert resource.tags.updates == []
 
 
@@ -389,7 +389,7 @@ def test_no_bucket_discovery_of_deallocated_vm_raises_prepare_pointer(temp_mngr_
 
     The cheap identity tags still identify the deallocated VM, so the offline
     discovery loop reaches the agent-record read -- and that read against the
-    ``MissingBucketHostStateStore`` raises the actionable prepare-pointer error
+    bucket-less ``_state_store`` raises the actionable prepare-pointer error
     (rather than silently dropping the stopped host's agents).
     """
     provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
@@ -553,17 +553,15 @@ def test_to_offline_host_reconstructs_stopped_host_from_bucket(temp_mngr_ctx: Mn
 
 
 # =============================================================================
-# State store selection (BucketHostStateStore vs MissingBucketHostStateStore)
+# State store selection (BucketHostStateStore, or raise when the bucket is absent)
 # =============================================================================
 
 
-def test_state_store_is_missing_bucket_store_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
-    """With no resolved bucket, ``_state_store`` is the raise-on-read placeholder store."""
+def test_state_store_raises_prepare_pointer_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
+    """With no resolved bucket, accessing ``_state_store`` raises the actionable prepare-pointer error."""
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    store = provider._state_store
-    assert isinstance(store, MissingBucketHostStateStore)
-    assert store.prepare_command == "mngr azure prepare"
-    assert store.store_label == "Azure state bucket"
+    with pytest.raises(MngrError, match="mngr azure prepare"):
+        _ = provider._state_store
 
 
 def test_state_store_is_bucket_store_when_bucket_exists(temp_mngr_ctx: MngrContext) -> None:

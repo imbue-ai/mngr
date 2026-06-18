@@ -34,7 +34,6 @@ from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.client import HOST_NAME_TAG_KEY
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.state_bucket import BlobStateBucket
-from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.state_bucket import BlobStateHostIdentityError
 from imbue.mngr_azure.state_bucket import host_dir_sync_target_for
@@ -47,8 +46,8 @@ from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
-from imbue.mngr_vps.host_state_store import MissingBucketHostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
+from imbue.mngr_vps.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import BucketHostDirBackend
 from imbue.mngr_vps.instance_offline import HOST_DIR_SYNC_SCRIPT_PATH
@@ -279,55 +278,55 @@ class AzureProvider(OfflineCapableVpsProvider):
     def _state_bucket(self) -> BlobStateBucket | None:
         """Return the Blob state bucket when account + container actually exist, else None.
 
-        When present, the bucket is the sole offline store for the host record and
-        agent records; when None (the storage account / container do not yet exist
-        because ``mngr azure prepare`` was never run, or the subscription can't be
-        resolved), offline reads are unavailable (see ``_state_store`` /
-        ``MissingBucketHostStateStore``). The existence probe runs at most once per
-        provider lifetime (cached). Mirrors ``AwsProvider._state_bucket``.
+        The bucket is the sole source of truth for agent records and the offline
+        host record. None means the account/container do not exist yet (``mngr
+        azure prepare`` was never run) or the subscription can't be resolved;
+        ``_state_store`` then raises an actionable error. A storage error while
+        probing existence propagates rather than masquerading as "absent". The
+        existence probe runs at most once per provider lifetime (cached). Mirrors
+        ``AwsProvider._state_bucket``.
         """
         return self._resolve_existing_state_bucket()
 
     def _resolve_existing_state_bucket(self) -> BlobStateBucket | None:
-        """Build the configured/derived bucket and return it only if it exists."""
+        """Build the configured/derived bucket and return it only if it exists.
+
+        Returns None only when the bucket genuinely does not exist (or the
+        subscription is unresolvable). An ``account_exists`` / ``container_exists``
+        storage error propagates -- the bucket is required, so an inability to
+        check is an operational failure, not a silent "no bucket".
+        """
         try:
             subscription_id = self.azure_config.get_subscription_id()
         except ValueError as e:
             logger.debug("Could not resolve subscription for the Blob state bucket: {}", e)
             return None
         bucket = self.azure_config.build_state_bucket(subscription_id)
-        try:
-            if not (bucket.account_exists() and bucket.container_exists()):
-                logger.debug(
-                    "Azure state account/container {}/{} does not exist; offline host state is unavailable "
-                    "(run `mngr azure prepare` to create it)",
-                    bucket.account_name,
-                    bucket.container_name,
-                )
-                return None
-        except BlobStateBucketError as e:
-            logger.warning("Could not check Azure state bucket {}: {}", bucket.account_name, e)
+        if not (bucket.account_exists() and bucket.container_exists()):
+            logger.debug(
+                "Azure state account/container {}/{} does not exist; offline host state is unavailable "
+                "(run `mngr azure prepare` to create it)",
+                bucket.account_name,
+                bucket.container_name,
+            )
             return None
         return bucket
 
     @cached_property
     def _state_store(self) -> HostStateStore:
-        """The external host/agent-record mirror: the Blob bucket, or a raise-on-read placeholder when absent.
+        """The external host/agent-record mirror: the Blob bucket, or raise when it is absent.
 
         Selecting one store here lets the persist / remove / list / read paths stop
-        branching on bucket presence. With no bucket the placeholder no-ops writes
-        (a running host stays usable) but raises an actionable error on offline
-        reads. Offline ``host_dir`` reads are a separate, bucket-only feature keyed
-        off ``_state_bucket``. Mirrors ``AwsProvider._state_store``.
+        branching on bucket presence. The bucket is required: when it does not
+        exist, accessing this property raises an actionable error pointing at
+        ``mngr azure prepare`` (so create / label / offline reads all fail loudly
+        and uniformly). Offline ``host_dir`` reads are a separate, bucket-only
+        feature keyed off ``_state_bucket``. Mirrors ``AwsProvider._state_store``.
         """
         bucket = self._state_bucket
-        if bucket is not None:
-            return BucketHostStateStore(
-                bucket=bucket,
-                bucket_error_type=BlobStateBucketError,
-                bucket_label="Azure state bucket",
-            )
-        return MissingBucketHostStateStore(store_label="Azure state bucket", prepare_command="mngr azure prepare")
+        if bucket is None:
+            raise missing_state_bucket_error("Azure state bucket", "mngr azure prepare")
+        return BucketHostStateStore(bucket=bucket, bucket_label="Azure state bucket")
 
     @cached_property
     def _host_dir_backend(self) -> HostDirBackend:
@@ -645,7 +644,6 @@ class _BlobHostDirBackend(BucketHostDirBackend):
 
     provider: AzureProvider
     bucket: BlobStateBucket
-    bucket_error_type: type[MngrError] = BlobStateBucketError
 
     def _sync_unit_name(self) -> str:
         return HOST_DIR_SYNC_UNIT_NAME
@@ -656,41 +654,41 @@ class _BlobHostDirBackend(BucketHostDirBackend):
     def _cloud_label(self) -> str:
         return "Azure"
 
-    def create_identity(self) -> str | None:
+    def create_identity(self) -> str:
+        """The bucket-write managed-identity resource id to attach at launch.
+
+        Raises when the identity is missing or cannot be resolved (a
+        ``host_identity_exists`` storage error propagates): with host_dir sync on,
+        a VM launched without it could never push its host_dir, so this is a
+        create-time setup failure. Set ``is_offline_host_dir_enabled = false`` to
+        skip it.
+        """
         identity = self.provider._host_identity()
         if identity is None:
-            return None
-        try:
-            if not identity.host_identity_exists():
-                logger.warning(
-                    "host_dir sync is on but the bucket-write managed identity {} does not exist; launching "
-                    "without it (re-run `mngr azure prepare` with sufficient permissions to enable offline host_dir)",
-                    identity.identity_name,
-                )
-                return None
-        except BlobStateHostIdentityError as e:
-            logger.warning(
-                "Could not check the bucket-write managed identity {}; launching without it: {}",
-                identity.identity_name,
-                e,
+            raise BlobStateHostIdentityError(
+                "host_dir sync is on but the bucket-write managed identity could not be resolved; re-run "
+                "`mngr azure prepare` with sufficient permissions, or set is_offline_host_dir_enabled = false."
             )
-            return None
+        if not identity.host_identity_exists():
+            raise BlobStateHostIdentityError(
+                f"host_dir sync is on but the bucket-write managed identity {identity.identity_name} does not "
+                "exist; re-run `mngr azure prepare` with sufficient permissions to enable offline host_dir, "
+                "or set is_offline_host_dir_enabled = false."
+            )
         return identity.resource_id()
 
     def _build_install_plan(self, host_id: HostId) -> HostDirSyncInstallPlan | None:
         # azcopy authenticates as the VM's user-assigned managed identity via MSI;
-        # without it the sync would just 403, so skip the install when it is absent
-        # (a sub-decision within bucket mode, distinct from the bucket-vs-fallback
-        # selection).
+        # without it the sync would just 403. With host_dir sync on, a missing
+        # identity is a create-time setup failure (per the launch contract), so
+        # raise rather than skip the install.
         identity = self.provider._host_identity()
         identity_client_id = identity.get_host_identity_client_id() if identity is not None else None
         if identity_client_id is None:
-            logger.warning(
-                "host_dir sync is on but the bucket-write managed identity for host {} is absent; skipping "
-                "the sync daemon install (re-run `mngr azure prepare` with sufficient permissions)",
-                host_id,
+            raise BlobStateHostIdentityError(
+                f"host_dir sync is on but the bucket-write managed identity for host {host_id} is absent; re-run "
+                "`mngr azure prepare` with sufficient permissions, or set is_offline_host_dir_enabled = false."
             )
-            return None
         host_dir_on_outer = str(self.provider._realizer.host_dir_path_on_outer(host_id))
         blob_prefix_url = host_dir_sync_target_for(self.bucket.account_name, self.bucket.container_name, host_id)
         return HostDirSyncInstallPlan(

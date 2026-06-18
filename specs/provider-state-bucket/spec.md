@@ -88,7 +88,10 @@ Modal's state volume.
    `NotImplementedError` at EC2's 50-tag ceiling (`persist_agent_data`). The legacy per-agent tag
    mirror is retained **only as a fallback when no bucket is configured** (operator never ran
    `prepare`, or an older `prepare`), so behavior degrades gracefully rather than regressing.
-   Fixes (a) and (b) together.
+   Fixes (a) and (b) together. `[CLAUDE: superseded — the bucket is now required infrastructure with
+   no tag-mirror fallback. The per-agent tag mirror was removed entirely; when the bucket has not been
+   provisioned, the provider raises an actionable "run `mngr <provider> prepare`" error on the
+   create/label write path as well as on offline reads, and transient bucket errors propagate.]`
 2. **`host_dir` is synced to the bucket by the instance (instance-push)**, the Modal model: an
    on-box daemon syncs `host_dir` to the bucket periodically and on graceful stop; offline reads are
    served from the bucket via a new bucket-backed volume. **On by default** (matches Lima).
@@ -100,8 +103,10 @@ Modal's state volume.
    permissions rather than failing the whole command; set it to `False` to skip the identity step.
    `prepare` is idempotent: re-running after a bucket-only prepare adds just the
    identity (bucket creation no-ops). `[CLAUDE: superseded — the tri-state flag was replaced by the
-   is_offline_host_dir_enabled config field (default True); prepare now provisions the identity
-   best-effort when enabled]`
+   is_offline_host_dir_enabled config field (default True). The bucket is now required, so prepare no
+   longer "warns and continues": a bucket-create failure fails the command, and when
+   is_offline_host_dir_enabled is on an identity-provisioning failure fails it too. Re-running prepare
+   after flipping the field false->true adds just the identity.]`
 
 ### Proposed (please confirm — these shape most of the implementation)
 
@@ -140,8 +145,10 @@ Modal's state volume.
    The bucket-only steps are unconditional and idempotent, so re-running `prepare` (once sufficient
    permissions are granted) adds just the missing identity. `[CLAUDE: superseded — the tri-state flag
    `--use-offline-host-dir {yes,auto,no}` was replaced by the is_offline_host_dir_enabled config
-   field (default True); prepare now provisions the identity best-effort when enabled, and "skip" is
-   expressed by setting the field to False]`
+   field (default True). The bucket is now required infrastructure, so prepare is no longer
+   best-effort: a missing bucket permission fails the command, and when is_offline_host_dir_enabled is
+   on a missing identity permission fails it too (rather than warning and continuing). "Skip the
+   identity" is expressed by setting the field to False.]`
 7. **Offline `host_dir` detects a missing identity and tells the user to re-run `prepare`.** When
    `get_volume_for_host` is used against a host whose instance was never granted the bucket-write
    identity, we detect it directly from cloud state — AWS: `DescribeInstances`'
@@ -202,7 +209,8 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
   are **not written at all** (Decision 1a) — removing the 256-char drop and the 50-tag ceiling.
 - **Graceful fallback:** when no bucket is configured, keep today's per-agent tag mirror unchanged
   (including its documented limits), so existing deployments that never ran the new `prepare` keep
-  working.
+  working. `[CLAUDE: superseded — the bucket is now required and the tag-mirror fallback was removed;
+  with no bucket the provider raises a "run `mngr <provider> prepare`" error on reads and writes alike.]`
 - Keep writing the **index tags** (`mngr-host-id`, `mngr-provider`, `Name`, `mngr-created-at`) in
   both modes so instance enumeration + power-state detection are unchanged.
 - Offline discovery reconstructs the full `OfflineHost` from `host_state.json` in the bucket (read
@@ -229,11 +237,13 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
 ### Component 4 — `prepare` / `cleanup`
 
 - `prepare`: idempotently create the bucket/container (Decision 8), then provision the bucket-write
-  identity best-effort when `is_offline_host_dir_enabled` is on (Decisions 3 & 6).
+  identity when `is_offline_host_dir_enabled` is on (Decisions 3 & 6).
   Read-only-first where possible (head/list before create), matching the existing SG-prepare style.
-  When the feature is on, an identity-provisioning permission / API error is swallowed into a
-  warning; when off, the identity step is bypassed entirely. The bucket steps always run and are
-  idempotent.
+  When the feature is on, an identity-provisioning permission / API error fails the command; when
+  off, the identity step is bypassed entirely. The bucket steps always run, are idempotent, and a
+  bucket-create failure fails the command. `[CLAUDE: superseded the earlier "error is swallowed into
+  a warning" wording — the bucket is required, so prepare now fails on a bucket or (feature-on)
+  identity provisioning error.]`
 - `cleanup`: delete identity + bucket, refusing while managed-host state remains (Decision 9).
 - Offline `host_dir` read (Decision 7) first checks that the host's instance actually has the
   identity attached (AWS `DescribeInstances.IamInstanceProfile`; Azure VM identity) and raises a
@@ -242,8 +252,9 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
 - New IAM perms for `prepare`: S3 `CreateBucket`/`PutBucketPolicy`/`PutEncryptionConfiguration` +
   IAM `CreateRole`/`PutRolePolicy`/`CreateInstanceProfile`/`PassRole`; Azure storage-account
   create + role-assignment write + managed-identity create. When `is_offline_host_dir_enabled` is on,
-  missing IAM perms degrade to a warning (bucket-only prepare). Per-host create path additionally
-  needs `iam:PassRole` for the instance profile (AWS) / identity assignment (Azure).
+  missing IAM perms fail the command (the bucket is required, so prepare does not fall back to a
+  bucket-only run). Per-host create path additionally needs `iam:PassRole` for the instance profile
+  (AWS) / identity assignment (Azure).
 
 ## Data model notes
 
@@ -284,9 +295,10 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
 - **Crash freshness.** Instance-push means an ungraceful crash leaves `host_dir` "as of last sync"
   (same tradeoff Modal accepts). Acceptable per Decision 2.
 - **Reintroducing IAM into `prepare`** (Decisions 6 & 7) — resolved: identity provisioning is gated
-  on the `is_offline_host_dir_enabled` config field (default `True`) and is best-effort, degrading a
-  missing-IAM-permission failure to a warning so bucket-only `prepare` still succeeds; setting the
-  field to `False` opts out; offline `host_dir` raises a "re-run prepare" error when the identity is
-  detectably absent.
+  on the `is_offline_host_dir_enabled` config field (default `True`); setting the field to `False`
+  opts out. `[CLAUDE: superseded the earlier "best-effort, degrading to a warning" resolution — the
+  bucket is now required, so with the feature on a missing-IAM-permission failure fails `prepare`. The
+  offline `host_dir` *read* still degrades gracefully: a genuinely empty host_dir prefix returns no
+  volume with a non-fatal "re-run prepare" diagnostic; only a bucket probe error propagates.]`
 - **Azure storage-account global-name collisions** — derive deterministically from
   subscription+RG+region and surface a clear error / override on collision.

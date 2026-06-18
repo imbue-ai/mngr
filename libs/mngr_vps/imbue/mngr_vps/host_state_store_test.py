@@ -12,8 +12,8 @@ from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
-from imbue.mngr_vps.host_state_store import MissingBucketHostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
+from imbue.mngr_vps.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps.host_store import VpsHostRecord
 
 
@@ -51,20 +51,27 @@ class _FakeBucketError(MngrError):
 
 
 class _FakeBucket:
-    """Minimal ``StateBucket`` whose host-record read is scriptable (value or raise)."""
+    """Minimal ``StateBucket`` whose host-record read/write is scriptable (value or raise)."""
 
-    def __init__(self, *, record_json: str | None = None, raise_on_read: bool = False) -> None:
+    def __init__(
+        self, *, record_json: str | None = None, raise_on_read: bool = False, raise_on_write: bool = False
+    ) -> None:
         self._record_json = record_json
         self._raise_on_read = raise_on_read
+        self._raise_on_write = raise_on_write
 
-    def write_host_record_json(self, host_id: HostId, record_json: str) -> None: ...
+    def write_host_record_json(self, host_id: HostId, record_json: str) -> None:
+        if self._raise_on_write:
+            raise _FakeBucketError("boom")
 
     def read_host_record_json(self, host_id: HostId) -> str | None:
         if self._raise_on_read:
             raise _FakeBucketError("boom")
         return self._record_json
 
-    def write_agent_record(self, host_id: HostId, agent_id: str, data: Mapping[str, object]) -> None: ...
+    def write_agent_record(self, host_id: HostId, agent_id: str, data: Mapping[str, object]) -> None:
+        if self._raise_on_write:
+            raise _FakeBucketError("boom")
 
     def list_agent_records(self, host_id: HostId) -> list[dict]:
         return []
@@ -81,7 +88,7 @@ class _FakeBucket:
 
 
 def _bucket_store(bucket: _FakeBucket) -> BucketHostStateStore:
-    return BucketHostStateStore(bucket=bucket, bucket_error_type=_FakeBucketError, bucket_label="fake bucket")
+    return BucketHostStateStore(bucket=bucket, bucket_label="fake bucket")
 
 
 def test_read_host_record_returns_parsed_bucket_record() -> None:
@@ -100,42 +107,37 @@ def test_read_host_record_returns_none_when_bucket_record_absent() -> None:
     assert store.read_host_record(HostId.generate()) is None
 
 
-def test_read_host_record_returns_none_when_bucket_record_malformed() -> None:
-    """A corrupt ``host_state.json`` is logged and treated as absent rather than crashing."""
+def test_read_host_record_raises_on_malformed_bucket_record() -> None:
+    """A corrupt ``host_state.json`` raises rather than vanishing the host as a clean None."""
     store = _bucket_store(_FakeBucket(record_json="{not valid json"))
-    assert store.read_host_record(HostId.generate()) is None
-
-
-def test_read_host_record_returns_none_on_bucket_read_error() -> None:
-    """A bucket read failure is swallowed (logged) and returns None rather than raising."""
-    store = _bucket_store(_FakeBucket(raise_on_read=True))
-    assert store.read_host_record(HostId.generate()) is None
-
-
-def _missing_store() -> MissingBucketHostStateStore:
-    return MissingBucketHostStateStore(store_label="fake state bucket", prepare_command="mngr fake prepare")
-
-
-def test_missing_bucket_store_writes_are_no_ops() -> None:
-    """With no bucket, mirror writes are silently skipped so a running host stays usable."""
-    store = _missing_store()
-    host_id = HostId.generate()
-    # None of these raise: creating/labelling an agent on a running host must not break.
-    store.persist_host_record(_host_record(host_id, "h"))
-    store.persist_agent_record(host_id, "agent-1", {"id": "agent-1", "name": "a1"})
-    store.remove_agent_record(host_id, "agent-1")
-    store.delete_host_state(host_id)
-
-
-def test_missing_bucket_store_read_host_record_raises_actionable_error() -> None:
-    """An offline host-record read with no bucket raises an error pointing at prepare."""
-    store = _missing_store()
-    with pytest.raises(MngrError, match="mngr fake prepare"):
+    with pytest.raises(MngrError, match="Malformed host record"):
         store.read_host_record(HostId.generate())
 
 
-def test_missing_bucket_store_list_agent_records_raises_actionable_error() -> None:
-    """An offline agent-listing read with no bucket raises an error pointing at prepare."""
-    store = _missing_store()
-    with pytest.raises(MngrError, match="fake state bucket"):
-        store.list_agent_records(HostId.generate())
+def test_read_host_record_propagates_bucket_read_error() -> None:
+    """A bucket read failure propagates -- the bucket is required, so a stopped host must not silently vanish."""
+    store = _bucket_store(_FakeBucket(raise_on_read=True))
+    with pytest.raises(_FakeBucketError):
+        store.read_host_record(HostId.generate())
+
+
+def test_bucket_store_writes_propagate_storage_errors() -> None:
+    """Mirror writes propagate a bucket failure (a dropped write would let a stopped host show stale state)."""
+    store = _bucket_store(_FakeBucket(raise_on_write=True))
+    host_id = HostId.generate()
+    with pytest.raises(_FakeBucketError):
+        store.persist_host_record(_host_record(host_id, "h"))
+    with pytest.raises(_FakeBucketError):
+        store.persist_agent_record(host_id, "agent-1", {"id": "agent-1", "name": "a1"})
+
+
+def test_missing_state_bucket_error_points_at_prepare() -> None:
+    """The shared missing-bucket error names the store and its prepare command.
+
+    Providers raise this from ``_state_store`` when the required bucket is absent,
+    so create / label / offline reads all fail loudly with an actionable pointer.
+    """
+    error = missing_state_bucket_error("fake state bucket", "mngr fake prepare")
+    assert isinstance(error, MngrError)
+    assert "fake state bucket" in str(error)
+    assert "mngr fake prepare" in str(error)

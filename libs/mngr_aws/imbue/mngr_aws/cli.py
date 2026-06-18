@@ -21,7 +21,6 @@ from typing import Any
 import click
 from botocore.exceptions import BotoCoreError
 from click_option_group import optgroup
-from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -37,7 +36,6 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.state_bucket import S3StateBucketError
 from imbue.mngr_aws.state_bucket import S3StateHostIdentity
-from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
 from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
@@ -150,36 +148,32 @@ def _build_state_bucket(base: AwsProviderConfig, region: str | None) -> S3StateB
     return S3StateBucket(session=session, region=effective_region, bucket_name=bucket_name)
 
 
-def _ensure_state_bucket_best_effort(base: AwsProviderConfig, region: str | None) -> tuple[str | None, bool]:
-    """Ensure the state bucket exists, returning ``(bucket_name, was_created)``.
+def _ensure_state_bucket(base: AwsProviderConfig, region: str | None) -> tuple[str, bool]:
+    """Create (idempotently) the required S3 state bucket, returning ``(bucket_name, was_created)``.
 
-    Best-effort for ``mngr aws prepare``: a missing-permission / API failure (or
-    an unresolvable bucket name) is logged at WARNING and surfaces as
-    ``(None, False)`` so the security-group prepare still succeeds even when the
-    operator's key cannot manage S3.
+    The bucket is required infrastructure, so this is the primary job of ``mngr
+    aws prepare``: an unresolvable bucket name, a missing S3/STS permission, or any
+    API failure raises (a security-group-only prepare would be misleading -- a
+    stopped host could not be listed or resumed). Errors surface as an actionable
+    ``click.ClickException``.
     """
     try:
         bucket = _build_state_bucket(base, region)
     except (ValueError, BotoCoreError) as e:
-        logger.warning("Could not resolve credentials for the S3 state bucket; skipping bucket setup: {}", e)
-        return None, False
+        raise click.ClickException(f"Could not resolve credentials for the required S3 state bucket: {e}") from e
     if bucket is None:
-        logger.warning(
-            "Could not resolve a state-bucket name (AWS account id unavailable); skipping bucket setup. "
-            "Offline host state will be unavailable (a stopped host cannot be listed or resumed) "
-            "until `mngr aws prepare` succeeds with sufficient permissions."
+        raise click.ClickException(
+            "Could not resolve a state-bucket name (AWS account id unavailable via sts:GetCallerIdentity). "
+            "The S3 state bucket is required; re-run `mngr aws prepare` with credentials that can resolve "
+            "the account id and manage S3."
         )
-        return None, False
     try:
         was_created = bucket.ensure_bucket()
     except S3StateBucketError as e:
-        logger.warning(
-            "Failed to create the S3 state bucket {!r}; offline host state will be unavailable "
-            "(a stopped host cannot be listed or resumed) until prepare succeeds: {}",
-            bucket.bucket_name,
-            e,
-        )
-        return None, False
+        raise click.ClickException(
+            f"Failed to create the required S3 state bucket {bucket.bucket_name!r} "
+            f"(check S3 permissions, then re-run `mngr aws prepare`): {e}"
+        ) from e
     return bucket.bucket_name, was_created
 
 
@@ -193,48 +187,30 @@ def _build_host_identity(base: AwsProviderConfig, region: str | None) -> S3State
     return S3StateHostIdentity(session=session, region=effective_region, bucket_name=bucket_name)
 
 
-def _provision_host_identity(identity: S3StateHostIdentity) -> str | None:
-    """Provision the bucket-write IAM host identity best-effort, returning its name or None.
+def _provision_host_identity(identity: S3StateHostIdentity) -> str:
+    """Provision the bucket-write IAM host identity, returning its name.
 
-    A permission/API failure degrades to a WARNING so the security-group + bucket
-    prepare still succeed; offline host_dir just won't work until prepare is re-run
-    with sufficient IAM.
+    With offline host_dir enabled the identity is part of ``mngr aws prepare``'s
+    setup, so a permission/API failure raises rather than leaving offline host_dir
+    quietly broken.
     """
-    try:
-        return identity.ensure_host_identity()
-    except S3StateHostIdentityError as e:
-        logger.warning(
-            "Failed to provision the host-dir IAM identity {!r} (offline host_dir reads will be "
-            "unavailable until prepare is re-run with sufficient IAM): {}",
-            identity.identity_name,
-            e,
-        )
-        return None
+    return identity.ensure_host_identity()
 
 
 def _resolve_and_provision_host_identity(
-    base: AwsProviderConfig, region: str | None, *, state_bucket_name: str | None
-) -> str | None:
-    """Resolve credentials, build the host identity for the (already-resolved) bucket, then provision it.
+    base: AwsProviderConfig, region: str | None, *, state_bucket_name: str
+) -> str:
+    """Resolve credentials, build the host identity for the (already-created) bucket, then provision it.
 
-    The identity's inline policy is scoped to the bucket, so provisioning it is
-    only meaningful once the bucket exists. ``state_bucket_name`` is the name
-    ``_ensure_state_bucket_best_effort`` resolved (None when bucket setup was
-    skipped/failed). When None, or when credentials cannot be resolved, this
-    degrades to a WARNING and returns None. Called only when
-    ``is_offline_host_dir_enabled`` is set.
+    The identity's inline policy is scoped to the bucket, which ``_ensure_state_bucket``
+    has already created (it raises otherwise), so ``state_bucket_name`` is always
+    present here. Called only when ``is_offline_host_dir_enabled`` is set; a
+    credential or IAM failure raises as an actionable ``click.ClickException``.
     """
-    if state_bucket_name is None:
-        logger.warning(
-            "Cannot provision the host-dir IAM identity: the S3 state bucket could not be set up "
-            "(its inline policy is scoped to that bucket). Re-run with sufficient S3/STS permissions."
-        )
-        return None
     try:
         session = base.get_session()
     except (ValueError, BotoCoreError) as e:
-        logger.warning("Could not resolve credentials for the host-dir IAM identity; skipping it: {}", e)
-        return None
+        raise click.ClickException(f"Could not resolve credentials to provision the host-dir IAM identity: {e}") from e
     identity = S3StateHostIdentity(
         session=session, region=region or base.default_region, bucket_name=state_bucket_name
     )
@@ -242,21 +218,17 @@ def _resolve_and_provision_host_identity(
 
 
 def _perform_host_identity_cleanup(identity: S3StateHostIdentity | None) -> str | None:
-    """Delete the bucket-write IAM host identity, best-effort. Returns its name or None.
+    """Delete the bucket-write IAM host identity. Returns its name, or None when absent.
 
-    Idempotent: a missing role/instance-profile is a no-op. A permission/API
-    failure is logged at WARNING and swallowed so it never blocks the rest of
-    ``mngr aws cleanup`` (the SG + bucket teardown still proceed).
+    Idempotent: a missing role/instance-profile is a no-op (returns None). A
+    permission/API failure raises so ``mngr aws cleanup`` reports an incomplete
+    teardown rather than silently leaving the identity behind.
     """
     if identity is None:
         return None
     if not identity.host_identity_exists():
         return None
-    try:
-        identity.delete_host_identity()
-    except S3StateHostIdentityError as e:
-        logger.warning("Failed to delete the host-dir IAM identity {!r}; skipping it: {}", identity.identity_name, e)
-        return None
+    identity.delete_host_identity()
     return identity.identity_name
 
 
@@ -484,15 +456,15 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # ``AwsProviderBackend.build_provider_instance``.
         raise click.ClickException(str(e)) from e
     result = client.ensure_security_group()
-    # Best-effort bucket setup: a missing S3/STS permission degrades to a
-    # warning so the SG prepare still succeeds (offline host state is then
-    # unavailable until prepare is re-run with sufficient permissions).
-    state_bucket_name, was_bucket_created = _ensure_state_bucket_best_effort(base, opts.region)
-    # Provision the bucket-write IAM identity (best-effort) when the offline
-    # host_dir feature is enabled. The bucket-only steps above are unconditional,
+    # Required bucket setup: a missing S3/STS permission or API failure raises
+    # (the bucket is prepare's primary job; a SG-only prepare would leave offline
+    # host state unavailable).
+    state_bucket_name, was_bucket_created = _ensure_state_bucket(base, opts.region)
+    # Provision the bucket-write IAM identity when the offline host_dir feature is
+    # enabled (raises on failure). The bucket-only steps above are unconditional,
     # so flipping is_offline_host_dir_enabled on and re-running prepare adds just
     # the identity.
-    host_identity_name = None
+    host_identity_name: str | None = None
     if base.is_offline_host_dir_enabled:
         host_identity_name = _resolve_and_provision_host_identity(
             base, opts.region, state_bucket_name=state_bucket_name
@@ -590,8 +562,8 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     except (ValueError, BotoCoreError) as e:
         raise click.ClickException(str(e)) from e
     deleted_bucket_name = _perform_state_bucket_cleanup(bucket, force=opts.force)
-    # Delete the bucket-write IAM identity after the bucket (best-effort,
-    # idempotent). Build errors mirror the bucket-build credential errors.
+    # Delete the bucket-write IAM identity after the bucket (idempotent; raises on
+    # a delete failure). Build errors mirror the bucket-build credential errors.
     try:
         identity = _build_host_identity(base, opts.region)
     except (ValueError, BotoCoreError) as e:

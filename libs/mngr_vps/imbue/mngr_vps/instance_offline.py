@@ -577,7 +577,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         return self._host_dir_backend.volume(host_id)
 
     # =========================================================================
-    # Post-finalize provisioning (best-effort idle watcher + host_dir sync)
+    # Post-finalize provisioning (best-effort idle watcher; raising host_dir sync)
     # =========================================================================
 
     def _post_finalize_steps(self, *, host_id: HostId, vps_ip: str) -> list[tuple[str, Callable[[], None]]]:
@@ -590,18 +590,22 @@ class OfflineCapableVpsProvider(VpsProvider):
         return []
 
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Run the best-effort post-finalize steps after the host record is durable.
+        """Run the post-finalize provisioning after the host record is durable.
 
-        Runs an ordered list of steps, each best-effort: a step that raises
-        ``MngrError`` is logged at WARNING (with its description) and the rest still
-        run, so a failure here never fails an already-durable ``create_host``.
+        Two tiers. The *best-effort* steps -- any provider-supplied
+        ``_post_finalize_steps`` (Azure: its self-deallocate role assignment) and
+        the host-side idle watcher (skipped when the realizer's idle command already
+        stops the whole host -- the bare case -- since a bare placement self-stops
+        directly) -- are each logged at WARNING and tolerated: a failure there never
+        fails an already-durable ``create_host`` (the agent simply won't auto-stop
+        on idle, but ``mngr stop`` still works).
 
-        The shared list is: install the host-side idle watcher (skipped when the
-        realizer's idle command already stops the whole host -- the bare case --
-        since a bare placement self-stops directly) and install the host_dir-to-bucket
-        sync daemon (a no-op when the selected ``_host_dir_backend`` is the null
-        backend, e.g. GCP). Providers prepend their own steps via
-        ``_post_finalize_steps`` (Azure: its self-deallocate role assignment).
+        The host_dir-to-bucket sync install is *not* best-effort: with the state
+        bucket required, a host that cannot install the daemon (or attach the
+        bucket-write identity it authenticates as) would silently have an unreadable
+        offline host_dir, so it raises (failing create). It is a no-op when the
+        selected ``_host_dir_backend`` is the null backend (offline host_dir off, or
+        GCP).
         """
         steps: list[tuple[str, Callable[[], None]]] = list(self._post_finalize_steps(host_id=host_id, vps_ip=vps_ip))
         if not self._realizer.idle_shutdown_stops_host:
@@ -611,17 +615,12 @@ class OfflineCapableVpsProvider(VpsProvider):
                     lambda: self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip),
                 )
             )
-        steps.append(
-            (
-                "the stopped host's host_dir will not be readable offline",
-                lambda: self._host_dir_backend.install_sync(host_id=host_id, vps_ip=vps_ip),
-            )
-        )
         for description, step in steps:
             try:
                 step()
             except MngrError as e:
                 logger.warning("Post-finalize step failed for host {} ({}); {}", host_id, e, description)
+        self._host_dir_backend.install_sync(host_id=host_id, vps_ip=vps_ip)
 
     @property
     @abstractmethod
@@ -630,10 +629,13 @@ class OfflineCapableVpsProvider(VpsProvider):
 
         Every offline-capable provider selects exactly one store (implemented as a
         cached property so any bucket-existence probe runs at most once): the
-        object-storage ``BucketHostStateStore`` (AWS S3, Azure Blob), the GCP
-        instance-metadata store, or ``MissingBucketHostStateStore`` when a required
-        bucket has not yet been provisioned. Selecting it here lets the persist /
-        remove / list / read paths below stop branching on the backing store.
+        object-storage ``BucketHostStateStore`` (AWS S3, Azure Blob) or the GCP
+        instance-metadata store. When a required object-storage bucket has not yet
+        been provisioned the property raises an actionable error (see
+        ``missing_state_bucket_error``) rather than returning a degraded store, so
+        every persist / remove / list / read below fails loudly and uniformly.
+        Selecting the store here lets those paths stop branching on the backing
+        store.
         """
         ...
 
@@ -666,27 +668,31 @@ class OfflineCapableVpsProvider(VpsProvider):
         Keyed by ``host_id``; the ``instance`` argument is accepted (the discovery
         loop passes the instance it is already iterating) but unused, since the
         store resolves everything from ``host_id``. A read against a provider whose
-        required bucket is absent raises an actionable error (see
-        ``MissingBucketHostStateStore``), which the discovery wrapper attributes to
-        this provider and surfaces per the caller's ``--on-error``.
+        required bucket is absent (or a bucket storage error) raises, which the
+        discovery wrapper attributes to this provider and surfaces per the caller's
+        ``--on-error``.
         """
         del instance
         return self._state_store.list_agent_records(host_id)
 
     def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror one agent record into the external state store (upsert; best-effort)."""
+        """Mirror one agent record into the external state store (upsert).
+
+        Propagates a storage/missing-bucket error: the bucket is required, so a
+        dropped mirror would let a stopped host show stale agents.
+        """
         self._state_store.persist_agent_record(host_id, agent_id, agent_data)
 
     def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        """Remove one agent's mirrored record from the external state store. Idempotent, best-effort."""
+        """Remove one agent's mirrored record from the external state store (idempotent; errors propagate)."""
         self._state_store.remove_agent_record(host_id, agent_id)
 
     def _persist_host_record_externally(self, record: VpsHostRecord) -> None:
-        """Mirror the full host record into the external state store (best-effort)."""
+        """Mirror the full host record into the external state store (errors propagate)."""
         self._state_store.persist_host_record(record)
 
     def _delete_host_record_externally(self, host_id: HostId) -> None:
-        """Delete the host's state from the external state store (best-effort, idempotent)."""
+        """Delete the host's state from the external state store (idempotent; errors propagate)."""
         self._state_store.delete_host_state(host_id)
 
     def _list_provider_vps_hostnames(self) -> list[str]:
@@ -857,9 +863,10 @@ class HostDirSyncInstallPlan(FrozenModel):
     The provider resolves these (the on-box sync-CLI install command, the host_dir
     sync ``.service`` body, and the bucket sync-target URI for the log line); the
     shared ``BucketHostDirBackend.install_sync`` skeleton then writes them to the
-    outer via the identical systemd sequence. A provider returns ``None`` instead of
-    a plan to skip the install entirely (e.g. Azure when the managed identity the
-    sync would authenticate as is absent).
+    outer via the identical systemd sequence. The bucket is required infrastructure,
+    so a provider that cannot install the daemon (e.g. the bucket-write identity the
+    sync authenticates as is absent) raises rather than returning ``None`` to skip --
+    a silently unreadable offline host_dir would otherwise surface only later.
     """
 
     install_command: str = Field(description="Best-effort on-box install of the sync CLI (awscli / azcopy)")
@@ -885,7 +892,6 @@ class BucketHostDirBackend(HostDirBackend):
 
     provider: OfflineCapableVpsProvider
     bucket: StateBucket
-    bucket_error_type: type[MngrError]
 
     @abstractmethod
     def _sync_unit_name(self) -> str:
@@ -904,11 +910,13 @@ class BucketHostDirBackend(HostDirBackend):
 
     @abstractmethod
     def _build_install_plan(self, host_id: HostId) -> HostDirSyncInstallPlan | None:
-        """Resolve the cloud-specific install pieces, or ``None`` to skip the install.
+        """Resolve the cloud-specific install pieces.
 
-        Returns ``None`` (after logging) when the install cannot proceed -- e.g.
+        With the state bucket required, an install that cannot proceed -- e.g.
         Azure when the bucket-write managed identity the sync authenticates as is
-        absent, so installing the daemon would only 403.
+        absent, so the daemon would only 403 -- raises (failing create) rather than
+        skipping, since a silently unreadable offline host_dir would otherwise
+        surface only later.
         """
         ...
 
@@ -939,14 +947,10 @@ class BucketHostDirBackend(HostDirBackend):
         return HostVolume(volume=self.bucket.volume_for_host(host_id))
 
     def volume(self, host_id: HostId) -> HostVolume | None:
-        try:
-            if not self.bucket.host_dir_prefix_has_objects(host_id):
-                self._warn_if_identity_missing(host_id)
-                return None
-        except self.bucket_error_type as e:
-            logger.warning(
-                "Could not probe host_dir prefix for host {}; treating volume as unavailable: {}", host_id, e
-            )
+        # A bucket probe error propagates (operational failure, surfaced per
+        # --on-error); only a genuinely empty prefix yields None.
+        if not self.bucket.host_dir_prefix_has_objects(host_id):
+            self._warn_if_identity_missing(host_id)
             return None
         return self.volume_reference(host_id)
 
