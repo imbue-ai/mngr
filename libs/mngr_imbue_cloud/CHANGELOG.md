@@ -20,7 +20,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Removed
 
-- Removed: Dead `disk-snapshot` and `list_ssh_keys` stubs from `LimaSliceVpsClient`, matching the slimmed-down `VpsClientInterface`. No user-facing behavior change: these methods only ever raised "unavailable".
+- Removed: Dead `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` stubs from `LimaSliceVpsClient`, matching the slimmed-down `VpsClientInterface`. No user-facing behavior change: these methods only ever raised "unavailable".
 
 ### Fixed
 
