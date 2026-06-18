@@ -379,12 +379,15 @@ def gcp_cli_group() -> None:
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
-    """Create (or reuse) the GCP firewall rule for mngr-managed instances.
+    """Create (or reuse) the GCP firewall rule and GCS state bucket for mngr-managed instances.
 
-    Idempotent: re-running is a no-op when the rule already exists. Needs
-    compute.firewalls.get + compute.firewalls.create. After this succeeds,
-    ``mngr create --provider gcp`` only needs instance create/get/list
-    permissions (no firewall-management permissions).
+    Idempotent: re-running is a no-op when each resource already exists. Needs
+    compute.firewalls.get + compute.firewalls.create + storage.buckets.get +
+    storage.buckets.create. After this succeeds, ``mngr create --provider gcp``
+    only needs instance create/get/list permissions (no firewall-management
+    permissions); the runtime stop/start path additionally needs
+    storage.objects.* on the state bucket when ``is_offline_host_dir_enabled``
+    is on (see the README's "Required IAM permissions" section).
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -487,9 +490,11 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     Idempotent: a no-op (exit 0) when each resource is already gone.
 
     Needs compute.instances.list (aggregated) + compute.firewalls.get +
-    compute.firewalls.delete + storage.buckets.delete. Does not touch per-host
-    keys -- those are created and deleted by the create/destroy lifecycle, not
-    by `prepare` or `cleanup`.
+    compute.firewalls.delete + storage.buckets.get + storage.buckets.delete +
+    storage.objects.list + storage.objects.delete (the storage.objects.*
+    permissions are required because the bucket is emptied before deletion).
+    Does not touch per-host keys -- those are created and deleted by the
+    create/destroy lifecycle, not by `prepare` or `cleanup`.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
