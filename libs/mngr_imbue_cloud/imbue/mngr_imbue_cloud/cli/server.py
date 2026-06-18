@@ -814,6 +814,29 @@ def _reap_orphan_slice_resources(*, server: BareMetalServer, private_key_path: P
             logger.warning("Orphan reap: failed to delete disk {} on {}: {}", disk_name, server.public_address, exc)
 
 
+def destroy_slice_vm(*, server: BareMetalServer, lima_instance_name: str) -> None:
+    """Destroy one slice's lima VM (and its data disk) on its box, freeing the box slot.
+
+    The teardown counterpart of the carve: SSHes the bare-metal box with the pool
+    management key (POOL_SSH_PRIVATE_KEY) and runs ``limactl delete`` for the named
+    instance -- the same client + key path the orphan reaper uses, but targeted at a
+    single known instance so ``admin pool destroy`` can fully tear down a slice
+    before dropping its ``pool_hosts`` row (instead of stranding the VM on the box).
+    """
+    if not server.public_address:
+        raise BareMetalProvisioningError(
+            f"server {server.id} has no public_address; cannot reach the box to destroy {lima_instance_name}"
+        )
+    ssh_user = server.lima_service_user or "limahost"
+    with _pool_private_key_path() as private_key_path:
+        client = LimaSliceVpsClient(
+            box_address=str(server.public_address),
+            box_ssh_user=ssh_user,
+            private_key_path=str(private_key_path),
+        )
+        client.destroy_instance(VpsInstanceId(lima_instance_name))
+
+
 def allocate_slices(
     *,
     count: int,
