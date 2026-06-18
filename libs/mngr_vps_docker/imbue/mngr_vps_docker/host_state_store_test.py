@@ -170,11 +170,15 @@ class _CaptureFakeProvider:
 
     Capture is operator-driven: it rsyncs the host_dir off the box into a local
     temp dir and uploads what landed there. This fake either populates that dir
-    (simulating a successful rsync of ``files``) or raises a connection failure.
+    (simulating a successful rsync of ``files`` plus any ``symlinks``) or raises a
+    connection failure. ``symlinks`` maps a link relpath to its target relpath
+    (relative to the temp dir), so a test can plant symlinks rsync may have left
+    behind alongside the regular files.
     """
 
-    def __init__(self, files: dict[str, bytes] | None) -> None:
+    def __init__(self, files: dict[str, bytes] | None, symlinks: dict[str, str] | None = None) -> None:
         self._files = files
+        self._symlinks = symlinks or {}
 
     def _pull_host_dir_to_local(self, host_id: HostId, vps_ip: str, local_dir: Path) -> None:
         if self._files is None:
@@ -183,6 +187,10 @@ class _CaptureFakeProvider:
             dest = local_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(body)
+        for link_rel, target_rel in self._symlinks.items():
+            link = local_dir / link_rel
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(local_dir / target_rel)
 
 
 def test_bucket_host_dir_backend_capture_uploads_the_tree() -> None:
@@ -200,6 +208,23 @@ def test_bucket_host_dir_backend_capture_uploads_nothing_for_empty_host_dir() ->
     backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider({}), bucket=bucket)
     backend.capture(HostId.generate(), "203.0.113.4")
     assert bucket.volume.written == {}
+
+
+def test_bucket_host_dir_backend_capture_skips_symlinks_and_special_files() -> None:
+    """Capture uploads regular files only, omitting symlinks rsync may have left behind.
+
+    This is the documented core guarantee of the local read step: a symlink (or a
+    dangling one, which is not a regular file) must never be followed/read into the
+    bucket, so a live socket or stray link can't sink the capture.
+    """
+    bucket = _CaptureFakeBucket()
+    provider = _CaptureFakeProvider(
+        {"events/e.jsonl": b"evt"},
+        symlinks={"link-to-file": "events/e.jsonl", "dangling": "events/missing.jsonl"},
+    )
+    backend = BucketHostDirBackend.model_construct(provider=provider, bucket=bucket)
+    backend.capture(HostId.generate(), "203.0.113.4")
+    assert bucket.volume.written == {"events/e.jsonl": b"evt"}
 
 
 def test_bucket_host_dir_backend_capture_raises_on_connection_failure() -> None:
