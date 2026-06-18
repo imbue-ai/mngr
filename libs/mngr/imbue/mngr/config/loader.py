@@ -941,19 +941,19 @@ def _parse_tmux_config(raw_tmux: dict[str, Any], *, strict: bool = True, silent:
     narrowing.
     """
     raw_tmux = _normalize_field_keys(raw_tmux, "tmux")
-    _check_unknown_fields(raw_tmux, TmuxConfig, "tmux", strict=strict, silent=silent)
-    if "attach_args" in raw_tmux:
-        attach_args = raw_tmux["attach_args"]
+    cleaned_tmux = _drop_unknown_fields(raw_tmux, TmuxConfig, "tmux", strict=strict, silent=silent)
+    if "attach_args" in cleaned_tmux:
+        attach_args = cleaned_tmux["attach_args"]
         if isinstance(attach_args, str):
             tokens = split_cli_args_string(attach_args) if attach_args else ()
-            raw_tmux["attach_args"] = StringDerivedTuple(tokens)
+            cleaned_tmux["attach_args"] = StringDerivedTuple(tokens)
         else:
-            raw_tmux["attach_args"] = tuple(attach_args)
+            cleaned_tmux["attach_args"] = tuple(attach_args)
     # Coerce the path to Path here: model_construct bypasses field validation, so
     # without this the field would hold a bare str despite its Path | None type.
-    if raw_tmux.get("user_config_path") is not None:
-        raw_tmux["user_config_path"] = Path(raw_tmux["user_config_path"])
-    return TmuxConfig.model_construct(**raw_tmux)
+    if cleaned_tmux.get("user_config_path") is not None:
+        cleaned_tmux["user_config_path"] = Path(cleaned_tmux["user_config_path"])
+    return TmuxConfig.model_construct(**cleaned_tmux)
 
 
 def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, CommandDefaults]:
