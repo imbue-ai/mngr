@@ -1,4 +1,3 @@
-import json
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -19,26 +18,6 @@ from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr_vps_docker import state_keys
 from imbue.mngr_vps_docker.state_bucket_base import BaseStateBucket
-
-# Trust policy + inline policy name for the per-bucket host identity.
-# The trust policy lets EC2 assume the role; the inline policy grants ONLY the
-# object actions the on-box sync daemon needs (Put/Get/Delete) scoped to this
-# bucket's ``hosts/*`` prefix, plus ``s3:ListBucket`` on the bucket (required by
-# ``aws s3 sync --delete`` to enumerate the destination) -- least privilege: the
-# operator's credentials, not this role, write host/agent records.
-_HOST_IDENTITY_INLINE_POLICY_NAME: Final[str] = "mngr-host-dir-sync"
-_EC2_TRUST_POLICY: Final[str] = json.dumps(
-    {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Principal": {"Service": "ec2.amazonaws.com"},
-                "Action": "sts:AssumeRole",
-            }
-        ],
-    }
-)
 
 # ``us-east-1`` is special-cased by S3: CreateBucket rejects a request that
 # carries a ``LocationConstraint`` of ``us-east-1`` (the legacy default region
