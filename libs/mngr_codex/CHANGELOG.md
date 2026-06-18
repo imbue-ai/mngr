@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Session adoption — `mngr create codex --adopt <id>` (or absolute rollout `.jsonl` path) makes a fresh agent resume an existing codex conversation. Resolved across `~/.codex/sessions`, every live local mngr codex agent, and every preserved (destroyed) codex agent; ambiguous matches are rejected with a clear message. The recorded working directory in the rollout is rewritten to the new agent's work dir, so `codex resume` does not pop the "Choose working directory" modal. The flag is repeatable (each rollout coexists in codex's session switcher; the last one is resumed) and may be combined with `--from`. `--adopt-session` is accepted as an alias.
+- Added: `mngr create <new> codex --from <agent>` now resumes the source agent's conversation (transferring the native session store, rebinding the recorded work dir to the clone). If the source has no resumable codex session, the clone warns and continues rather than failing.
+- Added: `CodexAgent` declares the new capability mixins (`HasSessionPreservationMixin`, `HasUnattendedModeMixin`, `HasPermissionPolicyMixin`, `HasVersionManagementMixin`, `HasAutoInstallMixin`, `CliBackedAgentMixin`), so these capabilities are code-detectable in the agent capability matrix.
+- Added: Auto-install of the `codex` CLI — provisioning installs it (`npm i -g @openai/codex`) when missing, gated by consent on local hosts and the remote-install config flag on remote hosts. New `check_installation` config field (default `True`) disables the check.
+
+### Changed
+
+- Changed: The codex common-transcript converter now records a tool invocation as a nested assistant `tool_calls` entry (sharing the same id as the paired `tool_result`), aligning codex with the other agent ports and the canonical envelope.
+- Changed: The codex common-transcript converter now emits `finish_reason` instead of `stop_reason` (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records.
+
+### Fixed
+
+- Fixed: A failure to resolve the user's `CODEX_HOME` during provisioning now surfaces as a clean, user-facing error instead of an abrupt process exit.
+
 ## [v0.1.3] - 2026-06-16
 
 ### Added

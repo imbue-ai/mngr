@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: AWS's stopped-host offline discovery/resolution and its stop/start lifecycle, known_hosts rebinding, and idle-watcher install now come from the shared `OfflineCapableVpsDockerProvider` base; AWS supplies only the EC2-specific hooks (stop/start the instance, poweroff idle action). No behavior change.
+
 ## [v0.1.3] - 2026-06-16
 
 ### Added
