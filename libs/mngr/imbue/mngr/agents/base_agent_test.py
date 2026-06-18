@@ -1038,6 +1038,7 @@ class _StubHost:
         self._default_result = default_result
         self.executed_commands: list[str] = []
         self.written_files: list[tuple[Path, str]] = []
+        self.host_dir = Path("/tmp/stub-host")
 
     def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
@@ -1053,6 +1054,9 @@ class _StubHost:
 
     def write_text_file(self, path: Path, content: str, **kwargs: object) -> None:
         self.written_files.append((path, content))
+
+    def read_text_file(self, path: Path, **kwargs: object) -> str:
+        raise FileNotFoundError(path)
 
 
 def _create_named_agent_with_stub_host(
@@ -1177,6 +1181,77 @@ def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
 
     with pytest.raises(SendMessageError, match="send-keys failed"):
         agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
+
+
+# =========================================================================
+# Unnamed-primary-window migration tests (pre-upgrade in-flight agents)
+# =========================================================================
+
+
+def test_migrate_unnamed_primary_window_renames_lowest_index_window(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The migration guards on has-session and renames the session's lowest-index window by name."""
+    stub = _StubHost(command_results=[CommandResult(success=True, stdout="", stderr="")])
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    is_migrated = agent._migrate_unnamed_primary_window()
+
+    assert is_migrated is True
+    assert len(stub.executed_commands) == 1
+    command = stub.executed_commands[0]
+    session_target = TmuxSessionTarget(session_name=agent.session_name).as_shell_arg()
+    # Guarded by has-session so a missing session is a no-op.
+    assert f"tmux has-session -t {session_target}" in command
+    # Selects the lowest window index (robust to base-index and extra windows) ...
+    assert f"tmux list-windows -t {session_target} -F '#I'" in command
+    assert "sort -n | head -n 1" in command
+    # ... and renames that window to the configured primary window name.
+    assert "tmux rename-window -t" in command
+    assert temp_mngr_ctx.config.tmux.primary_window_name in command
+
+
+def test_get_lifecycle_state_migrates_on_name_miss_then_reprobes(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A by-name probe miss on an existing session triggers a rename and a successful re-probe."""
+    stub = _StubHost(
+        command_results=[
+            # Initial by-name probe misses (unnamed pre-upgrade primary window).
+            CommandResult(success=True, stdout="", stderr=""),
+            # The one-shot migration rename succeeds.
+            CommandResult(success=True, stdout="", stderr=""),
+            # The re-probe now resolves the renamed primary window.
+            CommandResult(success=True, stdout="0|node|12345", stderr=""),
+            # ps output for descendant detection.
+            CommandResult(success=True, stdout="12345 1 node\n", stderr=""),
+        ]
+    )
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent.get_lifecycle_state()
+
+    # First probe, then rename, then re-probe (a correctly-named session would skip the latter two).
+    assert "list-panes" in stub.executed_commands[0]
+    assert "rename-window" in stub.executed_commands[1]
+    assert "list-panes" in stub.executed_commands[2]
+
+
+def test_get_lifecycle_state_skips_migration_when_name_probe_hits(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A correctly-named session resolves on the first probe and never issues a rename."""
+    stub = _StubHost(
+        command_results=[
+            CommandResult(success=True, stdout="0|node|12345", stderr=""),
+            CommandResult(success=True, stdout="12345 1 node\n", stderr=""),
+        ]
+    )
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent.get_lifecycle_state()
+
+    assert not any("rename-window" in command for command in stub.executed_commands)
 
 
 def test_agent_name_rejects_slash() -> None:
