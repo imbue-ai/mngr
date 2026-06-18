@@ -2619,11 +2619,12 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         )
         # The container is stopped (so host_dir is quiesced) but the instance is
         # still reachable: capture host_dir to the bucket now, before the pause.
-        # The pause is billing-critical -- an un-paused instance keeps billing and,
-        # with the record already marked STOPPED, becomes undiscoverable -- so a
-        # ``finally`` guarantees it runs even if capture somehow raises (capture is
-        # best-effort and already swallows its own errors; this is defense in depth
-        # for the sequencing).
+        # ``capture`` raises on a genuine failure (a lost connection, an rsync
+        # error, a bucket write error). The pause is billing-critical -- an
+        # un-paused instance keeps billing and, with the record already marked
+        # STOPPED, becomes undiscoverable -- so the ``finally`` pauses the instance
+        # first, guaranteeing a capture failure surfaces (failing ``mngr stop``)
+        # without ever leaving a running instance.
         try:
             self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
         finally:
