@@ -195,8 +195,13 @@ def _ensure_state_bucket(bucket: BlobStateBucket) -> tuple[str, bool]:
     The bucket is required infrastructure, so this is the primary job of ``mngr
     azure prepare``: a missing-permission / API failure raises (a network-only
     prepare would be misleading -- a stopped host could not be listed or resumed).
+    Also grants the operator's own principal data-plane blob access on the account:
+    Azure control-plane roles (the account creator) do NOT include blob data
+    access, so without this the operator's offline reads/writes would fail with
+    AuthorizationPermissionMismatch.
     """
     was_created = bucket.ensure_bucket()
+    bucket.ensure_operator_blob_access()
     return bucket.account_name, was_created
 
 

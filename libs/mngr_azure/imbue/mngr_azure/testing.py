@@ -6,6 +6,8 @@ anti-pattern (those files are auto-discovered, not designed for direct import).
 Mirrors ``libs/mngr_aws/imbue/mngr_aws/testing.py`` and ``mngr_gcp``'s.
 """
 
+import base64
+import json
 import os
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -437,6 +439,40 @@ class FakeAuthorizationClient:
         self.role_assignments = FakeRoleAssignmentsOperations()
 
 
+def _encode_fake_jwt(claims: dict[str, Any]) -> str:
+    """Build an (unsigned) JWT string whose payload carries ``claims``.
+
+    Used so ``resolve_operator_principal``'s real base64url-decode path is
+    exercised in tests against a chosen ``oid`` / ``idtyp``.
+    """
+
+    def _segment(obj: dict[str, Any]) -> str:
+        raw = json.dumps(obj).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{_segment({'alg': 'none', 'typ': 'JWT'})}.{_segment(claims)}.sig"
+
+
+class FakeTokenCredential:
+    """Minimal ``TokenCredential`` whose access token carries chosen ``oid`` / ``idtyp`` claims.
+
+    Lets tests drive ``resolve_operator_principal`` (and the operator blob-role
+    grant) without a real Azure login. Pass ``object_id=""`` to model a token with
+    no ``oid`` claim.
+    """
+
+    def __init__(self, object_id: str = "operator-oid-1", idtyp: str | None = "user") -> None:
+        self._object_id = object_id
+        self._idtyp = idtyp
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> Any:
+        del scopes, kwargs
+        claims: dict[str, Any] = {"oid": self._object_id}
+        if self._idtyp is not None:
+            claims["idtyp"] = self._idtyp
+        return SimpleNamespace(token=_encode_fake_jwt(claims), expires_on=0)
+
+
 class _StubbedAzureVpsClient(AzureVpsClient):
     """Test-only AzureVpsClient that injects fake management clients.
 
@@ -615,12 +651,18 @@ class _StubbedBlobStateBucket(BlobStateBucket):
     """
 
     fake_backend: Any = Field(default=None, description="Shared FakeBlobStorageBackend for the injected fakes")
+    fake_authorization: Any = Field(
+        default=None, description="Fake AuthorizationManagementClient for the operator blob-role grant"
+    )
 
     def _blob_service(self) -> Any:
         return FakeBlobServiceClient(self.fake_backend)
 
     def _storage_mgmt(self) -> Any:
         return FakeStorageManagementClient(self.fake_backend)
+
+    def _authorization(self) -> Any:
+        return self.fake_authorization
 
     def volume_for_host(self, host_id: HostId) -> Any:
         """Return a fake-backed ``BlobVolume`` scoped to the host's host_dir prefix.

@@ -1,3 +1,5 @@
+import base64
+import json
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -89,6 +91,152 @@ class BlobStateHostIdentityError(MngrError):
     """A managed-identity / role-assignment host-identity operation failed."""
 
 
+def _decode_jwt_claims(token: str) -> dict[str, Any]:
+    """Decode (without verifying) the claims payload of a JWT access token.
+
+    We trust our own management token, so no signature check is needed -- this
+    just base64url-decodes the middle segment and parses the JSON claims.
+    """
+    parts = token.split(".")
+    if len(parts) < 2:
+        raise BlobStateBucketError("The Azure access token is not a JWT; cannot determine the operator principal.")
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload + padding))
+    except (ValueError, json.JSONDecodeError) as e:
+        raise BlobStateBucketError(f"Could not decode the Azure access-token claims: {e}") from e
+
+
+def _principal_type_from_claims(claims: Mapping[str, Any]) -> str:
+    """Classify the token's principal as ``"User"`` or ``"ServicePrincipal"`` from its claims.
+
+    Prefers the ``idtyp`` claim (``"user"`` / ``"app"``) when present. ARM v1.0
+    tokens often omit ``idtyp``, so fall back to the presence of an app-identity
+    claim (``appid`` / ``azp``), which a service-principal token carries and a
+    user token does not; default to ``"User"`` otherwise. The value is only a hint
+    to the role-assignment API (it skips a directory lookup), and the operator is
+    always an already-existing principal, so a wrong guess is low-risk.
+    """
+    idtyp = str(claims.get("idtyp", "")).lower()
+    if idtyp == "user":
+        return "User"
+    if idtyp == "app":
+        return "ServicePrincipal"
+    if claims.get("appid") or claims.get("azp"):
+        return "ServicePrincipal"
+    return "User"
+
+
+def resolve_operator_principal(credential: Any) -> tuple[str, str]:
+    """Resolve the ``(object_id, principal_type)`` of the principal behind ``credential``.
+
+    Reads the ``oid`` claim from a management-scope access token, so it works for
+    both a signed-in user and a service principal without needing Microsoft Graph
+    permissions. ``principal_type`` is classified from the token claims (see
+    :func:`_principal_type_from_claims`).
+    """
+    token = credential.get_token("https://management.azure.com/.default").token
+    claims = _decode_jwt_claims(token)
+    object_id = claims.get("oid")
+    if not object_id:
+        raise BlobStateBucketError(
+            "Could not determine the operator principal (the Azure token has no 'oid' claim); cannot grant it "
+            "Storage Blob Data Contributor on the state account."
+        )
+    return object_id, _principal_type_from_claims(claims)
+
+
+def _blob_data_role_assignment_name(principal_id: str, scope: str) -> str:
+    """Deterministic role-assignment GUID for a principal on a scope (so ensure/delete match across runs)."""
+    return str(uuid5(NAMESPACE_URL, f"{principal_id}/{scope}/blob-data-contributor"))
+
+
+def _blob_data_contributor_role_definition_id(subscription_id: str) -> str:
+    """The Storage Blob Data Contributor role-definition ARM id in the given subscription."""
+    return (
+        f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/"
+        f"roleDefinitions/{STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}"
+    )
+
+
+def _try_create_blob_role_assignment(
+    authorization: Any,
+    scope: str,
+    assignment_name: str,
+    parameters: Any,
+    *,
+    subject_label: str,
+    account_name: str,
+    error_cls: type[MngrError],
+) -> bool:
+    """Create the role assignment once. True on success/already-exists; False on a transient PrincipalNotFound.
+
+    A 409 (assignment already exists) is success. A ``PrincipalNotFound`` is the
+    eventual-consistency case (a just-created principal) -- return False so the
+    caller retries. Any other Azure error is a real failure and is raised as
+    ``error_cls``.
+    """
+    try:
+        authorization.role_assignments.create(scope=scope, role_assignment_name=assignment_name, parameters=parameters)
+    except ResourceExistsError:
+        return True
+    except AzureError as e:
+        message = str(e).lower().replace(" ", "")
+        if "roleassignmentexists" in message:
+            return True
+        if "principalnotfound" in message:
+            return False
+        raise error_cls(
+            f"Failed to assign Storage Blob Data Contributor to {subject_label} on account {account_name!r}: {e}"
+        ) from e
+    return True
+
+
+def ensure_blob_data_contributor(
+    authorization: Any,
+    subscription_id: str,
+    scope: str,
+    principal_id: str,
+    principal_type: str,
+    *,
+    subject_label: str,
+    account_name: str,
+    error_cls: type[MngrError],
+) -> None:
+    """Assign Storage Blob Data Contributor to ``principal_id``, scoped to ``scope`` (idempotent).
+
+    Shared by the VM managed-identity grant and the operator grant. The assignment
+    name is a deterministic GUID (principal + scope), so a re-run targets the same
+    assignment and an already-existing one is success. A freshly-created principal
+    is eventually consistent, so a transient ``PrincipalNotFound`` is retried within
+    the consistency window.
+    """
+    parameters = RoleAssignmentCreateParameters(
+        role_definition_id=_blob_data_contributor_role_definition_id(subscription_id),
+        principal_id=principal_id,
+        principal_type=principal_type,
+    )
+    assignment_name = _blob_data_role_assignment_name(principal_id, scope)
+    if not poll_until(
+        lambda: _try_create_blob_role_assignment(
+            authorization,
+            scope,
+            assignment_name,
+            parameters,
+            subject_label=subject_label,
+            account_name=account_name,
+            error_cls=error_cls,
+        ),
+        timeout=_AZURE_CONSISTENCY_TIMEOUT_SECONDS,
+        poll_interval=_AZURE_CONSISTENCY_POLL_SECONDS,
+    ):
+        raise error_cls(
+            f"Role assignment for {subject_label} on account {account_name!r} did not succeed within "
+            f"{_AZURE_CONSISTENCY_TIMEOUT_SECONDS:.0f}s (the principal may not have propagated yet)."
+        )
+
+
 class BlobStateBucket(BaseStateBucket):
     """Reads/writes mngr control-plane state in an Azure Blob container, readable while offline.
 
@@ -119,6 +267,7 @@ class BlobStateBucket(BaseStateBucket):
     )
     _cached_blob_service_client: Any = PrivateAttr(default=None)
     _cached_storage_mgmt_client: Any = PrivateAttr(default=None)
+    _cached_authorization_client: Any = PrivateAttr(default=None)
 
     def _account_url(self) -> str:
         return f"https://{self.account_name}.blob.core.windows.net"
@@ -134,6 +283,23 @@ class BlobStateBucket(BaseStateBucket):
         if self._cached_storage_mgmt_client is None:
             self._cached_storage_mgmt_client = StorageManagementClient(self.credential, self.subscription_id)
         return self._cached_storage_mgmt_client
+
+    def _authorization(self) -> Any:
+        """Return the ``AuthorizationManagementClient`` (role assignments), cached.
+
+        Used to grant the operator's own principal data-plane blob access on this
+        account (see ``ensure_operator_blob_access``).
+        """
+        if self._cached_authorization_client is None:
+            self._cached_authorization_client = AuthorizationManagementClient(self.credential, self.subscription_id)
+        return self._cached_authorization_client
+
+    def _account_scope(self) -> str:
+        """ARM resource id of the storage account -- the role-assignment scope (least privilege)."""
+        return (
+            f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
+            f"/providers/Microsoft.Storage/storageAccounts/{self.account_name}"
+        )
 
     def _container(self) -> Any:
         return self._blob_service().get_container_client(self.container_name)
@@ -186,6 +352,36 @@ class BlobStateBucket(BaseStateBucket):
         was_account_created = self._ensure_account()
         self._ensure_container()
         return was_account_created
+
+    def ensure_operator_blob_access(self) -> None:
+        """Grant the operator's own principal Storage Blob Data Contributor on this account (idempotent).
+
+        Azure splits control-plane and data-plane: creating the storage account
+        (or holding Owner/Contributor on it) does NOT grant data-plane blob
+        read/write. mngr reads/writes the state blobs from the operator's machine
+        via ``DefaultAzureCredential`` during offline discovery (``mngr list`` /
+        ``start`` on a deallocated host), so the account creator must be granted the
+        data role explicitly -- scoped to JUST this account -- mirroring the VM
+        managed-identity grant. Without this, every operator offline read/write
+        fails with ``AuthorizationPermissionMismatch``.
+
+        Grants the principal behind this bucket's credential (the ``mngr azure
+        prepare`` runner). In a multi-operator setup, each operator that runs
+        against the bucket needs this grant; re-running ``prepare`` as that operator
+        (or granting their principal out of band) is the way to add them.
+        """
+        principal_id, principal_type = resolve_operator_principal(self.credential)
+        ensure_blob_data_contributor(
+            self._authorization(),
+            self.subscription_id,
+            self._account_scope(),
+            principal_id,
+            principal_type,
+            subject_label="the operator principal",
+            account_name=self.account_name,
+            error_cls=BlobStateBucketError,
+        )
+        logger.info("Granted the operator principal Storage Blob Data Contributor on account {}", self.account_name)
 
     def _ensure_account(self) -> bool:
         """Create the storage account if absent. Returns True iff it was created."""
@@ -389,64 +585,25 @@ class BlobStateHostIdentity(MutableModel):
         Derived from the principal + scope so ``ensure`` and ``delete`` target the
         same assignment across runs.
         """
-        return str(uuid5(NAMESPACE_URL, f"{principal_id}/{self._account_scope()}/blob-data-contributor"))
+        return _blob_data_role_assignment_name(principal_id, self._account_scope())
 
     def _ensure_blob_role_assignment(self, principal_id: str) -> None:
-        """Assign Storage Blob Data Contributor to ``principal_id``, scoped to the state account.
+        """Assign Storage Blob Data Contributor to the identity's principal, scoped to the state account.
 
-        Idempotent: an already-existing assignment (409 / RoleAssignmentExists) is
-        treated as success. The assignment name is a deterministic GUID derived
-        from the principal + scope, so a re-run targets the same assignment. A
-        just-created identity's principal is eventually consistent, so a transient
-        ``PrincipalNotFound`` is retried within the consistency window.
+        Delegates to the shared :func:`ensure_blob_data_contributor` helper (the
+        same logic the operator grant uses), passing ``ServicePrincipal`` since a
+        managed identity is a service principal.
         """
-        role_definition_id = (
-            f"/subscriptions/{self.subscription_id}/providers/Microsoft.Authorization/"
-            f"roleDefinitions/{STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}"
+        ensure_blob_data_contributor(
+            self._authorization(),
+            self.subscription_id,
+            self._account_scope(),
+            principal_id,
+            "ServicePrincipal",
+            subject_label=f"managed identity {self.identity_name!r}",
+            account_name=self.account_name,
+            error_cls=BlobStateHostIdentityError,
         )
-        scope = self._account_scope()
-        assignment_name = self._blob_role_assignment_name(principal_id)
-        parameters = RoleAssignmentCreateParameters(
-            role_definition_id=role_definition_id,
-            principal_id=principal_id,
-            principal_type="ServicePrincipal",
-        )
-        if not poll_until(
-            lambda: self._try_create_role_assignment(scope, assignment_name, parameters),
-            timeout=_AZURE_CONSISTENCY_TIMEOUT_SECONDS,
-            poll_interval=_AZURE_CONSISTENCY_POLL_SECONDS,
-        ):
-            raise BlobStateHostIdentityError(
-                f"Role assignment for managed identity {self.identity_name!r} on account {self.account_name!r} "
-                f"did not succeed within {_AZURE_CONSISTENCY_TIMEOUT_SECONDS:.0f}s (the identity principal may "
-                "not have propagated yet)."
-            )
-
-    def _try_create_role_assignment(self, scope: str, assignment_name: str, parameters: Any) -> bool:
-        """Attempt the role-assignment create once. True on success/already-exists; False on a transient miss.
-
-        A 409 (assignment already exists) is success. A ``PrincipalNotFound`` is the
-        eventual-consistency case -- return False so the poll retries. Any other
-        Azure error is a real failure and propagates (translated to
-        ``BlobStateHostIdentityError`` by the surrounding context manager).
-        """
-        try:
-            self._authorization().role_assignments.create(
-                scope=scope, role_assignment_name=assignment_name, parameters=parameters
-            )
-        except ResourceExistsError:
-            return True
-        except AzureError as e:
-            message = str(e).lower()
-            if "roleassignmentexists" in message.replace(" ", ""):
-                return True
-            if "principalnotfound" in message.replace(" ", ""):
-                return False
-            raise BlobStateHostIdentityError(
-                f"Failed to assign Storage Blob Data Contributor to managed identity {self.identity_name!r} "
-                f"on account {self.account_name!r}: {e}"
-            ) from e
-        return True
 
     def delete_host_identity(self) -> None:
         """Delete the scoped role assignment, then the user-assigned managed identity. Idempotent.
