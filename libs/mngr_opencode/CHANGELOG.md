@@ -6,6 +6,19 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Session adoption — `mngr create opencode --adopt <id-or-db-path>` makes a fresh opencode agent resume an existing conversation. The plugin resolves the id across the user-native opencode db and every live/preserved mngr agent's db, copies the source db (and `-wal`/`-shm` sidecars) into the new agent, rebinds the session's stored worktree path to the new agent's work dir, and writes a resume pointer. The flag is repeatable (subsequent sessions are merged into the single `opencode.db` so all appear in the switcher; the last one is resumed) and may be combined with `--from`. `--adopt-session` is accepted as an alias.
+- Added: `--from <agent>` cloning of an opencode agent now resumes the source's conversation — the source's opencode store is transferred, the root session id is rebound to the clone's work dir, and a resume pointer is written. A source with no opencode store warns and starts fresh.
+- Added: `OpenCodeAgent` declares the new capability mixins (`HasSessionPreservationMixin`, `HasUnattendedModeMixin`, `HasPermissionPolicyMixin`, `HasAutoInstallMixin`, `CliBackedAgentMixin`, `InteractiveAgentMixin`), so these capabilities are code-detectable in the agent capability matrix.
+- Added: Auto-install of the `opencode` CLI — provisioning installs it (`curl -fsSL https://opencode.ai/install | bash`) when missing, gated by consent on local hosts and the remote-install config flag on remote hosts. New `check_installation` config field (default `True`) disables the check.
+
+### Changed
+
+- Changed: Adoption no longer requires the `sqlite3` command-line tool on the destination host. The agent's `opencode.db` is assembled entirely on a local staging copy (via Python's bundled SQLite) and copied onto the (possibly remote) host once at the end.
+- Changed: A corrupt or unreadable opencode db encountered while searching for an adopt session id is now logged as a warning rather than at trace level; resolution still continues against the other stores.
+- Changed: The opencode common-transcript emitter now emits `finish_reason` instead of `stop_reason` (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records preserving the text/tool-call interleaving.
+
 ## [v0.2.16] - 2026-06-16
 
 ### Added

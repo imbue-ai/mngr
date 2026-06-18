@@ -6,6 +6,21 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Session adoption — `mngr create antigravity --adopt <id>` (or absolute store path) makes a newly created agent resume an existing agy conversation. The conversation is resolved across the user-native agy store, every live local mngr antigravity agent, and every preserved (destroyed) antigravity agent; ambiguous ids are rejected. `--adopt-session` is accepted as an alias. The flag is repeatable (each conversation coexists in the new agent's switcher; the last value is resumed) and may be combined with `--from` (the clone's conversation is the one resumed).
+- Added: `--from <agent>` cloning now carries the source agy conversation forward — the clone transfers the source's agy conversation store and resumes its root conversation. If the source has no resumable conversation, the clone warns and starts fresh rather than failing.
+- Added: `AntigravityAgent` declares the new capability mixins (`HasSessionPreservationMixin`, `HasUnattendedModeMixin`, `HasPermissionPolicyMixin`, `HasAutoInstallMixin`, `CliBackedAgentMixin`), so these capabilities are code-detectable in the agent capability matrix.
+- Added: Auto-install of the `agy` CLI — provisioning installs it (`curl -fsSL https://antigravity.google/cli/install.sh | bash`) when missing, gated by consent on local hosts and the remote-install config flag on remote hosts. New `check_installation` config field (default `True`) disables the check.
+
+### Changed
+
+- Changed: The antigravity common-transcript converter now emits `finish_reason` instead of `stop_reason` on assistant records (aligning with the OpenTelemetry GenAI vocabulary) and a `parts[]` array. antigravity's native format records text and tool calls separately with no relative ordering, so `parts[]` is a best-effort order and `parts_ordered` is false.
+
+### Fixed
+
+- Fixed: antigravity TUI-readiness detection for agy 1.0.9 (which removed the "? for shortcuts" footer hint mngr polled). `mngr message` / `create --message` no longer time out with "Timeout waiting for TUI to be ready" even though agy is up. The readiness signal now matches the input box itself (rule, `>`, rule) via a regex.
+
 ## [v0.1.7] - 2026-06-16
 
 ### Added

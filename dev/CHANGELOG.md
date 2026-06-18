@@ -4,6 +4,24 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-17
+
+### Added
+
+- Added: `scripts/make_agent_capabilities_doc.py`, a dev-only generator for a code-derived agent-capability matrix doc. It loads every installed mngr plugin (local backend only), builds the matrix from the agent classes plus their plugins, and either rewrites `libs/mngr/docs/concepts/agent_capabilities.md` or, with `--check`, fails if it is stale. Mirrors `scripts/make_cli_docs.py` and stays out of the shipped `mngr` wheel. Paired with a new `just regenerate-agent-capabilities-doc` recipe.
+- Added: `just bake-slice-dev` and `just bake-slice-prod` recipes for baking bare-metal slices (lima/QEMU VMs on a pre-registered, prepped OVH bare-metal box) into the minds pool. Thin wrappers over `minds pool create --backend slice`, mirroring the existing `bake-pool-host-{dev,prod}` recipes for OVH VPSes.
+- Added: Design specs — `specs/agent-plugin-parity/capability-mixins.md` proposing the code-derived agent capability taxonomy that shipped this run; `specs/gcp-azure-stop-start-lifecycle/spec.md` for bringing the AWS stop/start (idle-pause + resume) lifecycle to GCP and Azure; and `specs/common-transcript-standard/spec.md` tracking the OpenTelemetry GenAI semantic conventions in the agent-agnostic common-transcript schema (a `stop_reason` → `finish_reason` vocabulary alignment across all five emitters, plus a universal ordered `parts[]` field).
+
+### Changed
+
+- Changed: Updated `specs/agent-plugin-parity/spec.md` (new "Ordered assistant parts[]" row, transcript-capture note) and updated `specs/agent-plugin-parity/capability-mixins.md` to match what shipped (the three-state `Y`/`-`/`n/a` matrix with the code-derived `CapabilityScope` model, the positive `CliBackedAgentMixin` kind marker, the unified `live_output` capability, and the `session_resume` capability).
+- Changed: Updated the agent-capability-doc generator's test (`scripts/make_agent_capabilities_doc_test.py`) to expect the `session_resume` capability on every interactive agent (not just claude) and to use `SupportsLiveOutputMixin` in its TUI-snapshot fixture after the `HasStreamingSnapshotMixin` removal.
+- Changed: The `just destroy-pool-host` recipe comment now documents that teardown mirrors the row's backend — cancelling the OVH VPS for an `ovh_vps` row, or destroying the lima VM (freeing the box slot) for a `slice` row — and that `--skip-vps-cancel` is for when the underlying machine is already gone.
+
+### Removed
+
+- Removed: Throwaway synthetic-base doc (`dev/agent-mixins-synthetic-base.md`); the synthetic base branch is no longer needed.
+
 ## 2026-06-16
 
 ### Added

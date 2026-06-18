@@ -6,6 +6,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Session adoption — `mngr create pi --adopt <id-or-path>` makes a fresh pi-coding agent resume an existing conversation. Each resolved session is copied into the new agent's store and its embedded working directory is rebound to the new agent's work_dir (so pi never stalls at its "working directory does not exist" dialog). Resolved across the user-native store, every live mngr agent, and every preserved (destroyed) agent. The flag is repeatable and may be combined with `--from`. `--adopt-session` is accepted as an alias.
+- Added: `--from <agent>` cloning of a pi-coding agent now resumes the source agent's pi conversation — the source's native session store is transferred, its most-recent session is rebound to the clone's work_dir, and the resume pointer is written. A source with no resumable pi session warns and starts fresh.
+- Added: `PiCodingAgent` declares the new capability mixins (`HasSessionPreservationMixin`, `HasUnattendedModeMixin`, `HasAutoInstallMixin`, `CliBackedAgentMixin`, `InteractiveAgentMixin`) and exposes a `waiting_reason` field generator (single-valued END_OF_TURN since pi has no tool-approval gate), so these capabilities are code-detectable in the agent capability matrix. pi gains an `auto_allow_permissions` config field pinned to True (setting it False is rejected, since pi cannot enforce a deny).
+- Added: Auto-install of the `pi` CLI is now routed through the shared `ensure_cli_installed` helper (it now also prompts in interactive mode rather than only honoring `--yes`).
+
+### Changed
+
+- Changed: When `auto_dismiss_dialogs` is set (also implied by `mngr create --yes`), mngr now launches pi with its native `--approve` flag, so pi auto-trusts the agent's project folder for the run and its "Trust project folder?" dialog never blocks the first message.
+- Changed: The pi-coding common-transcript emitter now emits `finish_reason` instead of `stop_reason` (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records preserving the text/tool-call interleaving.
+
 ## [v0.1.13] - 2026-06-16
 
 ### Added

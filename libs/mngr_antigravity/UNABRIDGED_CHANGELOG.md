@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+The agent now declares the `HasSessionPreservationMixin` capability mixin: its `on_destroy` session-preservation step was extracted into a `preserve_session_state` method, so preserving session/transcript files on destroy is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact. Behavior is unchanged.
+
+Also declares the `HasUnattendedModeMixin` capability (`is_unattended_enabled` reports the `auto_allow_permissions` config), so "can run unattended" is a code-detectable capability in the matrix.
+
+Also declares `HasPermissionPolicyMixin` (per-resource permission policy via the settings `permissions` block).
+
+Also declares `HasAutoInstallMixin`: provisioning now checks whether the `agy` CLI is installed and installs it (`curl -fsSL https://antigravity.google/cli/install.sh | bash`) if missing, gated by consent on local hosts and the remote-install config flag on remote hosts. A new `check_installation` config field (default `True`) disables the check when set to `False`.
+
+The auto-allow permission apply-path (the `--dangerously-skip-permissions` flag) now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
+
+`AntigravityAgent` now also declares `CliBackedAgentMixin`, marking it as wrapping a specific external CLI so the CLI-only capability-matrix rows scope to it positively (rather than by the absence of a command-runner marker). Behavior is unchanged.
+
+Antigravity agents can now adopt an existing agy conversation at create time, so a new agent resumes that conversation's full context instead of starting fresh. The conversation to adopt is given as a conversation id or an absolute path to the conversations store (a `<id>.db` file or a `conversations/` directory). A conversation id is resolved across the user-native agy store (`~/.gemini/antigravity-cli/conversations/`), every live local mngr antigravity agent, and every preserved (destroyed) antigravity agent; an id that matches in more than one place is rejected as ambiguous. The resolved store is copied into the new agent's home and recorded as its resume pointer.
+
+Adoption is triggered by the shared `--adopt` CLI flag (e.g. `mngr create antigravity --adopt <id>`; `--adopt-session` is accepted as an alias). The flag is repeatable: every value's conversation store is copied into the new agent (each coexists as a separate `<id>.db`, so all stay available in agy's session switcher), and agy resumes the last value given. `--adopt` may now also be combined with `--from`: every named conversation plus the clone's conversation are made available, and the clone's conversation is the one resumed. Because agy resumes purely by conversation id and is directory-agnostic, adoption needs no working-directory rebind. A bad or ambiguous `--adopt` id is now rejected with a clean error before any host or worktree is created, rather than surfacing as a wrapped provisioning traceback.
+
+Internally, the antigravity plugin now reads the adopt value from the first-class `CreateAgentOptions.adopt_session` field (and `OnBeforeCreateArgs.agent_options.adopt_session`) rather than the previous `plugin_data["adopt_session"]` namespaced key.
+
+Cloning an antigravity agent with `--from <agent>` now carries the source agent's conversation forward: the clone transfers the source's agy conversation store and resumes the source's root conversation, so it recalls the original agent's context instead of starting fresh. Because `--from` is fundamentally a workspace clone, carrying the conversation forward is a bonus: if the source agent has no resumable conversation, the clone logs a warning and starts a fresh session rather than failing. (An explicit `--adopt` of an unusable session remains a hard error.)
+
+Fixed the antigravity TUI-readiness detection for agy 1.0.9, which removed the "? for shortcuts" footer hint `mngr` polled to know the input row was drawn before sending a message. Without it, `mngr message`/`create --message` timed out with "Timeout waiting for TUI to be ready" even though agy was up. The readiness signal now matches the input box itself (a horizontal rule, the `>` prompt, and a second rule) via a regex, which -- unlike the splash banner -- is present on both a fresh start and a resume (it stays pinned on screen even as the conversation grows) and only appears once the input row is actually interactive.
+
+The antigravity common-transcript converter now emits `finish_reason` instead of `stop_reason` on assistant records (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array. Antigravity's native format records the text and tool calls separately with no relative ordering, so `parts[]` is a best-effort order (text, then the calls) and `parts_ordered` is false.
+
 ## 2026-06-16
 
 Fixed a stale keyword argument in the antigravity submission path: the call to `send_enter_via_tmux_wait_for_hook` still passed `queue_log_path_template=None`, a parameter that was removed upstream when the queue-log fallback was dropped (the function now waits on the TUI hook signal, optionally alongside an acceptance marker). agy supplies no acceptance marker, so behavior is unchanged -- it still waits on its statusLine busy-signal alone. This reconciles the antigravity plugin with the current `tui_utils` signature so it type-checks.
