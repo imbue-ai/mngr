@@ -70,6 +70,7 @@ The base config (`VpsProviderConfig`) provides these settings:
 | `default_image` | `debian:bookworm-slim` | Default Docker image |
 | `default_idle_timeout` | 800 | Idle timeout in seconds |
 | `default_idle_mode` | `IO` | Idle detection mode |
+| `default_activity_sources` | (all sources) | Default activity sources |
 | `ssh_connect_timeout` | 60.0 | SSH connection timeout in seconds |
 | `instance_boot_timeout` | 300.0 | Timeout for the cloud instance to become reachable, in seconds |
 | `docker_install_timeout` | 300.0 | Docker installation timeout in seconds |
@@ -77,6 +78,9 @@ The base config (`VpsProviderConfig`) provides these settings:
 | `default_region` | `ewr` | Default cloud region (provider subclasses override the default) |
 | `default_start_args` | `()` | Default `docker run` arguments |
 | `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |
+| `docker_runtime` | `None` | Container runtime to pass to `docker run --runtime` (e.g. 'runsc' for gVisor). When None (the default), no `--runtime` flag is added and the VPS Docker daemon uses its configured default. The named runtime must be installed and registered on the VPS (see `install_gvisor_runtime`), otherwise container creation fails with Docker's native 'unknown runtime' error. Override via MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME. |
+| `install_gvisor_runtime` | `false` | When True, VPS provisioning installs and registers the gVisor `runsc` runtime with the Docker daemon (idempotent; a no-op when runsc is already present, e.g. baked into the image). This only installs the runtime -- set `docker_runtime='runsc'` to actually run containers under it. |
+| `builder` | `DOCKER` | Image builder used on the VPS. DOCKER (default) runs native `docker build` over SSH. DEPOT runs `depot build --load` over SSH, auto-installs the depot CLI on the VPS the first time, and requires DEPOT_TOKEN in the agent's environment (DEPOT_PROJECT_ID optional, only forwarded when set). |
 | `btrfs_mount_path` | `/mngr-btrfs` | Path on the outer where the loop-mounted btrfs filesystem holding the per-host unified docker volume is mounted. The per-host subvolume lives at ``<btrfs_mount_path>/<host_id_hex>`` and is bound into the agent container via ``docker volume create --opt device=...``. |
 | `btrfs_loop_file_path` | `/var/lib/mngr-btrfs.img` | Path on the outer's root filesystem where the loop-backed btrfs image file is stored. Allocated with ``fallocate`` and mounted via an ``/etc/fstab`` entry so it survives VPS reboots. |
 | `outer_disk_reserved_gb` | `20` | Gigabytes of free space on the outer's root filesystem to hold back from the btrfs loop file at provisioning time. Loop file size is computed as ``free_gb - outer_disk_reserved_gb``; ``VpsProvisioningError`` is raised when the result is not positive. |

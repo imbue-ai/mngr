@@ -62,6 +62,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `consumer_key` | `None` | OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var or ~/.ovh.conf. |
 | `client_id` | `None` | OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var or ~/.ovh.conf. |
 | `client_secret` | `None` | OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var or ~/.ovh.conf. |
+| `project_id` | `None` | OVH cloud project ID. Reserved for future Public Cloud support; unused for classic VPS. |
 | `default_region` | `US-EAST-VA` | Default VPS datacenter (e.g. US-WEST-OR for US accounts). |
 | `default_plan` | `vps-2025-model1` | Default VPS plan code (1 vCPU / 8 GB RAM / 80 GB SSD, ~$7.99/mo). |
 | `default_image_name` | `Debian 12 - Docker` | Default OS image name (Docker pre-installed). |
@@ -69,6 +70,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `pricing_mode` | `default` | OVH pricing mode. UPFRONT6 / UPFRONT12 get a discount in exchange for prepayment. |
 | `duration` | `P1M` | ISO-8601 commitment duration. OVH classic VPS only supports monthly billing. |
 | `instance_boot_timeout` | `600.0` | Seconds to wait for the OVH order to deliver a VPS. |
+| `ovh_subsidiary` | `US` | OVHcloud subsidiary code used for ordering. Must match the account region. |
 | `enable_recycle_cancelled` | `True` | Whether `mngr create` may reuse a cancelled-but-still-alive VPS instead of ordering fresh. |
 | `recycle_safety_margin_hours` | `2` | Minimum hours of remaining expiration for a cancelled VPS to be recyclable. |
 | `recycle_max_candidates_considered` | `10` | Cap on provider-tagged VPSes evaluated before falling through to a fresh order. Applied to the raw tagged-VPS list before the cancellation/state/expiration filters run, so on accounts with many active mngr-tagged VPSes a recyclable candidate further down the list may be missed. |

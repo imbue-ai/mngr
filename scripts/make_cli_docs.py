@@ -750,9 +750,10 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("iam_instance_profile", "`None`"),
             ConfigTableRow("terminate_on_shutdown", "`false`"),
             ConfigTableRow("auto_shutdown_seconds", "`None`"),
+            ConfigTableRow("state_bucket_name", "`None` (auto-derived)"),
+            ConfigTableRow("is_offline_host_dir_enabled", "`true`"),
         ),
-        # backend is the fixed provider tag; the offline-state-bucket knobs are documented in prose.
-        excluded_fields=("backend", "state_bucket_name", "is_offline_host_dir_enabled"),
+        excluded_fields=("backend",),  # fixed provider discriminator, not a user tunable
     ),
     ConfigTable(
         readme="libs/mngr_gcp/README.md",
@@ -770,14 +771,14 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("network", "`default`"),
             ConfigTableRow("subnetwork", "`None`"),
             ConfigTableRow("allowed_ssh_cidrs", '`("0.0.0.0/0",)`'),
+            ConfigTableRow("firewall_name", "`mngr-gcp-ssh`"),
             ConfigTableRow("firewall_target_tag", "`mngr-ssh`"),
             ConfigTableRow("associate_external_ip", "`True`"),
             ConfigTableRow("service_account_email", "`None`"),
             ConfigTableRow("service_account_scopes", '`("https://www.googleapis.com/auth/cloud-platform",)`'),
             ConfigTableRow("auto_shutdown_seconds", "`None`"),
         ),
-        # backend is the fixed provider tag; firewall_name is an advanced rename of the prepare rule.
-        excluded_fields=("backend", "firewall_name"),
+        excluded_fields=("backend",),  # fixed provider discriminator, not a user tunable
     ),
     ConfigTable(
         readme="libs/mngr_ovh/README.md",
@@ -791,6 +792,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("consumer_key", "`None`"),
             ConfigTableRow("client_id", "`None`"),
             ConfigTableRow("client_secret", "`None`"),
+            ConfigTableRow("project_id", "`None`"),
             ConfigTableRow("default_region", "`US-EAST-VA`"),
             ConfigTableRow("default_plan", "`vps-2025-model1`"),
             ConfigTableRow("default_image_name", "`Debian 12 - Docker`"),
@@ -798,13 +800,12 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("pricing_mode", "`default`"),
             ConfigTableRow("duration", "`P1M`"),
             ConfigTableRow("instance_boot_timeout", "`600.0`"),
+            ConfigTableRow("ovh_subsidiary", "`US`"),
             ConfigTableRow("enable_recycle_cancelled", "`True`"),
             ConfigTableRow("recycle_safety_margin_hours", "`2`"),
             ConfigTableRow("recycle_max_candidates_considered", "`10`"),
         ),
-        # backend is the fixed provider tag; project_id is reserved/unused for classic VPS;
-        # ovh_subsidiary rarely needs changing (it tracks the account region).
-        excluded_fields=("backend", "project_id", "ovh_subsidiary"),
+        excluded_fields=("backend",),  # fixed provider discriminator, not a user tunable
     ),
     ConfigTable(
         readme="libs/mngr_vultr/README.md",
@@ -830,6 +831,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("default_image", "`debian:bookworm-slim`"),
             ConfigTableRow("default_idle_timeout", "800"),
             ConfigTableRow("default_idle_mode", "`IO`"),
+            ConfigTableRow("default_activity_sources", "(all sources)"),
             ConfigTableRow("ssh_connect_timeout", "60.0"),
             ConfigTableRow("instance_boot_timeout", "300.0"),
             ConfigTableRow("docker_install_timeout", "300.0"),
@@ -837,12 +839,13 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
             ConfigTableRow("default_region", "`ewr`"),
             ConfigTableRow("default_start_args", "`()`"),
             ConfigTableRow("auto_shutdown_seconds", "`None`"),
+            ConfigTableRow("docker_runtime", "`None`"),
+            ConfigTableRow("install_gvisor_runtime", "`false`"),
+            ConfigTableRow("builder", "`DOCKER`"),
             ConfigTableRow("btrfs_mount_path", "`/mngr-btrfs`"),
             ConfigTableRow("btrfs_loop_file_path", "`/var/lib/mngr-btrfs.img`"),
             ConfigTableRow("outer_disk_reserved_gb", "`20`"),
         ),
-        # Advanced tunables documented in prose: idle-source selection and the gVisor / depot knobs.
-        excluded_fields=("default_activity_sources", "docker_runtime", "install_gvisor_runtime", "builder"),
     ),
     ConfigTable(
         readme="libs/mngr_opencode/README.md",

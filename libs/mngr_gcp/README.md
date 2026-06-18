@@ -121,6 +121,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |
 | `subnetwork` | `None` | Optional explicit subnetwork (required for custom-mode VPCs); None lets GCE pick for auto-mode networks. |
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound (ingress) CIDR blocks allowed on tcp/22 and the container SSH port on the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own IP, or () for no ingress (no rule is created, leaving the instance unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replace-by-default across config layers (combining CIDRs across layers is never the intent). |
+| `firewall_name` | `mngr-gcp-ssh` | Name of the network-scoped firewall rule `mngr gcp prepare` creates to allow SSH ingress. |
 | `firewall_target_tag` | `mngr-ssh` | Network tag bound to the firewall rule; every instance is tagged with it. |
 | `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. Required for the current mngr-from-developer-laptop SSH access model; for a more secure deployment, set to False and run mngr from a bastion inside the VPC. |
 | `service_account_email` | `None` | Optional service account email attached to launched instances. When None, GCE applies its normal default for an unspecified service account. |

@@ -95,6 +95,8 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `iam_instance_profile` | `None` | Optional IAM instance profile name attached to launched instances. |
 | `terminate_on_shutdown` | `false` | EC2 shutdown behavior (InstanceInitiatedShutdownBehavior) on an OS shutdown. False keeps the instance stoppable and resumable via `mngr start` (EBS preserved); True terminates it (ephemeral / self-cleaning). |
 | `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |
+| `state_bucket_name` | `None` (auto-derived) | S3 bucket where mngr stores a stopped instance's state so it is readable without starting the instance. When None, named 'mngr-state-<account_id>-<region>'. The bucket is required infrastructure (run `mngr aws prepare`); there is no tag fallback. |
+| `is_offline_host_dir_enabled` | `true` | When on (default), a stopped instance's host_dir is readable without starting it, so `mngr event` / `mngr transcript` / `mngr file` work against it. `mngr aws prepare` sets up the access it needs. Set False to turn it off. |
 <!-- END GENERATED CONFIG TABLE -->
 
 ## One-time setup: `mngr aws prepare`
