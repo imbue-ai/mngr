@@ -175,8 +175,9 @@ class _CaptureFakeBucket:
 class _FakeOuter:
     """Fake outer host exposing the host_dir tree (recursive list + per-file read)."""
 
-    def __init__(self, files: dict[str, bytes]) -> None:
+    def __init__(self, files: dict[str, bytes], *, raise_on_read: bool = False) -> None:
         self._files = files
+        self._raise_on_read = raise_on_read
 
     def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
         return [
@@ -185,6 +186,10 @@ class _FakeOuter:
         ]
 
     def read_file(self, path: Path) -> bytes:
+        # Models a raw paramiko SFTP failure mid-transfer (a bare OSError, not a
+        # HostConnectionError/MngrError) -- the failure mode that crashed `mngr stop`.
+        if self._raise_on_read:
+            raise OSError("Failure")
         return self._files[Path(path).relative_to(_HOST_DIR_ON_OUTER).as_posix()]
 
 
@@ -213,10 +218,30 @@ def test_bucket_host_dir_backend_capture_uploads_the_tree() -> None:
     assert bucket.volume.written == {"events/e.jsonl": b"evt", "logs/a.log": b"a"}
 
 
-def test_bucket_host_dir_backend_capture_is_best_effort() -> None:
-    """A connection failure during capture is swallowed -- it must never break ``mngr stop``."""
+def test_bucket_host_dir_backend_capture_raises_on_connection_failure() -> None:
+    """A connection failure during capture raises (as MngrError) so the operator knows it failed.
+
+    The instance pause is the caller's job (a ``finally`` in stop_host), so raising
+    surfaces the failure without leaking a running instance.
+    """
     bucket = _CaptureFakeBucket()
     backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider(None), bucket=bucket)
-    # The connection error inside capture must be swallowed (not re-raised here).
-    backend.capture(HostId.generate(), "203.0.113.4")
+    with pytest.raises(MngrError, match="Failed to capture host_dir"):
+        backend.capture(HostId.generate(), "203.0.113.4")
+    assert bucket.volume.written == {}
+
+
+def test_bucket_host_dir_backend_capture_raises_on_raw_sftp_oserror() -> None:
+    """A raw OSError from the SFTP read (mid-transfer) is caught and re-raised as MngrError.
+
+    Real-cloud testing showed a bare paramiko ``OSError: Failure`` here; the
+    too-narrow ``except`` let it crash ``mngr stop`` *before* the instance paused.
+    Now it is caught (so it can't escape the documented set) and re-raised with
+    host_dir context -- and stop_host's ``finally`` still pauses the instance first.
+    """
+    bucket = _CaptureFakeBucket()
+    outer = _FakeOuter({"events/e.jsonl": b"evt"}, raise_on_read=True)
+    backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider(outer), bucket=bucket)
+    with pytest.raises(MngrError, match="Failed to capture host_dir"):
+        backend.capture(HostId.generate(), "203.0.113.4")
     assert bucket.volume.written == {}

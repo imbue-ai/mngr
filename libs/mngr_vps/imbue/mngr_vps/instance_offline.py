@@ -196,9 +196,13 @@ class OfflineCapableVpsProvider(VpsProvider):
             host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
         )
         # The placement is stopped (host_dir quiesced) but the instance is still
-        # reachable: capture host_dir to the bucket now, before the pause.
-        self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
-        self._pause_cloud_instance(host_record.config.vps_instance_id)
+        # reachable: capture host_dir to the bucket now, before the pause. ``capture``
+        # raises on failure, so pause in a ``finally`` -- a capture failure surfaces
+        # (failing ``mngr stop``) without ever leaving a running instance.
+        try:
+            self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
+        finally:
+            self._pause_cloud_instance(host_record.config.vps_instance_id)
 
     def start_host(
         self,
@@ -883,10 +887,13 @@ class BucketHostDirBackend(HostDirBackend):
 
         Reads the host_dir tree over the outer-host interface (the operator's SSH
         connection) and writes each file into the bucket's host_dir volume with the
-        operator's credentials. Best-effort: a connection/storage failure is logged
-        and swallowed so it never breaks ``mngr stop`` -- the offline copy simply
-        stays as of the previous capture. The whole tree is read into memory before
-        upload, which is fine for a bounded ``host_dir`` (events / transcripts).
+        operator's credentials. Raises (with host_dir context) on failure rather
+        than swallowing it -- the operator should know the offline copy was not
+        captured. The caller (``stop_host``) pauses the instance in a ``finally``
+        *before* this can propagate, so raising never leaks a running instance: the
+        host is stopped and ``mngr stop`` then surfaces the error. The whole tree is
+        read into memory before upload, which is fine for a bounded ``host_dir``
+        (events / transcripts).
         """
         host_dir_on_outer = self.provider._host_dir_path_on_outer(host_id)
         try:
@@ -901,13 +908,20 @@ class BucketHostDirBackend(HostDirBackend):
                         files[rel] = outer.read_file(abs_path)
                     if files:
                         self.bucket.volume_for_host(host_id).write_files(files)
-        except (HostConnectionError, MngrError) as e:
-            logger.warning(
-                "Failed to capture host_dir to the bucket for host {}; the offline copy will be as of the "
-                "previous capture: {}",
-                host_id,
-                e,
-            )
+        # A capture failure surfaces (it is NOT swallowed) -- the operator should
+        # know the offline host_dir was not captured. stop_host's ``finally``
+        # guarantees the instance is paused *before* this propagates, so raising
+        # can never leak a running instance: the host is stopped and `mngr stop`
+        # then reports the failure. The expected failure modes (a connection drop,
+        # a bucket storage error, or a raw paramiko SFTP OSError mid-read while the
+        # container quiesces) are re-raised with host_dir context; an unexpected
+        # error propagates as-is.
+        except (HostConnectionError, MngrError, OSError) as e:
+            raise MngrError(
+                f"Failed to capture host_dir to the bucket for host {host_id}: {e}. The host is stopped, but "
+                "its offline host_dir was not captured, so `mngr event` / `mngr file` on it will be unavailable "
+                "or stale until the next successful stop."
+            ) from e
 
 
 # Identity tags a stopped instance still carries (host id + name), read cheaply
