@@ -15,3 +15,5 @@ Fixed `mngr destroy` of a stopped AWS host leaking its EC2 instance. Destroying 
 A partial S3 `DeleteObjects` failure (the API returns HTTP 200 with per-key failures only in the response `Errors` array) now raises instead of being silently dropped, so a failed state/`host_dir` removal can't leave orphaned objects behind unnoticed.
 
 Follow-up cleanup: removed the now-orphaned `AwsVpsClient.add_tags` / `AwsVpsClient.remove_tags` client methods (and their unit tests). They only ever existed to push per-agent records into EC2 instance tags for the old tag mirror, which the state bucket replaces; nothing reachable called them.
+
+`mngr aws prepare` is now idempotent under a concurrent `prepare` race: a `BucketAlreadyOwnedByYou` from the bucket create (two prepares racing, or the existence check racing the create) is treated as a no-op -- mngr still applies the bucket's (idempotent) hardening config and reports it as not-created -- rather than surfacing as an error. Any other create failure still raises.

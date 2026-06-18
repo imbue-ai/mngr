@@ -153,7 +153,8 @@ def deregister_modal_test_volume(volume_name: str) -> None:
     Call only when the caller's delete returned DELETED or NOT_FOUND.
     On FAILED, do NOT call this -- leaving the name tracked lets the
     session-end leak detector surface it, with
-    `cleanup_old_modal_test_environments.py` as the hourly safety net.
+    `cleanup_old_modal_test_environments.py` as the safety net (run by a CI
+    job on every push to main and pull request).
     """
     if volume_name in worker_modal_volume_names:
         worker_modal_volume_names.remove(volume_name)
@@ -165,7 +166,8 @@ def deregister_modal_test_environment(environment_name: str) -> None:
     Call only when the caller's delete returned DELETED or NOT_FOUND.
     On FAILED, do NOT call this -- leaving the name tracked lets the
     session-end leak detector surface it, with
-    `cleanup_old_modal_test_environments.py` as the hourly safety net.
+    `cleanup_old_modal_test_environments.py` as the safety net (run by a CI
+    job on every push to main and pull request).
     Mirrors `deregister_modal_test_volume`.
     """
     if environment_name in worker_modal_environment_names:
@@ -1379,7 +1381,7 @@ def cleanup_old_modal_test_environments(
     all apps in the selected environment" (per Modal CLI docs), so individual
     app/volume delete failures are best-effort and not real leaks as long as the
     env-level delete succeeds. Reserving error level for the env-level FAILED
-    keeps cron/CI logs free of false-positive noise.
+    keeps CI logs free of false-positive noise.
 
     Returns the number of environments that were processed (attempted deletion).
     """
@@ -1404,7 +1406,7 @@ def cleanup_old_modal_test_environments(
         # Finally delete the environment itself. `delete_modal_environment`
         # already logs at debug/warning for individual outcomes; surface
         # FAILED at error level here so a stuck safety-net run is greppable
-        # in the cron/CI logs that drive this script.
+        # in the CI logs that drive this script.
         outcome = delete_modal_environment(env_name)
         match outcome:
             case ModalCleanupOutcome.DELETED | ModalCleanupOutcome.NOT_FOUND:

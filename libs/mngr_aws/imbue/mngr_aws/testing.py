@@ -17,6 +17,7 @@ from botocore.exceptions import BotoCoreError
 from pydantic import Field
 
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.config import ExistingSecurityGroup
 
 # Optional prefix release tests use for their agent names so leaked instances
 # (should the scanner ever fail) are still visually identifiable as test-owned.
@@ -65,11 +66,30 @@ def clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(key, raising=False)
 
 
+def make_aws_reaper_client() -> AwsVpsClient:
+    """Build an ``AwsVpsClient`` for the session-end hook / standalone reaper.
+
+    The reaper only calls ``list_instances`` + ``destroy_instance``, which ignore the AMI /
+    security-group fields, so those are placeholders. Region comes from ``AWS_DEFAULT_REGION``
+    (the same region the release tests and orphan scan operate in). Used by both the conftest
+    session-end leak detector and ``scripts/cleanup_old_aws_test_instances.py`` so the two share
+    one client-construction path.
+    """
+    session = boto3.Session(region_name=AWS_DEFAULT_REGION)
+    return AwsVpsClient(
+        session=session,
+        region=AWS_DEFAULT_REGION,
+        ami_id="ami-placeholder",
+        security_group=ExistingSecurityGroup(id="sg-placeholder"),
+    )
+
+
 def aws_credentials_available() -> bool:
     """Return True iff boto3's default credential chain can resolve credentials.
 
     Used to gate release tests (skipif) and the session-end cleanup hook
-    (no-op when credentials are absent). Walks the full boto3 chain (env
+    (which, when ``MNGR_AWS_RELEASE_TESTS`` is set, fails the session if
+    credentials are absent rather than skipping). Walks the full boto3 chain (env
     vars, shared credentials file, AWS_PROFILE, EC2 IMDS), matching what
     ``AwsProviderConfig.get_session`` does at provider-construction time
     -- so the gate and the production code agree on what counts as

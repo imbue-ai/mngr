@@ -250,6 +250,141 @@ jobs:
         run: uv run python scripts/cleanup_old_modal_test_environments.py --max-age-hours 1.0
 
 
+  # Clean up old Vultr test VPS instances left behind by the mngr_vultr release
+  # tests (run manually / locally against the shared Vultr account, so this CI
+  # job -- which runs on every push to main and pull request, like the Modal
+  # cleanup job above -- is their only automated safety net). The script no-ops
+  # if VULTR_API_KEY is unset, so this job is safe before the secret is configured.
+  cleanup-vultr-instances:
+    runs-on: ubuntu-latest
+    env:
+      VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Clean up old Vultr test instances
+        run: uv run python scripts/cleanup_old_vultr_test_instances.py --max-age-hours 1.0
+
+
+  # Clean up old AWS test EC2 instances left behind by the mngr_aws release tests
+  # (run manually / locally against the shared AWS account, so this CI job --
+  # which runs on every push to main and pull request, like the Modal cleanup job
+  # above -- is their only automated safety net). The script no-ops if AWS
+  # credentials cannot be resolved, so this job is safe before the secret is
+  # configured.
+  cleanup-aws-instances:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Clean up old AWS test instances
+        run: uv run python scripts/cleanup_old_aws_test_instances.py --max-age-hours 1.0
+
+
+  # Clean up old GCP test GCE instances left behind by the mngr_gcp release tests
+  # (run manually / locally against the shared GCP project, so this CI job is
+  # their only automated safety net). The script no-ops if Application Default
+  # Credentials or a default project cannot be resolved, so this job is safe
+  # before the secret is configured.
+  cleanup-gcp-instances:
+    runs-on: ubuntu-latest
+    env:
+      GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      # Materialize the service-account key into a file and point ADC at it, but
+      # only when the secret is configured. Without it, GOOGLE_APPLICATION_CREDENTIALS
+      # stays unset and the script no-ops.
+      - name: Write GCP credentials if configured
+        run: |
+          if [ -n "$GCP_SERVICE_ACCOUNT_KEY" ]; then
+            echo "$GCP_SERVICE_ACCOUNT_KEY" > "$RUNNER_TEMP/gcp-key.json"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp-key.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: Clean up old GCP test instances
+        run: uv run python scripts/cleanup_old_gcp_test_instances.py --max-age-hours 1.0
+
+
+  # Clean up old Azure test VMs left behind by the mngr_azure release tests (run
+  # manually / locally against the shared Azure subscription, so this CI job is
+  # their only automated safety net). The script no-ops if Azure credentials or a
+  # subscription cannot be resolved, so this job is safe before the secret is
+  # configured.
+  cleanup-azure-instances:
+    runs-on: ubuntu-latest
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Clean up old Azure test instances
+        run: uv run python scripts/cleanup_old_azure_test_instances.py --max-age-hours 1.0
+
+
   # Acceptance tests via offload on Modal
   test-offload-acceptance:
     runs-on: ubuntu-latest

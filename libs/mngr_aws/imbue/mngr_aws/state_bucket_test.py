@@ -2,6 +2,7 @@
 
 import boto3
 import pytest
+from botocore.stub import Stubber
 from moto import mock_aws
 
 from imbue.mngr.primitives import HostId
@@ -31,6 +32,33 @@ def test_ensure_bucket_is_idempotent(aws_session: boto3.Session) -> None:
     assert bucket.ensure_bucket() is True
     # Second call must not re-create: returns False (already existed).
     assert bucket.ensure_bucket() is False
+
+
+def test_ensure_bucket_treats_concurrent_create_as_idempotent(aws_session: boto3.Session) -> None:
+    # A racing concurrent `prepare` (the HeadBucket saw 404, then someone else
+    # created it first) makes create_bucket raise BucketAlreadyOwnedByYou. The
+    # bucket is ours, so ensure_bucket must apply its hardening config and report
+    # not-created rather than raising.
+    bucket = S3StateBucket(session=aws_session, region=_US_EAST_1, bucket_name="mngr-state-raced")
+    with Stubber(bucket._s3()) as stubber:
+        stubber.add_client_error("head_bucket", service_error_code="404", http_status_code=404)
+        stubber.add_client_error("create_bucket", service_error_code="BucketAlreadyOwnedByYou", http_status_code=409)
+        stubber.add_response("put_public_access_block", {})
+        stubber.add_response("put_bucket_encryption", {})
+        stubber.add_response("put_bucket_tagging", {})
+        assert bucket.ensure_bucket() is False
+        stubber.assert_no_pending_responses()
+
+
+def test_ensure_bucket_raises_on_other_create_error(aws_session: boto3.Session) -> None:
+    # A create error that is not BucketAlreadyOwnedByYou (e.g. a permission
+    # denial) must surface as S3StateBucketError, not be swallowed.
+    bucket = S3StateBucket(session=aws_session, region=_US_EAST_1, bucket_name="mngr-state-denied")
+    with Stubber(bucket._s3()) as stubber:
+        stubber.add_client_error("head_bucket", service_error_code="404", http_status_code=404)
+        stubber.add_client_error("create_bucket", service_error_code="AccessDenied", http_status_code=403)
+        with pytest.raises(S3StateBucketError, match="mngr-state-denied"):
+            bucket.ensure_bucket()
 
 
 def test_ensure_bucket_creates_in_other_region_with_location_constraint() -> None:

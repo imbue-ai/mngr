@@ -167,8 +167,9 @@ def _cleanup_modal_test_resources(
     Known limitation: treating NOT_FOUND as success has a residual failure
     mode. If env-create propagation is eventually consistent across Modal
     replicas, a delete that hits a stale replica returns NOT_FOUND for a
-    resource that actually exists, and we'd deregister. The CI hourly cleanup
-    script (`cleanup_old_modal_test_environments.py`) is the safety net.
+    resource that actually exists, and we'd deregister. The CI cleanup job
+    (`cleanup_old_modal_test_environments.py`), which runs on every push to
+    main and pull request, is the safety net.
     """
     ModalProviderBackend.close_app(app_name)
 

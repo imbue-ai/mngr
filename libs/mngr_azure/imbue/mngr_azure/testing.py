@@ -18,6 +18,7 @@ from azure.core.exceptions import AzureError
 from azure.core.exceptions import HttpResponseError
 from azure.core.exceptions import ResourceExistsError
 from azure.core.exceptions import ResourceNotFoundError
+from azure.identity import DefaultAzureCredential
 from pydantic import Field
 
 from imbue.mngr.primitives import HostId
@@ -66,11 +67,29 @@ AZURE_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_AZURE_RELEASE_TES
 AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 
 
+def make_azure_reaper_client(subscription_id: str) -> AzureVpsClient:
+    """Build an ``AzureVpsClient`` for the session-end hook / standalone reaper.
+
+    The reaper calls ``list_instances`` + ``destroy_instance`` + ``reclaim_orphaned_network_resources``,
+    none of which need a real image / VM size, so only the credential, subscription, region, and
+    resource group are supplied (the same ones the release tests and orphan scan operate in). Used
+    by both the conftest session-end leak detector and
+    ``scripts/cleanup_old_azure_test_instances.py`` so the two share one client-construction path.
+    """
+    return AzureVpsClient(
+        credential=DefaultAzureCredential(),
+        subscription_id=subscription_id,
+        region=AZURE_DEFAULT_REGION,
+        resource_group=AZURE_DEFAULT_RESOURCE_GROUP,
+    )
+
+
 def azure_credentials_available() -> bool:
     """Return True iff ``DefaultAzureCredential`` can mint an ARM token.
 
-    Used to gate release tests and the session-end cleanup hook (no-op when
-    credentials are absent). Mints an ARM-scoped token through the same
+    Used to gate release tests and the session-end cleanup hook (which, when
+    ``MNGR_AZURE_RELEASE_TESTS`` is set, fails the session if credentials are
+    absent rather than skipping). Mints an ARM-scoped token through the same
     ``AzureProviderConfig.get_credential`` the provider uses at construction time,
     so the gate and production code agree on what counts as "available". This only
     runs behind the ``MNGR_AZURE_RELEASE_TESTS`` opt-in, so the network call never
