@@ -89,6 +89,7 @@ from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.recovery_probe import extract_provider_error
 from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
@@ -2846,6 +2847,38 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
     return finished.stdout
 
 
+def _run_mngr_capturing(
+    concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]
+) -> tuple[str, int, str]:
+    """Run an ``mngr`` subprocess, returning ``(stdout, returncode, stderr)`` without raising on a nonzero exit.
+
+    The recovery host-health probe needs ``mngr list``'s JSON body even when the
+    command exits non-zero: with ``--on-error continue`` a provider failure still
+    emits ``{"agents": [...], "errors": [...]}`` to stdout and *then* exits 1, and
+    that ``errors[]`` array is exactly where the provider-reachability signal
+    lives. ``_run_mngr`` discards stdout on a nonzero exit, so this sibling keeps
+    it. Outcomes where there is no body to read -- a timeout, or a failure to
+    launch the process at all -- still raise ``MngrCommandError`` (same domain
+    error the caller already handles).
+    """
+    try:
+        finished = concurrency_group.run_process_to_completion(
+            argv,
+            timeout=_RESTART_COMMAND_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=env,
+        )
+    except (OSError, ConcurrencyGroupError) as exc:
+        raise MngrCommandError(str(exc)) from exc
+    if finished.is_timed_out:
+        raise MngrCommandError(f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s")
+    # A finished, non-timed-out process always carries a returncode; the Optional
+    # is for the not-yet-finished case, which this branch has ruled out. Coerce a
+    # surprise None to a nonzero so the caller treats it as a failed listing.
+    returncode = finished.returncode if finished.returncode is not None else 1
+    return finished.stdout, returncode, finished.stderr
+
+
 def _await_system_interface_ready(
     agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str, wait_seconds: float
 ) -> bool:
@@ -3336,6 +3369,18 @@ def _handle_host_health_probe_api(
     )
 
 
+def _provider_display_label(provider_name: str | None) -> str:
+    """Friendly provider name for the 'Can't connect to ...' page title.
+
+    imbue_cloud is the user-facing cloud, so name it; local backends (docker /
+    lima) fall back to a generic label rather than leaking an internal provider
+    instance name into the UI.
+    """
+    if provider_name is not None and provider_name.startswith(_IMBUE_CLOUD_PROVIDER_PREFIX):
+        return "Imbue Cloud"
+    return "the workspace backend"
+
+
 def _run_host_health_probe(
     agent_id: AgentId,
     request: Request,
@@ -3359,18 +3404,25 @@ def _run_host_health_probe(
     list_error: str | None = None
     list_stdout = ""
     try:
-        list_stdout = _run_mngr(concurrency_group, list_argv, env)
+        # Capture stdout even on a nonzero exit: with ``--on-error continue`` the
+        # listing still emits its JSON body (including the ``errors[]`` array that
+        # carries the provider-reachability signal) and then exits 1 when a
+        # provider failed. The listing is scoped to this workspace's own provider
+        # (see _build_mngr_host_state_argv), so a nonzero exit reflects a problem
+        # with *this* provider/host. Record the reason for the host-state rows,
+        # but keep the body so ``extract_provider_error`` can classify it.
+        list_stdout, returncode, list_stderr = _run_mngr_capturing(concurrency_group, list_argv, env)
+        if returncode != 0:
+            list_error = f"exited {returncode}: {list_stderr.strip()}"
+            logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
     except MngrCommandError as exc:
-        # The listing is scoped to this workspace's own provider (see
-        # _build_mngr_host_state_argv), so a non-clean exit reflects a problem
-        # with *this* provider/host rather than an unrelated sibling, and there
-        # is no trustworthy listing to keep. Record the reason and continue with
-        # an empty listing; it is logged here and threaded into the response so
-        # the recovery page can surface it on the host-state rows in place of a
-        # bare "no row".
+        # No body to read at all (timeout / failed to launch); continue with an
+        # empty listing and surface the reason on the host-state rows.
         list_error = str(exc)
-        logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
+        logger.warning("`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error)
     list_json: str | None = list_stdout or None
+    provider_error = extract_provider_error(list_json, provider_name)
+    provider_label = _provider_display_label(provider_name)
     # The in-container probe stays quiet at warning level: its argv embeds a
     # long base64 inner script that adds nothing to diagnostics, and the
     # dispatch_tier INFO line already records the outcome. Trust the stdout only
@@ -3402,6 +3454,8 @@ def _run_host_health_probe(
         mngr_list_error=list_error,
         mngr_exec_command=exec_command,
         mngr_binary=mngr_binary,
+        provider_error=provider_error,
+        provider_label=provider_label,
     )
 
 
