@@ -1,6 +1,8 @@
 """Tests for VPS provider instance utilities."""
 
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -10,14 +12,18 @@ from typing import cast
 import pytest
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -40,6 +46,8 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import MinimalVpsProvider
 from imbue.mngr_vps.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps.instance import build_vps_tags
+from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -609,6 +617,76 @@ def test_bare_provider_rejects_snapshot_operations_up_front(temp_mngr_ctx: MngrC
         provider.create_snapshot(HostId.generate())
     with pytest.raises(SnapshotsNotSupportedError):
         provider.delete_snapshot(HostId.generate(), SnapshotId("snap-x"))
+
+
+def _snapshot(id_: str, name: str) -> SnapshotRecord:
+    return SnapshotRecord(id=id_, name=name, created_at=datetime.now(timezone.utc).isoformat())
+
+
+def _record_with_snapshots(host_id: HostId, snapshots: list[SnapshotRecord]) -> VpsHostRecord:
+    record = _record_for(host_id, container_name="c")
+    certified = record.certified_host_data
+    return record.with_certified_updates(to_update(certified.field_ref().snapshots, snapshots))
+
+
+def test_delete_snapshot_raises_for_unknown_snapshot_id(temp_mngr_ctx: MngrContext) -> None:
+    """An id not in the host record is a SnapshotNotFoundError (raised before any outer I/O)."""
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    host_id = HostId.generate()
+    provider._host_record_cache[host_id] = _record_with_snapshots(host_id, [_snapshot("sha256:a", "keep")])
+    with pytest.raises(SnapshotNotFoundError):
+        provider.delete_snapshot(host_id, SnapshotId("sha256:missing"))
+
+
+class _FakeSnapshotRealizer:
+    """Duck-typed snapshot-capable realizer: the rmi is a no-op and the host store is
+    never really opened, so ``delete_snapshot``'s record handling can be tested without
+    real outer I/O."""
+
+    def delete_snapshot_placement(self, outer: OuterHostInterface, snapshot_id: SnapshotId) -> None:
+        pass
+
+    def open_host_store(self, outer: OuterHostInterface, host_id: HostId) -> Any:
+        return object()
+
+
+class _CaptureDeleteProvider(MinimalVpsProvider):
+    """delete_snapshot double: a fake realizer (seeded into the cache) skips real docker,
+    and the persisted write is captured for assertion."""
+
+    _captured_record: VpsHostRecord | None = PrivateAttr(default=None)
+
+    def _require_snapshot_capable_realizer(self, realizer: HostRealizer) -> SnapshotCapableRealizer:
+        return cast(SnapshotCapableRealizer, realizer)
+
+    @contextmanager
+    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+        yield cast(OuterHostInterface, object())
+
+    def _write_and_mirror(self, host_store: Any, record: VpsHostRecord) -> None:
+        self._captured_record = record
+
+
+def test_delete_snapshot_drops_it_from_the_record_and_list(temp_mngr_ctx: MngrContext) -> None:
+    """A successful delete removes the snapshot from the persisted record and from the
+    cache-backed ``list_snapshots``, leaving the other snapshots intact."""
+    provider = _CaptureDeleteProvider(
+        name=ProviderInstanceName("test-vps-docker"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsProviderConfig(backend=ProviderBackendName("test-vps-docker"), isolation=IsolationMode.CONTAINER),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    provider._realizer_cache = {IsolationMode.CONTAINER: cast(HostRealizer, _FakeSnapshotRealizer())}
+    host_id = HostId.generate()
+    keep, doomed = _snapshot("sha256:keep", "keep"), _snapshot("sha256:doomed", "doomed")
+    provider._host_record_cache[host_id] = _record_with_snapshots(host_id, [keep, doomed])
+
+    provider.delete_snapshot(host_id, SnapshotId("sha256:doomed"))
+
+    assert provider._captured_record is not None
+    assert [s.id for s in provider._captured_record.certified_host_data.snapshots] == ["sha256:keep"]
+    assert [str(s.id) for s in provider.list_snapshots(host_id)] == ["sha256:keep"]
 
 
 def test_create_host_rejects_bare_on_a_provider_without_machine_lifecycle(temp_mngr_ctx: MngrContext) -> None:

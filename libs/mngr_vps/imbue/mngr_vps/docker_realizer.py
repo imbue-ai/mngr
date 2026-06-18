@@ -453,7 +453,16 @@ class DockerRealizer(SnapshotCapableRealizer):
         return SnapshotId(image_id)
 
     def delete_snapshot_placement(self, outer: OuterHostInterface, snapshot_id: SnapshotId) -> None:
+        # Idempotent: an already-absent image ("No such image", a stable docker string)
+        # means the postcondition -- the snapshot is gone -- already holds, so treat it
+        # as success. Any OTHER rmi failure means the image still exists, so raise rather
+        # than swallow: the provider's delete_snapshot only drops the snapshot from the
+        # host record on success, and a failed delete must not be reported as one.
+        # (The original docker provider only logs a warning here; this one raises.)
         try:
             run_docker(outer, ["rmi", str(snapshot_id)])
         except MngrError as e:
-            logger.warning("Failed to delete snapshot image: {}", e)
+            if "no such image" in str(e).lower():
+                logger.trace("Snapshot image {} already gone -- nothing to remove", snapshot_id)
+                return
+            raise

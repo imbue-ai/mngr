@@ -29,6 +29,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -2164,12 +2165,32 @@ class VpsProvider(BaseProviderInstance):
         self._require_snapshot_capable_realizer(self._realizer)
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.vps_ip is None:
+        if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
         realizer = self._require_snapshot_capable_realizer(self._realizer_for_record(host_record))
 
+        certified = host_record.certified_host_data
+        remaining_snapshots = [s for s in certified.snapshots if s.id != str(snapshot_id)]
+        if len(remaining_snapshots) == len(certified.snapshots):
+            raise SnapshotNotFoundError(self.name, snapshot_id)
+
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            # Delete the image first: on a real failure this raises (the snapshot stays
+            # in the record, so it still lists), and only on success do we drop it from
+            # the record -- so the record never claims a snapshot is gone while its image
+            # remains. (create_snapshot is the inverse: image, then record.)
             realizer.delete_snapshot_placement(outer, snapshot_id)
+            updated_record = host_record.with_certified_updates(
+                to_update(certified.field_ref().snapshots, remaining_snapshots),
+                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
+            )
+            host_store = realizer.open_host_store(outer, host_id)
+            self._write_and_mirror(host_store, updated_record)
+
+        # Refresh the cache so a same-process ``list_snapshots`` (cache-first) does not
+        # still report the just-deleted snapshot.
+        self._host_record_cache[host_id] = updated_record
+        logger.info("Deleted snapshot {} for host {}", snapshot_id, host_id)
 
     # =========================================================================
     # Tags

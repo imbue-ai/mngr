@@ -226,3 +226,13 @@ Performance: `mngr stop` on a bare (`isolation=NONE`) host no longer hangs for m
 Internal cleanup (no behavior change): dropped the unused `sentinel_on_outer`
 parameter from the `_idle_watcher_service_unit` hook -- the sentinel removal lives
 in the poweroff/deallocate scripts, not the oneshot `.service` body.
+
+Bugfix: `mngr snapshot delete` on a VPS now actually takes effect. `delete_snapshot`
+previously removed the docker image but never dropped the snapshot from the host
+record, so `mngr snapshot list` kept showing a deleted snapshot (and an unknown id
+succeeded silently). It now removes the entry from the record (raising
+`SnapshotNotFoundError` for an unknown id) and refreshes the cache. The image
+removal (`delete_snapshot_placement`) now treats an already-absent image as success
+but raises on any other failure -- so a failed delete is no longer reported as one,
+and the snapshot stays listed until its image is really gone. (The docker provider
+still only warns here; the VPS provider deliberately raises.)
