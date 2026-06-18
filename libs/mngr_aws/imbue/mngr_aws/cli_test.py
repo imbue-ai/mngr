@@ -303,7 +303,7 @@ def test_perform_state_bucket_cleanup_none_is_noop() -> None:
 
 
 # =============================================================================
-# host-dir identity provisioning (best-effort, gated on is_offline_host_dir_enabled)
+# host-dir identity provisioning (required when gated on is_offline_host_dir_enabled)
 # =============================================================================
 
 _IDENTITY_BUCKET = "mngr-state-identity-cli"
@@ -336,14 +336,37 @@ def test_perform_host_identity_cleanup_none_is_noop() -> None:
     assert _perform_host_identity_cleanup(None) is None
 
 
-def test_resolve_and_provision_host_identity_skips_when_bucket_not_set_up() -> None:
-    """Provisioning is skipped (and touches no credentials) when the bucket was not set up.
+def test_resolve_and_provision_host_identity_provisions_with_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given a (created) bucket name and resolvable credentials, the identity is provisioned.
 
-    The identity's inline policy is scoped to the bucket, so provisioning it is
-    meaningless without one; the gate must short-circuit before any IAM/STS call.
+    The bucket is required, so by the time this is called ``_ensure_state_bucket``
+    has already created it; provisioning then returns the identity name.
     """
-    result = _resolve_and_provision_host_identity(AwsProviderConfig(), region="us-east-1", state_bucket_name=None)
-    assert result is None
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    with mock_aws():
+        result = _resolve_and_provision_host_identity(
+            AwsProviderConfig(), region="us-east-1", state_bucket_name=_IDENTITY_BUCKET
+        )
+        assert result == host_identity_name_for_bucket(_IDENTITY_BUCKET)
+
+
+def test_resolve_and_provision_host_identity_raises_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unresolvable credentials raise a clean ``click.ClickException`` (no silent skip).
+
+    The old "skip with a warning when the bucket wasn't set up" path is gone: the
+    bucket is required and created first, so the only failure here is a credential
+    one, which surfaces rather than quietly disabling offline host_dir.
+    """
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
+    with pytest.raises(click.ClickException):
+        _resolve_and_provision_host_identity(
+            AwsProviderConfig(), region="us-east-1", state_bucket_name=_IDENTITY_BUCKET
+        )
 
 
 # =============================================================================
@@ -354,7 +377,7 @@ def test_resolve_and_provision_host_identity_skips_when_bucket_not_set_up() -> N
 def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
     """HUMAN mode emits one SG sentence (plus a bucket line when a bucket was set up)."""
     result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
-    # Bucket skipped (e.g. missing S3 perms): only the SG line is emitted.
+    # No bucket name passed: the output helper emits only the SG line.
     _output_prepare_result(result, "us-east-1", None, False, None, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert captured.out == "Prepared AWS security group sg-new123 in region us-east-1\n"

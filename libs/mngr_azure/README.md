@@ -118,9 +118,9 @@ Blob container holding mngr's control-plane state — the full host record and t
 per-agent records — keyed by host id. The mngr host machine writes these with
 **your own Azure credentials** (no keys stored on the box) whenever it writes
 state (on create and on stop), so a **deallocated** VM's full state is readable
-without SSH. This replaces the VM-tag mirror, which (a) silently dropped
-per-agent `labels` larger than the 256-char Azure tag value limit and (b) could
-only reconstruct a lossy subset of the host record while the VM was stopped.
+without SSH. This is the sole offline store: the previous VM-tag mirror has been
+removed (it silently dropped per-agent `labels` larger than the 256-char Azure
+tag value limit and could only reconstruct a lossy subset of the host record).
 
 The storage-account name defaults to a deterministic `mngrst<hash>` derived from
 your subscription + resource group (storage-account names are globally unique,
@@ -131,11 +131,14 @@ Blob data-plane access uses AAD (the same `DefaultAzureCredential` the provider
 already uses), so to read/write host state you need the **`Storage Blob Data
 Contributor`** role on the state storage account, in addition to the
 storage-account create/delete permission `prepare`/`cleanup` use
-(`Microsoft.Storage/storageAccounts/write` + `delete`). A missing storage
-permission during `prepare` is **not fatal**: it degrades to a warning, the
-network prepare still succeeds, and offline state falls back to the VM-tag
-mirror. Existing deployments that never re-ran the new `prepare` keep working on
-that fallback.
+(`Microsoft.Storage/storageAccounts/write` + `delete`). The state account is
+**required** infrastructure, with no VM-tag fallback: creating it is `prepare`'s
+primary job, so a missing storage permission (or any account/container create
+failure) **fails** the command rather than continuing with a network-only
+prepare. Once provisioned, when it is absent mngr raises an actionable error
+pointing at `mngr azure prepare` -- on the `mngr create` / `mngr label` write path
+as well as on offline reads -- and a transient Blob error on a mirror read or
+write propagates rather than being swallowed.
 
 ### Offline `host_dir` (on by default)
 
@@ -150,22 +153,24 @@ box), excluding large transient caches (`*.tmp`, `__pycache__`, `node_modules`).
 Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to disable it
 (offline host metadata still works via the bucket).
 
-The instance-push needs a cloud identity, which `prepare` provisions
-**best-effort** when `is_offline_host_dir_enabled` is on (the default):
+The instance-push needs a cloud identity, which `prepare` provisions when
+`is_offline_host_dir_enabled` is on (the default):
 
 ```bash
-mngr azure prepare   # provisions the identity best-effort; warns + continues if permissions are denied
+mngr azure prepare   # creates the bucket and (when enabled) the host-dir managed identity; fails if denied
 ```
 
 `prepare` provisions a **user-assigned managed identity** plus a **`Storage Blob
 Data Contributor`** role assignment scoped to **just the state storage account**
-(least privilege -- never the resource group or subscription). Any missing-
-permission / API failure downgrades to a **warning** (the network + bucket
-prepare still succeed; only offline `host_dir` is unavailable until `prepare` is
-re-run with sufficient permissions). Set `is_offline_host_dir_enabled = false` in
-`[providers.azure]` to skip the identity entirely. `mngr azure cleanup` deletes
-the identity. `mngr create` attaches it to the VM when the feature is on and the
-identity exists (an operator-supplied identity takes precedence).
+(least privilege -- never the resource group or subscription). When the feature
+is on, this is part of `prepare`, so a missing-permission / API failure **fails**
+the command. Set `is_offline_host_dir_enabled = false` in `[providers.azure]` to
+skip the identity entirely. At `mngr create`, with the feature on, the VM is
+attached to the identity and the sync daemon installed -- both raise (failing
+create) if they cannot complete, since a VM that cannot push its `host_dir` would
+otherwise be silently unreadable offline (an operator-supplied identity takes
+precedence). `mngr azure cleanup` deletes the identity (idempotent when already
+absent; a delete failure raises).
 
 Provisioning the identity needs `Microsoft.ManagedIdentity/userAssignedIdentities/write`
 + `Microsoft.Authorization/roleAssignments/write` (Owner or User Access
@@ -228,8 +233,9 @@ halts compute billing (an OS-level shutdown would only power it off — "Stopped
 paused agent costs only disk storage. `mngr start` re-allocates it. The public IP
 is static, so it and the SSH host keys survive the stop (no known_hosts rebind on
 resume). A deallocated VM still shows in `mngr list` and resolves by name (offline
-discovery reads its state from the state storage account, or the VM tag mirror as
-a fallback). `mngr destroy` deletes the VM, and the NIC, public IP and
+discovery reads its state from the state storage account; without one, offline
+reads raise an actionable error pointing at `mngr azure prepare`). `mngr destroy`
+deletes the VM, and the NIC, public IP and
 OS disk are reaped automatically via their `delete_option=Delete` (no orphaned
 resources).
 
@@ -260,14 +266,15 @@ size has no capacity in the region right now; pick another size with
   eviction, matching AWS spot's terminate-on-reclaim.
 - VMs are tagged `mngr-provider`, `mngr-host-id`, `mngr-created-at`,
   `managed-by=mngr`, and `mngr-host-name`; discovery filters the resource group's
-  VM list by `mngr-provider`. Offline discovery reconstructs deallocated/stopped
-  VMs from those index tags and reads their full host record + per-agent records
-  from the **state storage account** (see "Offline state storage account") when
-  it exists. When it does not (older `prepare` / no storage permission), it falls
-  back to the per-agent VM-tag mirror (`mngr-agent-<id>-<field>`), which is
-  capped at the 256-char Azure tag value limit. Either way, power state for a
-  not-SSH-reachable VM is confirmed with a per-VM `get_instance_status` call
-  (Azure rejects `expand=instanceView` on a resource-group VM list).
+  VM list by `mngr-provider`. Offline discovery identifies deallocated/stopped
+  VMs from those cheap index tags and reads their full host record + per-agent
+  records from the **state storage account** (see "Offline state storage
+  account"). When it does not exist (older `prepare` / no storage permission),
+  offline host state is unavailable and the read raises an actionable error
+  pointing at `mngr azure prepare` (no per-agent VM-tag mirror is written). Power
+  state for a not-SSH-reachable VM is confirmed with a per-VM
+  `get_instance_status` call (Azure rejects `expand=instanceView` on a
+  resource-group VM list).
 - **Stop/start = deallocate/start:** `mngr stop` deallocates the VM
   (`virtual_machines.begin_deallocate`) to halt compute billing; `mngr start`
   re-allocates it (`begin_start`). The static public IP and on-disk SSH host keys

@@ -659,6 +659,7 @@ class FakeUserAssignedIdentitiesOperations:
         self.created: list[str] = []
         self.deleted: list[str] = []
         self.create_error: Exception | None = None
+        self.delete_error: Exception | None = None
         self.principal_id: str = "principal-1"
         self.client_id: str = "client-1"
 
@@ -680,6 +681,8 @@ class FakeUserAssignedIdentitiesOperations:
         del resource_group
         if not self.exists:
             raise ResourceNotFoundError(message=f"identity {name} not found")
+        if self.delete_error is not None:
+            raise self.delete_error
         self.exists = False
         self.deleted.append(name)
 

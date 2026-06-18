@@ -1058,8 +1058,12 @@ class VpsProvider(BaseProviderInstance):
         the flow lets the VPS auto-decommission instead of leaking
         a still-billing orphan.
 
-        Default no-op. Must not raise; any errors should be caught and
-        logged by the override.
+        Default no-op. An override may raise only when ``create_host``'s
+        cleanup can reverse the partially-created host (e.g. the offline
+        host_dir-sync install in ``OfflineCapableVpsProvider``, where a setup
+        failure must fail create); an override whose side effect is NOT undone
+        by that cleanup (e.g. OVH un-cancellation, which would leak a
+        still-billing VPS) must instead catch and log its own errors.
         """
 
     def _persist_host_record_externally(self, record: VpsHostRecord) -> None:

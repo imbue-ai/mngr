@@ -1,12 +1,9 @@
-import json
 import shlex
 from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Mapping
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
-from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -24,7 +21,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -38,7 +34,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
-from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
@@ -582,7 +577,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         return self._host_dir_backend.volume(host_id)
 
     # =========================================================================
-    # Post-finalize provisioning (best-effort idle watcher + host_dir sync)
+    # Post-finalize provisioning (best-effort idle watcher; raising host_dir sync)
     # =========================================================================
 
     def _post_finalize_steps(self, *, host_id: HostId, vps_ip: str) -> list[tuple[str, Callable[[], None]]]:
@@ -595,18 +590,22 @@ class OfflineCapableVpsProvider(VpsProvider):
         return []
 
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Run the best-effort post-finalize steps after the host record is durable.
+        """Run the post-finalize provisioning after the host record is durable.
 
-        Runs an ordered list of steps, each best-effort: a step that raises
-        ``MngrError`` is logged at WARNING (with its description) and the rest still
-        run, so a failure here never fails an already-durable ``create_host``.
+        Two tiers. The *best-effort* steps -- any provider-supplied
+        ``_post_finalize_steps`` (Azure: its self-deallocate role assignment) and
+        the host-side idle watcher (skipped when the realizer's idle command already
+        stops the whole host -- the bare case -- since a bare placement self-stops
+        directly) -- are each logged at WARNING and tolerated: a failure there never
+        fails an already-durable ``create_host`` (the agent simply won't auto-stop
+        on idle, but ``mngr stop`` still works).
 
-        The shared list is: install the host-side idle watcher (skipped when the
-        realizer's idle command already stops the whole host -- the bare case --
-        since a bare placement self-stops directly) and install the host_dir-to-bucket
-        sync daemon (a no-op when the selected ``_host_dir_backend`` is the null
-        backend, e.g. GCP). Providers prepend their own steps via
-        ``_post_finalize_steps`` (Azure: its self-deallocate role assignment).
+        The host_dir-to-bucket sync install is *not* best-effort: with the state
+        bucket required, a host that cannot install the daemon (or attach the
+        bucket-write identity it authenticates as) would silently have an unreadable
+        offline host_dir, so it raises (failing create). It is a no-op when the
+        selected ``_host_dir_backend`` is the null backend (offline host_dir off, or
+        GCP).
         """
         steps: list[tuple[str, Callable[[], None]]] = list(self._post_finalize_steps(host_id=host_id, vps_ip=vps_ip))
         if not self._realizer.idle_shutdown_stops_host:
@@ -616,25 +615,40 @@ class OfflineCapableVpsProvider(VpsProvider):
                     lambda: self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip),
                 )
             )
-        steps.append(
-            (
-                "the stopped host's host_dir will not be readable offline",
-                lambda: self._host_dir_backend.install_sync(host_id=host_id, vps_ip=vps_ip),
-            )
-        )
         for description, step in steps:
             try:
                 step()
             except MngrError as e:
                 logger.warning("Post-finalize step failed for host {} ({}); {}", host_id, e, description)
+        self._host_dir_backend.install_sync(host_id=host_id, vps_ip=vps_ip)
+
+    @property
+    @abstractmethod
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror this provider reads and writes offline state through.
+
+        Every offline-capable provider selects exactly one store (implemented as a
+        cached property so any bucket-existence probe runs at most once): the
+        object-storage ``BucketHostStateStore`` (AWS S3, Azure Blob) or the GCP
+        instance-metadata store. When a required object-storage bucket has not yet
+        been provisioned the property raises an actionable error (see
+        ``missing_state_bucket_error``) rather than returning a degraded store, so
+        every persist / remove / list / read below fails loudly and uniformly.
+        Selecting the store here lets those paths stop branching on the backing
+        store.
+        """
+        ...
 
     @abstractmethod
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED ``DiscoveredHost`` from an instance's tags/metadata.
+        """Build a STOPPED ``DiscoveredHost`` from an instance's identity tags/labels/metadata.
 
         Returns ``None`` when the instance is not a mngr host. Raises ``ValueError``
         when the instance carries a mngr host identity that is malformed (a
-        corrupt/externally-edited host-id or name).
+        corrupt/externally-edited host-id or name). Reads only the cheap cached
+        listing (host id + name), never the state store, so a discovery sweep stays
+        cheap; the full record is reconstructed from the store only on demand
+        (``to_offline_host``).
         """
         ...
 
@@ -648,54 +662,57 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         ...
 
-    @abstractmethod
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Reassemble the host's agent records mirrored into this instance's tags/metadata."""
-        ...
-
-    @abstractmethod
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal STOPPED offline host from a stopped instance's tags/metadata."""
-        ...
-
     def _offline_agent_dicts_for(self, host_id: HostId, instance: Mapping[str, Any] | None = None) -> list[dict]:
-        """Return a stopped host's mirrored agent records, for offline discovery / listing.
+        """Return a stopped host's mirrored agent records from the external state store.
 
-        Default: reassemble them from the instance's own tags/metadata, resolving
-        the instance from the cached listing when one is not already in hand
-        (``list``-style callers pass only a ``host_id``; the discovery loop passes
-        the instance it is already iterating, avoiding a redundant lookup). A
-        provider with a separate external store (e.g. an object-storage bucket)
-        overrides this to read from that store keyed by ``host_id``, so bucket-mode
-        agents -- which are NOT mirrored into tags -- are still surfaced, and the
-        ``instance`` argument is ignored.
+        Keyed by ``host_id``; the ``instance`` argument is accepted (the discovery
+        loop passes the instance it is already iterating) but unused, since the
+        store resolves everything from ``host_id``. A read against a provider whose
+        required bucket is absent (or a bucket storage error) raises, which the
+        discovery wrapper attributes to this provider and surfaces per the caller's
+        ``--on-error``.
         """
-        if instance is not None:
-            return self._persisted_agent_dicts_from_instance(instance)
-        return self._agent_dicts_from_tags(host_id)
+        del instance
+        return self._state_store.list_agent_records(host_id)
 
-    def _agent_dicts_from_tags(self, host_id: HostId) -> list[dict]:
-        """Reassemble a host's agent records from its instance tags/metadata, or [] if the instance is gone.
-
-        Resolves the instance from the cached listing, then reads its mirrored
-        agent records. Shared by the default ``_offline_agent_dicts_for`` and the
-        tag-mirror ``HostStateStore`` implementations (AWS/Azure), which otherwise
-        re-derived the same lookup.
-        """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return []
-        return self._persisted_agent_dicts_from_instance(instance)
-
-    @abstractmethod
     def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror one agent record into the offline store (instance tags/metadata, or an external store)."""
-        ...
+        """Mirror one agent record into the external state store (upsert).
 
-    @abstractmethod
+        Propagates a storage/missing-bucket error: the bucket is required, so a
+        dropped mirror would let a stopped host show stale agents.
+        """
+        self._state_store.persist_agent_record(host_id, agent_id, agent_data)
+
     def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        """Remove one agent's mirrored record from the offline store. Idempotent."""
-        ...
+        """Remove one agent's mirrored record from the external state store (idempotent; errors propagate)."""
+        self._state_store.remove_agent_record(host_id, agent_id)
+
+    def _persist_host_record_externally(self, record: VpsHostRecord) -> None:
+        """Mirror the full host record into the external state store (errors propagate)."""
+        self._state_store.persist_host_record(record)
+
+    def _delete_host_record_externally(self, host_id: HostId) -> None:
+        """Delete the host's state from the external state store (idempotent; errors propagate)."""
+        self._state_store.delete_host_state(host_id)
+
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return the SSH-reachable public IPs of this provider's instances.
+
+        Every cloud (AWS/GCP/Azure) provider reaches this point with resolvable
+        credentials: ``build_provider_instance`` raises ``ProviderUnavailableError``
+        when the session/subscription/credentials cannot be resolved, so the live
+        listing is always available here. A stopped EC2/GCE instance loses its
+        ephemeral IP and is naturally excluded by the non-empty ``main_ip`` check; a
+        *deallocated* Azure VM keeps its Static IP, so it is still listed and then
+        fails fast over the bounded SSH connect timeout before being reconstructed
+        offline -- this keeps discovery uniform (no power-state-specific branch).
+        """
+        vps_ips: list[str] = []
+        for instance in self._list_instances_cached():
+            main_ip = instance.get("main_ip", "")
+            if main_ip:
+                vps_ips.append(main_ip)
+        return vps_ips
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         """Persist an agent's record on the host volume *and* mirror it for offline reads.
@@ -798,14 +815,20 @@ class OfflineCapableVpsProvider(VpsProvider):
             raise
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a stopped instance's record from instance data."""
+        """Return an offline host, reconstructing a stopped host's full record from the external store.
+
+        Falls back to the SSH/volume-backed base path first; if that can't find the
+        host (stopped and unreachable), reconstruct the full ``VpsHostRecord`` from
+        the external state store. Calls the SSH-only ``VpsProvider`` path directly so
+        this override does not recurse into itself.
+        """
         try:
-            return super().to_offline_host(host_id)
+            return VpsProvider.to_offline_host(self, host_id)
         except HostNotFoundError:
-            instance = self._find_instance_for_host(host_id)
-            if instance is None:
+            record = self._state_store.read_host_record(host_id)
+            if record is None:
                 raise
-            return self._offline_host_from_instance(host_id, instance)
+            return self._create_offline_host(record)
 
     def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
         """Return ``[]`` for a stopped host instead of raising.
@@ -840,9 +863,10 @@ class HostDirSyncInstallPlan(FrozenModel):
     The provider resolves these (the on-box sync-CLI install command, the host_dir
     sync ``.service`` body, and the bucket sync-target URI for the log line); the
     shared ``BucketHostDirBackend.install_sync`` skeleton then writes them to the
-    outer via the identical systemd sequence. A provider returns ``None`` instead of
-    a plan to skip the install entirely (e.g. Azure when the managed identity the
-    sync would authenticate as is absent).
+    outer via the identical systemd sequence. The bucket is required infrastructure,
+    so a provider that cannot install the daemon (e.g. the bucket-write identity the
+    sync authenticates as is absent) raises rather than returning ``None`` to skip --
+    a silently unreadable offline host_dir would otherwise surface only later.
     """
 
     install_command: str = Field(description="Best-effort on-box install of the sync CLI (awscli / azcopy)")
@@ -868,7 +892,6 @@ class BucketHostDirBackend(HostDirBackend):
 
     provider: OfflineCapableVpsProvider
     bucket: StateBucket
-    bucket_error_type: type[MngrError]
 
     @abstractmethod
     def _sync_unit_name(self) -> str:
@@ -887,11 +910,13 @@ class BucketHostDirBackend(HostDirBackend):
 
     @abstractmethod
     def _build_install_plan(self, host_id: HostId) -> HostDirSyncInstallPlan | None:
-        """Resolve the cloud-specific install pieces, or ``None`` to skip the install.
+        """Resolve the cloud-specific install pieces.
 
-        Returns ``None`` (after logging) when the install cannot proceed -- e.g.
+        With the state bucket required, an install that cannot proceed -- e.g.
         Azure when the bucket-write managed identity the sync authenticates as is
-        absent, so installing the daemon would only 403.
+        absent, so the daemon would only 403 -- raises (failing create) rather than
+        skipping, since a silently unreadable offline host_dir would otherwise
+        surface only later.
         """
         ...
 
@@ -922,14 +947,10 @@ class BucketHostDirBackend(HostDirBackend):
         return HostVolume(volume=self.bucket.volume_for_host(host_id))
 
     def volume(self, host_id: HostId) -> HostVolume | None:
-        try:
-            if not self.bucket.host_dir_prefix_has_objects(host_id):
-                self._warn_if_identity_missing(host_id)
-                return None
-        except self.bucket_error_type as e:
-            logger.warning(
-                "Could not probe host_dir prefix for host {}; treating volume as unavailable: {}", host_id, e
-            )
+        # A bucket probe error propagates (operational failure, surfaced per
+        # --on-error); only a genuinely empty prefix yields None.
+        if not self.bucket.host_dir_prefix_has_objects(host_id):
+            self._warn_if_identity_missing(host_id)
             return None
         return self.volume_reference(host_id)
 
@@ -954,413 +975,37 @@ class BucketHostDirBackend(HostDirBackend):
         ...
 
 
-# Per-agent records are mirrored into a key-value map (instance tags or GCE
-# metadata) as up to three entries per agent, keyed ``mngr-agent-<agent_id>-<field>``
-# (the agent id lives in the key), so a stopped instance still surfaces its agents
-# in discovery and resolves by name.
-AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
-AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
-# Max length of a single instance/VM tag value (EC2 and Azure both cap at 256).
-_MAX_TAG_VALUE_LEN: Final[int] = 256
-# The host-name value is stored as ``mngr-<host_name>``; strip the prefix to
-# recover the bare host name when reconstructing a stopped host.
-_HOST_NAME_VALUE_PREFIX: Final[str] = "mngr-"
-# Key constants mngr writes at launch, shared by every key-value mirror (tags and
-# GCE metadata use the same keys for host-id and created-at; only the host-name key
-# differs per provider).
-_HOST_ID_KEY: Final[str] = "mngr-host-id"
-_CREATED_AT_KEY: Final[str] = "mngr-created-at"
+# Identity tags a stopped instance still carries (host id + name), read cheaply
+# during discovery to label a STOPPED host; the authoritative records live in the
+# external state store. The host-name value is stored as ``mngr-<host_name>``.
+_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
 
 
-class KeyValueMirrorVpsProvider(OfflineCapableVpsProvider):
-    """``OfflineCapableVpsProvider`` whose offline mirror lives in a key-value map.
+def normalized_tags_to_dict(instance: Mapping[str, Any]) -> dict[str, str]:
+    """Turn an instance's normalized ``["key=value", ...]`` tag/label list into a dict (split on first ``=``).
 
-    The mirror is a ``dict[str, str]`` derived from the instance -- GCE *metadata*
-    (GCP) or the instance's ``key=value`` *tags* (AWS/Azure, via
-    ``TagMirrorVpsProvider``). This class owns the entire read-side reconstruction
-    over that map: reassembling per-agent records, building STOPPED discovered/offline
-    hosts, and resolving instances by host id. Subclasses supply the map
-    (``_offline_kv_map``), the optional per-value length cap (``_max_value_len``),
-    and the host-name key (``_host_name_key``); the agent-record *write* side stays
-    per-provider (the tag vs metadata write APIs differ too much to share).
+    Shared by the tag/label-keyed providers (AWS EC2 tags, Azure VM tags, GCE
+    labels) to read the ``mngr-*`` identity tags a stopped instance carries.
     """
-
-    @abstractmethod
-    def _offline_kv_map(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """The instance's offline mirror as a key-value map (GCE metadata, or split ``key=value`` tags)."""
-        ...
-
-    def _max_value_len(self) -> int | None:
-        """Max length of one mirrored value, or None when uncapped.
-
-        Tag-backed providers cap at 256 (EC2/Azure); GCE metadata is uncapped (None).
-        """
-        return None
-
-    def _host_id_key(self) -> str:
-        """Key whose value holds the host id. Shared by tags and GCE metadata."""
-        return _HOST_ID_KEY
-
-    @abstractmethod
-    def _host_name_key(self) -> str:
-        """Key whose value holds ``mngr-<host_name>`` (EC2: ``Name``; Azure/GCP: ``mngr-host-name``)."""
-        ...
-
-    def _created_at_key(self) -> str:
-        """Key whose value holds the ISO-8601 created-at timestamp. Shared by tags and GCE metadata."""
-        return _CREATED_AT_KEY
-
-    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Return every cached instance whose host-id key in the mirror equals ``host_id``."""
-        wanted = str(host_id)
-        return [
-            instance
-            for instance in self._list_instances_cached()
-            if self._offline_kv_map(instance).get(self._host_id_key()) == wanted
-        ]
-
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return the SSH-reachable public IPs of this provider's instances.
-
-        Every cloud (AWS/GCP/Azure) provider reaches this point with resolvable
-        credentials: ``build_provider_instance`` raises ``ProviderUnavailableError``
-        when the session/subscription/credentials cannot be resolved, so the live
-        listing is always available here. A stopped EC2/GCE instance loses its
-        ephemeral IP and is naturally excluded by the non-empty ``main_ip`` check; a
-        *deallocated* Azure VM keeps its Static IP, so it is still listed and then
-        fails fast over the bounded SSH connect timeout before being reconstructed
-        offline -- this keeps discovery uniform (no power-state-specific branch).
-        """
-        vps_ips: list[str] = []
-        for instance in self._list_instances_cached():
-            main_ip = instance.get("main_ip", "")
-            if main_ip:
-                vps_ips.append(main_ip)
-        return vps_ips
-
-    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
-        """Render one agent field as a mirror-value string, or ``None`` if absent/empty.
-
-        ``name``/``type`` are stored raw; ``labels`` as compact JSON (empty labels
-        are treated as absent so no ``-labels`` entry is written).
-        """
-        if field == "labels":
-            labels = agent_data.get("labels")
-            return json.dumps(labels, separators=(",", ":")) if labels else None
-        value = agent_data.get(field)
-        return None if value is None else str(value)
-
-    def _agent_field_items(
-        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
-    ) -> tuple[dict[str, str], list[str]]:
-        """Compute the ``mngr-agent-<id>-<field>`` entries to set, and stale ones to delete.
-
-        Returns ``(items_to_set, keys_to_delete)``. ``persist_agent_data`` is an
-        upsert that is sometimes called with a *partial* record (e.g. an update
-        carrying only ``id``/``type``), so a field absent from ``agent_data`` means
-        "unchanged" -- it is left alone, NOT removed (deleting it would clobber the
-        ``name`` entry that offline resolve-by-name depends on). A field that *is*
-        present but renders empty (e.g. ``labels={}``, an explicit removal) or
-        overflows ``_max_value_len`` (realistically only ``labels``, and only when a
-        cap is set) is dropped and its existing entry, if any, is deleted so no stale
-        value lingers. The agent id is carried in the *key*, not a value.
-        """
-        max_len = self._max_value_len()
-        set_items: dict[str, str] = {}
-        delete_keys: list[str] = []
-        for field in AGENT_TAG_FIELDS:
-            if field not in agent_data:
-                continue
-            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
-            value = self._agent_field_value(field, agent_data)
-            if value is not None and (max_len is None or len(value) <= max_len):
-                set_items[key] = value
-                continue
-            # Present but empty (an explicit removal, e.g. labels={}) or too large
-            # for a single entry: drop it, and delete any existing entry so no stale
-            # value lingers. Only oversized values warrant a warning.
-            if value is not None and max_len is not None:
-                logger.warning(
-                    "Agent {} {} ({} chars) exceeds the {}-char tag limit; omitted from the stopped-host tag mirror",
-                    agent_data.get("name", agent_id),
-                    field,
-                    len(value),
-                    max_len,
-                )
-            delete_keys.append(key)
-        existing = set(self._offline_kv_map(instance))
-        return set_items, [key for key in delete_keys if key in existing]
-
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` mirror entries.
-
-        Groups the per-field entries by agent id (recovered from the key, split on
-        the final ``-`` so ids may themselves contain dashes), and rebuilds one
-        dict per agent. A malformed/externally-edited ``-labels`` entry (not valid
-        JSON, or not a JSON object) is skipped for that field with a warning rather
-        than crashing the discovery sweep.
-        """
-        by_id: dict[str, dict] = {}
-        for key, value in self._offline_kv_map(instance).items():
-            if not key.startswith(AGENT_TAG_PREFIX):
-                continue
-            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
-            if not sep or field not in AGENT_TAG_FIELDS:
-                continue
-            record = by_id.setdefault(agent_id, {"id": agent_id})
-            if field == "labels":
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping unparseable agent labels mirror entry {!r}", key)
-                    continue
-                if not isinstance(parsed, dict):
-                    logger.warning("Skipping agent labels mirror entry {!r}: value is not a JSON object", key)
-                    continue
-                record["labels"] = parsed
-            else:
-                record[field] = value
-        return list(by_id.values())
-
-    def _host_name_from_kv_map(self, kv_map: Mapping[str, str]) -> HostName:
-        """Recover the host name from the ``<host_name_key>=mngr-<host_name>`` entry (fallback: host-id)."""
-        name_value = kv_map.get(self._host_name_key(), "")
-        if name_value.startswith(_HOST_NAME_VALUE_PREFIX):
-            return HostName(name_value[len(_HOST_NAME_VALUE_PREFIX) :])
-        if name_value:
-            return HostName(name_value)
-        return HostName(kv_map.get(self._host_id_key(), "unknown"))
-
-    def _created_at_from_kv_map(self, kv_map: Mapping[str, str], host_id: HostId) -> datetime | None:
-        """Parse the created-at entry (ISO-8601 UTC) written verbatim at launch, or None on failure.
-
-        ``create_instance`` writes ``datetime.isoformat()``, so reconstruct with
-        ``datetime.fromisoformat``. A malformed/externally-edited value yields None
-        (the caller falls back to now()) and is surfaced at WARNING -- a parse
-        failure means the entry was edited/corrupted, not something to swallow.
-        """
-        raw = kv_map.get(self._created_at_key())
-        if not raw:
-            return None
-        try:
-            return datetime.fromisoformat(raw)
-        except ValueError as e:
-            logger.opt(exception=e).warning(
-                "Malformed mngr-created-at value {!r} on host {}; falling back to now()", raw, host_id
-            )
-            return None
-
-    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from an instance's mirror, or None if not a mngr host."""
-        kv_map = self._offline_kv_map(instance)
-        host_id_str = kv_map.get(self._host_id_key())
-        if host_id_str is None:
-            return None
-        return DiscoveredHost(
-            host_id=HostId(host_id_str),
-            host_name=self._host_name_from_kv_map(kv_map),
-            provider_name=self.name,
-            host_state=HostState.STOPPED,
-        )
-
-    def _host_record_from_instance(self, instance: Mapping[str, Any]) -> VpsHostRecord:
-        """Build a minimal STOPPED host record from a stopped instance's own ``mngr-*`` mirror entries.
-
-        Uses only the base entries mngr writes at launch (host-id, host-name,
-        created-at), so it works regardless of the external-store mode -- including a
-        bucket-mode host created before the bucket existed (whose ``host_state.json``
-        is absent).
-        """
-        kv_map = self._offline_kv_map(instance)
-        host_id = HostId(kv_map.get(self._host_id_key(), ""))
-        now = datetime.now(timezone.utc)
-        created_at = self._created_at_from_kv_map(kv_map, host_id) or now
-        certified = CertifiedHostData(
-            host_id=str(host_id),
-            host_name=str(self._host_name_from_kv_map(kv_map)),
-            created_at=created_at,
-            updated_at=now,
-            stop_reason=HostState.STOPPED.value,
-        )
-        return VpsHostRecord(certified_host_data=certified)
-
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its mirror."""
-        del host_id
-        return self._create_offline_host(self._host_record_from_instance(instance))
+    tags: dict[str, str] = {}
+    for kv in instance.get("tags", ()):
+        key, sep, value = kv.partition("=")
+        if sep:
+            tags[key] = value
+    return tags
 
 
-class TagMirrorVpsProvider(KeyValueMirrorVpsProvider):
-    """``KeyValueMirrorVpsProvider`` whose offline mirror lives in key=value instance tags.
+def host_name_from_tags(tags: Mapping[str, str], name_tag_key: str) -> HostName:
+    """Recover the host name from the ``<name_tag_key>=mngr-<host_name>`` identity tag.
 
-    AWS (EC2 tags) and Azure (VM tags) mirror the host name and per-agent records
-    into the instance's own ``mngr-*`` tags, so a stopped instance still lists and
-    resolves by name from the tag listing alone. This class supplies the tag-backed
-    key-value map and the external-store (object-storage bucket, when present)
-    routing on top of the shared read-side reconstruction. GCP differs (it mirrors
-    into GCE metadata, not tags) and so extends ``KeyValueMirrorVpsProvider``
-    directly instead.
+    Strips the ``mngr-`` prefix; falls back to the raw tag value, then to the
+    ``mngr-host-id`` tag, when the name tag is missing/unprefixed. Used only to
+    label a STOPPED host in discovery -- the authoritative name lives in the full
+    record in the external state store.
     """
-
-    @property
-    @abstractmethod
-    def _state_bucket(self) -> StateBucket | None:
-        """The object-storage state bucket when it actually exists, else None (use the tag mirror).
-
-        A ``@cached_property`` on the concrete providers, so the existence probe
-        (S3 ``bucket_exists`` / Azure account+container) runs at most once. The
-        probe itself is cloud-specific and stays per-provider; this base only
-        consumes the result.
-        """
-        ...
-
-    @abstractmethod
-    def _bucket_error_type(self) -> type[MngrError]:
-        """The bucket's operation-failure exception type (``S3StateBucketError`` / ``BlobStateBucketError``)."""
-        ...
-
-    @abstractmethod
-    def _bucket_label(self) -> str:
-        """Human-readable bucket name for logs (``S3 state bucket`` / ``Azure state bucket``)."""
-        ...
-
-    @cached_property
-    def _state_store(self) -> HostStateStore:
-        """The external host/agent-record mirror: the bucket when present, else the tag store.
-
-        Selecting one store here lets the offline read/write paths below stop
-        branching on bucket-vs-tags. The bucket-existence probe is amortized via
-        ``_state_bucket`` (cached on the concrete provider), so this runs it once.
-        """
-        bucket = self._state_bucket
-        if bucket is not None:
-            return BucketHostStateStore(
-                bucket=bucket,
-                bucket_error_type=self._bucket_error_type(),
-                bucket_label=self._bucket_label(),
-                fallback=TagHostStateStore(provider=self),
-            )
-        return TagHostStateStore(provider=self)
-
-    @abstractmethod
-    def _remove_instance_tags(self, instance: Mapping[str, Any], keys: Sequence[str]) -> None:
-        """Remove the given tag keys from this provider's instance (EC2 / Azure VM tag API). Idempotent."""
-        ...
-
-    @abstractmethod
-    def _persist_agent_to_tags(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        """Mirror one agent record into the instance's per-field ``mngr-*`` tags (no-bucket fallback)."""
-        ...
-
-    def to_offline_host(self, host_id: HostId) -> OfflineHost:
-        """Return an offline host, reconstructing a stopped instance's record from the external store.
-
-        Falls back to the SSH/volume-backed base path first; if that can't find the
-        host (stopped and unreachable), reconstruct it from the external store --
-        the full ``VpsHostRecord`` when the store has it (bucket ``host_state.json``),
-        otherwise the instance's own tags (which also covers a bucket-mode host
-        created before the bucket existed). Calls the SSH-only ``VpsProvider`` path
-        directly so the ``OfflineCapableVpsProvider`` tag fallback does not pre-empt
-        this store-aware reconstruction.
-        """
-        try:
-            return VpsProvider.to_offline_host(self, host_id)
-        except HostNotFoundError:
-            record = self._state_store.read_host_record(host_id)
-            if record is None:
-                raise
-            return self._create_offline_host(record)
-
-    def _offline_kv_map(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
-        tags: dict[str, str] = {}
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if sep:
-                tags[key] = value
-        return tags
-
-    def _max_value_len(self) -> int | None:
-        return _MAX_TAG_VALUE_LEN
-
-    def _mirror_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        self._state_store.persist_agent_record(host_id, agent_id, agent_data)
-
-    def _remove_mirrored_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        self._state_store.remove_agent_record(host_id, agent_id)
-
-    def _offline_agent_dicts_for(self, host_id: HostId, instance: Mapping[str, Any] | None = None) -> list[dict]:
-        """Read a stopped host's agent records from the external store (bucket or tag mirror).
-
-        Overrides the base tag/metadata reconstruction so a bucket-mode host --
-        whose agents live in the bucket, not in tags -- still surfaces its agents
-        offline. ``_state_store`` selects bucket vs tags; ``instance`` is unused (the
-        store is keyed by ``host_id``).
-        """
-        del instance
-        return self._state_store.list_agent_records(host_id)
-
-    def _persist_host_record_externally(self, record: VpsHostRecord) -> None:
-        """Mirror the full host record into the external store (best-effort).
-
-        The bucket writes the full record; the tag store is a no-op (the instance's
-        own tags carry it).
-        """
-        self._state_store.persist_host_record(record)
-
-    def _delete_host_record_externally(self, host_id: HostId) -> None:
-        """Delete the host's state from the external store (best-effort, idempotent).
-
-        The bucket deletes the host's prefix; the tag store is a no-op (destroying
-        the instance drops its tags).
-        """
-        self._state_store.delete_host_state(host_id)
-
-    def _host_record_from_instance_tags(self, host_id: HostId) -> VpsHostRecord | None:
-        """Rebuild a minimal STOPPED host record from the instance's own ``mngr-*`` tags, or None.
-
-        Returns None when no instance carries the host's tag. Backs the tag store's
-        ``read_host_record`` and the universal fallback in ``to_offline_host``.
-        """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return None
-        return self._host_record_from_instance(instance)
-
-
-class TagHostStateStore(HostStateStore):
-    """Tag-backed host-state mirror: the instance's own ``mngr-*`` tags are the store (no-bucket fallback).
-
-    Shared by AWS (EC2 tags) and Azure (VM tags). Compact (256-char per value, and
-    on EC2 a 50-tag-per-instance ceiling) and keyed off the live instance, so the
-    host record / agent records are reconstructed from the instance's tags. All tag
-    I/O is delegated to the owning ``TagMirrorVpsProvider``, which resolves
-    instances from its cached listing; the only cloud-specific step (the tag-removal
-    API call) goes through the provider's ``_remove_instance_tags`` hook.
-    """
-
-    provider: TagMirrorVpsProvider
-
-    def persist_host_record(self, record: VpsHostRecord) -> None:
-        # The instance's own create/stop tags carry the host record; nothing extra to write.
-        pass
-
-    def delete_host_state(self, host_id: HostId) -> None:
-        # Destroying the instance drops its tags, so there is no separate state to delete.
-        pass
-
-    def persist_agent_record(self, host_id: HostId, agent_id: str, agent_data: Mapping[str, object]) -> None:
-        self.provider._persist_agent_to_tags(host_id, agent_id, agent_data)
-
-    def remove_agent_record(self, host_id: HostId, agent_id: str) -> None:
-        instance = self.provider._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in AGENT_TAG_FIELDS]
-        self.provider._remove_instance_tags(instance, keys)
-
-    def list_agent_records(self, host_id: HostId) -> list[dict]:
-        return self.provider._agent_dicts_from_tags(host_id)
-
-    def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
-        return self.provider._host_record_from_instance_tags(host_id)
+    name_tag = tags.get(name_tag_key, "")
+    if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
+        return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
+    if name_tag:
+        return HostName(name_tag)
+    return HostName(tags.get("mngr-host-id", "unknown"))
