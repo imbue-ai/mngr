@@ -12,6 +12,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
 from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
+from imbue.mngr_gcp.state_bucket import GcsStateBucket
 from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 
 # OAuth scope granting full access to all Google Cloud Platform APIs. Only
@@ -179,6 +180,24 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
         default=DEFAULT_SERVICE_ACCOUNT_SCOPES,
         description="OAuth scopes for the attached service account (only used when service_account_email is set).",
     )
+    state_bucket_name: str | None = Field(
+        default=None,
+        description=(
+            "GCS bucket where mngr stores a stopped instance's offline host_dir mirror so it is "
+            "readable without starting the instance. When None, named 'mngr-state-<project_id>'. The "
+            "bucket is provisioned by `mngr gcp prepare` and only used when "
+            "`is_offline_host_dir_enabled` is on; the host + agent records still live in GCE "
+            "instance metadata regardless."
+        ),
+    )
+    is_offline_host_dir_enabled: bool = Field(
+        default=True,
+        description=(
+            "When on (default), a stopped instance's host_dir is readable without starting it, so "
+            "`mngr event` / `mngr transcript` / `mngr file` work against it. `mngr gcp prepare` sets "
+            "up the GCS bucket it needs. Set False to turn it off."
+        ),
+    )
 
     def get_credentials_and_resolved_project(self) -> tuple[Credentials, str | None]:
         """Resolve Google Application Default Credentials and the project ADC infers.
@@ -276,3 +295,42 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
                 "Check default_zone / default_region (or the active 'gcloud config get compute/zone')."
             )
         return zone, region
+
+    def resolve_state_bucket_region(self, zone: str) -> str:
+        """Return the region the GCS state bucket should live in.
+
+        Explicit ``default_region`` wins; otherwise the region is derived from
+        the resolved zone (GCE zones are ``<region>-<suffix>``). Used by both
+        the operator CLI (``mngr gcp prepare`` / ``cleanup``) and the runtime
+        provider so they pin the bucket to the same region.
+        """
+        return self.default_region or zone.rsplit("-", 1)[0]
+
+    def resolve_state_bucket_name(self, project_id: str) -> str:
+        """Return the effective state-bucket name.
+
+        ``state_bucket_name`` wins when set. Otherwise derive
+        ``mngr-state-<project_id>``. GCS bucket names are globally unique but
+        scoped per project, and a GCP project id is already DNS-valid lowercase,
+        so the derived name is anchored on the project alone (no extra hash is
+        needed). Always derivable: unlike AWS, which needs an STS call to learn
+        the account id, the project id is known at config-resolution time.
+        """
+        if self.state_bucket_name:
+            return self.state_bucket_name
+        return f"mngr-state-{project_id}"
+
+    def build_state_bucket(self, credentials: Credentials, project_id: str, region: str) -> GcsStateBucket:
+        """Build a ``GcsStateBucket`` from this config + the resolved credentials / project / region.
+
+        The bucket name is always derivable, so this never returns None -- the
+        provider gates on whether the bucket actually *exists* (i.e. whether
+        ``mngr gcp prepare`` created it), not on whether a name can be built.
+        Mirrors ``AzureProviderConfig.build_state_bucket``.
+        """
+        return GcsStateBucket(
+            credentials=credentials,
+            project_id=project_id,
+            region=region,
+            bucket_name=self.resolve_state_bucket_name(project_id),
+        )

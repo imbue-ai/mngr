@@ -14,6 +14,9 @@ dependencies = [
     # packages are not needed -- the SDK's request/response types are checked
     # directly.
     "google-cloud-compute>=1.19",
+    # Backs the offline ``host_dir`` mirror written at ``mngr stop`` (the GCP
+    # analog of AWS S3 / Azure Blob storage). See ``state_bucket.py``.
+    "google-cloud-storage>=2.18",
     "google-auth>=2.28",
 ]
 
