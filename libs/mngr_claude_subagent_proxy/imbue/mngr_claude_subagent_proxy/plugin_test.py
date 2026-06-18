@@ -29,6 +29,7 @@ from imbue.mngr_claude_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_claude_subagent_proxy.plugin import UnguardedProjectStopHookError
 from imbue.mngr_claude_subagent_proxy.plugin import UnignoredProxyArtifactError
 from imbue.mngr_claude_subagent_proxy.plugin import UnsupportedSubagentHookError
+from imbue.mngr_claude_subagent_proxy.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude_subagent_proxy.plugin import _guard_user_stop_hooks_in_project_settings
 from imbue.mngr_claude_subagent_proxy.plugin import cascade_destroy_recorded_children
 from imbue.mngr_claude_subagent_proxy.plugin import on_after_provisioning
@@ -859,3 +860,64 @@ def test_guard_user_stop_hooks_skips_gitignore_check_when_nothing_to_guard(
 
     # Should not raise: no write happens, so the gitignore requirement never applies.
     _guard_user_stop_hooks_in_project_settings(host, work_dir)
+
+
+def test_gitignore_check_passes_when_claude_is_symlink_and_resolved_path_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should pass when .claude is a symlink and the resolved path is gitignored."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create .agents directory and symlink .claude -> .agents
+    (repo_dir / ".agents").mkdir()
+    (repo_dir / ".claude").symlink_to(".agents")
+
+    # Gitignore the resolved path (what git actually sees)
+    (repo_dir / ".gitignore").write_text(".agents/settings.local.json\n")
+
+    # Should not raise
+    _check_settings_local_gitignored(host, repo_dir)
+
+
+def test_gitignore_check_raises_when_claude_is_symlink_and_resolved_path_not_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should raise when .claude is a symlink and the resolved path is not gitignored."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create .agents directory and symlink .claude -> .agents
+    (repo_dir / ".agents").mkdir()
+    (repo_dir / ".claude").symlink_to(".agents")
+
+    # Gitignore the symlink path (wrong -- git won't match this)
+    (repo_dir / ".gitignore").write_text(".claude/settings.local.json\n")
+
+    with pytest.raises(PluginMngrError, match="not gitignored") as exc_info:
+        _check_settings_local_gitignored(host, repo_dir)
+
+    # Error message should tell the user to add the resolved path, not the symlink path
+    assert ".agents/settings.local.json" in str(exc_info.value)
+
+
+def test_gitignore_check_skips_when_claude_symlink_points_outside_repo(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should silently return when .claude symlink target is outside the repo."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create a directory outside the repo and symlink .claude to it
+    outside_dir = tmp_path / "outside_agents"
+    outside_dir.mkdir()
+    (repo_dir / ".claude").symlink_to(outside_dir)
+
+    # Should not raise -- target is outside the repo, git won't track it
+    _check_settings_local_gitignored(host, repo_dir)

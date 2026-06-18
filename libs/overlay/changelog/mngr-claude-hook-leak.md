@@ -12,9 +12,9 @@ Added the typed-node merge algebra as the new API (additive; the string-suffix A
 above stays present, unchanged, pending the mngr migration). Three frozen node
 wrappers (`Default` / `Assign` / `Extend`, in `nodes.py`) carry the operator in the
 value's *type* instead of a key-string suffix. `lift` turns a suffix-keyed surface
-dict into a node `Patch` (folding the within-layer "reset then add" once, up front);
-`lift_concrete` wraps a plain base dict as an all-`Default` patch for "merge against a
-concrete base". The node algebra (`node_merge.py`) provides `combine` / `finalize` /
+dict into a node `Patch` (folding the within-layer "reset then add" once, up front); a
+plain base dict with no suffix keys simply lifts to an all-`Default` patch, so `lift` is
+used for a concrete base too. The node algebra (`node_merge.py`) provides `combine` / `finalize` /
 `apply_extend` plus the public `merge` (raises `NarrowingError`, aggregating every
 narrowing path) and `merge_narrowing_allowed` (returns the patch and the paths without
 raising). Because the algebra never re-parses a field name or unwraps a payload to look

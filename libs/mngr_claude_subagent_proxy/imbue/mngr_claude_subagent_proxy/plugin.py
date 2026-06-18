@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -30,7 +31,6 @@ from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
-from imbue.mngr_claude.plugin import check_settings_local_gitignored
 from imbue.mngr_claude_subagent_proxy import hookimpl
 from imbue.mngr_claude_subagent_proxy import resources as _subagent_proxy_resources
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
@@ -278,6 +278,30 @@ def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, 
     )
 
 
+def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path) -> None:
+    """Verify .claude/settings.local.json is gitignored in the given repo path.
+
+    The proxy wraps user-defined Stop hooks by writing into this file; if it is
+    not gitignored the write would surface as an unstaged change. When .claude is
+    a symlink, resolves it and checks the resolved path against .gitignore instead
+    (e.g. .agents/settings.local.json if .claude -> .agents).
+
+    Raises PluginMngrError if the file is not gitignored. Silently returns if the
+    path is not a git repository or if the .claude symlink target is outside the
+    repo (since git won't track it).
+    """
+    settings_subpath = Path(".claude") / "settings.local.json"
+    status, settings_relative = check_path_gitignore_status(host, repo_path, settings_subpath)
+    if status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED):
+        return
+    raise PluginMngrError(
+        f"'{settings_relative}' is not gitignored in {repo_path}.\n"
+        "mngr writes to this file (to guard user-defined Stop hooks against proxy children), "
+        "but it would appear as an unstaged change.\n"
+        f"Add '{settings_relative}' to your .gitignore and try again."
+    )
+
+
 def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> None:
     """Write the mngr-proxy subagent definition under the agent's .claude/agents/.
 
@@ -381,7 +405,7 @@ def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_d
     if settings is None:
         return
     if guard_user_stop_hooks_against_proxy_children(settings):
-        check_settings_local_gitignored(host, work_dir)
+        _check_settings_local_gitignored(host, work_dir)
         host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
 
 
@@ -729,7 +753,7 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
 
     if not stripped_any:
         return
-    check_settings_local_gitignored(host, work_dir)
+    _check_settings_local_gitignored(host, work_dir)
     logger.info("Stripped user-configured hooks from spawned subagent settings at {}", settings_path)
     host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
 

@@ -38,8 +38,6 @@ from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_di
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
-from imbue.mngr.api.git import GitignoreStatus
-from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
@@ -344,17 +342,20 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
 
 
-def build_mngr_hook_configs(config: ClaudeAgentConfig) -> list[dict[str, Any]]:
+def build_mngr_hook_configs(config: ClaudeAgentConfig, *, is_unattended: bool) -> list[dict[str, Any]]:
     """Build the list of mngr hook configs to fold into a Claude settings file.
 
     Always includes the readiness hooks. Adds the macOS keychain credential-sync
     hook when ``sync_credentials_on_login`` is set (on macOS), and the permission
-    auto-allow hook when ``auto_allow_permissions`` is set.
+    auto-allow hook when the agent runs unattended. The caller passes
+    ``is_unattended`` from the ``HasUnattendedModeMixin`` contract
+    (``is_unattended_enabled``) so the gate cannot drift from that contract; the
+    agent-less deploy path passes the equivalent config field directly.
     """
     hook_configs = [build_readiness_hooks_config()]
     if config.sync_credentials_on_login and is_macos():
         hook_configs.append(build_credential_sync_hooks_config())
-    if config.auto_allow_permissions:
+    if is_unattended:
         hook_configs.append(build_permission_auto_allow_hooks_config())
     return hook_configs
 
@@ -539,6 +540,7 @@ def _build_settings_json(
     ctx: ProvisioningContext,
     sync_local: bool,
     *,
+    is_unattended: bool = False,
     allow_narrowing: bool = False,
 ) -> str:
     """Build settings.json content for per-agent config dirs.
@@ -577,7 +579,7 @@ def _build_settings_json(
 
     # Fold in mngr's own hooks (concatenated into the hook event lists by
     # merge_hooks_config).
-    data = fold_hook_configs(data, build_mngr_hook_configs(config))
+    data = fold_hook_configs(data, build_mngr_hook_configs(config, is_unattended=is_unattended))
 
     # Normalize the base ``B``: lift any ``__extend`` a user may have placed in
     # their home settings.json into nodes and finalize against nothing
@@ -1362,31 +1364,6 @@ def _has_api_credentials_available(
     return False
 
 
-def check_settings_local_gitignored(
-    host: OnlineHostInterface,
-    repo_path: Path,
-) -> None:
-    """Verify .claude/settings.local.json is gitignored in the given repo path.
-
-    When .claude is a symlink, resolves it and checks the resolved path against
-    .gitignore instead (e.g. .agents/settings.local.json if .claude -> .agents).
-
-    Raises PluginMngrError if the file is not gitignored. Silently returns
-    if the path is not a git repository or if the .claude symlink target is
-    outside the repo (since git won't track it).
-    """
-    settings_subpath = Path(".claude") / "settings.local.json"
-    status, settings_relative = check_path_gitignore_status(host, repo_path, settings_subpath)
-    if status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED):
-        return
-    raise PluginMngrError(
-        f"'{settings_relative}' is not gitignored in {repo_path}.\n"
-        "mngr writes to this file (to guard user-defined Stop hooks against proxy children), "
-        "but it would appear as an unstaged change.\n"
-        f"Add '{settings_relative}' to your .gitignore and try again."
-    )
-
-
 class DialogIndicator(FrozenModel, ABC):
     """Base class for dialog indicators that can block agent input."""
 
@@ -1656,7 +1633,9 @@ class ClaudeCoreAgent(
         """
         # The always-on readiness hooks, plus the optional credential-sync
         # (macOS) and permission auto-allow hooks.
-        settings = fold_hook_configs({}, build_mngr_hook_configs(self.agent_config))
+        settings = fold_hook_configs(
+            {}, build_mngr_hook_configs(self.agent_config, is_unattended=self.is_unattended_enabled())
+        )
 
         settings_path = get_managed_settings_path(self._get_agent_dir())
         # The plugin/claude/ parent may not exist yet (in use_env_config_dir
@@ -1760,6 +1739,7 @@ class ClaudeCoreAgent(
             config,
             ctx,
             sync_local=config.sync_home_settings,
+            is_unattended=self.is_unattended_enabled(),
             allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
         )
 
@@ -2756,12 +2736,15 @@ def get_files_for_deploy(
     deploy_ctx = ProvisioningContext(is_unattended=True, copy_project_config_from=None)
     deploy_config = ClaudeAgentConfig()
 
-    # settings.json always ships (generated, not a direct copy)
+    # settings.json always ships (generated, not a direct copy). There is no agent
+    # instance here, so the unattended gate reads the config field directly -- the
+    # field-based equivalent of Claude's is_unattended_enabled().
     files[Path("~/.claude/settings.json")] = _build_settings_json(
         local_claude_dir,
         deploy_config,
         deploy_ctx,
         sync_local=include_user_settings,
+        is_unattended=deploy_config.auto_allow_permissions,
         allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
     )
 
