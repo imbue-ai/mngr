@@ -213,7 +213,7 @@ def test_provision_preserves_user_cmd_when_only_in_settings_local(local_host: Ho
 def test_hookimpl_skips_non_claude_agent(
     local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext, tmp_path: Path
 ) -> None:
-    """The hookimpl filters with isinstance(agent, ClaudeAgent). A real non-Claude
+    """The hookimpl filters with isinstance(agent, ClaudeCoreAgent). A real non-Claude
     agent (a plain BaseAgent of the 'generic' type) must be a no-op -- no host
     commands dir, no settings.local.json. The agent runs on a real host, so
     removing the isinstance guard would let provisioning actually run and create

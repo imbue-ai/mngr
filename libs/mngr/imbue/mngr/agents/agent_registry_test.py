@@ -12,6 +12,7 @@ from imbue.mngr.agents.agent_registry import list_selectable_agent_type_names
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.default_plugins.command_agent import CommandAgent
 from imbue.mngr.agents.default_plugins.headless_command_agent import HeadlessCommandConfig
 from imbue.mngr.config.agent_alias_registry import is_agent_alias
 from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
@@ -268,7 +269,7 @@ def test_alias_is_skipped_when_name_collides_with_existing_type() -> None:
     _load_with_plugins(_BadAliasPlugin())
 
     # The built-in "command" type's class must be untouched by the colliding alias.
-    assert get_agent_class("command") is BaseAgent
+    assert get_agent_class("command") is CommandAgent
     assert not is_agent_alias("command")
 
 
