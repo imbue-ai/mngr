@@ -32,11 +32,7 @@ from pydantic import SecretStr
 from imbue.imbue_common.logging import setup_logging
 from imbue.mngr_vultr.cleanup import cleanup_old_vultr_test_instances
 from imbue.mngr_vultr.client import VultrVpsClient
-
-# os_id is required by the VultrVpsClient constructor but only used by
-# create_instance, which the reaper never calls. Mirrors the hardcoded id in
-# conftest.py and test_release_vultr.py.
-_REAPER_OS_ID = 2136
+from imbue.mngr_vultr.testing import VULTR_TEST_OS_ID
 
 
 def main() -> int:
@@ -58,7 +54,7 @@ def main() -> int:
         print("VULTR_API_KEY not set; skipping Vultr test instance cleanup")
         return 0
 
-    client = VultrVpsClient(api_key=SecretStr(api_key), os_id=_REAPER_OS_ID)
+    client = VultrVpsClient(api_key=SecretStr(api_key), os_id=VULTR_TEST_OS_ID)
     cleaned_count = cleanup_old_vultr_test_instances(
         client,
         max_age=timedelta(hours=args.max_age_hours),

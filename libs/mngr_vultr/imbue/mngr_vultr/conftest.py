@@ -66,6 +66,7 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vultr.cleanup import build_test_created_tag
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.testing import VULTR_RELEASE_TESTS_OPT_IN
+from imbue.mngr_vultr.testing import VULTR_TEST_OS_ID
 
 _SESSION_TAG_KEY: Final[str] = "mngr-vultr-test-session"
 _SESSION_TAG: Final[str] = f"{_SESSION_TAG_KEY}={uuid.uuid4().hex}"
@@ -242,9 +243,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             _mark_session_failed(session)
             return
         # os_id is required by the VultrVpsClient constructor but only used by
-        # create_instance, which we never call from this cleanup path. The
-        # value mirrors the hardcoded id in test_release_vultr.py's _build_client.
-        client = VultrVpsClient(api_key=SecretStr(api_key), os_id=2136)
+        # create_instance, which we never call from this cleanup path.
+        client = VultrVpsClient(api_key=SecretStr(api_key), os_id=VULTR_TEST_OS_ID)
         leaked = _list_leaked_instances(client)
         if not leaked:
             return
