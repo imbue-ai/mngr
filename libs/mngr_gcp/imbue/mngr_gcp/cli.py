@@ -158,11 +158,10 @@ def _build_state_bucket(base: GcpProviderConfig, client: GcpVpsClient) -> GcsSta
     ``mngr-state-<project_id>``). The bucket lives in the same region as the
     GCE instances writing to it (the resolved zone's region).
     """
-    region = base.default_region or client.zone.rsplit("-", 1)[0]
     return base.build_state_bucket(
         credentials=client.credentials,
         project_id=client.project_id,
-        region=region,
+        region=base.resolve_state_bucket_region(client.zone),
     )
 
 

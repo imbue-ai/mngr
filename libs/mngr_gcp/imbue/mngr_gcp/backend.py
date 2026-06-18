@@ -437,7 +437,7 @@ class GcpProvider(OfflineCapableVpsProvider):
         it, so reads/writes from the operator's mngr CLI hit the closest endpoint.
         Falls back to the zone's region when ``default_region`` is unset.
         """
-        return self.gcp_config.default_region or self.gcp_client.zone.rsplit("-", 1)[0]
+        return self.gcp_config.resolve_state_bucket_region(self.gcp_client.zone)
 
     @cached_property
     def _host_dir_backend(self) -> HostDirBackend:

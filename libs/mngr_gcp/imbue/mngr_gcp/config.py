@@ -296,6 +296,16 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
             )
         return zone, region
 
+    def resolve_state_bucket_region(self, zone: str) -> str:
+        """Return the region the GCS state bucket should live in.
+
+        Explicit ``default_region`` wins; otherwise the region is derived from
+        the resolved zone (GCE zones are ``<region>-<suffix>``). Used by both
+        the operator CLI (``mngr gcp prepare`` / ``cleanup``) and the runtime
+        provider so they pin the bucket to the same region.
+        """
+        return self.default_region or zone.rsplit("-", 1)[0]
+
     def resolve_state_bucket_name(self, project_id: str) -> str:
         """Return the effective state-bucket name.
 
