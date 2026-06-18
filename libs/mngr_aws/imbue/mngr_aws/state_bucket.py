@@ -84,6 +84,11 @@ class S3StateBucket(BaseStateBucket):
         already-prepared bucket issues no write. The created bucket is private
         (public access blocked), encrypted at rest with SSE-S3, and tagged
         ``managed-by=mngr``.
+
+        A ``BucketAlreadyOwnedByYou`` from the create (two concurrent ``prepare``
+        runs, or the HeadBucket having raced the create) is treated as an
+        idempotent no-op rather than an error: the bucket is ours, so we still
+        apply the (idempotent) hardening config and report it as not-created.
         """
         if self.bucket_exists():
             logger.debug("S3 state bucket {} already exists; skipping create", self.bucket_name)
@@ -92,8 +97,16 @@ class S3StateBucket(BaseStateBucket):
         # us-east-1 must omit LocationConstraint; every other region requires it.
         if self.region != _S3_DEFAULT_REGION:
             create_kwargs["CreateBucketConfiguration"] = {"LocationConstraint": self.region}
-        with _translate_s3_errors(self.bucket_name):
+        was_created = True
+        try:
             self._s3().create_bucket(**create_kwargs)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code != "BucketAlreadyOwnedByYou":
+                raise S3StateBucketError(f"Failed to create S3 bucket {self.bucket_name!r}: {e}") from e
+            logger.debug("S3 state bucket {} was created concurrently; applying config idempotently", self.bucket_name)
+            was_created = False
+        with _translate_s3_errors(self.bucket_name):
             self._s3().put_public_access_block(
                 Bucket=self.bucket_name,
                 PublicAccessBlockConfiguration={
@@ -113,8 +126,9 @@ class S3StateBucket(BaseStateBucket):
                 Bucket=self.bucket_name,
                 Tagging={"TagSet": [{"Key": state_keys.MANAGED_BY_TAG_KEY, "Value": state_keys.MANAGED_BY_TAG_VALUE}]},
             )
-        logger.info("Created S3 state bucket {} in region {}", self.bucket_name, self.region)
-        return True
+        if was_created:
+            logger.info("Created S3 state bucket {} in region {}", self.bucket_name, self.region)
+        return was_created
 
     def delete_bucket(self) -> None:
         """Empty and delete the bucket. Idempotent (no error if already absent)."""
