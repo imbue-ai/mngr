@@ -96,6 +96,8 @@ _SAMPLE_TRANSCRIPT_EVENTS: list[dict[str, Any]] = [
         "role": "assistant",
         "text": "ASSISTANT_MESSAGE_MARKER on it",
         "tool_calls": [],
+        "parts": [{"type": "text", "content": "ASSISTANT_MESSAGE_MARKER on it"}],
+        "parts_ordered": True,
         "model": "test-model",
     },
     {

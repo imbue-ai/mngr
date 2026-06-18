@@ -171,6 +171,10 @@ def convert(input_file: str, output_file: str) -> int:
                 if event_id in existing_ids:
                     continue
                 text = _join_content_text(payload.get("content"), "output_text")
+                # codex assistant messages are text-only (tool calls are separate
+                # response_items surfaced as tool_results), so parts is just the text and
+                # its order is trivially faithful.
+                parts = [{"type": "text", "content": text}] if text else []
                 new_events.append(
                     (
                         timestamp,
@@ -184,7 +188,9 @@ def convert(input_file: str, output_file: str) -> int:
                             "model": None,
                             "text": text,
                             "tool_calls": [],
-                            "stop_reason": None,
+                            "parts": parts,
+                            "parts_ordered": True,
+                            "finish_reason": None,
                             "usage": None,
                         },
                     )
@@ -201,15 +207,18 @@ def convert(input_file: str, output_file: str) -> int:
                 tool_call_id = f"line-{line_index}-tc"
                 tool_name = name if isinstance(name, str) else ""
                 input_preview = _truncate(arguments, _MAX_INPUT_PREVIEW_LENGTH)
-                pending_call_by_id[call_id] = {
+                tool_call = {
                     "tool_call_id": tool_call_id,
                     "tool_name": tool_name,
                     "input_preview": input_preview,
                 }
+                pending_call_by_id[call_id] = tool_call
                 # Emit the invocation on the assistant turn (see module docstring): codex
                 # carries no assistant `message` for a tool call, so without this the
                 # canonical envelope would record the tool_result with no assistant
-                # tool_call. The tool_call_id matches the paired tool_result below.
+                # tool_call. The tool_call_id matches the paired tool_result below. Each
+                # call is its own rollout item, so the single tool_call part is trivially
+                # ordered -> parts_ordered=True.
                 event_id = f"line-{line_index}-assistant"
                 if event_id in existing_ids:
                     continue
@@ -225,14 +234,10 @@ def convert(input_file: str, output_file: str) -> int:
                             "role": "assistant",
                             "model": None,
                             "text": "",
-                            "tool_calls": [
-                                {
-                                    "tool_call_id": tool_call_id,
-                                    "tool_name": tool_name,
-                                    "input_preview": input_preview,
-                                }
-                            ],
-                            "stop_reason": None,
+                            "tool_calls": [tool_call],
+                            "parts": [{"type": "tool_call", **tool_call}],
+                            "parts_ordered": True,
+                            "finish_reason": None,
                             "usage": None,
                         },
                     )
