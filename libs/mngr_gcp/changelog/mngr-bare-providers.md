@@ -42,3 +42,9 @@ identity; GCE labels are too restricted), stamped at create, so discovery reads
 the host's placement from the cloud API without SSH and probes it with the
 matching realizer. Pre-existing instances have no marker and default to container,
 preserving prior behavior.
+
+Bugfix: renaming a host now re-stamps the `mngr-host-name` instance metadata (the
+cheap identity tag offline discovery reads), not just the host record. Previously
+this metadata was written only at create, so a host that was renamed and then
+stopped still listed under its old name in offline discovery; it now lists under
+its new name.

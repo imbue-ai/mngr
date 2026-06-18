@@ -855,6 +855,21 @@ class AzureVpsClient(VpsClientInterface):
             return
         logger.info("Deleted Azure VM {} (NIC, public IP and OS disk cascade via delete_option)", instance_id)
 
+    def set_instance_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
+        """Upsert ``tags`` on an existing VM, preserving its other tags.
+
+        Azure's VM update replaces the whole tags dict, so read the current tags,
+        merge in the new ones, then write back. Widens ``AzureVpsClient`` beyond the
+        shared ``VpsClientInterface``; ``AzureProvider`` reaches it via ``self.azure_client``.
+        """
+        with self._translate_azure_errors():
+            vm = self._compute().virtual_machines.get(self.resource_group, str(instance_id))
+            merged = dict(vm.tags or {})
+            merged.update(tags)
+            self._compute().virtual_machines.begin_update(
+                self.resource_group, str(instance_id), compute_models.VirtualMachineUpdate(tags=merged)
+            ).result()
+
     def _await_long_running_operation(self, poller: LROPoller[None], timeout_seconds: float, description: str) -> None:
         """Block on an Azure long-running operation up to ``timeout_seconds``.
 

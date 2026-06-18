@@ -212,4 +212,13 @@ relaunch on resume, the agent-record id guard, and the malformed-identity skip i
 offline discovery) warn rather than raise, cross-referencing their Modal/Docker and
 online-discovery equivalents.
 
+Added a shared `_remirror_host_name` hook on `VpsProvider`, called from the base
+`rename_host` after the record write. Offline discovery recovers a stopped host's
+name from a cheap instance tag/metadata stamped at create (not from the mirrored
+record), so without re-stamping it a renamed host kept listing under its old name
+once stopped. The base hook is a no-op (providers with no such identity tag need
+nothing); the offline-capable cloud providers (AWS/Azure/GCP) override it to update
+the identity through their cloud API. The hook runs whether the host is up or
+stopped, since the cloud-API tag/metadata write does not require a reachable host.
+
 Performance: `mngr stop` on a bare (`isolation=NONE`) host no longer hangs for minutes while it captures the host's `host_dir`. A bare `host_dir` holds the agent's full working tree (a git checkout is thousands of small files), and the offline capture writes one object per file to the state bucket; these uploads previously ran serially, so one wide-area round-trip per object made the capture take minutes (the EC2 pause only happens after the capture completes). The per-file uploads now run concurrently across a bounded worker pool, turning a minutes-long stop into seconds. Found by a real-cloud smoke test; container hosts were unaffected (their `host_dir` is small).

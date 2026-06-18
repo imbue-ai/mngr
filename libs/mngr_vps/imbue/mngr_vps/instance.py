@@ -2213,7 +2213,27 @@ class VpsProvider(BaseProviderInstance):
                 host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
                 self._write_and_mirror(host_store, updated_record)
 
+        # Re-stamp the cheap host-name identity tag/metadata that offline discovery
+        # reads (it never reads the mirrored record), so a renamed host no longer
+        # resolves under its old name once stopped. Runs via the cloud API, so it
+        # works whether the host is up or stopped; default no-op for providers with
+        # no such identity tag.
+        self._remirror_host_name(updated_record, name)
+
         return self.get_host(host_id)
+
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        """Re-stamp the create-time host-name identity tag/metadata after a rename.
+
+        Offline discovery recovers a stopped host's name from a cheap instance
+        tag/metadata stamped at create (the EC2 ``Name`` tag, the Azure/GCP
+        ``mngr-host-name`` tag/metadata) -- not from the mirrored record -- so without
+        this a renamed host still lists under its old name once stopped. The value
+        matches create's ``label`` (``mngr-<host_name>``). Default no-op (a provider
+        with no such identity tag needs nothing); offline-capable cloud providers
+        override to update it through their cloud API.
+        """
+        del host_record, name
 
     # =========================================================================
     # Volumes

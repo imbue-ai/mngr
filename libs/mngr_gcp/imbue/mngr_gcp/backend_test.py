@@ -17,6 +17,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_gcp.backend import AGENT_METADATA_PREFIX
@@ -35,7 +36,9 @@ from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
 from imbue.mngr_vps.bare_realizer import BareRealizer
+from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
@@ -582,6 +585,49 @@ def test_persist_host_record_externally_writes_full_record_to_metadata(temp_mngr
     round_tripped = VpsHostRecord.model_validate_json(written[HOST_STATE_METADATA_KEY])
     assert round_tripped.certified_host_data.host_name == "myhost"
     assert round_tripped.vps_ip == "203.0.113.7"
+
+
+def test_remirror_host_name_restamps_identity_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """A rename re-stamps ``mngr-host-name`` (read by offline discovery) to ``mngr-<newname>``."""
+    provider, instances = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    listed = _instance(
+        "i-1",
+        "TERMINATED",
+        host_id=host_id,
+        metadata={HOST_NAME_METADATA_KEY: "mngr-oldname"},
+    )
+    instances.get_result = listed
+    record = VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="newname",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+        config=VpsHostConfig(vps_instance_id=VpsInstanceId("i-1"), region="us-west1-a", plan="e2-medium"),
+    )
+    provider._remirror_host_name(record, HostName("newname"))
+    assert len(instances.set_metadata_calls) == 1
+    written = {item.key: item.value for item in instances.set_metadata_calls[0].items}
+    assert written[HOST_NAME_METADATA_KEY] == "mngr-newname"
+
+
+def test_remirror_host_name_no_op_without_config(temp_mngr_ctx: MngrContext) -> None:
+    """No config means no instance id to address, so the re-stamp is a no-op (no API call)."""
+    provider, instances = _build_stubbed_provider(temp_mngr_ctx)
+    record = VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(HostId.generate()),
+            host_name="newname",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+    )
+    provider._remirror_host_name(record, HostName("newname"))
+    assert instances.set_metadata_calls == []
 
 
 def test_list_persisted_agent_data_for_host_reads_metadata(temp_mngr_ctx: MngrContext) -> None:

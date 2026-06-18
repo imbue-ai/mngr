@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostCreationError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.interfaces.volume_test import InMemoryVolume
@@ -409,6 +410,56 @@ def test_on_host_finalized_skips_record_check_for_self_stopping_placement(temp_m
     provider._record = None
     provider._on_host_finalized(host_id=HostId.generate(), vps_ip="10.0.0.1")
     assert not provider._watcher_installed
+
+
+# =========================================================================
+# rename_host re-mirrors the cheap host-name identity (_remirror_host_name)
+# =========================================================================
+
+
+class _RenameProvider(_MarkerProvider):
+    """Captures the ``_remirror_host_name`` call ``rename_host`` makes, and stubs
+    ``get_host`` so the rename path needs no reachable host."""
+
+    _record: VpsHostRecord | None = PrivateAttr(default=None)
+    _remirror_calls: list[tuple[str, str]] = PrivateAttr(default_factory=list)
+
+    def _find_host_record(self, host: HostId | HostName) -> VpsHostRecord | None:
+        return self._record
+
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        self._remirror_calls.append((host_record.certified_host_data.host_id, str(name)))
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        return cast(HostInterface, object())
+
+
+def test_rename_host_remirrors_updated_name(temp_mngr_ctx: MngrContext) -> None:
+    """rename_host re-stamps the cheap host-name identity (via _remirror_host_name) with
+    the NEW name, so a renamed-then-stopped host stops listing under its old name. A
+    stopped record (vps_ip=None) is used so the rename needs no reachable volume.
+    """
+    provider = _RenameProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        config=VpsProviderConfig(backend=ProviderBackendName("offline-test")),
+        mngr_ctx=temp_mngr_ctx,
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    host_id = HostId.generate()
+    provider._record = VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="oldname",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+        vps_ip=None,
+        config=VpsHostConfig(vps_instance_id=VpsInstanceId("i-rename"), region="r", plan="p"),
+    )
+    provider.rename_host(host_id, HostName("newname"))
+    assert provider._remirror_calls == [(str(host_id), "newname")]
 
 
 # =========================================================================

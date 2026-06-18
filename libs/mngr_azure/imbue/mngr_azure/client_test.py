@@ -550,6 +550,25 @@ def test_destroy_instance_idempotent_on_404() -> None:
     client.destroy_instance(VpsInstanceId("vm1"))
 
 
+def test_set_instance_tags_merges_into_existing_tags() -> None:
+    """set_instance_tags upserts via read-merge-write, preserving the VM's other tags.
+
+    Azure's VM update replaces the whole tags dict, so the merge (not replace) is the
+    key correctness property: the renamed host-name tag lands without clobbering tags
+    like ``mngr-host-id`` that offline discovery also relies on.
+    """
+    compute = FakeComputeClient()
+    compute.virtual_machines.get_result = SimpleNamespace(
+        tags={"mngr-host-id": "host-1", "mngr-host-name": "mngr-old"}
+    )
+    client = _make_client(compute=compute)
+    client.set_instance_tags(VpsInstanceId("vm1"), {"mngr-host-name": "mngr-new"})
+    assert len(compute.virtual_machines.updated) == 1
+    vm_name, parameters = compute.virtual_machines.updated[0]
+    assert vm_name == "vm1"
+    assert parameters.tags == {"mngr-host-id": "host-1", "mngr-host-name": "mngr-new"}
+
+
 # =========================================================================
 # deallocate_instance / start_instance (Azure-only idle-pause + resume)
 # =========================================================================

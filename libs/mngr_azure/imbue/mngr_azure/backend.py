@@ -24,6 +24,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure import hookimpl
@@ -475,6 +476,18 @@ class AzureProvider(OfflineCapableVpsProvider):
         # ``mngr-<host_name>``); the shared ``_offline_discovered_host_from_instance``
         # reads it through here.
         return HOST_NAME_TAG_KEY
+
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        """Re-stamp the ``mngr-host-name`` VM tag (read by offline discovery) after a rename.
+
+        Merges into the VM's existing tags (does not replace them); the value matches
+        create's ``label`` (``mngr-<host_name>``).
+        """
+        if host_record.config is None:
+            return
+        self.azure_client.set_instance_tags(
+            host_record.config.vps_instance_id, {self._host_name_tag_key(): f"mngr-{name}"}
+        )
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the VM is halted (stopped/deallocated, and their in-flight transitions).

@@ -417,6 +417,19 @@ class GcpProvider(OfflineCapableVpsProvider):
             host_state=HostState.STOPPED,
         )
 
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        """Re-stamp the ``mngr-host-name`` identity metadata (read by offline discovery) after a rename.
+
+        Matches create's value (``f"{_HOST_NAME_PREFIX}{name}"``), which
+        ``_host_name_from_instance`` strips back off, so a renamed-then-stopped
+        host lists under its new name.
+        """
+        if host_record.config is None:
+            return
+        self.gcp_client.set_instance_metadata(
+            host_record.config.vps_instance_id, {HOST_NAME_METADATA_KEY: f"{_HOST_NAME_PREFIX}{name}"}
+        )
+
 
 class _GceMetadataHostStateStore(HostStateStore):
     """Instance-metadata-backed mirror: full host + agent records live in GCE metadata.
