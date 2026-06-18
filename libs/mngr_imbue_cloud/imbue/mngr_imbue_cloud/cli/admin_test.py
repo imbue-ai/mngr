@@ -196,7 +196,7 @@ def test_pool_create_rejects_malformed_tag(tmp_path: Any) -> None:
 
 
 def _slice_create_args(extra: list[str]) -> list[str]:
-    """Base ``pool create --backend slice`` argv (with a DSN so resolution succeeds).
+    """Base ``pool create --backend slice`` argv (with a DSN + server-id so resolution succeeds).
 
     Carries no identity attributes: repo_url / repo_branch_or_tag are derived from
     the bake source (--from-tag / --workspace-dir), never passed in --attributes.
@@ -209,10 +209,58 @@ def _slice_create_args(extra: list[str]) -> list[str]:
         "1",
         "--region",
         "US-EAST-VA",
+        "--server-id",
+        "11111111-1111-1111-1111-111111111111",
         "--database-url",
         "postgres://example",
         *extra,
     ]
+
+
+def test_pool_create_slice_backend_requires_server_id() -> None:
+    """``--server-id`` is required for the slice backend (we never auto-select a box)."""
+    args = [
+        "create",
+        "--backend",
+        "slice",
+        "--count",
+        "1",
+        "--region",
+        "US-EAST-VA",
+        "--database-url",
+        "postgres://example",
+        "--from-tag",
+        "v0.3.0",
+    ]
+    result = CliRunner().invoke(pool, args)
+    assert result.exit_code != 0
+    assert "--server-id is required for --backend slice" in result.output
+
+
+def test_pool_create_ovh_backend_rejects_server_id(tmp_path: Any) -> None:
+    """``--server-id`` is slice-only; passing it to the OVH backend is a usage error."""
+    key_file = tmp_path / "mgmt.pub"
+    key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
+    result = CliRunner().invoke(
+        pool,
+        [
+            "create",
+            "--backend",
+            "ovh_vps",
+            "--count",
+            "1",
+            "--region",
+            "US-EAST-VA",
+            "--database-url",
+            "postgres://example",
+            "--management-public-key-file",
+            str(key_file),
+            "--server-id",
+            "11111111-1111-1111-1111-111111111111",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--server-id is only supported for --backend slice" in result.output
 
 
 def test_pool_create_requires_a_bake_source_selector() -> None:

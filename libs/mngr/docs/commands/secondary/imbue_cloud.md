@@ -666,6 +666,7 @@ mngr imbue_cloud admin pool create [OPTIONS]
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--mngr-source` | path | Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts. | None |
 | `--no-recycle` | boolean | [ovh_vps only] Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH provider recycles a cancelled (still-billable) VPS when one is available; pass this to test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false on the inner `mngr create`. | `True` |
+| `--server-id` | text | [slice only, required] The bare_metal_servers row id to bake the slices onto (from `admin server list`). Slice baking targets an explicitly-chosen, ready box -- it never auto-selects one. | None |
 | `--dry-run` | boolean | [slice only] Report placement + per-slice sizing; do not bake. | `False` |
 | `--max-concurrency` | integer | [slice only] Max slices baked at once; the rest queue and start as slots free. Bounds box CPU/IO/network contention so each `mngr create` stays under its timeout. | `4` |
 | `--skip-deferred-install-wait` | boolean | [dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to finish before stopping the baked services agent. Saves a few minutes per bake, but the baked container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg). Safe for dev/throwaway bakes; NEVER use for production pool hosts. | `False` |
@@ -957,6 +958,7 @@ mngr imbue_cloud admin server order [OPTIONS]
 | `--storage` | text | Storage option short code (the pricing table's BASE_STORAGE, e.g. softraid-2x512nvme). | None |
 | `--memory-per-slice-gb` | integer | RAM (GB) each slice will advertise; sets slot_count = floor(server RAM / this). | `8` |
 | `--cpu-overcommit` | float | CPU overcommit factor recorded for slice sizing on this box. | `2.0` |
+| `--option` | text | Explicit planCode for a mandatory option family that offers more than one choice (e.g. bandwidth, vrack). Repeatable. Required when the plan offers a real choice -- run once without it and the error lists each family's offers + monthly prices so you can re-run with --option. | None |
 | `--yes` | boolean | Skip the interactive confirmation and place the order. | `False` |
 | `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
 
