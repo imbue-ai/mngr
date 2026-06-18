@@ -13,7 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: Replaced `logger.warning()` calls and downgraded `logger.debug()` to `logger.info()` to keep log volumes reasonable.
+- Changed: Adjusted discovery logging to keep log volumes reasonable: `logger.warning()` calls in `discovery.py` are now `logger.opt(exception=e).error(...)` (carrying the underlying exception) or `logger.info(...)` for benign races, and several routine `logger.debug()` lines were downgraded to `logger.trace()`.
 
 ### Fixed
 
