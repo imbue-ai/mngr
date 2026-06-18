@@ -510,7 +510,9 @@ def build_settings_narrowing_message(detail_lines: Sequence[str], *, example_key
     narrowed dotted path) tailors the ``__extend`` example to the user's actual key so the
     message shows exactly how to fix *their* config; it falls back to a generic example.
     """
-    example = _extend_example(example_key_path) if example_key_path else 'permissions__extend = {allow__extend = ["..."]}'
+    example = (
+        _extend_example(example_key_path) if example_key_path else 'permissions__extend = {allow__extend = ["..."]}'
+    )
     return (
         "Settings narrowing detected: a higher-precedence settings layer would assign over "
         "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
