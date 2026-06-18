@@ -240,6 +240,100 @@
       <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-subtle / -default / -strong (border-*)</div>
     </section>
 
+    {# Surface & fill tokens. Surfaces are solid backgrounds (primary/inverse
+       are exact mirrors; overlay = inverse @ 20%); fills are translucent
+       resting/state tints over a surface (selected dropped). Both modes; the
+       panels themselves use bg-surface-primary + border-default. data-token
+       marks each --color-* token for the drift guard. #}
+    <section class="mb-12">
+      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Surface &amp; fill tokens</h2>
+      <p class="text-xs text-zinc-500 mb-4">
+        Surfaces (<code>bg-surface-primary</code> / <code>-inverse</code> /
+        <code>-overlay</code>) are solid backgrounds; primary &amp; inverse
+        mirror (white&harr;black), overlay is the inverse color at 20%. Fills
+        (<code>bg-fill-subtle</code> / <code>-hover</code> / <code>-active</code>)
+        are translucent tints over a surface.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        {# Light #}
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4">
+            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Surfaces</div>
+            <div class="grid grid-cols-3 gap-3 mb-4">
+              <div data-token="--color-surface-primary" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-primary border border-default"></div>
+                <code class="text-[11px] font-mono text-secondary">primary</code>
+              </div>
+              <div data-token="--color-surface-inverse" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-inverse"></div>
+                <code class="text-[11px] font-mono text-secondary">inverse</code>
+              </div>
+              <div data-token="--color-surface-overlay" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-overlay"></div>
+                <code class="text-[11px] font-mono text-secondary">overlay</code>
+              </div>
+            </div>
+            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Fills</div>
+            <div class="grid grid-cols-3 gap-3">
+              <div data-token="--color-fill-subtle" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-subtle border border-subtle"></div>
+                <code class="text-[11px] font-mono text-secondary">subtle</code>
+              </div>
+              <div data-token="--color-fill-hover" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-hover border border-subtle"></div>
+                <code class="text-[11px] font-mono text-secondary">hover</code>
+              </div>
+              <div data-token="--color-fill-active" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-active border border-subtle"></div>
+                <code class="text-[11px] font-mono text-secondary">active</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {# Dark (scoped via `.dark`) #}
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4">
+            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Surfaces</div>
+            <div class="grid grid-cols-3 gap-3 mb-4">
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-primary border border-default"></div>
+                <code class="text-[11px] font-mono text-secondary">primary</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-inverse"></div>
+                <code class="text-[11px] font-mono text-secondary">inverse</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-overlay"></div>
+                <code class="text-[11px] font-mono text-secondary">overlay</code>
+              </div>
+            </div>
+            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Fills</div>
+            <div class="grid grid-cols-3 gap-3">
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-subtle border border-subtle"></div>
+                <code class="text-[11px] font-mono text-secondary">subtle</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-hover border border-subtle"></div>
+                <code class="text-[11px] font-mono text-secondary">hover</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-active border border-subtle"></div>
+                <code class="text-[11px] font-mono text-secondary">active</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
+    </section>
+
     {# Text-color ramp (LEGACY -- superseded by the token section above; kept
        until the call sites migrate off raw zinc). Five roles, five shades.
        Banished: text-zinc-600 (consolidated into 500 or 700 depending on

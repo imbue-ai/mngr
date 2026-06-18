@@ -61,6 +61,14 @@
   --c-border-subtle: rgb(0 0 0 / 0.10);
   --c-border-default: rgb(0 0 0 / 0.17);
   --c-border-strong: rgb(0 0 0 / 0.25);
+  /* surfaces -- solid backgrounds; primary and inverse are exact mirrors */
+  --c-surface-primary: #ffffff;
+  --c-surface-inverse: #000000;
+  --c-surface-overlay: rgb(0 0 0 / 0.20);
+  /* fills -- translucent resting / state tints over a surface (Figma 4/6/10%) */
+  --c-fill-subtle: rgb(0 0 0 / 0.04);
+  --c-fill-hover: rgb(0 0 0 / 0.06);
+  --c-fill-active: rgb(0 0 0 / 0.10);
 }
 .dark {
   /* regular text -- white in dark mode */
@@ -75,6 +83,14 @@
   --c-border-subtle: rgb(255 255 255 / 0.10);
   --c-border-default: rgb(255 255 255 / 0.17);
   --c-border-strong: rgb(255 255 255 / 0.25);
+  /* surfaces -- pure black base in dark; inverse + overlay mirror to white */
+  --c-surface-primary: #000000;
+  --c-surface-inverse: #ffffff;
+  --c-surface-overlay: rgb(255 255 255 / 0.20);
+  /* fills -- white at slightly higher alpha in dark (Figma 6/10/14%) */
+  --c-fill-subtle: rgb(255 255 255 / 0.06);
+  --c-fill-hover: rgb(255 255 255 / 0.10);
+  --c-fill-active: rgb(255 255 255 / 0.14);
 }
 @theme inline {
   --color-primary: var(--c-text-primary);
@@ -87,6 +103,14 @@
   --color-subtle: var(--c-border-subtle);
   --color-default: var(--c-border-default);
   --color-strong: var(--c-border-strong);
+  /* surfaces: bg-surface-primary / -inverse / -overlay */
+  --color-surface-primary: var(--c-surface-primary);
+  --color-surface-inverse: var(--c-surface-inverse);
+  --color-surface-overlay: var(--c-surface-overlay);
+  /* fills: bg-fill-subtle / -hover / -active */
+  --color-fill-subtle: var(--c-fill-subtle);
+  --color-fill-hover: var(--c-fill-hover);
+  --color-fill-active: var(--c-fill-active);
 }
 
 /*
