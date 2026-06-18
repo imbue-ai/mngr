@@ -11,6 +11,7 @@ from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.testing import clear_aws_env
 
 
@@ -113,23 +114,20 @@ def test_get_ami_id_for_region_uses_default_ami_id() -> None:
     assert config.get_ami_id_for_region("eu-west-1") == "ami-deadbeef"
 
 
-def test_get_ami_id_for_region_uses_region_map() -> None:
-    config = AwsProviderConfig(default_ami_by_region={"us-east-1": "ami-east", "eu-west-1": "ami-eu"})
-    assert config.get_ami_id_for_region("us-east-1") == "ami-east"
-    assert config.get_ami_id_for_region("eu-west-1") == "ami-eu"
+def test_get_ami_id_for_region_uses_pinned_region_default() -> None:
+    config = AwsProviderConfig()
+    for region, ami_id in DEFAULT_AMI_BY_REGION.items():
+        assert config.get_ami_id_for_region(region) == ami_id
 
 
 def test_get_ami_id_for_region_raises_when_missing() -> None:
-    config = AwsProviderConfig(default_ami_by_region={})
+    config = AwsProviderConfig()
     with pytest.raises(ValueError, match="No AMI configured"):
-        config.get_ami_id_for_region("us-east-1")
+        config.get_ami_id_for_region("ap-south-1")
 
 
-def test_get_ami_id_explicit_takes_precedence_over_region_map() -> None:
-    config = AwsProviderConfig(
-        default_ami_id="ami-override",
-        default_ami_by_region={"us-east-1": "ami-region-specific"},
-    )
+def test_get_ami_id_explicit_takes_precedence_over_region_default() -> None:
+    config = AwsProviderConfig(default_ami_id="ami-override")
     assert config.get_ami_id_for_region("us-east-1") == "ami-override"
 
 

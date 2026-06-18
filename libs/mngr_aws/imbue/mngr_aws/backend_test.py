@@ -853,8 +853,8 @@ def test_build_provider_instance_does_not_touch_ami_resolution(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     config = AwsProviderConfig(
         backend=AWS_BACKEND_NAME,
-        default_ami_id="",
-        default_ami_by_region={},
+        default_region="ap-south-1",
+        default_ami_id=None,
     )
     name = ProviderInstanceName("aws-test")
 
@@ -882,8 +882,8 @@ def test_create_vps_instance_raises_mngr_error_when_no_ami_configured(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     config = AwsProviderConfig(
         backend=AWS_BACKEND_NAME,
-        default_ami_id="",
-        default_ami_by_region={},
+        default_region="ap-south-1",
+        default_ami_id=None,
     )
     name = ProviderInstanceName("aws-test")
     provider = AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)

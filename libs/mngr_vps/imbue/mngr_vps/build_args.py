@@ -72,7 +72,7 @@ _VPS_MIGRATION_HINT: Final[str] = (
     "--vultr-region= / --vultr-plan=, or --ovh-datacenter= (alias --ovh-region=) / --ovh-plan= "
     "(matching your provider). The old --vps-os= / --vps-image= / --vps-ami= image-selection args "
     "are also removed; image selection lives on the provider config (default_os_id for Vultr, "
-    "default_image_name for OVH, default_ami_id / default_ami_by_region for AWS)."
+    "default_image_name for OVH, default_ami_id for AWS)."
 )
 
 
