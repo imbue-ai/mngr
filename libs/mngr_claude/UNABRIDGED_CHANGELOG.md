@@ -4,6 +4,52 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+`ClaudeAgent` now declares the `HasStreamingSnapshotMixin` capability mixin (it already implemented `get_stream_buffer_path`), so the live in-progress response-streaming view is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact.
+
+`ClaudeAgent` also declares the `HasUnattendedModeMixin` capability (`is_unattended_enabled` reports the `auto_allow_permissions` config).
+
+`ClaudeAgent` also declares `HasVersionManagementMixin` (version pin, else auto-update).
+
+The auto-allow permission apply-path now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
+
+`ClaudeAgent` now declares `CliBackedAgentMixin` (marking it as wrapping a specific external CLI, which scopes the CLI-only capability-matrix rows) and `HasSessionAdoptionMixin`. Its session-adoption logic moved from `on_after_provisioning` into an `adopt_session` method (called by `on_after_provisioning`), so `--adopt-session` / `--from` session resumption is now a code-detectable `session_resume` capability. Behavior is unchanged.
+
+Split the Claude agent into a shared `ClaudeCoreAgent` base and the interactive `ClaudeAgent(ClaudeCoreAgent, InteractiveTuiAgent, ...)` subclass. The core holds everything not tied to the interactive TUI (config-dir setup, credentials, transcripts, session preservation, auto-install, version management, the provisioning flow); the TUI subclass holds the keystroke send/readiness pipeline, the streaming snapshot (`HasStreamingSnapshotMixin`), session adoption (`HasSessionAdoptionMixin`), and start-dialog dismissal + pre-provisioning validation. `HeadlessClaude` extends `ClaudeCoreAgent` directly, so the headless variant no longer structurally inherits those interactive-only capabilities -- in the capability matrix `headless_claude` is now `n/a` (not `Y`) for `session_resume`. One user-visible change: `--adopt-session` is now rejected for `headless_claude` with a clear error, instead of being silently accepted and never resumed (headless runs `claude --print`, not `--resume`).
+
+Post-split cleanup of now-redundant scaffolding: dropped the empty `NoPermissionsClaudeAgent` intermediate base (its no-op overrides became core defaults; `HeadlessClaude` extends `ClaudeCoreAgent` directly), the no-op `ClaudeCoreAgent.on_before_provisioning` (it just restated `BaseAgent`'s no-op default), and `HeadlessClaude`'s vestigial `_preflight_send_message` override (headless claude is not an interactive agent: the send-message flow, including `_preflight_send_message`, now lives only on the interactive `SendKeysAgent` side, and messaging a headless agent is refused at the call layer by `require_interactive_agent`). `HeadlessClaude` now carries one explicit `is_unattended_enabled` override that makes its `ClaudeCoreAgent` (config-driven) vs `BaseHeadlessAgent` (always-True) diamond choice deliberate (behavior unchanged: config-driven, as before the split).
+
+The entire start-dialog-dismissal concern is now TUI-only: the shared `ClaudeCoreAgent.provision()` calls a single `_dismiss_start_dialogs` seam that is a no-op on the core and carries the real block (auto-dismiss or interactive prompt) only on the interactive `ClaudeAgent`. Previously the interactive prompt was already skipped for headless, but the `auto_dismiss_dialogs=True` path still ran for headless; now a headless claude does no start-dialog handling at all (it has no TUI pane to protect from intercepted input).
+
+`ClaudeCoreAgent` now installs claude through the shared `ensure_cli_installed` helper (consent-gated locally, config-gated remotely; claude's `get_install_command` pins the version) instead of its own bespoke install block, then calls `reconcile_installed_version` to verify the present binary matches any pinned `version` (raising on mismatch). User-visible change: install / version-mismatch failures now raise `AgentInstallationError` (the shared installer's error type) rather than `PluginMngrError`.
+
+The session-adoption create option and its agent-agnostic validation moved out of the claude plugin into core, since session adoption is now a capability shared by every interactive agent. The option is now `--adopt` (with `--adopt-session` kept as an accepted alias). Claude's `register_cli_options` no longer declares the option, and its `on_before_create` retains only the claude-specific fail-fast pre-resolution of named session ids. Claude now reads the adopted session ids from the first-class `CreateAgentOptions.adopt_session` field instead of the old `plugin_data["adopt_session"]` namespaced key (in both `on_before_create` and the `adopt_session` method). Claude's session-store scanner now routes through the shared `iter_agent_session_paths` helper. No change to claude's user-facing adoption behavior other than the option rename.
+
+Claude now ships a release test (`test_claude_agent_e2e.py`) built on the shared agent release-test harness, so it is held to the same end-to-end lifecycle arc as the other agent types (create -> WAITING -> message -> RUNNING -> transcript -> stop/start resume -> destroy -> preserve -> adopt the preserved session into a fresh agent -> recall). The profile turns on the richer assertions (RUNNING marker, forced tool call, token usage), resolves adoption by the preserved session JSONL's path, and pins the agent to the `haiku` model tier (the seed/recall turns don't need a frontier model). Skipped unless `claude` is on PATH and `ANTHROPIC_API_KEY` is set.
+
+Removed the now-redundant `test_adopt_session_brings_context_from_mngr_claude_agent_session` release test (and its `_create_mngr_claude_session` helper): adopting an mngr-managed agent's own preserved session into a fresh worktree is now exercised by the shared harness arc above. `test_adopt_session.py` retains the vanilla-`claude`-CLI adoption case, which the harness does not cover.
+
+Fixed `--adopt A --from X` (combined explicit-adopt plus clone): the explicit session is copied into the destination's encoded project dir first, so the clone's rekey now merges the source-encoded subdir's files into that pre-existing dir instead of refusing on a whole-directory clobber. The merge is non-destructive and refuses (raising `AgentStartError`) only on a genuine per-file collision (the same session-id filename present in both), so distinct sessions coexist cleanly in one project dir while real data loss is still prevented.
+
+A `--from` clone whose source has no resumable session now warns and adopts nothing (rather than raising): `--from` is a workspace clone, so carrying the source's conversation forward is a bonus, not a requirement. The agent still starts (falling back to the last `--adopt` session, or a fresh start). Explicit `--adopt` failures and the per-file merge collision remain hard errors.
+
+`mngr create --yes` now dismisses claude's first-run *dialogs* (onboarding, effort callout, work-dir trust) in the per-agent config -- previously these were only auto-dismissed for a remote/unattended agent or the explicit `auto_dismiss_dialogs` config, so a local `--yes` create relied on the global `~/.claude.json`. `--yes` deliberately does *not* accept bypass-permissions mode (tool auto-allow stays governed by `auto_allow_permissions`/unattended): it auto-approves prompts, it does not silently widen tool permissions.
+
+The claude release test now gitignores `.claude/settings.local.json` in its own `.gitignore` in both the seed and adoption worktrees, which mngr's claude preflight requires (a repo-local rule, not a global one) before it will write per-agent hooks. Without it the test could not get past `create`.
+
+The claude release test no longer seeds a `~/.claude.json` to dismiss first-run dialogs and pre-approve the API key. It now relies entirely on the product behavior: `mngr create --yes` dismisses the dialogs and trusts the work dir, and the plugin's `approve_api_key_for_claude` pre-approves `ANTHROPIC_API_KEY`. The test builds its subprocess env with the plain shared `get_subprocess_test_env`, matching the sibling agent release tests.
+
+Fixed resuming a Claude agent and immediately sending it a message. The TUI-ready indicator is now the input-prompt glyph (`❯`) instead of the "Claude Code" welcome banner. The banner only renders on a fresh start, not when resuming a saved session, so resumes previously skipped the readiness wait and could drop the message into a still-replaying transcript.
+
+Adapted the Claude agents to the unified live-output contract.
+
+`ClaudeAgent` (TUI) now inherits `SupportsLiveOutputMixin` directly (instead of the removed `HasStreamingSnapshotMixin`), exposes its streaming snapshot via `get_live_output_path()`, and supplies a `SnapshotDeltaReader` from `make_live_output_reader()`. The stream_buffer snapshot parsing/diffing (`compute_stream_delta` and friends, previously in `mngr_robinhood`) moves into the new `imbue.mngr_claude.stream_buffer` module alongside that reader, since it is the Claude watcher's format.
+
+`HeadlessClaude` keeps streaming `claude --print` stream-json output via `stream_output()`, but the tail loop is now the shared one in mngr; the agent only supplies a `StreamJsonReader` plus its startup-grace "finished" check and stderr-augmented error reporting. No user-visible behavior change.
+
+The claude common-transcript converter now emits `finish_reason` (was `stop_reason`, aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records that preserves the source interleaving of text and tool-use blocks (`parts_ordered` true, since Claude's native content blocks are ordered).
+
 ## 2026-06-16
 
 The common-transcript converter's event-conversion logic moved out of an inline `python3` heredoc in `common_transcript.sh` into a standalone `common_transcript_convert.py` (provisioned alongside the shell script), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, and transcript lines whose `message` is `null` (rather than an object) are dropped silently rather than aborting the conversion run.

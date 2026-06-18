@@ -10,6 +10,7 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.orchestrator import _StreamBufferConsumer
@@ -60,7 +61,7 @@ def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() ->
     )
     host = _FakeBufferHost()
     consumer = _StreamBufferConsumer.model_construct(
-        host=host, buffer_path=Path("/buffer"), writer=writer, emitted_body="", last_content=""
+        host=host, buffer_path=Path("/buffer"), writer=writer, reader=SnapshotDeltaReader()
     )
 
     _drive_consumer_turn(consumer, host, ["id1\nThe answer is\n", "id1\nThe answer is 42.\nx"])

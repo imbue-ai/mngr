@@ -1,3 +1,0 @@
-`minds pool destroy` (and the `just destroy-pool-host` recipe that wraps it) now fully tears down bare-metal `slice` pool hosts, not just OVH VPSes. Previously destroying a slice either failed trying to cancel a non-existent OVH VPS, or -- with `--skip-vps-cancel` -- dropped the DB row while leaving the slice's lima VM running on the box (a stranded slot).
-
-The wrapper now injects both teardown secrets from the activated tier's Vault (OVH AK/AS/CK and `POOL_SSH_PRIVATE_KEY`) so the underlying `admin pool destroy` can tear down whichever backend the row uses -- the connector's region/keypair conventions are unchanged. `just destroy-pool-host <id>` now works for a slice with no extra flags: it destroys the lima VM (freeing the box slot) and then drops the row.

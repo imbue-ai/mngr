@@ -9,11 +9,11 @@ from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
-from imbue.mngr.interfaces.agent import HasStreamingSnapshotMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
 from imbue.mngr.providers.registry import reset_backend_registry
 from scripts.make_agent_capabilities_doc import AGENT_CAPABILITIES
 from scripts.make_agent_capabilities_doc import AgentCapability
@@ -39,9 +39,9 @@ class _FakeTranscriptAgent(CliBackedAgentMixin, HasCommonTranscriptMixin): ...
 class _FakeStreamingHeadlessAgent(CliBackedAgentMixin, StreamingHeadlessAgentMixin): ...
 
 
-# A CLI-backed agent that publishes a streaming snapshot (HasStreamingSnapshotMixin extends
-# SupportsLiveOutputMixin), so it has live output and is not headless.
-class _FakeTuiSnapshotAgent(CliBackedAgentMixin, HasStreamingSnapshotMixin): ...
+# A CLI-backed TUI agent that publishes a streaming snapshot (it supports live output via the
+# snapshot surface of SupportsLiveOutputMixin), so it has live output and is not headless.
+class _FakeTuiSnapshotAgent(CliBackedAgentMixin, SupportsLiveOutputMixin): ...
 
 
 # A CLI-backed agent that can adopt an existing session.
@@ -360,10 +360,9 @@ def test_builder_detects_known_capabilities(loaded_plugin_manager: pluggy.Plugin
     # live_output: claude publishes a streaming snapshot; codex does not.
     assert "live_output" in _present_keys(infos, "claude")
     assert "live_output" not in _present_keys(infos, "codex")
-    # session_resume (--adopt-session / --from carry-forward): claude only.
-    assert "session_resume" in _present_keys(infos, "claude")
-    for agent_type_name in ("codex", "opencode", "pi-coding", "antigravity"):
-        assert "session_resume" not in _present_keys(infos, agent_type_name)
+    # session_resume (--adopt-session / --from carry-forward): every interactive agent.
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
+        assert "session_resume" in _present_keys(infos, agent_type_name)
     for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
         assert "session_preservation" in _present_keys(infos, agent_type_name)
         assert "unattended_operation" in _present_keys(infos, agent_type_name)

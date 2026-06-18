@@ -507,6 +507,19 @@ class _CreateCommand(click.Command):
     ),
 )
 @optgroup.option(
+    "--adopt",
+    "--adopt-session",
+    "adopt_session",
+    multiple=True,
+    help=(
+        "Adopt an existing session into this newly created agent so it resumes that conversation. "
+        "Accepts a session id or a path to the session file; a session id is searched across the "
+        "relevant user/config store, every live local mngr agent, and preserved sessions from "
+        "destroyed agents. Repeatable: every named session is copied in, and the last is resumed on "
+        "startup (unless combined with --from, in which case the source agent's session is resumed)."
+    ),
+)
+@optgroup.option(
     "--rsync/--no-rsync",
     default=None,
     help="Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled]",
@@ -1693,6 +1706,7 @@ def _parse_agent_opts(
         label_options=label_options,
         provisioning=provisioning,
         tmux=tmux_options,
+        adopt_session=opts.adopt_session,
         source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base
@@ -1979,7 +1993,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     key="create",
     one_line_description="Create and run an agent",
     synopsis="""mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--adopt <SESSION>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]

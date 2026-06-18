@@ -169,6 +169,16 @@ def convert(input_file: str, output_file: str) -> int:
                         }
                     )
 
+                text_str = text if isinstance(text, str) else ""
+                # agy's native format records the text and the tool_calls separately with no
+                # information about where each call sat relative to the text, so we can only
+                # synthesize a best-effort order (text, then the calls) -> parts_ordered=False.
+                parts: list[dict[str, Any]] = []
+                if text_str:
+                    parts.append({"type": "text", "content": text_str})
+                for tc in tool_calls:
+                    parts.append({"type": "tool_call", **tc})
+
                 event_id = f"{conv_id}-{step_index}-assistant"
                 if event_id not in existing_ids:
                     new_events.append(
@@ -181,9 +191,11 @@ def convert(input_file: str, output_file: str) -> int:
                                 "source": "antigravity/common_transcript",
                                 "role": "assistant",
                                 "model": None,
-                                "text": text if isinstance(text, str) else "",
+                                "text": text_str,
                                 "tool_calls": tool_calls,
-                                "stop_reason": None,
+                                "parts": parts,
+                                "parts_ordered": False,
+                                "finish_reason": None,
                                 "usage": None,
                                 "conversation_id": conv_id,
                                 "step_index": step_index,

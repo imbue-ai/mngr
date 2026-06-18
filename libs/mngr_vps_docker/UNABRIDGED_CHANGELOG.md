@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+Added `OfflineCapableVpsDockerProvider`, a base for cloud providers (AWS/GCP/Azure) whose hosts can be stopped while their disk persists. It consolidates the previously-duplicated offline discovery and host resolution -- reconstructing stopped (SSH-unreachable) hosts and their agents from the provider's instance listing, and falling back to that listing when the on-volume path is unreadable -- behind a small set of per-provider hooks.
+
+The same base now also owns the shared stop/start lifecycle (idle-pause + resume), instance lookup by host-id, SSH known_hosts rebinding, and the self-stopping idle watcher install, with the cloud-specific bits (pause/resume the instance, the idle action, Azure's static-IP/self-deallocate variations) supplied through hooks. No user-visible behavior change.
+
 ## 2026-06-16
 
 Fix `start_host` (the `mngr stop --stop-host` resume path) to restart the container's sshd after `docker start`. sshd is launched via `docker exec`, not the container entrypoint, so it does not survive a container stop/start (or a host VM reboot that takes the container down, e.g. an AWS instance stop/start) -- without restarting it, the resume timed out waiting for container SSH. This was a latent gap for every VPS-Docker provider; AWS's native instance stop/start surfaced it.

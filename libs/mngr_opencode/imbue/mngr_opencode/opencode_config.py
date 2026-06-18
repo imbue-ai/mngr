@@ -29,9 +29,15 @@ truth those resources are kept in sync with.
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Final
+
+from loguru import logger
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import UserInputError
@@ -272,3 +278,283 @@ def build_opencode_config(
 def serialize_opencode_config(config: Mapping[str, Any]) -> str:
     """Serialize an ``opencode.json`` body as two-space-indented JSON."""
     return json.dumps(dict(config), indent=2)
+
+
+# The agent's native opencode store dir (the dir holding ``opencode.db`` + its ``-wal``/``-shm``
+# sidecars), relative to its state dir (under the per-agent ``XDG_DATA_HOME``). A ``--from`` clone
+# transfers exactly this dir from the source agent's state dir into its own.
+AGENT_OPENCODE_STORE_RELPATH: Final[Path] = Path(*_DATA_HOME_RELATIVE_PATH, _OPENCODE_APP_DIR_NAME)
+
+# The agent's native ``opencode.db`` relative to its state dir. The plugin passes this to the shared
+# live/preserved agent scanner (``iter_agent_session_paths``) to find every local agent's db; kept
+# here so the path layout stays defined alongside the other opencode-data constants.
+AGENT_OPENCODE_DB_RELPATH: Final[Path] = AGENT_OPENCODE_STORE_RELPATH / _DB_FILENAME
+
+# Where a user-native (plain-CLI) OpenCode install keeps its data, relative to the data
+# home root resolved from ``$XDG_DATA_HOME`` (or ``~/.local/share``).
+_USER_DATA_HOME_PARTS: Final[tuple[str, ...]] = (".local", "share")
+
+
+def get_opencode_db_path_for_data_home(data_home: Path) -> Path:
+    """Return the ``opencode.db`` path under a ``XDG_DATA_HOME`` root."""
+    return get_opencode_app_data_dir(data_home) / _DB_FILENAME
+
+
+def get_user_native_opencode_db_path() -> Path:
+    """Return the user-native ``opencode.db`` (plain-CLI install), honoring ``$XDG_DATA_HOME``."""
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    data_home = Path(xdg_data_home) if xdg_data_home else Path.home().joinpath(*_USER_DATA_HOME_PARTS)
+    return get_opencode_db_path_for_data_home(data_home)
+
+
+def collect_adopt_search_db_paths(agent_db_paths: Sequence[Path]) -> list[Path]:
+    """Return the ``opencode.db`` paths an adopt session id is searched across (local only).
+
+    The user-native db (plain-CLI install) plus ``agent_db_paths`` -- every live local mngr
+    agent's and preserved agent's db, which the plugin gathers via the shared
+    ``iter_agent_session_paths`` scanner. Local sources only: the resolved db is copied onto
+    the destination host from a path reachable as a local source.
+    """
+    return [get_user_native_opencode_db_path(), *agent_db_paths]
+
+
+def _db_has_session(db_path: Path, session_id: str) -> bool:
+    """Return whether ``db_path`` (an OpenCode SQLite db) contains a session with ``session_id``.
+
+    Opened read-only so a live agent's db is never disturbed; a malformed/locked db is
+    treated as "no match" so one bad store can't block resolving a session that lives
+    elsewhere.
+    """
+    try:
+        # Connect failures are dominated by the benign "file does not exist" case, so not logged.
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        cursor = connection.execute("SELECT 1 FROM session WHERE id = ? LIMIT 1", (session_id,))
+        return cursor.fetchone() is not None
+    except sqlite3.Error as exc:
+        # File exists but is malformed/corrupt: a real anomaly worth surfacing, but still treated as
+        # no match so resolution continues against the other stores.
+        logger.warning("Could not query sessions in OpenCode db {} (treated as no match): {}", db_path, exc)
+        return False
+    finally:
+        connection.close()
+
+
+def resolve_adopt_session_db(adopt_session_arg: str, search_db_paths: Sequence[Path]) -> tuple[str, Path]:
+    """Resolve an adopt argument to a ``(session_id, source_db_path)`` pair.
+
+    Accepts either an absolute path to a source ``opencode.db`` (its single root session is
+    used), or a ``ses_...`` session id searched across ``search_db_paths`` (user-native +
+    every live and preserved mngr agent's db). A session id found in more than one db is
+    rejected as ambiguous (mirrors the claude adopt resolver), so the caller must pass the
+    db path instead.
+    """
+    if adopt_session_arg.endswith(".db"):
+        source_db = Path(adopt_session_arg).resolve()
+        if not source_db.is_file():
+            raise UserInputError(f"OpenCode session db not found: {source_db}")
+        return read_only_root_session_id(source_db), source_db
+
+    matches = [db_path for db_path in search_db_paths if _db_has_session(db_path, adopt_session_arg)]
+    if not matches:
+        raise UserInputError(
+            f"OpenCode session {adopt_session_arg} not found in any live, preserved, or user-native "
+            "store. Check that the session id is correct, or pass a path to the source opencode.db."
+        )
+    if len(matches) > 1:
+        match_list = "\n".join(f"  {match}" for match in matches)
+        raise UserInputError(
+            f"OpenCode session {adopt_session_arg} found in multiple stores:\n{match_list}\n"
+            "Pass the full path to the source opencode.db to specify which one."
+        )
+    return adopt_session_arg, matches[0]
+
+
+def read_only_root_session_id(db_path: Path) -> str:
+    """Return the lone root (parent-less) session id in ``db_path``, opened read-only.
+
+    Adoption resumes one root conversation; a db with zero or several roots is ambiguous
+    when addressed by path, so require exactly one.
+    """
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = connection.execute("SELECT id FROM session WHERE parent_id IS NULL").fetchall()
+    except sqlite3.Error as exc:
+        raise UserInputError(f"Could not read sessions from OpenCode db {db_path}: {exc}") from exc
+    finally:
+        connection.close()
+    if len(rows) != 1:
+        raise UserInputError(
+            f"OpenCode db {db_path} has {len(rows)} root sessions; expected exactly one. "
+            "Pass a session id instead of a db path to disambiguate."
+        )
+    return str(rows[0][0])
+
+
+# Fold the ``-wal``/``-shm`` sidecars into the main db so the rebind sees and rewrites the
+# committed rows. Run before the rebind script.
+_WAL_CHECKPOINT_SQL: Final[str] = "PRAGMA wal_checkpoint(TRUNCATE);"
+
+
+def build_opencode_rebind_sql(session_id: str, new_directory: Path) -> str:
+    """Build the SQL script that rebinds an adopted session's stored source-worktree paths.
+
+    OpenCode stores the absolute source worktree on the ``session`` row, the owning ``project``
+    row, and a ``project_directory`` row; after copying the db into the new agent these all
+    still point at the destroyed source worktree, so the session must be rebound to the new
+    agent's work dir or recall silently no-ops against it. The ``project_directory`` upsert
+    leaves any pre-existing row in place (its PK is ``(project_id, directory)``, so the new row
+    is additive) -- harmless, and it matches how OpenCode records additional directories.
+    Verified live against opencode 1.17.7.
+    """
+    quoted_session = _sqlite_quote(session_id)
+    quoted_dir = _sqlite_quote(str(new_directory))
+    return (
+        f"UPDATE session SET directory = {quoted_dir} WHERE id = {quoted_session};"
+        f"UPDATE project SET worktree = {quoted_dir} "
+        f"WHERE id = (SELECT project_id FROM session WHERE id = {quoted_session});"
+        f"INSERT INTO project_directory (project_id, directory, time_created) "
+        f"SELECT project_id, {quoted_dir}, CAST(strftime('%s','now') AS INTEGER) * 1000 "
+        f"FROM session WHERE id = {quoted_session} "
+        f"ON CONFLICT (project_id, directory) DO NOTHING;"
+    )
+
+
+def apply_opencode_rebind(db_path: Path, session_id: str, new_directory: Path) -> None:
+    """Checkpoint then rebind ``session_id``'s stored worktree paths in ``db_path`` to ``new_directory``.
+
+    Applied to a LOCAL staging db via the stdlib ``sqlite3`` module (not the host ``sqlite3`` CLI), so
+    no CLI dependency on the destination host. The WAL checkpoint folds the ``-wal``/``-shm`` sidecars
+    into the main file first, so a subsequent file copy to the host carries the rebound rows.
+    """
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(_WAL_CHECKPOINT_SQL)
+        connection.executescript(build_opencode_rebind_sql(session_id, new_directory))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+# Tables whose rows are scoped to a session (directly or through the session's owning project), in
+# FK-dependency order (parents before children) so a copy that ever runs with foreign keys enabled
+# still satisfies the references. ``project``/``permission`` are project-scoped; the rest are
+# session-scoped. ``__drizzle_migrations``/``migration``/``control_account`` are global (schema and
+# auth state) and deliberately excluded -- merging them would duplicate migration bookkeeping or
+# clobber the dest agent's own account rows. Verified against the opencode 1.17.7 schema.
+_PROJECT_SCOPED_MERGE_TABLES: Final[tuple[str, ...]] = ("project", "permission")
+_SESSION_SCOPED_MERGE_TABLES: Final[tuple[str, ...]] = (
+    "session",
+    "message",
+    "part",
+    "todo",
+    "session_share",
+)
+# ``project_directory`` is project-scoped but absent on some opencode versions (the installed 1.17.7
+# db lacks it while the rebind still upserts into it), so it is merged only when the source has it.
+_OPTIONAL_PROJECT_SCOPED_MERGE_TABLE: Final[str] = "project_directory"
+
+# All tables the merge may touch; used to detect which actually exist in a given source db.
+_ALL_MERGE_TABLES: Final[tuple[str, ...]] = (
+    *_PROJECT_SCOPED_MERGE_TABLES,
+    _OPTIONAL_PROJECT_SCOPED_MERGE_TABLE,
+    *_SESSION_SCOPED_MERGE_TABLES,
+)
+
+# Column the project-scoped tables key off (``project`` itself keys off ``id``).
+_PROJECT_KEY_BY_TABLE: Final[Mapping[str, str]] = {"project": "id"}
+
+# Column the session-scoped tables key off (the ``session`` row itself keys off its ``id``).
+_SESSION_KEY_BY_TABLE: Final[Mapping[str, str]] = {"session": "id"}
+
+
+def list_source_merge_tables(source_db: Path) -> tuple[str, ...]:
+    """Return which session/project-scoped tables exist in ``source_db`` (opened read-only).
+
+    The source is always a local opencode db, so this is read with the stdlib ``sqlite3`` module.
+    Used to build a merge script that touches only tables the source actually has (e.g. older/newer
+    opencode versions differ on ``project_directory``), so the merge never fails on an absent table.
+    """
+    connection = sqlite3.connect(f"file:{source_db}?mode=ro", uri=True)
+    try:
+        present = {
+            str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+    finally:
+        connection.close()
+    return tuple(table for table in _ALL_MERGE_TABLES if table in present)
+
+
+def build_opencode_merge_sql(staged_source_db: Path, session_id: str, present_tables: Sequence[str]) -> str:
+    """Build the SQL that merges one session's rows from ``staged_source_db`` into the open db.
+
+    Applied via :func:`apply_opencode_merge` when a *subsequent* ``--adopt`` session must be folded
+    into a staging ``opencode.db`` that already holds an earlier adopted session (the single-file
+    store means later sessions are merged in rather than copied as a fresh db). It attaches the staged
+    source copy and, for the adopted session plus all its descendant (sub-)sessions, copies the owning
+    ``project`` (and ``permission``/``project_directory``) rows and every session-scoped row
+    (``session``/``message``/``part``/``todo``/``session_share``). ``INSERT OR IGNORE`` makes a shared
+    project or an already-present row a harmless no-op, so re-merging is idempotent. ``present_tables``
+    (from :func:`list_source_merge_tables`) bounds the copy to tables the source actually has.
+
+    The descendant walk follows ``session.parent_id`` so a resumed root brings its subagent sessions;
+    rows are copied in FK-dependency order. The session set / project set live in temp tables so the
+    recursive walk runs once. ``staged_source_db`` is the source db *as a local path* (it must be the
+    full trio -- db + ``-wal``/``-shm`` sidecars -- so the attach sees uncheckpointed writes).
+    """
+    quoted_source = _sqlite_quote(str(staged_source_db))
+    quoted_session = _sqlite_quote(session_id)
+    statements: list[str] = [
+        f"ATTACH DATABASE {quoted_source} AS src;",
+        # Adopted session + all descendant (sub-)sessions, walked via parent_id.
+        "CREATE TEMP TABLE _adopt_sessions AS "
+        "WITH RECURSIVE descendants(id) AS ("
+        f"SELECT id FROM src.session WHERE id = {quoted_session} "
+        "UNION "
+        "SELECT s.id FROM src.session s JOIN descendants d ON s.parent_id = d.id"
+        ") SELECT id FROM descendants;",
+        "CREATE TEMP TABLE _adopt_projects AS "
+        "SELECT DISTINCT project_id AS id FROM src.session WHERE id IN (SELECT id FROM _adopt_sessions);",
+    ]
+    for table in present_tables:
+        if table in _SESSION_SCOPED_MERGE_TABLES:
+            key_column = _SESSION_KEY_BY_TABLE.get(table, "session_id")
+            statements.append(
+                f"INSERT OR IGNORE INTO main.{table} SELECT * FROM src.{table} "
+                f"WHERE {key_column} IN (SELECT id FROM _adopt_sessions);"
+            )
+        else:
+            key_column = _PROJECT_KEY_BY_TABLE.get(table, "project_id")
+            statements.append(
+                f"INSERT OR IGNORE INTO main.{table} SELECT * FROM src.{table} "
+                f"WHERE {key_column} IN (SELECT id FROM _adopt_projects);"
+            )
+    statements.append("DROP TABLE _adopt_sessions;")
+    statements.append("DROP TABLE _adopt_projects;")
+    statements.append("DETACH DATABASE src;")
+    return "".join(statements)
+
+
+def apply_opencode_merge(dest_db: Path, staged_source_db: Path, session_id: str) -> None:
+    """Merge ``session_id`` (and its descendants) from ``staged_source_db`` into a LOCAL ``dest_db``.
+
+    Applied via the stdlib ``sqlite3`` module (not the host ``sqlite3`` CLI), so no CLI dependency on
+    the destination host. Reads which tables the source actually has (:func:`list_source_merge_tables`)
+    and runs :func:`build_opencode_merge_sql`, which attaches the staged source and copies the session's
+    connected rows. Both dbs are local staging paths.
+    """
+    present_tables = list_source_merge_tables(staged_source_db)
+    connection = sqlite3.connect(dest_db)
+    try:
+        connection.executescript(build_opencode_merge_sql(staged_source_db, session_id, present_tables))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _sqlite_quote(value: str) -> str:
+    """Quote a value as a SQLite string literal (single quotes doubled)."""
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"

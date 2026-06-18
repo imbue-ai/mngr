@@ -427,7 +427,6 @@ def _seed_claude_transcript(host_dir: Path, events: list[dict[str, Any]]) -> Non
     (transcript_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_tips_transcript_tail_assistant(e2e: E2eSession, temp_host_dir: Path) -> None:
@@ -456,6 +455,8 @@ def test_tips_transcript_tail_assistant(e2e: E2eSession, temp_host_dir: Path) ->
                 "role": "assistant",
                 "text": f"ASSISTANT_MSG_{i}",
                 "tool_calls": [],
+                "parts": [{"type": "text", "content": f"ASSISTANT_MSG_{i}"}],
+                "parts_ordered": True,
             }
         )
     _seed_claude_transcript(temp_host_dir, events)
