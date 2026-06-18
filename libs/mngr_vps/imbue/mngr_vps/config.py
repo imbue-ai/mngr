@@ -150,13 +150,12 @@ class OfflineCapableVpsProviderConfig(VpsProviderConfig):
     allowed_ssh_cidrs: ScalarStrTuple = Field(
         default=ScalarTuple(("0.0.0.0/0",)),
         description=(
-            "Inbound (ingress) CIDR blocks allowed on tcp/22 and the container SSH port on "
-            "the security group / NSG / firewall rule the provider's `prepare` command "
-            "creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to "
-            "restrict to your own IP, or () for no ingress (no rule is created, leaving the "
-            "instance unreachable from outside its network). A warning is logged when the "
-            "effective range is 0.0.0.0/0 or empty. Replace-by-default across config layers "
-            "(combining CIDRs across layers is never the intent)."
+            "Inbound CIDR blocks allowed on tcp/22 and the container SSH port in the security "
+            "group / NSG / firewall rule the provider's `prepare` command creates. Default "
+            "('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own, "
+            "or () for no ingress (no rule is created, so the instance is unreachable from outside "
+            "its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. "
+            "Replaced, not merged, across config layers."
         ),
     )
 
