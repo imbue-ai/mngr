@@ -112,18 +112,18 @@ class BaseStateBucket(MutableModel, ABC):
         """Return whether any object exists under the host's ``host_dir/`` prefix.
 
         Used by the offline-read path as a light existence probe: an empty prefix
-        means the instance never pushed its host_dir (e.g. the sync daemon never
-        ran, or the instance has no bucket-write identity).
+        means nothing was captured yet (the host was never ``mngr stop``-ped, or
+        idle-self-poweroffed with no operator to capture it).
         """
         return self._prefix_has_objects(state_keys.host_dir_prefix(host_id))
 
     def volume_for_host(self, host_id: HostId) -> Volume:
         """Return a Volume scoped to ``hosts/<host_id_hex>/host_dir/`` for offline reads.
 
-        Reads use the operator's credentials, so no instance identity is required
-        to read -- only to push. The returned volume is rooted at the host's
-        ``host_dir`` tree, matching how ``OfflineHostWithVolume`` addresses files
-        (relative to ``host_dir``).
+        Both the capture (at ``mngr stop``) and these reads use the operator's
+        credentials, so no instance identity is required. The returned volume is
+        rooted at the host's ``host_dir`` tree, matching how
+        ``OfflineHostWithVolume`` addresses files (relative to ``host_dir``).
         """
         host_dir_prefix = state_keys.host_dir_prefix(host_id).rstrip("/")
         return self._make_host_dir_volume().scoped(host_dir_prefix)

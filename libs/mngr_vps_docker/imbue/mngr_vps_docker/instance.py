@@ -2842,8 +2842,9 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         """Outer-filesystem path of this host's host_dir (the btrfs subvolume's host_dir tree).
 
         The per-host host_dir lives at ``<btrfs_mount_path>/<host_id_hex>/host_dir``
-        on the outer (the same subvolume layout the idle sentinel path uses). Used
-        by the bucket host_dir sync daemon (AWS/Azure).
+        on the outer (the same subvolume layout the idle sentinel path uses). Read
+        off the box by the operator-driven host_dir capture at ``mngr stop``
+        (AWS/Azure).
         """
         return self.config.btrfs_mount_path / host_id.get_uuid().hex / HOST_DIR_SUBPATH
 
