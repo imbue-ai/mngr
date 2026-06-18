@@ -21,6 +21,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
+from imbue.mngr.hosts.host import read_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
@@ -336,28 +337,6 @@ def _write_proxy_skill(host: OnlineHostInterface, work_dir: Path) -> None:
     host.write_text_file(skill_path, content)
 
 
-def _load_settings_dict(host: OnlineHostInterface, path: Path) -> dict[str, Any] | None:
-    """Read and parse a Claude settings JSON file, returning the dict or None.
-
-    Returns None (logging a warning) when the file is missing, not valid JSON,
-    or whose top-level value is not a JSON object. Callers handle the None case
-    by skipping their pass.
-    """
-    try:
-        content = host.read_text_file(path)
-    except FileNotFoundError:
-        return None
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse Claude settings at {}; skipping", path)
-        return None
-    if not isinstance(data, dict):
-        logger.warning("Claude settings at {} is not a JSON object; skipping", path)
-        return None
-    return data
-
-
 def _merge_hooks_into_settings(host: OnlineHostInterface, settings_path: Path, hooks_config: dict[str, Any]) -> None:
     """Layer ``hooks_config`` onto the agent's Claude settings file.
 
@@ -369,15 +348,7 @@ def _merge_hooks_into_settings(host: OnlineHostInterface, settings_path: Path, h
     write tolerates a missing file regardless. ``merge_hooks_config`` preserves
     sibling (non-hook) keys.
     """
-    existing_settings: dict[str, Any] = {}
-    try:
-        existing_settings = json.loads(host.read_text_file(settings_path))
-    except FileNotFoundError:
-        pass
-    except json.JSONDecodeError:
-        logger.warning("Could not parse settings at {}; skipping subagent-proxy hook merge", settings_path)
-        return
-
+    existing_settings = read_json_dict_via_host(host, settings_path)
     merged = merge_hooks_config(existing_settings, hooks_config)
     if merged == existing_settings:
         logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
@@ -401,8 +372,8 @@ def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_d
     the file to be gitignored -- the one place that requirement still applies.
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
-    settings = _load_settings_dict(host, settings_path)
-    if settings is None:
+    settings = read_json_dict_via_host(host, settings_path)
+    if not settings:
         return
     if guard_user_stop_hooks_against_proxy_children(settings):
         _check_settings_local_gitignored(host, work_dir)
@@ -467,8 +438,8 @@ def _guard_stop_hooks_in_file(host: OnlineHostInterface, path: Path) -> None:
     file back. No-op if the file is missing, malformed, or already fully
     guarded.
     """
-    data = _load_settings_dict(host, path)
-    if data is None:
+    data = read_json_dict_via_host(host, path)
+    if not data:
         return
     if not guard_user_stop_hooks_against_proxy_children(data):
         return
@@ -558,8 +529,8 @@ def _check_subagent_hooks_compat(host: OnlineHostInterface, agent: AgentInterfac
     not at all? -- so we fail loudly rather than silently strip or duplicate.
     """
     settings_path = agent.work_dir / ".claude" / "settings.local.json"
-    settings = _load_settings_dict(host, settings_path)
-    if settings is None:
+    settings = read_json_dict_via_host(host, settings_path)
+    if not settings:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -601,8 +572,8 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     if os.environ.get(_OPT_OUT_PROJECT_STOP_CHECK_ENV, "") == "1":
         return
     settings_path = work_dir / ".claude" / "settings.json"
-    settings = _load_settings_dict(host, settings_path)
-    if settings is None:
+    settings = read_json_dict_via_host(host, settings_path)
+    if not settings:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -731,8 +702,8 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
     (the compat check has already rejected ambiguous user Stop/SubagentStop hooks).
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
-    settings = _load_settings_dict(host, settings_path)
-    if settings is None:
+    settings = read_json_dict_via_host(host, settings_path)
+    if not settings:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
