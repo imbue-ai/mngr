@@ -170,8 +170,13 @@ def test_assistant_message_is_converted(state_dir: Path) -> None:
     assert assistant["tool_calls"] == []
 
 
-def test_function_call_and_output_pair_into_tool_result(state_dir: Path) -> None:
-    """function_call + function_call_output (same call_id) -> tool_result."""
+def test_function_call_emits_assistant_message_with_tool_call(state_dir: Path) -> None:
+    """function_call -> assistant_message whose tool_calls carry the invocation.
+
+    codex models the call as a standalone rollout item (no assistant `message`),
+    so the converter surfaces it on an assistant turn -- matching the other ports.
+    The assistant tool_call_id must match the paired tool_result's.
+    """
     _write_raw_stream(
         state_dir,
         [
@@ -184,13 +189,19 @@ def test_function_call_and_output_pair_into_tool_result(state_dir: Path) -> None
     _run_converter(state_dir)
 
     events = _read_common_events(state_dir)
-    types = [e["type"] for e in events]
-    assert types == ["user_message", "tool_result"]
-    tool_result = events[1]
+    assert [e["type"] for e in events] == ["user_message", "assistant_message", "tool_result"]
+    assistant, tool_result = events[1], events[2]
+    assert assistant["text"] == ""
+    assert len(assistant["tool_calls"]) == 1
+    call = assistant["tool_calls"][0]
+    assert call["tool_name"] == "shell_command"
+    assert call["input_preview"] == '{"command":"ls"}'
     assert tool_result["tool_name"] == "shell_command"
     assert tool_result["output"] == "file_a\nfile_b\n"
     assert tool_result["is_error"] is False
-    # The tool_result references the synthetic id minted on the function_call line.
+    # The assistant tool_call and its tool_result share the synthetic id minted on
+    # the function_call line, so a reader can pair them.
+    assert call["tool_call_id"] == "line-2-tc"
     assert tool_result["tool_call_id"] == "line-2-tc"
 
 

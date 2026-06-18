@@ -479,7 +479,7 @@ def encode_claude_project_dir_name(path: Path) -> str:
     anthropics/claude-code#19972. If this encoder diverges from Claude
     Code's, ``on_after_provisioning`` writes the adopted JSONL to a
     project subdir Claude Code never reads on resume, the find guard in
-    ``assemble_command`` returns no match, and ``--adopt-session``
+    ``assemble_command`` returns no match, and ``--adopt``
     silently spawns a fresh session via the ``||`` fallback.
     """
     return _NON_DASH_ALNUM_ASCII.sub("-", str(path))

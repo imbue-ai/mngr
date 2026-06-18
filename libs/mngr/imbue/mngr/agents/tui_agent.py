@@ -8,6 +8,7 @@ calling the relevant helper from ``_send_enter_and_validate``.
 
 from __future__ import annotations
 
+import re
 from abc import abstractmethod
 from typing import Callable
 from typing import ClassVar
@@ -15,7 +16,7 @@ from typing import ClassVar
 from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.tui_utils import DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import wait_for_paste_visible
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
@@ -23,18 +24,21 @@ from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
 
 
-class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
+class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
     """Base for interactive TUI agents that echo input back to the terminal.
 
     Subclasses declare:
 
-    * ``TUI_READY_INDICATOR`` -- a stable substring that appears in the pane
-      once the TUI is rendered and ready to accept input, on BOTH a fresh
-      start and a resume (and ideally stays visible while the TUI is
-      processing). Polled by ``send_message`` before pasting, and at startup
-      by ``wait_for_ready_signal``. A startup-only banner is unsuitable: it
-      does not render when resuming a saved session, so prefer the input
-      prompt glyph over a welcome banner.
+    * ``TUI_READY_INDICATOR`` -- what the pane shows once the TUI is rendered and
+      ready to accept input, on BOTH a fresh start and a resume (and ideally
+      stays matching while the TUI is processing). Either a plain ``str``
+      (matched as an exact substring) or a compiled ``re.Pattern`` (matched with
+      ``re.search``) -- the type, not the string contents, chooses the matching
+      mode, so reach for a ``re.Pattern`` when no single substring captures the
+      ready state. Polled by ``send_message`` before pasting, and at startup by
+      ``wait_for_ready_signal``. A startup-only banner is unsuitable: it does not
+      render when resuming a saved session, so prefer the input prompt glyph (or
+      the input-box chrome) over a welcome banner.
     * ``_send_enter_and_validate`` -- how to submit a message and confirm it
       landed. Pick one of the strategies in ``tui_utils``:
       ``send_enter_via_tmux_wait_for_hook`` (for agents whose TUI fires a
@@ -50,14 +54,14 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
     the paste to render in the pane before invoking ``_send_enter_and_validate``.
     """
 
-    TUI_READY_INDICATOR: ClassVar[str]
+    TUI_READY_INDICATOR: ClassVar[str | re.Pattern[str]]
 
     enter_submission_timeout_seconds: float = Field(
         default=DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS,
         description="Timeout in seconds for the signal-based submission strategy",
     )
 
-    def get_tui_ready_indicator(self) -> str:
+    def get_tui_ready_indicator(self) -> str | re.Pattern[str]:
         return self.TUI_READY_INDICATOR
 
     @abstractmethod

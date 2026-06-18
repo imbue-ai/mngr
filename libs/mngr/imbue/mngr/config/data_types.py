@@ -621,6 +621,7 @@ class CreateCliOptions(CommonCliOptions):
     name_style: str
     extra_window: tuple[str, ...]
     source: str | None
+    adopt_session: tuple[str, ...]
     target_path: str | None
     transfer: str | None
     rsync: bool | None

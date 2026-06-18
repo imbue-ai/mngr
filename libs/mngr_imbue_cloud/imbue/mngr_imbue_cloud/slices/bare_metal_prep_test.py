@@ -27,6 +27,16 @@ def test_prep_script_stages_base_image_under_lima_user_via_file_path() -> None:
     assert 'if [ ! -f "$img" ]; then' in script
 
 
+def test_prep_script_chowns_cache_dir_to_lima_user() -> None:
+    script = _script()
+    # The script runs as root; staging the image under ~/.cache must leave ~/.cache
+    # owned by the lima user, or `limactl` (run as that user) cannot create
+    # ~/.cache/lima and every VM start fails. The parent cache dir must be chowned,
+    # not just the leaf image dir.
+    assert 'cache_dir="$(dirname "$image_dir")"' in script
+    assert 'chown limahost:limahost "$cache_dir" "$image_dir"' in script
+
+
 def test_prep_script_installs_qemu_and_lima() -> None:
     script = _script()
     assert "qemu-system-x86" in script

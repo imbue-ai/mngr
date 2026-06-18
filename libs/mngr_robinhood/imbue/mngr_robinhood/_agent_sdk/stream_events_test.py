@@ -2,6 +2,7 @@ from pathlib import Path
 
 from claude_agent_sdk import StreamEvent
 
+from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 from imbue.mngr_robinhood._agent_sdk.stream_events import StreamEventSynthesizer
 
 
@@ -25,7 +26,7 @@ class _MissingBufferHost:
 def _make_synth(host: object) -> StreamEventSynthesizer:
     # model_construct bypasses validation so the lightweight fake host can stand in for the real
     # OnlineHostInterface (the field is SkipValidation; only read_text_file is exercised).
-    return StreamEventSynthesizer.model_construct(host=host, buffer_path=Path("/buffer"))
+    return StreamEventSynthesizer.model_construct(host=host, buffer_path=Path("/buffer"), reader=SnapshotDeltaReader())
 
 
 def _event_types(events: list[StreamEvent]) -> list[str]:
