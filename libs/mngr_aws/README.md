@@ -2,9 +2,9 @@
 
 AWS provider backend plugin for mngr. Runs agents in Docker containers on Amazon EC2 instances.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps` machinery underneath it is well-tested, but AWS-specific defaults may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, and `auto_shutdown_seconds` before pointing this at production resources.
 
-See `mngr_vps_docker` for the base architecture and shared infrastructure.
+See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
@@ -81,7 +81,7 @@ mngr destroy my-agent
 
 ## AWS-specific configuration
 
-These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
+These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -97,6 +97,8 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |
 | `iam_instance_profile` | `None` | Optional IAM instance profile name attached to launched instances. |
+| `state_bucket_name` | `None` | Name of the S3 bucket holding mngr control-plane state (host record + agent records) for offline reads. When `None`, derived as `mngr-state-<account_id>-<region>`. The bucket is the sole offline store (created by `mngr aws prepare`); without it, a stopped host cannot be listed or resumed and offline reads raise an error pointing at `prepare`. |
+| `is_offline_host_dir_enabled` | `True` | Offline `host_dir`: makes a stopped host's `host_dir` readable without starting it. When on (and a state bucket is present), mngr captures `host_dir` operator-side at `mngr stop` (reads it off the box over SSH and uploads it to the bucket with your own credentials -- no instance IAM identity), and a stopped host's `host_dir` is read back from the bucket (so `mngr event` / `mngr transcript` work offline). A host that idle-self-poweroffs isn't captured (only `mngr stop` captures). Set `False` to disable the capture entirely. |
 | `terminate_on_shutdown` | `false` | EC2 `InstanceInitiatedShutdownBehavior` on an OS shutdown. `false` → `stop` (resumable via `mngr start`, EBS preserved); `true` → `terminate` (ephemeral / self-cleaning). |
 | `auto_shutdown_seconds` | `None` | When set, cloud-init schedules `shutdown -P` so the OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts, with a floor of 1 minute). Whether that stops or terminates the instance is governed by `terminate_on_shutdown` (default `stop`, i.e. resumable). A hard max-lifetime cap, distinct from the activity-based `default_idle_timeout`. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
@@ -110,7 +112,13 @@ mngr aws prepare --region us-east-1
 mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
 ```
 
-`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port.
+`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It additionally creates (idempotently) a private, encrypted S3 **state bucket** that holds mngr's control-plane state -- the full host record and per-agent records -- so a stopped instance's state is readable offline without SSH. The bucket is **required** infrastructure and the sole offline store, named `mngr-state-<account_id>-<region>` by default (override with `state_bucket_name` on the provider config). Creating the bucket is `prepare`'s primary job: if the key lacks the S3 / `sts:GetCallerIdentity` permissions, or the bucket name cannot be resolved, `prepare` **fails** (it does not fall back to a security-group-only prepare).
+
+`prepare` sets up only the security group + state bucket. The offline `host_dir` feature (on by default; see `is_offline_host_dir_enabled`) needs **no IAM identity** -- `host_dir` is captured operator-side at `mngr stop` (mngr reads it off the box and uploads it to the bucket with your own credentials), so the instance never needs to write the bucket itself.
+
+```bash
+mngr aws prepare --region us-east-1   # creates the security group + state bucket; fails if S3/STS is denied
+```
 
 It is **read-only-first**: it issues a `DescribeSecurityGroups` call, and when the security group already exists with the required SSH ingress, it returns without any write call. This means a re-run on an already-prepared region succeeds even with a key that only has `ec2:DescribeSecurityGroups` (so callers -- e.g. minds' auto-prepare -- can safely run it before every create regardless of the key's privileges). The write permissions are needed only when something is actually missing:
 
@@ -130,6 +138,8 @@ mngr aws cleanup --region us-east-1
 
 It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group is already gone. It needs only `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
 
+`cleanup` also deletes the S3 state bucket. Because the instance check above has already passed, any state left in the bucket is **orphaned** offline state (from hosts that are no longer running instances), so `cleanup` **refuses** to delete a non-empty bucket rather than silently dropping records you may still want -- pass `--force` to delete the bucket and its remaining state.
+
 ## Required IAM permissions
 
 For `mngr create --provider aws` (per-host path):
@@ -143,7 +153,7 @@ ec2:DescribeSecurityGroups,
 ec2:DescribeImages
 ```
 
-No `iam:*` actions are required by default (no instance profile is attached); `iam:PassRole` is only needed if you set the optional `iam_instance_profile`.
+`iam:PassRole` is needed at create only when the optional operator-supplied `iam_instance_profile` is set (to attach it to the instance). Offline `host_dir` needs no `iam:*` action -- it is captured operator-side at `mngr stop`, not pushed by an instance identity.
 
 For `mngr aws prepare` (one-time admin setup; in addition to the above for convenience):
 
@@ -151,13 +161,19 @@ For `mngr aws prepare` (one-time admin setup; in addition to the above for conve
 ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress
 ```
 
+The S3 state bucket setup additionally uses `sts:GetCallerIdentity` (to derive the bucket name) and `s3:CreateBucket`, `s3:PutBucketPublicAccessBlock`, `s3:PutEncryptionConfiguration`, `s3:PutBucketTagging`, `s3:ListBucket`. These are **required**: the bucket is `prepare`'s primary job, so missing them fails the command. The per-host `mngr create` path uses `s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` / `s3:ListBucket` to mirror state (the bucket must already exist).
+
+Offline `host_dir` needs no extra IAM: it is captured operator-side at `mngr stop` (mngr uploads `host_dir` to the bucket with the operator's own credentials -- the same `s3:PutObject` etc. above), so there is no instance identity to provision and no `iam:*` action involved.
+
 For `mngr aws cleanup` (teardown; in addition to the per-host path's `DescribeInstances` / `DescribeSecurityGroups`):
 
 ```
 ec2:DeleteSecurityGroup
 ```
 
-Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. After launch, `ec2:CreateTags`/`ec2:DeleteTags` mirror per-agent metadata onto the instance (tags keyed `mngr-agent-<id>`) so a stopped host still lists its agents and resolves by name (see the offline-discovery note below). `ec2:StopInstances`/`ec2:StartInstances` back `mngr stop --stop-host` / `mngr start`, so a paused agent costs only EBS storage. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
+Deleting the S3 state bucket additionally uses `s3:ListBucket`, `s3:DeleteObject`, and `s3:DeleteBucket`.
+
+Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. Only the cheap index tags (`mngr-host-id`, `Name`, `mngr-created-at`) are stamped on the instance, to identify a stopped host during discovery; per-agent metadata lives in the S3 state bucket, not in tags (see the offline-discovery note below). `ec2:StopInstances`/`ec2:StartInstances` back `mngr stop --stop-host` / `mngr start`, so a paused agent costs only EBS storage. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
 
 ## Implementation details
 
@@ -168,9 +184,10 @@ Instance and volume tags are set at launch via `RunInstances` `TagSpecifications
 - Instance shutdown behavior (`InstanceInitiatedShutdownBehavior`) is set from the `terminate_on_shutdown` config field: `stop` by default (an OS shutdown — the idle watcher or the `auto_shutdown_seconds` time cap — stops the instance, leaving it resumable with its EBS volume intact) or `terminate` when `terminate_on_shutdown = true` (an OS shutdown terminates the instance, so a self-halted host is garbage-collected automatically). This is independent of `mngr stop --stop-host`, which uses the `StopInstances` API (not an OS halt) and always leaves the instance recoverable.
 - **Stop/resume** (`mngr stop --stop-host` / `mngr start`): the provider overrides `stop_host`/`start_host` to stop and start the EC2 instance via the API, preserving the root EBS volume across the stop. A stopped instance loses its public IPv4, so `start_host` reads the fresh IP, rewrites `vps_ip` in the host record, and re-points known_hosts before restarting the container. For a stable address across stops, see the Elastic IP item under "Future improvements".
 - **Self-stopping idle watcher**: an idle agent stops its own EC2 instance (so a paused agent costs only EBS), reusing the in-container activity watcher. A container cannot power off its host, so on idle the in-container `shutdown.sh` *signals* by touching a sentinel file (`stop-instance-requested`) on the shared host volume rather than killing the container. At host finalization the provider installs (on the outer host) a systemd path unit (`mngr-aws-idle-watcher.path`) that watches the outer-filesystem location of that sentinel; when it appears, a paired oneshot service powers the host off with `shutdown -P now`. EC2 then applies the instance's `InstanceInitiatedShutdownBehavior` (`stop`, the default — resumable — or `terminate`; see `terminate_on_shutdown`) to decide whether the poweroff stops or terminates the instance. **No IAM role or awscli is involved** — the watcher never calls the EC2 API. The install is best-effort: if the unit setup fails, finalization logs a warning and proceeds with no auto-stop (manual `mngr stop --stop-host` still works). `mngr start` resumes a self-stopped host exactly as it resumes a `mngr stop --stop-host` host (the self-stop service removes the sentinel before powering off so a resumed instance isn't immediately re-stopped).
-- **Offline discovery of stopped hosts**: a stopped instance has no public IP, so it falls out of the SSH-based discovery the base provider uses. To keep paused hosts visible in `mngr list` and resolvable for `mngr start`, agent records are mirrored into EC2 tags (written via `persist_agent_data`) and `AwsProvider` reconstructs stopped hosts + their agents from tags in `discover_hosts_and_agents` / `to_offline_host`. Each agent is stored as up to three per-field tags keyed `mngr-agent-<id>-name` / `-type` / `-labels` (the id lives in the key; `name`/`type` raw, `labels` as compact JSON), so `labels` gets the full 256-char value budget and an offline `mngr label` on a stopped host round-trips. A field whose value still overflows 256 chars (realistically only `labels`) is dropped with a warning rather than a silent no-op. EC2 caps a resource at 50 tags; when a host has so many agents that mirroring another would exceed that, `persist_agent_data` raises a `NotImplementedError` (which the CLI turns into an "open an issue" prompt) rather than failing obscurely. An S3-backed store for many-agent hosts (and full agent records) is the planned fix.
+- **Offline discovery of stopped hosts**: a stopped instance has no public IP, so it falls out of the SSH-based discovery the base provider uses. To keep paused hosts visible in `mngr list` and resolvable for `mngr start`, mngr mirrors state to the S3 state bucket, and `AwsProvider` reconstructs stopped hosts + their agents from it in `discover_hosts_and_agents` / `to_offline_host`. The full `VpsHostRecord` and each per-agent record are written to the bucket by the mngr host machine (via `persist_agent_data` / `_persist_host_record_externally`), and a stopped host's full record + agents are read back from it (there is no size limit, so an oversized `labels` blob survives a stop). The cheap `mngr-host-id` / `Name` EC2 tags stamped at create are still used to *identify* a stopped instance during discovery, but no per-agent `mngr-agent-*` tags are written. The bucket is **required**, with no tag-mirror fallback: when it has not been provisioned (`prepare` never run), mngr raises an actionable error pointing at `mngr aws prepare` -- on the `mngr create` / `mngr label` write path as well as on offline reads. A transient S3 error on a mirror read or write propagates rather than being swallowed.
+- **Offline `host_dir`** (on by default via `is_offline_host_dir_enabled`): **operator-driven**, so it needs no instance IAM identity. At `mngr stop` the operator (mngr, already SSH-connected and holding the bucket credentials) reads the host's `host_dir` off the box and uploads it to `s3://<bucket>/hosts/<host_id>/host_dir/` with **your own** credentials -- the same ones that write the state records. Offline reads (`get_volume_for_host` / `get_volume_reference_for_host`) serve it back from the bucket, upgrading a stopped host to an `OfflineHostWithVolume` so `mngr event` / `mngr transcript` / `mngr file` work while the instance is stopped. An empty `host_dir` prefix (nothing captured yet) reads as no volume. **Limitation:** capture happens only at `mngr stop` -- a host that idle-self-poweroffs (or crashes) is **not** captured, since no operator is involved at that moment and (by design) the box holds no bucket credentials; its offline `host_dir` then reflects its last `mngr stop` (or is empty if never stopped that way). The state *records* are unaffected (always operator-written). Set `is_offline_host_dir_enabled = false` to skip the capture entirely.
 - The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host`; run `mngr aws cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists).
-- **No snapshot workflow**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider has no host snapshot workflow today. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are intentionally unwired -- they raise `VpsDockerError` with an actionable "EBS snapshot support is not implemented in mngr_aws" message rather than running real EBS API calls that nothing else consumes. Restore from a fresh `mngr create` instead.
+- **No snapshot workflow**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider has no host snapshot workflow today. The AWS client exposes no disk-snapshot surface (the speculative EBS `create_snapshot` / `list_snapshots` / `delete_snapshot` client methods had no consumers and are not part of `VpsClientInterface`). Restore from a fresh `mngr create` instead.
 - **Spot capacity via `--aws-spot`**: opt-in (presence-only build arg). When set, the instance launches with `InstanceMarketOptions={"MarketType": "spot"}` and is billed at the spot rate. AWS may reclaim the instance with ~2 minutes' notice; mngr does not currently surface the spot-interruption signal, so the host is terminated cold from mngr's perspective (cloud-init's auto-shutdown safety net still fires correctly). Use for cheap experimental agents, not for long-running production-shaped workloads.
 
 ## Release tests and cost

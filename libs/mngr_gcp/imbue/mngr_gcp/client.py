@@ -25,11 +25,12 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Label key stamped on every mngr-managed instance (the provider-instance name
 # is the value). Discovery filters on it, and ``mngr gcp cleanup`` uses its
@@ -43,10 +44,20 @@ MNGR_PROVIDER_LABEL_KEY: Final[str] = "mngr-provider"
 # tests do not have to constrain host naming: any agent name works.
 GCP_PYTEST_LAUNCHED_LABEL: Final[str] = "mngr-pytest-launched"
 
-# Instance-metadata key holding the human host name (``mngr-<host_name>``). Stored
-# in metadata, not a label, because GCE labels lowercase and restrict values --
-# offline discovery recovers the name from here for a STOPPED instance.
+# Instance-metadata keys holding mngr host identity. Stored in metadata, not
+# labels, because GCE labels lowercase and restrict values to ``[a-z0-9_-]`` (so
+# a mixed-case name or an ISO timestamp would be mangled). Offline discovery
+# recovers these from metadata for a STOPPED instance. The only mngr identity
+# that stays a *label* is ``mngr-provider`` (below), because it is a server-side
+# ``instances.list`` filter.
 HOST_NAME_METADATA_KEY: Final[str] = "mngr-host-name"
+HOST_ID_METADATA_KEY: Final[str] = "mngr-host-id"
+CREATED_AT_METADATA_KEY: Final[str] = "mngr-created-at"
+# Placement marker (container vs bare). Stored in metadata, not a label, so a
+# STOPPED instance's placement is readable by offline discovery to pick the right
+# realizer (labels are too restricted; metadata mirrors the AWS/Azure tag). Reuses
+# the shared ``ISOLATION_TAG_KEY`` so the key never drifts from the read side.
+ISOLATION_METADATA_KEY: Final[str] = ISOLATION_TAG_KEY
 
 # SSH metadata is injected as ``<user>:<public-key>``. The google-guest-agent
 # creates whatever user is named here, so ``ubuntu`` works on any image (including
@@ -500,17 +511,34 @@ class GcpVpsClient(VpsClientInterface):
             # ssh-keys metadata grants access (no inherited project keys).
             compute_v1.Items(key="enable-oslogin", value="FALSE"),
             compute_v1.Items(key="block-project-ssh-keys", value="TRUE"),
-            # Mirror the human host name into metadata (NOT a label -- labels
-            # lowercase and restrict the charset, mangling a mixed-case name) so a
-            # STOPPED instance can be reconstructed by name in offline discovery.
-            # ``label`` is ``mngr-<host_name>``; the read side strips the prefix.
+            # Mirror mngr host identity into metadata (NOT labels -- labels
+            # lowercase and restrict the charset, mangling a mixed-case name or
+            # an ISO timestamp) so a STOPPED instance can be reconstructed by
+            # name in offline discovery. ``label`` is ``mngr-<host_name>``; the
+            # read side strips the prefix. The host id is stored verbatim, and
+            # created-at as an ISO-8601 UTC string.
             compute_v1.Items(key=HOST_NAME_METADATA_KEY, value=label),
+            compute_v1.Items(key=CREATED_AT_METADATA_KEY, value=datetime.now(timezone.utc).isoformat()),
         ]
+        host_id = tags.get("mngr-host-id")
+        if host_id:
+            metadata_items.append(compute_v1.Items(key=HOST_ID_METADATA_KEY, value=host_id))
+        # Mirror the placement marker (container vs bare) into metadata so offline
+        # discovery can pick the right realizer for a STOPPED instance without SSH.
+        isolation = tags.get(ISOLATION_TAG_KEY)
+        if isolation:
+            metadata_items.append(compute_v1.Items(key=ISOLATION_METADATA_KEY, value=isolation))
         if ssh_metadata_value:
             metadata_items.append(compute_v1.Items(key="ssh-keys", value=ssh_metadata_value))
 
-        labels: dict[str, str] = {to_gce_label_value(k): to_gce_label_value(v) for k, v in tags.items()}
-        labels["mngr-created-at"] = to_gce_label_value(datetime.now(timezone.utc).strftime("%Y-%m-%dt%H-%M-%S"))
+        # Only ``mngr-provider`` rides in a label: it is the server-side filter for
+        # ``instances.list`` / the project-wide ``aggregatedList`` cleanup scan, so
+        # it must be a label (and is lowercased to the GCE charset). All other mngr
+        # identity (host id, host name, created-at) lives in metadata above.
+        labels: dict[str, str] = {}
+        provider_value = tags.get(MNGR_PROVIDER_LABEL_KEY)
+        if provider_value:
+            labels[MNGR_PROVIDER_LABEL_KEY] = to_gce_label_value(provider_value)
         # Mark instances launched during pytest so the conftest session-end
         # orphan scanner can identify and force-delete any leaks without having
         # to constrain the agent / host name shape.

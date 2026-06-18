@@ -887,7 +887,7 @@ def test_rsync_worktree_over_clone_overlays_uncommitted_files(
     (temp_git_repo / "tracked.txt").write_text("DIRTY\n")
     (temp_git_repo / "untracked.txt").write_text("hello\n")
 
-    # Clone HEAD into a sibling dir (mirrors what mngr_vps_docker does for a
+    # Clone HEAD into a sibling dir (mirrors what mngr_vps does for a
     # worktree build context).
     clone_dir = tmp_path / "clone"
     subprocess.run(

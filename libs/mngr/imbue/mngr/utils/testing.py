@@ -1250,7 +1250,10 @@ def delete_modal_apps_in_environment(environment_name: str) -> None:
             if app_id:
                 try:
                     stop_result = subprocess.run(
-                        ["uv", "run", "modal", "app", "stop", app_id],
+                        # --yes: skip the interactive confirmation, which otherwise aborts the
+                        # stop in non-interactive runs (CI / release tests) so the app is never
+                        # stopped and only the environment deletion reaps it.
+                        ["uv", "run", "modal", "app", "stop", app_id, "--yes"],
                         capture_output=True,
                         text=True,
                         timeout=30,

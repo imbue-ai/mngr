@@ -23,6 +23,7 @@ There are two variants:
 
 import json
 import shlex
+from collections.abc import Mapping
 from typing import Any
 from typing import Final
 
@@ -330,3 +331,8 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
 
     result["agents"] = agents
     return result
+
+
+def extract_agent_data_from_parsed_listing(parsed_listing: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Pull each agent's ``data.json`` dict out of a parsed listing, skipping malformed entries."""
+    return [data for agent in parsed_listing.get("agents", []) if isinstance((data := agent.get("data")), dict)]

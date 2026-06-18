@@ -27,23 +27,24 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
+from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 # region/plan are meaningless for a locally-carved lima VM, but the shared
-# VpsDockerProvider finalize path persists them, so use stable placeholders.
+# VpsProvider finalize path persists them, so use stable placeholders.
 # Region falls back to this only if the owning bare-metal server's region is
 # unknown; the slice bake always passes the real region via ``slice_region``.
 _FALLBACK_SLICE_REGION: str = "lima"
 _SLICE_PLAN: str = "slice"
 
 
-class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
-    """Config for the slice provider: a VpsDockerProvider whose 'VPS' is a local lima VM."""
+class SliceVpsDockerProviderConfig(VpsProviderConfig):
+    """Config for the slice provider: a VpsProvider whose 'VPS' is a local lima VM."""
 
     backend: ProviderBackendName = Field(default=ProviderBackendName("imbue_cloud_slice"))
     box_public_address: str = Field(
@@ -94,8 +95,8 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
     slice_port_range_end: int | None = Field(default=None, description="Box host-port range end (no default)")
 
 
-class SliceVpsDockerProvider(VpsDockerProvider):
-    """A VpsDockerProvider whose 'VPS' is a lima VM we run on a bare-metal box.
+class SliceVpsDockerProvider(VpsProvider):
+    """A VpsProvider whose 'VPS' is a lima VM we run on a bare-metal box.
 
     The bake runs from wherever ``mngr create`` is invoked (the operator's laptop,
     like an OVH bake): ``create_host`` carves the VM by driving limactl over SSH on
@@ -152,7 +153,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         # Slices have no region/plan flags (the VM is carved locally), so this
-        # mirrors MinimalVpsDockerProvider: extract git-depth, pass the rest
+        # mirrors MinimalVpsProvider: extract git-depth, pass the rest
         # through as docker build args. Region is the owning server's region.
         args = list(build_args or ())
         git_depth, args = extract_git_depth(args)
@@ -198,7 +199,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
     ) -> Host:
         """Provision a slice VM and bake the shared vps_docker container onto it.
 
-        Mirrors ``VpsDockerProvider.create_host`` but, instead of ordering a VPS
+        Mirrors ``VpsProvider.create_host`` but, instead of ordering a VPS
         and uploading an SSH key, carves a lima VM (the LimaSliceVpsClient does
         not support cloud ordering) and reaches it via box-forwarded ports.
         """
@@ -315,7 +316,10 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         finally:
             outer.disconnect()
 
-    def _wait_for_container_sshd(self, vps_ip: str) -> None:
+    def _wait_for_container_sshd(self, vps_ip: str, realizer: HostRealizer | None = None) -> None:
+        # imbue_cloud is container-only (it rejects bare), and the agent sshd is
+        # reached on a dynamically forwarded port, so the realizer is unused here.
+        del realizer
         port = (
             self._current_container_port
             if self._current_container_port is not None
@@ -323,7 +327,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         )
         wait_for_sshd(hostname=vps_ip, port=port, timeout_seconds=self.config.ssh_connect_timeout)
 
-    def _create_host_object(self, host_id: HostId, host_name: HostName, vps_ip: str) -> Host:
+    def _create_host_object(self, host_id: HostId, host_name: HostName, vps_ip: str, realizer: HostRealizer) -> Host:
         container_key_path, _container_pub = self._get_container_ssh_keypair()
         _container_host_key_path, container_host_public_key = self._get_container_host_keypair()
         port = (
@@ -351,13 +355,15 @@ class SliceVpsDockerProvider(VpsDockerProvider):
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data, vps_ip
+                callback_host_id, certified_data, vps_ip, realizer
             ),
         )
         self._evict_cached_host(host_id, replacement=host)
         return host
 
-    def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str) -> None:
+    def _on_certified_host_data_updated(
+        self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str, realizer: HostRealizer
+    ) -> None:
         # Same intent as the base (sync data.json into the host volume), but the
         # outer is reached via the forwarded port that _make_outer_for_vps_ip uses.
-        super()._on_certified_host_data_updated(host_id, certified_data, vps_ip)
+        super()._on_certified_host_data_updated(host_id, certified_data, vps_ip, realizer)

@@ -29,7 +29,7 @@ parallel worker.
 Also registers the shared plugin-test fixtures (including
 ``temp_mngr_ctx``) so backend-level unit tests can construct real
 provider instances; mirrors the conftest pattern used by
-``mngr_vps_docker`` and ``mngr_schedule``.
+``mngr_vps`` and ``mngr_schedule``.
 """
 
 from collections.abc import Generator
@@ -44,6 +44,7 @@ import pytest
 from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
+from moto import mock_aws
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
@@ -56,6 +57,25 @@ from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import aws_credentials_available
 
 register_plugin_test_fixtures(globals())
+
+
+@pytest.fixture
+def aws_session() -> Generator[boto3.Session, None, None]:
+    """A boto3 Session with moto's in-memory AWS backend active and dummy creds.
+
+    Shared by the unit tests that exercise S3/IAM behavior against moto (state
+    bucket, host identity). Lives here so the moto context and the dummy-cred
+    session have a single definition.
+    """
+    with mock_aws():
+        yield boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
+
+
+@pytest.fixture
+def aws_mock() -> Generator[None, None, None]:
+    """Activate moto's in-memory AWS backend for a test that builds its own sessions."""
+    with mock_aws():
+        yield
 
 
 @pytest.fixture(autouse=True)

@@ -9,7 +9,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_BACKEND_NAME
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import VpsProviderConfig
 
 CONNECTOR_URL_ENV_VAR = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
 
@@ -18,10 +18,10 @@ class MissingConnectorUrlError(ImbueCloudError):
     """Raised when the provider's connector URL is unset (no field, no env)."""
 
 
-class ImbueCloudProviderConfig(VpsDockerProviderConfig):
+class ImbueCloudProviderConfig(VpsProviderConfig):
     """Configuration for an imbue_cloud provider instance.
 
-    Extends ``VpsDockerProviderConfig`` so it carries the runtime knobs
+    Extends ``VpsProviderConfig`` so it carries the runtime knobs
     (``docker_runtime`` / ``install_gvisor_runtime`` / ``default_start_args``)
     that the slow (rebuild) path forwards onto the delegated ``vps_docker``
     provider in ``ImbueCloudProvider._build_delegated_vps_provider``. Minds
