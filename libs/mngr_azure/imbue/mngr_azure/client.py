@@ -27,8 +27,6 @@ from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.network import models as network_models
 from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.resource.resources.models import ResourceGroup
-from azure.mgmt.resource.resources.models import Tags
-from azure.mgmt.resource.resources.models import TagsPatchResource
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -913,38 +911,6 @@ class AzureVpsClient(VpsClientInterface):
             f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
             f"/providers/Microsoft.Compute/virtualMachines/{vm_name}"
         )
-
-    def add_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
-        """Merge ``tags`` onto a VM via a server-side tag Merge (no read-modify-write race).
-
-        Used to mirror offline-discoverable metadata (per-agent records) onto the
-        VM so a deallocated VM -- SSH-unreachable -- still surfaces in ``mngr list``
-        and resumes by name. No-op when ``tags`` is empty. AWS does the equivalent
-        with EC2 ``CreateTags``; Azure tags accept large permissive values, like
-        EC2's.
-        """
-        if not tags:
-            return
-        with self._translate_azure_errors():
-            self._resource().tags.begin_update_at_scope(
-                self._vm_resource_id(str(instance_id)),
-                TagsPatchResource(operation="Merge", properties=Tags(tags=dict(tags))),
-            ).result()
-
-    def remove_tags(self, instance_id: VpsInstanceId, keys: Sequence[str]) -> None:
-        """Delete tags (by key) from a VM via a server-side tag Delete. No-op when ``keys`` is empty.
-
-        The Delete operation removes the listed keys regardless of value (the
-        values in the patch are ignored), so this drops a persisted-agent tag when
-        its agent is destroyed.
-        """
-        if not keys:
-            return
-        with self._translate_azure_errors():
-            self._resource().tags.begin_update_at_scope(
-                self._vm_resource_id(str(instance_id)),
-                TagsPatchResource(operation="Delete", properties=Tags(tags={key: "" for key in keys})),
-            ).result()
 
     def ensure_self_deallocate_role(self) -> str | None:
         """Create the least-privilege custom role that lets a VM deallocate itself. Best-effort.
