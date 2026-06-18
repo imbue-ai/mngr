@@ -24,7 +24,10 @@ class VpsProviderConfig(ProviderInstanceConfig):
     )
     host_dir: Path = Field(
         default=Path("/mngr"),
-        description="Base directory for mngr data inside containers",
+        description=(
+            "Base directory for mngr data on the agent host. With container isolation this is the "
+            "path inside the container; with bare isolation it is the path on the VM's OS."
+        ),
     )
     default_image: str = Field(
         default="debian:bookworm-slim",
