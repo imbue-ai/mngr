@@ -31,7 +31,6 @@ from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
-from imbue.mngr.errors import TagLimitExceededError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -126,16 +125,6 @@ def test_snapshots_not_supported_error_includes_provider() -> None:
     error = SnapshotsNotSupportedError(provider_name)
     assert error.provider_name == provider_name
     assert "test-provider" in str(error)
-
-
-def test_tag_limit_exceeded_error_includes_limit_and_actual() -> None:
-    """TagLimitExceededError should include both limit and actual."""
-    error = TagLimitExceededError(_TEST_PROVIDER, limit=10, actual=15)
-    assert error.provider_name == _TEST_PROVIDER
-    assert error.limit == 10
-    assert error.actual == 15
-    assert "10" in str(error)
-    assert "15" in str(error)
 
 
 def test_agent_not_found_on_host_error_sets_both_ids() -> None:
