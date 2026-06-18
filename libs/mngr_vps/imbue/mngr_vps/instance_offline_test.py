@@ -1,5 +1,6 @@
 """Tests for the offline VPS provider subsystem (external HostStateStore mirror)."""
 
+import threading
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -18,6 +19,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr.interfaces.volume_test import InMemoryVolume
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -38,6 +40,8 @@ from imbue.mngr_vps.host_store_test import _LocalFakeOuter
 from imbue.mngr_vps.host_store_test import _make_local_connector
 from imbue.mngr_vps.instance_offline import BucketHostDirBackend
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.instance_offline import _HOST_DIR_UPLOAD_CONCURRENCY
+from imbue.mngr_vps.instance_offline import _write_files_concurrently
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
@@ -473,3 +477,53 @@ def test_add_known_hosts_for_ip_skips_endpoint_with_absent_key(temp_mngr_ctx: Mn
     provider._add_known_hosts_for_ip("10.0.0.6", vps_public_key="ssh-ed25519 AAAAVPS", container_public_key=None)
     assert "10.0.0.6 ssh-ed25519 AAAAVPS" in provider._vps_known_hosts_path().read_text()
     assert not provider._container_known_hosts_path().exists()
+
+
+# =========================================================================
+# Concurrent host_dir capture upload (_write_files_concurrently)
+# =========================================================================
+
+
+def test_write_files_concurrently_overlaps_writers_and_persists_all_files() -> None:
+    """All files land regardless of chunking, and the per-file writes genuinely overlap."""
+    file_count = _HOST_DIR_UPLOAD_CONCURRENCY * 3 + 1
+    files = {f"projects/repo/.git/objects/{i:04d}": f"obj-{i}".encode() for i in range(file_count)}
+    worker_count = min(_HOST_DIR_UPLOAD_CONCURRENCY, file_count)
+    lock = threading.Lock()
+    written: dict[str, bytes] = {}
+    # Every worker must rendezvous at the barrier before any proceeds, so the upload
+    # completes only if the workers truly run concurrently; a serialized
+    # implementation would block the first worker forever and time out here.
+    barrier = threading.Barrier(worker_count, timeout=30)
+
+    class _BarrierVolume(InMemoryVolume):
+        def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+            barrier.wait()
+            with lock:
+                written.update(file_contents_by_path)
+
+    _write_files_concurrently(_BarrierVolume(), files)
+
+    assert written == files
+
+
+def test_write_files_concurrently_empty_is_a_noop() -> None:
+    """An empty mapping writes nothing and spawns no workers."""
+    volume = InMemoryVolume()
+    _write_files_concurrently(volume, {})
+    assert volume.files == {}
+
+
+def test_write_files_concurrently_surfaces_worker_failure() -> None:
+    """A failure in any worker propagates out of the concurrent upload."""
+    files: dict[str, bytes] = {f"f{i}": b"x" for i in range(_HOST_DIR_UPLOAD_CONCURRENCY * 2)}
+    files["dir/boom"] = b"x"
+
+    class _FailingVolume(InMemoryVolume):
+        def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+            if any("boom" in path for path in file_contents_by_path):
+                raise MngrError("upload failed")
+            self.files.update(file_contents_by_path)
+
+    with pytest.raises(MngrError, match="upload failed"):
+        _write_files_concurrently(_FailingVolume(), files)

@@ -13,6 +13,7 @@ from loguru import logger
 from pydantic import ConfigDict
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
@@ -26,6 +27,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
+from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -1096,6 +1098,42 @@ def _read_local_file_tree(root: Path) -> dict[str, bytes]:
     return files
 
 
+# A captured host_dir can be a full git checkout -- thousands of tiny files --
+# and an object-store volume PUTs one object per file. Uploading the files across
+# this many worker threads overlaps the per-object round-trips instead of
+# serializing them (which made `mngr stop` on a large host_dir take minutes).
+_HOST_DIR_UPLOAD_CONCURRENCY: Final[int] = 32
+
+
+def _write_files_concurrently(volume: Volume, files: Mapping[str, bytes]) -> None:
+    """Upload ``files`` to ``volume`` with the per-object writes overlapped across worker threads.
+
+    Object-store volumes PUT one object per file, so a large captured host_dir
+    otherwise uploads file-by-file, serializing one WAN round-trip per object.
+    The files are split round-robin across a bounded pool of workers, each of
+    which writes its share through the volume's public ``write_files`` (so the
+    volume's own error translation is unchanged). A failure in any worker
+    surfaces via ``future.result()``.
+    """
+    items = list(files.items())
+    if not items:
+        return
+    worker_count = min(_HOST_DIR_UPLOAD_CONCURRENCY, len(items))
+    chunks: list[dict[str, bytes]] = [{} for _ in range(worker_count)]
+    for index, (path, content) in enumerate(items):
+        chunks[index % worker_count][path] = content
+    with ConcurrencyGroup(name="host-dir-capture-upload") as cg:
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg, name="host-dir-capture-upload", max_workers=worker_count
+        ) as executor:
+            futures = [executor.submit(volume.write_files, chunk) for chunk in chunks]
+    # Surface a worker's failure *outside* the ConcurrencyGroup block: re-raising it
+    # inside would let the group's __exit__ wrap it in a ConcurrencyExceptionGroup,
+    # hiding the underlying MngrError that the caller's error handling expects.
+    for future in futures:
+        future.result()
+
+
 class BucketHostDirBackend(HostDirBackend):
     """Operator-driven offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
 
@@ -1139,7 +1177,9 @@ class BucketHostDirBackend(HostDirBackend):
         (``stop_host``) pauses the instance in a ``finally`` *before* this can
         propagate, so raising never leaks a running instance: the host is stopped
         and ``mngr stop`` then surfaces the error. The tree is read into memory
-        before upload, which is fine for a bounded ``host_dir`` (events / transcripts).
+        and the per-file uploads are overlapped across worker threads
+        (``_write_files_concurrently``), so a large host_dir (a full git checkout)
+        does not serialize one object-store round-trip per file.
         """
         try:
             with log_span("Capturing host_dir to the bucket for host {}", host_id):
@@ -1148,7 +1188,7 @@ class BucketHostDirBackend(HostDirBackend):
                     self.provider._pull_host_dir_to_local(host_id, vps_ip, local_root)
                     files = _read_local_file_tree(local_root)
                     if files:
-                        self.bucket.volume_for_host(host_id).write_files(files)
+                        _write_files_concurrently(self.bucket.volume_for_host(host_id), files)
                     else:
                         logger.debug("host_dir for host {} is empty; nothing to capture", host_id)
         # A capture failure surfaces (it is NOT swallowed) -- the operator should
