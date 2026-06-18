@@ -15,8 +15,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: Adoption no longer requires the `sqlite3` command-line tool on the destination host. The agent's `opencode.db` is assembled entirely on a local staging copy (via Python's bundled SQLite) and copied onto the (possibly remote) host once at the end.
-- Changed: A corrupt or unreadable opencode db encountered while searching for an adopt session id is now logged as a warning rather than at trace level; resolution still continues against the other stores.
 - Changed: The opencode common-transcript emitter now emits `finish_reason` instead of `stop_reason` (aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records preserving the text/tool-call interleaving.
 
 ## [v0.2.16] - 2026-06-16
