@@ -3455,6 +3455,7 @@ def _run_host_health_probe(
     provider_label = friendly_provider_label(provider_name) or "the workspace backend"
     list_error: str | None = None
     list_stdout = ""
+    list_timed_out = False
     provider_error: ProviderProbeError | None = None
     try:
         # Capture stdout even on a nonzero exit: with ``--on-error continue`` the
@@ -3479,6 +3480,7 @@ def _run_host_health_probe(
         # produces UNKNOWN host state and falls through to HOST_UNRESPONSIVE, which
         # is exactly what handed users a destructive button during a full outage.
         list_error = str(exc)
+        list_timed_out = True
         provider_error = provider_unavailable_error(
             f"Could not reach {provider_label}: the workspace listing timed out after "
             f"{int(_HOST_HEALTH_PROBE_TIMEOUT_SECONDS)}s."
@@ -3504,7 +3506,13 @@ def _run_host_health_probe(
     # failure) raises and leaves ``in_container_stdout`` None, which parses to a
     # "no" on the can-we-run-commands probe, and is recorded only at debug.
     in_container_stdout: str | None = None
-    if services_agent_id is not None:
+    # Skip the in-container exec probe when the listing timed out: the exec SSHes
+    # to the container over the same network that just failed to even enumerate
+    # the provider, so it would only add another doomed round-trip -- and the tier
+    # is already PROVIDER_UNAVAILABLE regardless of what it answers. A provider
+    # error *with* a body is different (the connector can be down while the host's
+    # own SSH path is fine), so we still probe in that case.
+    if services_agent_id is not None and not list_timed_out:
         try:
             in_container_stdout = _run_mngr(concurrency_group, build_probe_argv(mngr_binary, services_agent_id), env)
         except MngrCommandError as exc:
