@@ -27,7 +27,6 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import Final
 
 import pytest
@@ -37,6 +36,8 @@ from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
+from imbue.mngr_gcp.cleanup import find_old_test_instances
+from imbue.mngr_gcp.cleanup import force_delete_instances
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
 from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
 from imbue.mngr_gcp.testing import GCP_RELEASE_TESTS_OPT_IN
@@ -81,42 +82,6 @@ def setup_test_mngr_env(
 # auto-shutdown TTL (the same value release tests propagate into the instance's
 # max_run_duration) so the two TTLs can never drift.
 _TEST_LEAK_TTL: Final[timedelta] = timedelta(seconds=GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS)
-
-
-def _force_delete_instances(instances_client: Any, project: str, zone: str, instance_names: list[str]) -> None:
-    for instance_name in instance_names:
-        try:
-            # GCE delete() returns an async operation; await it (like production
-            # destroy_instance) so a server-side failure is caught here rather
-            # than silently dropped after a fire-and-forget call.
-            operation = instances_client.delete(project=project, zone=zone, instance=instance_name)
-            operation.result()
-        except google_api_exceptions.GoogleAPICallError as e:
-            logger.warning("Failed to delete leaked GCE instance {}: {}", instance_name, e)
-
-
-def _find_orphan_test_instances(instances_client: Any, project: str, zone: str) -> list[str]:
-    """Return names of instances labeled ``mngr-pytest-launched=true`` older than the TTL.
-
-    ``GcpVpsClient.create_instance`` adds the label to every GCE instance
-    launched while ``PYTEST_CURRENT_TEST`` is set, so this scanner only matches
-    instances we created here. Younger instances are intentionally skipped so
-    this never races a parallel worker's in-flight test.
-    """
-    cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
-    leaked: list[str] = []
-    request = compute_v1.ListInstancesRequest(
-        project=project, zone=zone, filter=f"labels.{GCP_PYTEST_LAUNCHED_LABEL}=true"
-    )
-    try:
-        page_result = instances_client.list(request=request)
-        for instance in page_result:
-            created_at = datetime.fromisoformat(instance.creation_timestamp)
-            if created_at < cutoff:
-                leaked.append(instance.name)
-    except google_api_exceptions.GoogleAPICallError as e:
-        logger.warning("Failed to scan for orphaned GCE test instances: {}", e)
-    return leaked
 
 
 def _mark_session_failed(session: pytest.Session) -> None:
@@ -175,11 +140,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         _mark_session_failed(session)
         return
 
-    orphans = _find_orphan_test_instances(instances_client, project, GCP_DEFAULT_ZONE)
+    orphans = find_old_test_instances(
+        instances_client, project, GCP_DEFAULT_ZONE, _TEST_LEAK_TTL, datetime.now(timezone.utc)
+    )
     if not orphans:
         return
 
-    _force_delete_instances(instances_client, project, GCP_DEFAULT_ZONE, orphans)
+    force_delete_instances(instances_client, project, GCP_DEFAULT_ZONE, orphans)
     message = (
         "=" * 70
         + "\nGCP SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
