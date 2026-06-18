@@ -13,3 +13,5 @@ Added an offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled
 - Limitation: capture happens only at `mngr stop`. A VM that idle-self-deallocates (or crashes) is **not** captured -- its offline `host_dir` then reflects its last `mngr stop` (or is empty if never stopped that way); the state *records* are unaffected (always operator-written). An empty `host_dir` prefix reads as no volume. Set `is_offline_host_dir_enabled = false` to disable the capture entirely.
 
 Test-only: added unit coverage for the host-identity raise-on-failure paths (provisioning and cleanup) via a `delete_error` failure-injection seam on the managed-identity fake.
+
+Follow-up cleanup: removed the now-orphaned `AzureVpsClient.add_tags` / `AzureVpsClient.remove_tags` client methods (and their unit tests). They only ever existed to push per-agent records into VM tags for the old tag mirror, which the state bucket replaces; nothing reachable called them.

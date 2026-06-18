@@ -32,6 +32,7 @@ from imbue.mngr_vps.build_args import extract_git_depth
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 # region/plan are meaningless for a locally-carved lima VM, but the shared
@@ -315,7 +316,10 @@ class SliceVpsDockerProvider(VpsProvider):
         finally:
             outer.disconnect()
 
-    def _wait_for_container_sshd(self, vps_ip: str) -> None:
+    def _wait_for_container_sshd(self, vps_ip: str, realizer: HostRealizer | None = None) -> None:
+        # imbue_cloud is container-only (it rejects bare), and the agent sshd is
+        # reached on a dynamically forwarded port, so the realizer is unused here.
+        del realizer
         port = (
             self._current_container_port
             if self._current_container_port is not None
@@ -323,7 +327,7 @@ class SliceVpsDockerProvider(VpsProvider):
         )
         wait_for_sshd(hostname=vps_ip, port=port, timeout_seconds=self.config.ssh_connect_timeout)
 
-    def _create_host_object(self, host_id: HostId, host_name: HostName, vps_ip: str) -> Host:
+    def _create_host_object(self, host_id: HostId, host_name: HostName, vps_ip: str, realizer: HostRealizer) -> Host:
         container_key_path, _container_pub = self._get_container_ssh_keypair()
         _container_host_key_path, container_host_public_key = self._get_container_host_keypair()
         port = (
@@ -351,13 +355,15 @@ class SliceVpsDockerProvider(VpsProvider):
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data, vps_ip
+                callback_host_id, certified_data, vps_ip, realizer
             ),
         )
         self._evict_cached_host(host_id, replacement=host)
         return host
 
-    def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str) -> None:
+    def _on_certified_host_data_updated(
+        self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str, realizer: HostRealizer
+    ) -> None:
         # Same intent as the base (sync data.json into the host volume), but the
         # outer is reached via the forwarded port that _make_outer_for_vps_ip uses.
-        super()._on_certified_host_data_updated(host_id, certified_data, vps_ip)
+        super()._on_certified_host_data_updated(host_id, certified_data, vps_ip, realizer)

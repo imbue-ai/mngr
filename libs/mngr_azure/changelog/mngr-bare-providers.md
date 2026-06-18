@@ -57,3 +57,13 @@ Further internal dedup against the shared offline layer (no user-visible behavio
 Localized cleanup (no user-visible behavior change): the bare-placement `_write_bare_idle_shutdown_script` now writes its ARM self-deallocate `shutdown.sh` via the shared `VpsProvider._write_shutdown_script` plumbing instead of repeating the mkdir/write/chmod sequence.
 
 Integrated the `mngr/volumes` offline-store simplification (commit `f8bb5c0a5`): the per-agent instance-tag mirror is removed in favor of a single uniform external `HostStateStore` per provider -- AWS/Azure use their object-storage state bucket as the sole offline store (a stopped host's offline metadata now requires the bucket; the provider's `_state_store` raises an actionable `missing_state_bucket_error` pointing at `mngr <cloud> prepare` when the bucket is absent), and GCP uses a lossless instance-metadata-backed store (full host record + one JSON value per agent). AWS/Azure/GCP now extend `OfflineCapableVpsProvider` directly. This supersedes the earlier-on-this-branch tag-mirror dedup (the lifted `TagHostStateStore` / `KeyValueMirrorVpsProvider` / `TagMirrorVpsProvider` are gone); the realizer architecture, the systemd-unit hardening, and the cli/config/state-bucket dedup are retained. No behavior change for container hosts beyond the offline-metadata-requires-bucket consequence noted above.
+
+Bugfix: a running bare (`isolation=NONE`) host is now discoverable and reachable
+with the default provider config -- `mngr conn`/`list`/`stop`/`start`/`destroy`
+no longer need `-S providers.<name>.isolation=NONE` at connect time. Instances
+now carry a `mngr-isolation` tag stamped at create (alongside `mngr-host-id` /
+`mngr-provider`), so discovery reads the host's placement from the cloud API
+without SSH and probes it with the matching realizer. Pre-existing hosts have no
+tag and default to container, preserving prior behavior.
+
+Behavior-preserving dedup against the shared offline layer. The Azure `_state_store` / `_host_dir_backend` cached properties are now thin wrappers over the shared `OfflineCapableVpsProvider._select_bucket_store` / `_select_bucket_host_dir_backend` (supplying only the resolved Blob bucket, its label, and `mngr azure prepare`). The near-identical `_offline_discovered_host_from_instance` is dropped in favor of the shared default; Azure now sets only the `mngr-host-name` host-name tag key via the new `_host_name_tag_key()` hook. No user-visible behavior change.

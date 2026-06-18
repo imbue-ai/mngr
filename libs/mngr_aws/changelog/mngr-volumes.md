@@ -11,3 +11,7 @@ Added an offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled
 - Limitation: capture happens only at `mngr stop`. A host that idle-self-poweroffs (or crashes) is **not** captured -- its offline `host_dir` then reflects its last `mngr stop` (or is empty if never stopped that way); the state *records* are unaffected (always operator-written). An empty `host_dir` prefix reads as no volume. Set `is_offline_host_dir_enabled = false` to disable the capture entirely.
 
 Fixed `mngr destroy` of a stopped AWS host leaking its EC2 instance. Destroying a host that had been stopped (`mngr stop --stop-host`, or idle self-stop) previously failed to terminate the still-billing EC2 instance and left its S3 state behind while appearing to succeed. Destroy now falls back to the offline path -- resolving the stopped instance by its `mngr-host-id` tag and terminating it via `TerminateInstances` -- and removes the state-bucket records, failing loudly if the instance could not be terminated.
+
+A partial S3 `DeleteObjects` failure (the API returns HTTP 200 with per-key failures only in the response `Errors` array) now raises instead of being silently dropped, so a failed state/`host_dir` removal can't leave orphaned objects behind unnoticed.
+
+Follow-up cleanup: removed the now-orphaned `AwsVpsClient.add_tags` / `AwsVpsClient.remove_tags` client methods (and their unit tests). They only ever existed to push per-agent records into EC2 instance tags for the old tag mirror, which the state bucket replaces; nothing reachable called them.

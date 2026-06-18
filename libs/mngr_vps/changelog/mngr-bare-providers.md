@@ -181,3 +181,21 @@ the no-op default and return on the first poll; GCP's existing override polls
 until its startup-script-installed key is live, riding out the ssh restart.
 
 Integrated the `mngr/volumes` offline-store simplification (commit `f8bb5c0a5`): the per-agent instance-tag mirror is removed in favor of a single uniform external `HostStateStore` per provider -- AWS/Azure use their object-storage state bucket as the sole offline store (a stopped host's offline metadata now requires the bucket; the provider's `_state_store` raises an actionable `missing_state_bucket_error` pointing at `mngr <cloud> prepare` when the bucket is absent), and GCP uses a lossless instance-metadata-backed store (full host record + one JSON value per agent). AWS/Azure/GCP now extend `OfflineCapableVpsProvider` directly. This supersedes the earlier-on-this-branch tag-mirror dedup (the lifted `TagHostStateStore` / `KeyValueMirrorVpsProvider` / `TagMirrorVpsProvider` are gone); the realizer architecture, the systemd-unit hardening, and the cli/config/state-bucket dedup are retained. No behavior change for container hosts beyond the offline-metadata-requires-bucket consequence noted above.
+
+Bugfix: a running bare (`isolation=NONE`) host is now discoverable and reachable
+with the default provider config -- `mngr conn <agent>` (and every other
+operation: list, stop, start, destroy, snapshot, label, agent persistence) no
+longer requires re-specifying `-S providers.<cloud>.isolation=NONE` at connect
+time. The provider previously built a single realizer from `config.isolation` and
+used it for ALL operations, so a bare host probed by the default container
+realizer found no container and was invisible/unreachable (it was reached on the
+container port 2222 instead of the VM's port 22). Now `config.isolation` selects
+the realizer only for newly-created hosts; operations on an existing host resolve
+that host's own placement -- from the host record (`container_name is None` means
+bare) once it is read, and, in discovery (which has only the VPS IP, before any
+on-host store is opened), from a new `mngr-isolation` instance marker (an EC2/
+Azure tag, a GCE metadata item) stamped at create and readable from the cloud API
+without SSH. A host created before this change carries no marker and defaults to
+container, preserving the prior behavior.
+
+Behavior-preserving dedup in the shared offline layer. The near-identical AWS/Azure bucket-store selection now lives on `OfflineCapableVpsProvider` as `_select_bucket_store` (builds a `BucketHostStateStore`, or raises the actionable `missing_state_bucket_error` when the bucket is absent) and `_select_bucket_host_dir_backend` (bucket-backed when the feature is enabled and the bucket is present, else the no-op `NullHostDirBackend`); the AWS/Azure `_state_store` / `_host_dir_backend` cached properties are now thin wrappers passing only their resolved bucket, label, and prepare-command. The shared offline discovery now has a concrete `_offline_discovered_host_from_instance` default (builds a STOPPED `DiscoveredHost` from the `mngr-host-id` / name identity tags) with a `_host_name_tag_key()` hook; AWS/Azure drop their copies and set only the key (`Name` / `mngr-host-name`). The resume known_hosts rebind's add half is now a shared `_add_known_hosts_for_ip` helper (adds the VPS port-22 and container endpoints, each only when its key is present). GCP is unaffected: it keeps its metadata-backed `_state_store`, the `NullHostDirBackend` default, and its metadata-encoded discovery override. No user-visible behavior change.
