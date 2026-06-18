@@ -1,9 +1,7 @@
-import json
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -17,19 +15,14 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -38,33 +31,27 @@ from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.client import HOST_NAME_TAG_KEY
 from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
+from imbue.mngr_vps_docker.host_state_store import HostDirBackend
+from imbue.mngr_vps_docker.host_state_store import HostStateStore
+from imbue.mngr_vps_docker.host_state_store import NullHostDirBackend
+from imbue.mngr_vps_docker.host_state_store import missing_state_bucket_error
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.instance import BucketHostDirBackend
 from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import extract_git_depth
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
+from imbue.mngr_vps_docker.instance import host_name_from_tags
+from imbue.mngr_vps_docker.instance import normalized_tags_to_dict
 from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
 from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
-
-# Per-agent metadata is mirrored onto the VM as up to three tags per agent, keyed
-# ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the key), so a
-# *deallocated* VM (SSH-unreachable) still surfaces its agents in discovery and
-# resolves by name. ``name``/``type`` are stored raw; ``labels`` as compact JSON.
-# Mirrors the AWS EC2-tag layout (Azure tags are similarly permissive).
-AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
-_AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
-# Azure tag values are capped at 256 chars; a field whose value overflows is
-# dropped, not failed (realistically only ``labels``).
-_MAX_TAG_VALUE_LEN: Final[int] = 256
-# ``mngr-host-name`` tag holds ``mngr-<host_name>``; strip the prefix on read.
-# Named to match ``AwsProvider`` (both mirror the host name into instance tags);
-# GCP differs (GCE metadata) and keeps its own ``_HOST_NAME_PREFIX``.
-_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
 
 # Self-stopping idle watcher (host-side). The shared sentinel script + ``.path``
 # unit come from ``OfflineCapableVpsDockerProvider``; Azure differs only in the
@@ -185,6 +172,75 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
     azure_client: AzureVpsClient = Field(frozen=True, description="Azure VM API client")
     azure_config: AzureProviderConfig = Field(frozen=True, description="Azure-specific configuration")
 
+    @cached_property
+    def _state_bucket(self) -> BlobStateBucket | None:
+        """Return the Blob state bucket when account + container actually exist, else None.
+
+        The bucket is the sole source of truth for agent records and the offline
+        host record. None means the account/container do not exist yet (``mngr
+        azure prepare`` was never run) or the subscription can't be resolved;
+        ``_state_store`` then raises an actionable error. A storage error while
+        probing existence propagates rather than masquerading as "absent". The
+        existence probe runs at most once per provider lifetime (cached). Mirrors
+        ``AwsProvider._state_bucket``.
+        """
+        return self._resolve_existing_state_bucket()
+
+    def _resolve_existing_state_bucket(self) -> BlobStateBucket | None:
+        """Build the configured/derived bucket and return it only if it exists.
+
+        Returns None only when the bucket genuinely does not exist (or the
+        subscription is unresolvable). An ``account_exists`` / ``container_exists``
+        storage error propagates -- the bucket is required, so an inability to
+        check is an operational failure, not a silent "no bucket".
+        """
+        try:
+            subscription_id = self.azure_config.get_subscription_id()
+        except ValueError as e:
+            logger.debug(
+                "Could not resolve subscription for the Blob state bucket; offline host state is unavailable: {}", e
+            )
+            return None
+        bucket = self.azure_config.build_state_bucket(subscription_id)
+        if not (bucket.account_exists() and bucket.container_exists()):
+            logger.debug(
+                "Azure state account/container {}/{} does not exist; offline host state is unavailable "
+                "(run `mngr azure prepare` to create it)",
+                bucket.account_name,
+                bucket.container_name,
+            )
+            return None
+        return bucket
+
+    @cached_property
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror: the Blob bucket, or raise when it is absent.
+
+        Selecting one store here lets the persist / remove / list / read paths stop
+        branching on bucket presence. The bucket is required: when it does not
+        exist, accessing this property raises an actionable error pointing at
+        ``mngr azure prepare`` (so create / label / offline reads all fail loudly
+        and uniformly). Offline ``host_dir`` reads are a separate, bucket-only
+        feature keyed off ``_state_bucket``. Mirrors ``AwsProvider._state_store``.
+        """
+        bucket = self._state_bucket
+        if bucket is None:
+            raise missing_state_bucket_error("Azure state bucket", "mngr azure prepare")
+        return BucketHostStateStore(bucket=bucket, bucket_label="Azure state bucket")
+
+    @cached_property
+    def _host_dir_backend(self) -> HostDirBackend:
+        """Select the offline host_dir backend once: bucket-backed when enabled + present, else no-op.
+
+        The only place ``is_offline_host_dir_enabled`` and ``_state_bucket``
+        presence are tested together; every host_dir call site dispatches through
+        the selected backend. Mirrors ``AwsProvider._host_dir_backend``.
+        """
+        bucket = self._state_bucket
+        if self.azure_config.is_offline_host_dir_enabled and bucket is not None:
+            return BucketHostDirBackend(provider=self, bucket=bucket)
+        return NullHostDirBackend()
+
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List Azure VMs tagged with this provider's name."""
         return self.azure_client.list_instances(provider_tag=str(self.name))
@@ -301,6 +357,9 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
                     f"got {type(parsed).__name__}. This indicates the parser hook returned a "
                     "non-Azure shape; _parse_build_args must return ParsedAzureBuildOptions."
                 )
+        # Offline host_dir is operator-driven (captured at `mngr stop`), so no
+        # user-assigned identity is attached here; the VM still gets a
+        # system-assigned identity (for the idle self-deallocate role).
         return self.azure_client.create_instance(
             label=label,
             region=parsed.region,
@@ -409,46 +468,26 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         outer.execute_idempotent_command(f"chmod +x {_DEALLOCATE_SCRIPT_PATH}")
 
     # =========================================================================
-    # Offline metadata via VM tags (so DEALLOCATED hosts list + resolve by name)
+    # Offline discovery (so DEALLOCATED hosts list + resolve by name from the bucket)
     # =========================================================================
 
-    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
-        """Persist an agent's record on the host volume *and* mirror it into VM tags.
+    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        """Build a STOPPED-state DiscoveredHost from a deallocated VM's ``mngr-*`` tags, or None.
 
-        Mirrors ``AwsProvider.persist_agent_data``: the base writes the
-        authoritative on-volume record (read by SSH-based discovery for *running*
-        hosts -- best-effort, raises ``HostNotFoundError`` when deallocated), and
-        this override mirrors a compact record into VM tags so a *deallocated* VM
-        still surfaces its agents and resolves for ``mngr start``.
+        Reads only the cheap identity tags stamped at create (host id +
+        ``mngr-host-name``), never the bucket -- the full record is read from the
+        state store on demand.
         """
-        try:
-            super().persist_agent_data(host_id, agent_data)
-        except HostNotFoundError:
-            logger.debug("Host {} unreachable; persisting agent data to Azure tags only", host_id)
-        agent_id = agent_data.get("id")
-        if agent_id is None:
-            logger.warning("Cannot mirror agent data to Azure tags without an id (name={!r})", agent_data.get("name"))
-            return
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            logger.warning("No Azure VM found for host {}; cannot persist agent tags", host_id)
-            return
-        set_tags, delete_keys = self._agent_field_tags(str(agent_id), agent_data, instance)
-        self.azure_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
-        if delete_keys:
-            self.azure_client.remove_tags(VpsInstanceId(instance["id"]), delete_keys)
-
-    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>-*`` tags."""
-        try:
-            super().remove_persisted_agent_data(host_id, agent_id)
-        except HostNotFoundError:
-            logger.debug("Host {} unreachable; removing agent data from Azure tags only", host_id)
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
-        self.azure_client.remove_tags(VpsInstanceId(instance["id"]), keys)
+        tags = normalized_tags_to_dict(instance)
+        host_id_str = tags.get("mngr-host-id")
+        if host_id_str is None:
+            return None
+        return DiscoveredHost(
+            host_id=HostId(host_id_str),
+            host_name=host_name_from_tags(tags, HOST_NAME_TAG_KEY),
+            provider_name=self.name,
+            host_state=HostState.STOPPED,
+        )
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the VM is halted (stopped/deallocated, and their in-flight transitions).
@@ -463,137 +502,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         misreported as STOPPED.
         """
         return self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) == VpsInstanceStatus.HALTED
-
-    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
-        """Render one agent field as a tag-value string, or ``None`` if absent/empty.
-
-        ``name``/``type`` raw; ``labels`` as compact JSON (empty labels treated as
-        absent). Mirrors ``AwsProvider._agent_field_value``.
-        """
-        if field == "labels":
-            labels = agent_data.get("labels")
-            return json.dumps(labels, separators=(",", ":")) if labels else None
-        value = agent_data.get(field)
-        return None if value is None else str(value)
-
-    def _agent_field_tags(
-        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
-    ) -> tuple[dict[str, str], list[str]]:
-        """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
-
-        ``persist_agent_data`` is an upsert sometimes called with a partial record,
-        so a field absent from ``agent_data`` is left alone (NOT removed -- deleting
-        it would clobber the ``name`` offline resolve-by-name depends on). A field
-        present but empty (e.g. ``labels={}``) or over the 256-char Azure tag limit
-        (realistically only ``labels``) is dropped and its existing tag deleted.
-        Mirrors ``AwsProvider._agent_field_tags``.
-        """
-        set_tags: dict[str, str] = {}
-        delete_keys: list[str] = []
-        existing = set(self._tag_dict_from_normalized(instance))
-        for field in _AGENT_TAG_FIELDS:
-            if field not in agent_data:
-                continue
-            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
-            value = self._agent_field_value(field, agent_data)
-            if value is not None and len(value) <= _MAX_TAG_VALUE_LEN:
-                set_tags[key] = value
-                continue
-            if value is not None:
-                logger.warning(
-                    "Agent {} {} ({} chars) exceeds the {}-char Azure tag limit; omitted from the "
-                    "stopped-host tag mirror",
-                    agent_data.get("name", agent_id),
-                    field,
-                    len(value),
-                    _MAX_TAG_VALUE_LEN,
-                )
-            if key in existing:
-                delete_keys.append(key)
-        return set_tags, delete_keys
-
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Reassemble agent records from this VM's ``mngr-agent-<id>-<field>`` tags.
-
-        Mirrors ``AwsProvider._persisted_agent_dicts_from_instance`` (ids may
-        contain dashes, so split on the final ``-``).
-        """
-        by_id: dict[str, dict] = {}
-        for key, value in self._tag_dict_from_normalized(instance).items():
-            if not key.startswith(AGENT_TAG_PREFIX):
-                continue
-            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
-            if not sep or field not in _AGENT_TAG_FIELDS:
-                continue
-            record = by_id.setdefault(agent_id, {"id": agent_id})
-            if field == "labels":
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping unparseable agent labels tag {!r}", key)
-                    continue
-                if not isinstance(parsed, dict):
-                    logger.warning("Skipping agent labels tag {!r}: value is not a JSON object", key)
-                    continue
-                record["labels"] = parsed
-            else:
-                record[field] = value
-        return list(by_id.values())
-
-    def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
-        tags: dict[str, str] = {}
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if sep:
-                tags[key] = value
-        return tags
-
-    def _host_name_from_tags(self, tags: Mapping[str, str]) -> HostName:
-        """Recover the host name from the ``mngr-host-name=mngr-<name>`` tag (fallback: host-id)."""
-        name_tag = tags.get(HOST_NAME_TAG_KEY, "")
-        if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
-            return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
-        if name_tag:
-            return HostName(name_tag)
-        return HostName(tags.get("mngr-host-id", "unknown"))
-
-    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from a VM's tags, or None if not a mngr host."""
-        tags = self._tag_dict_from_normalized(instance)
-        host_id_str = tags.get("mngr-host-id")
-        if host_id_str is None:
-            return None
-        return DiscoveredHost(
-            host_id=HostId(host_id_str),
-            host_name=self._host_name_from_tags(tags),
-            provider_name=self.name,
-            host_state=HostState.STOPPED,
-        )
-
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a deallocated VM from its tags."""
-        tags = self._tag_dict_from_normalized(instance)
-        now = datetime.now(timezone.utc)
-        created_at = now
-        created_at_raw = tags.get("mngr-created-at")
-        if created_at_raw:
-            try:
-                created_at = datetime.fromisoformat(created_at_raw)
-            except ValueError as e:
-                logger.opt(exception=e).warning(
-                    "Malformed mngr-created-at tag {!r} on host {}; falling back to now()",
-                    created_at_raw,
-                    host_id,
-                )
-        certified = CertifiedHostData(
-            host_id=str(host_id),
-            host_name=str(self._host_name_from_tags(tags)),
-            created_at=created_at,
-            updated_at=now,
-            stop_reason=HostState.STOPPED.value,
-        )
-        return self._create_offline_host(VpsDockerHostRecord(certified_host_data=certified))
 
 
 class AzureProviderBackend(ProviderBackendInterface):
