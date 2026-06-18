@@ -296,8 +296,10 @@ def run_provider_release_trip1(
                 settings_dir, workspace, "stop", host_name, "--stop-host", timeout=_LIFECYCLE_TIMEOUT_SECONDS
             )
             assert refused.returncode != 0, f"stop --stop-host should be refused but succeeded:\n{refused.stdout}"
-            assert "HostShutdownNotSupported" in refused.stdout, (
-                f"expected a HostShutdownNotSupportedError refusal:\n{refused.stdout}"
+            # The CLI surfaces HostShutdownNotSupportedError as its user-facing message rather
+            # than the class name; key on that stable phrase.
+            assert "does not support stopping hosts" in refused.stdout.lower(), (
+                f"expected a host-shutdown-not-supported refusal:\n{refused.stdout}"
             )
 
         # 7. Start brings the host back (and is idempotent), then the marker must have survived.
