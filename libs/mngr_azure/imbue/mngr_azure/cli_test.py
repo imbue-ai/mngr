@@ -35,28 +35,38 @@ from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeManagedServiceIdentityClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
+from imbue.mngr_azure.testing import FakeTokenCredential
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
 from imbue.mngr_azure.testing import _StubbedBlobStateHostIdentity
 from imbue.mngr_vps.errors import ManagedResourcesExistError
 
 
-def _stubbed_bucket(backend: FakeBlobStorageBackend) -> _StubbedBlobStateBucket:
+def _stubbed_bucket(
+    backend: FakeBlobStorageBackend, *, authorization: FakeAuthorizationClient | None = None
+) -> _StubbedBlobStateBucket:
     return _StubbedBlobStateBucket(
-        credential=None,
+        credential=FakeTokenCredential(),
         subscription_id="sub-123",
         resource_group="mngr",
         region="westus",
         account_name="mngrststateacct1234",
         fake_backend=backend,
+        fake_authorization=authorization or FakeAuthorizationClient(),
     )
 
 
-def test_ensure_state_bucket_creates_account() -> None:
-    bucket = _stubbed_bucket(FakeBlobStorageBackend())
+def test_ensure_state_bucket_creates_account_and_grants_operator() -> None:
+    authorization = FakeAuthorizationClient()
+    bucket = _stubbed_bucket(FakeBlobStorageBackend(), authorization=authorization)
     account_name, was_created = _ensure_state_bucket(bucket)
     assert account_name == "mngrststateacct1234"
     assert was_created is True
+    # prepare also grants the operator's own principal data-plane blob access
+    # (FakeTokenCredential's default token carries oid "operator-oid-1").
+    assert len(authorization.role_assignments.created) == 1
+    _scope, _name, parameters = authorization.role_assignments.created[0]
+    assert parameters.principal_id == "operator-oid-1"
 
 
 def test_perform_state_bucket_cleanup_deletes_when_empty() -> None:

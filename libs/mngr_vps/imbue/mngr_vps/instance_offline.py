@@ -640,6 +640,18 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         ...
 
+    def _validate_external_store_ready(self) -> None:
+        """Fail fast (before launch) when the required offline state store is absent.
+
+        Accessing ``_state_store`` raises an actionable "run prepare" error when a
+        provider's required object-storage bucket has not been provisioned
+        (AWS/Azure); for the metadata-backed store (GCP) it is a cheap
+        construction. Probing here -- before the SSH key upload and instance launch
+        in ``create_host`` -- means a missing bucket fails ``mngr create`` cleanly
+        instead of after the instance is already running.
+        """
+        _ = self._state_store
+
     @abstractmethod
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
         """Build a STOPPED ``DiscoveredHost`` from an instance's identity tags/labels/metadata.
@@ -948,10 +960,12 @@ class BucketHostDirBackend(HostDirBackend):
         return HostVolume(volume=self.bucket.volume_for_host(host_id))
 
     def volume(self, host_id: HostId) -> HostVolume | None:
-        # A bucket probe error propagates (operational failure, surfaced per
-        # --on-error); only a genuinely empty prefix yields None.
+        # A bucket probe error propagates (operational failure). An empty prefix
+        # because the instance has no bucket-write identity (so it could never
+        # push host_dir) raises an actionable error; an empty prefix with the
+        # identity present is a genuine "no host_dir yet" and yields None.
         if not self.bucket.host_dir_prefix_has_objects(host_id):
-            self._warn_if_identity_missing(host_id)
+            self._raise_if_identity_missing(host_id)
             return None
         return self.volume_reference(host_id)
 
@@ -971,8 +985,12 @@ class BucketHostDirBackend(HostDirBackend):
             )
 
     @abstractmethod
-    def _warn_if_identity_missing(self, host_id: HostId) -> None:
-        """Warn (best-effort) when an empty host_dir prefix is explained by a missing cloud identity."""
+    def _raise_if_identity_missing(self, host_id: HostId) -> None:
+        """Raise an actionable error when an empty host_dir prefix is explained by a missing cloud identity.
+
+        Best-effort *detection*: if the identity probe itself fails we cannot
+        confirm, so we return without raising (``volume`` then yields None).
+        """
         ...
 
 

@@ -252,6 +252,28 @@ def test_state_store_raises_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
         _ = provider._state_store
 
 
+def test_validate_external_store_ready_raises_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
+    """``create_host``'s pre-launch store check fails fast when the required bucket is absent.
+
+    ``_validate_external_store_ready`` (called by ``create_host`` before any
+    instance is launched) touches ``_state_store``, so a missing bucket surfaces
+    the actionable ``mngr aws prepare`` error *before* the create path provisions
+    anything -- rather than after the instance is already running.
+    """
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    provider.__dict__["_state_bucket"] = None
+    with pytest.raises(MngrError, match="mngr aws prepare"):
+        provider._validate_external_store_ready()
+
+
+def test_validate_external_store_ready_is_noop_when_store_present(temp_mngr_ctx: MngrContext) -> None:
+    """With the state store resolvable, the pre-launch check is a no-op so create proceeds."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    # Pre-seed the cached store so the hook finds it without a bucket-existence probe.
+    provider.__dict__["_state_store"] = object()
+    provider._validate_external_store_ready()
+
+
 def test_persist_agent_data_no_bucket_raises_for_stopped_host(temp_mngr_ctx: MngrContext) -> None:
     """With no state bucket, mirroring an agent raises (the bucket is required).
 

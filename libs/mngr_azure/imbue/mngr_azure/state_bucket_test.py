@@ -1,24 +1,43 @@
 """Unit tests for ``BlobStateBucket`` against an in-memory Azure Blob fake."""
 
+from typing import Any
+
+import pytest
+from azure.core.exceptions import ResourceExistsError
+
 from imbue.mngr.primitives import HostId
+from imbue.mngr_azure.state_bucket import BlobStateBucketError
 from imbue.mngr_azure.state_bucket import DEFAULT_STATE_CONTAINER_NAME
+from imbue.mngr_azure.state_bucket import resolve_operator_principal
+from imbue.mngr_azure.testing import FakeAuthorizationClient
 from imbue.mngr_azure.testing import FakeBlobStorageBackend
+from imbue.mngr_azure.testing import FakeTokenCredential
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
 
 _ACCOUNT_NAME = "mngrststateacct1234"
 _RESOURCE_GROUP = "mngr"
 _REGION = "westus"
 _SUBSCRIPTION = "sub-1234"
+_ACCOUNT_SCOPE = (
+    f"/subscriptions/{_SUBSCRIPTION}/resourceGroups/{_RESOURCE_GROUP}"
+    f"/providers/Microsoft.Storage/storageAccounts/{_ACCOUNT_NAME}"
+)
 
 
-def _make_bucket(backend: FakeBlobStorageBackend) -> _StubbedBlobStateBucket:
+def _make_bucket(
+    backend: FakeBlobStorageBackend,
+    *,
+    credential: Any = None,
+    fake_authorization: FakeAuthorizationClient | None = None,
+) -> _StubbedBlobStateBucket:
     return _StubbedBlobStateBucket(
-        credential=None,
+        credential=credential,
         subscription_id=_SUBSCRIPTION,
         resource_group=_RESOURCE_GROUP,
         region=_REGION,
         account_name=_ACCOUNT_NAME,
         fake_backend=backend,
+        fake_authorization=fake_authorization,
     )
 
 
@@ -120,3 +139,44 @@ def test_delete_bucket_removes_account_and_state() -> None:
     assert backend.deleted_account is True
     # Deleting an already-absent account is idempotent.
     bucket.delete_bucket()
+
+
+def test_ensure_operator_blob_access_grants_data_contributor_to_operator() -> None:
+    """Grants the operator's principal Storage Blob Data Contributor scoped to the account."""
+    authorization = FakeAuthorizationClient()
+    bucket = _make_bucket(
+        FakeBlobStorageBackend(),
+        credential=FakeTokenCredential(object_id="operator-oid-1", idtyp="user"),
+        fake_authorization=authorization,
+    )
+    bucket.ensure_operator_blob_access()
+    assert len(authorization.role_assignments.created) == 1
+    scope, _name, parameters = authorization.role_assignments.created[0]
+    assert scope == _ACCOUNT_SCOPE
+    assert parameters.principal_id == "operator-oid-1"
+    assert parameters.principal_type == "User"
+
+
+def test_ensure_operator_blob_access_is_idempotent_when_already_assigned() -> None:
+    """An already-existing assignment (RoleAssignmentExists / 409) is treated as success, not an error."""
+    authorization = FakeAuthorizationClient()
+    authorization.role_assignments.create_error = ResourceExistsError(message="RoleAssignmentExists")
+    bucket = _make_bucket(
+        FakeBlobStorageBackend(),
+        credential=FakeTokenCredential(),
+        fake_authorization=authorization,
+    )
+    # Must not raise.
+    bucket.ensure_operator_blob_access()
+
+
+def test_resolve_operator_principal_classifies_principal_type() -> None:
+    assert resolve_operator_principal(FakeTokenCredential(object_id="u1", idtyp="user")) == ("u1", "User")
+    assert resolve_operator_principal(FakeTokenCredential(object_id="s1", idtyp="app")) == ("s1", "ServicePrincipal")
+    # No idtyp and no app-identity claim -> treated as a user.
+    assert resolve_operator_principal(FakeTokenCredential(object_id="u2", idtyp=None)) == ("u2", "User")
+
+
+def test_resolve_operator_principal_raises_without_oid() -> None:
+    with pytest.raises(BlobStateBucketError, match="no 'oid' claim"):
+        resolve_operator_principal(FakeTokenCredential(object_id=""))

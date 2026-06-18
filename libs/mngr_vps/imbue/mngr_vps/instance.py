@@ -369,6 +369,18 @@ class VpsProvider(BaseProviderInstance):
         ``mngr create``.
         """
 
+    def _validate_external_store_ready(self) -> None:
+        """Hook called by ``create_host`` before the first provider write.
+
+        Default no-op. ``OfflineCapableVpsProvider`` overrides it to fail fast
+        when its required offline state store has not been provisioned, so a
+        missing object-storage bucket fails ``mngr create`` cleanly *before* any
+        instance is launched (rather than after, when the host record write would
+        otherwise hit the absent store with an instance already running). Kept
+        separate from ``_validate_provider_args_for_create`` so it needs no
+        per-provider ``super()`` coordination.
+        """
+
     # =========================================================================
     # Key Management
     # =========================================================================
@@ -610,12 +622,14 @@ class VpsProvider(BaseProviderInstance):
             ensure_depot_token_available(self.config.builder)
 
         # Provider-specific pre-create checks (e.g. GCP's firewall-rule
-        # existence, AWS's pytest auto-shutdown guard). Run before the first
-        # provider write (the SSH key upload just below) so a failed
-        # precondition -- like a missing `mngr gcp prepare` firewall rule --
-        # surfaces cleanly: no instance created, no SSH key uploaded, and no
-        # "Host creation failed, attempting cleanup..." path.
+        # existence, AWS's pytest auto-shutdown guard) plus the offline
+        # state-store readiness check. Both run before the first provider write
+        # (the SSH key upload just below) so a failed precondition -- a missing
+        # `mngr gcp prepare` firewall rule, or an unprovisioned object-storage
+        # state bucket -- surfaces cleanly: no instance created, no SSH key
+        # uploaded, and no "Host creation failed, attempting cleanup..." path.
         self._validate_provider_args_for_create()
+        self._validate_external_store_ready()
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
