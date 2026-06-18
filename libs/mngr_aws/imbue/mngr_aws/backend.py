@@ -376,7 +376,7 @@ class AwsProvider(OfflineCapableVpsProvider):
         """
         return self._host_dir_backend.create_identity()
 
-    # The shared ``KeyValueMirrorVpsProvider._list_provider_vps_hostnames``
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
     # (cached listing -> non-empty main_ip) covers AWS unchanged: a stopped EC2
     # instance loses its ephemeral IP and is excluded by the non-empty IP check.
 

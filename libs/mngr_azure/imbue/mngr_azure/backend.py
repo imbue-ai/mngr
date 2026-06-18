@@ -484,7 +484,7 @@ class AzureProvider(OfflineCapableVpsProvider):
         """
         return self._host_dir_backend.create_identity()
 
-    # The shared ``KeyValueMirrorVpsProvider._list_provider_vps_hostnames``
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
     # (cached listing -> non-empty main_ip) covers Azure: a *deallocated* VM keeps
     # its Static IP, so it is still listed and then fails fast over the bounded SSH
     # connect timeout before being reconstructed offline -- see that base method.
