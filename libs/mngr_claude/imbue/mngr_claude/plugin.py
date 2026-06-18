@@ -37,6 +37,8 @@ from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_di
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
+from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
@@ -275,17 +277,20 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=True,
         description="Check if claude is installed (if False, assumes it is already present)",
     )
-    # FIXME: when the version is pinned, we should, during provisioning, ensure that the auto-updates are disabled. This means doing the following:
-    #  - for local, check that "DISABLE_AUTOUPDATER=1" or "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" are set in the local claude settings (~/.claude/settings.json) and warn if not
-    #  - for remote, just automatically add these env vars to the agent environment:
-    #       export DISABLE_AUTOUPDATER=1 && export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 && export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
-    #    this should be done by adding a new callback ("get_provision_env_vars") for agents (like get_provision_file_transfers) that allows us to define additional environment variables
-    #    that function ("get_provision_env_vars") should be defined on our claude agent below, and should be called from Host::_collect_agent_env_vars in order to collect them all
     version: str | None = Field(
         default=None,
         description="Pin the Claude Code version to install (e.g., '2.1.50'). "
         "When set, installation uses this specific version and provisioning verifies the installed version matches. "
-        "If None, uses the latest available version.",
+        'If None, uses the latest available version. Pin alongside `update_policy = "NEVER"` to keep the '
+        "binary on the pinned version (claude's auto-updater would otherwise move it off the pin).",
+    )
+    update_policy: AgentUpdatePolicy | None = Field(
+        default=None,
+        description="How to handle Claude Code's background auto-updater. NEVER sets DISABLE_AUTOUPDATER=1 "
+        "in the agent environment so the binary stays on the installed version; AUTO leaves the auto-updater "
+        "enabled. ASK has no interactive flow for claude and behaves like AUTO. When unset (the default), "
+        "resolves to NEVER (auto-update disabled) so a managed agent stays on its installed version -- set "
+        "AUTO to opt back into Claude Code's auto-updater. Ignored in use_env_config_dir (shared) mode.",
     )
     auto_dismiss_dialogs: bool = Field(
         default=False,
@@ -544,13 +549,16 @@ def _build_claude_json(
     Returns the dict so callers can do further modifications (e.g. keychain merge)
     before serializing.
     """
+    disable_auto_update = is_self_update_disabled(config.update_policy, is_unattended=ctx.is_unattended)
     if sync_local:
         local_config = read_claude_config(find_user_claude_config())
         data: dict[str, Any] = (
-            local_config if local_config else _generate_claude_json(version, current_time=current_time)
+            local_config
+            if local_config
+            else _generate_claude_json(version, current_time=current_time, disable_auto_update=disable_auto_update)
         )
     else:
-        data = _generate_claude_json(version, current_time=current_time)
+        data = _generate_claude_json(version, current_time=current_time, disable_auto_update=disable_auto_update)
 
     data.update(compute_claude_json_flags(ctx))
 
@@ -1501,11 +1509,19 @@ class ClaudeCoreAgent(
         The common-transcript opt-in/out is gated at provisioning time -- when
         disabled, the converter script is not written to commands/, so the
         background orchestrator finds nothing to launch.
+
+        When the resolved update policy is NEVER, sets DISABLE_AUTOUPDATER=1 so
+        Claude Code's background auto-updater does not move the binary off its
+        installed (possibly pinned) version. setdefault leaves an explicit
+        user-provided value untouched. Skipped in ``use_env_config_dir`` (shared)
+        mode, where mngr leaves the user's claude environment entirely alone.
         """
         config = self.agent_config
         if not config.use_env_config_dir:
             env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
             env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
+            if is_self_update_disabled(config.update_policy, is_unattended=not host.is_local):
+                env_vars.setdefault("DISABLE_AUTOUPDATER", "1")
 
     def get_lifecycle_state(self) -> AgentLifecycleState:
         """Get lifecycle state, accounting for Claude-specific permissions_waiting file.
@@ -2595,8 +2611,16 @@ def _generate_claude_home_settings() -> dict[str, Any]:
     return {"skipDangerousModePermissionPrompt": True}
 
 
-def _generate_claude_json(version: str | None, current_time: datetime | None = None) -> dict[str, Any]:
-    """default contents for .claude.json"""
+def _generate_claude_json(
+    version: str | None, current_time: datetime | None = None, disable_auto_update: bool = True
+) -> dict[str, Any]:
+    """default contents for .claude.json
+
+    ``disable_auto_update`` sets the ``autoUpdates`` flag: the authoritative lever
+    is the ``DISABLE_AUTOUPDATER`` env var (set in ``modify_env_vars``), but the
+    generated default mirrors the resolved update policy so a fresh config is
+    internally consistent.
+    """
     if version is None:
         version = "2.1.50"
     if current_time is None:
@@ -2612,7 +2636,7 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
     return {
         "numStartups": 1,
         "installMethod": "native",
-        "autoUpdates": False,
+        "autoUpdates": not disable_auto_update,
         "firstStartTime": current_time_str,
         "opusProMigrationComplete": True,
         "sonnet1m45MigrationComplete": True,

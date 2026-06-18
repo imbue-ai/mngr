@@ -22,6 +22,7 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.api.testing import FakeHost
@@ -82,6 +83,7 @@ from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _claude_preserved_items
 from imbue.mngr_claude.plugin import _compute_keychain_label_suffix
+from imbue.mngr_claude.plugin import _generate_claude_json
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
@@ -3572,11 +3574,11 @@ def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ct
 
 def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should accept a config-defined subtype whose parent_type
-    chain reaches claude (e.g. a ``write-plus`` template), not just the literal
+    chain reaches claude (e.g. a custom ``coder`` template), not just the literal
     ``claude`` type name. This is the centralized "is a claude agent" check via
     resolve_agent_type, rather than a string comparison against "claude".
     """
-    subtype = AgentTypeName("write-plus")
+    subtype = AgentTypeName("coder")
     config_with_subtype = temp_mngr_ctx.config.model_copy_update(
         to_update(
             temp_mngr_ctx.config.field_ref().agent_types,
@@ -5180,6 +5182,8 @@ def test_modify_env_vars_sets_claude_config_dirs(
     # $CLAUDE_CONFIG_DIR / $ORIGINAL_CLAUDE_CONFIG_DIR, so the resolved value is
     # known: it must be exactly ~/.claude (not, e.g., the per-agent config dir).
     assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] == str(Path.home() / ".claude")
+    # The default policy disables claude's auto-updater even on an attended local host.
+    assert env_vars["DISABLE_AUTOUPDATER"] == "1"
 
 
 def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
@@ -5205,6 +5209,75 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
     # In shared mode there's nothing to add: the transcript opt-out is
     # gated at provisioning time (on-disk script presence), not via env var.
     assert env_vars == {}
+
+
+def test_modify_env_vars_disables_autoupdater_when_policy_never(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """update_policy=NEVER sets DISABLE_AUTOUPDATER=1 even on an attended local host."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.NEVER),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["DISABLE_AUTOUPDATER"] == "1"
+
+
+def test_modify_env_vars_leaves_autoupdater_alone_when_policy_auto(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """update_policy=AUTO leaves claude's auto-updater enabled (no DISABLE_AUTOUPDATER)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.AUTO),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert "DISABLE_AUTOUPDATER" not in env_vars
+
+
+def test_modify_env_vars_respects_explicit_disable_autoupdater(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit user-provided DISABLE_AUTOUPDATER value is not overwritten."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.NEVER),
+    )
+    env_vars: dict[str, str] = {"DISABLE_AUTOUPDATER": "0"}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["DISABLE_AUTOUPDATER"] == "0"
+
+
+def test_generate_claude_json_autoupdates_follows_disable_flag() -> None:
+    """The generated .claude.json autoUpdates flag mirrors the disable_auto_update arg."""
+    assert _generate_claude_json(None, disable_auto_update=True)["autoUpdates"] is False
+    assert _generate_claude_json(None, disable_auto_update=False)["autoUpdates"] is True
 
 
 # =============================================================================
