@@ -360,10 +360,9 @@ def test_builder_detects_known_capabilities(loaded_plugin_manager: pluggy.Plugin
     # live_output: claude publishes a streaming snapshot; codex does not.
     assert "live_output" in _present_keys(infos, "claude")
     assert "live_output" not in _present_keys(infos, "codex")
-    # session_resume (--adopt-session / --from carry-forward): claude only.
-    assert "session_resume" in _present_keys(infos, "claude")
-    for agent_type_name in ("codex", "opencode", "pi-coding", "antigravity"):
-        assert "session_resume" not in _present_keys(infos, agent_type_name)
+    # session_resume (--adopt-session / --from carry-forward): every interactive agent.
+    for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
+        assert "session_resume" in _present_keys(infos, agent_type_name)
     for agent_type_name in ("claude", "codex", "opencode", "pi-coding", "antigravity"):
         assert "session_preservation" in _present_keys(infos, agent_type_name)
         assert "unattended_operation" in _present_keys(infos, agent_type_name)

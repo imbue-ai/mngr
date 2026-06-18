@@ -41,10 +41,13 @@ from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
-from imbue.mngr.api.preservation import get_preserved_agents_root_dir
+from imbue.mngr.api.preservation import adopt_sessions
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
+from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
-from imbue.mngr.config.agent_config_registry import resolve_agent_type
+from imbue.mngr.api.preservation import require_unique_match
+from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentInstallationError
@@ -55,7 +58,6 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
-from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -76,7 +78,6 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
-from imbue.mngr.plugins.hookspecs import OptionStackItem
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -146,7 +147,7 @@ depending on the build machine's home directory path.
 # An mngr agent's isolated Claude config dir lives at
 # <agent_state_dir>/plugin/claude/anthropic/ (the per-agent replacement for ~/.claude/),
 # with session JSONLs filed under its projects/ subdir. Both live local mngr agents and
-# preserved agents mirror this layout, so --adopt-session can resolve a session ID against
+# preserved agents mirror this layout, so --adopt can resolve a session ID against
 # either.
 _AGENT_CLAUDE_CONFIG_RELPATH: Final[Path] = Path("plugin") / "claude" / "anthropic"
 _AGENT_CLAUDE_PROJECTS_RELPATH: Final[Path] = _AGENT_CLAUDE_CONFIG_RELPATH / "projects"
@@ -165,19 +166,11 @@ def _mngr_session_projects_dirs(mngr_ctx: MngrContext) -> list[Path]:
     local source, so remote agents' session dirs are not searched here.
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
-    projects_dirs: list[Path] = []
-    for parent in (get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)):
-        if not parent.is_dir():
-            continue
-        for agent_dir in sorted(parent.iterdir()):
-            projects_dir = agent_dir / _AGENT_CLAUDE_PROJECTS_RELPATH
-            if projects_dir.is_dir():
-                projects_dirs.append(projects_dir)
-    return projects_dirs
+    return iter_agent_session_paths(local_host_dir, _AGENT_CLAUDE_PROJECTS_RELPATH)
 
 
 def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tuple[str, Path]:
-    """Resolve an --adopt-session argument to a (session_id, project_dir) pair.
+    """Resolve an --adopt argument to a (session_id, project_dir) pair.
 
     Accepts either:
     - A path to a .jsonl file (e.g. ~/.claude/projects/foo/abc123.jsonl)
@@ -208,37 +201,28 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
 
     candidate_dirs = [current_config_dir / "projects", user_config_dir / "projects"]
     candidate_dirs.extend(_mngr_session_projects_dirs(mngr_ctx))
-
-    # Deduplicate by resolved path while preserving the candidate ordering.
-    search_dirs: list[Path] = []
-    seen_resolved_dirs: set[Path] = set()
-    for candidate in candidate_dirs:
-        resolved = candidate.resolve()
-        if resolved not in seen_resolved_dirs:
-            seen_resolved_dirs.add(resolved)
-            search_dirs.append(candidate)
+    search_dirs = dedupe_by_resolved_path(candidate_dirs)
 
     matches: list[Path] = []
     for projects_dir in search_dirs:
         if projects_dir.exists():
             matches.extend(projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
 
-    if not matches:
-        # Don't enumerate the searched dirs: there is one per local mngr agent, so the
-        # list can run to hundreds of paths. The --adopt-session help documents the
-        # search scope (current/user Claude config dirs, live agents, preserved agents).
-        raise UserInputError(
+    # Don't enumerate the searched dirs in the not-found message: there is one per local mngr
+    # agent, so the list can run to hundreds of paths. The --adopt help documents the search
+    # scope (current/user Claude config dirs, live agents, preserved agents).
+    match = require_unique_match(
+        matches,
+        not_found_message=(
             f"Session {adopt_session_arg} not found. "
             "Check that the session ID is correct, or pass a path to the .jsonl file."
-        )
-    if len(matches) > 1:
-        match_list = "\n".join(f"  {m}" for m in matches)
-        raise UserInputError(
-            f"Session {adopt_session_arg} found in multiple project directories:\n{match_list}\n"
-            "Pass the full path to the .jsonl file to specify which one."
-        )
-
-    return adopt_session_arg, matches[0].parent
+        ),
+        ambiguous_message=(
+            f"Session {adopt_session_arg} found in multiple project directories; "
+            "pass the full path to the .jsonl file to specify which one:"
+        ),
+    )
+    return adopt_session_arg, match.parent
 
 
 class ClaudeAgentConfig(AgentTypeConfig):
@@ -350,17 +334,27 @@ class ProvisioningContext(FrozenModel):
     """Runtime context derived from host type and transfer mode."""
 
     is_unattended: bool = Field(description="Agent runs without user interaction (remote/deploy)")
+    is_auto_approve: bool = Field(
+        default=False,
+        description="The human auto-approved mngr's prompts (`mngr create --yes`). Dismisses first-run "
+        "*dialogs* (onboarding/effort/trust), but -- unlike `is_unattended` -- does not accept "
+        "bypass-permissions mode (tool auto-allow is governed by `auto_allow_permissions`).",
+    )
     copy_project_config_from: Path | None = Field(
         default=None, description="Source dir to copy project config from (worktree mode)"
     )
 
 
 _ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"hasAcknowledgedCostThreshold": True}
-_UNATTENDED_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
-    "bypassPermissionsModeAccepted": True,
+# First-run *dialog* dismissals (cosmetic startup prompts). Dismissed for an unattended agent
+# OR when the human auto-approved mngr's prompts (--yes) -- neither changes tool permissions.
+_DIALOG_DISMISS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
     "effortCalloutDismissed": True,
     "hasCompletedOnboarding": True,
 }
+# Accepting bypass-permissions mode is a tool-permission change, so it applies only to a
+# genuinely unattended (remote/deploy) agent -- NOT merely because the human passed --yes.
+_PERMISSION_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"bypassPermissionsModeAccepted": True}
 _UNATTENDED_SETTINGS_FLAGS: Final[Mapping[str, Any]] = {
     "skipDangerousModePermissionPrompt": True,
     # fastMode off by default in unattended mode (API limitation)
@@ -370,15 +364,27 @@ _UNATTENDED_SETTINGS_FLAGS: Final[Mapping[str, Any]] = {
 
 @pure
 def compute_claude_json_flags(ctx: ProvisioningContext) -> Mapping[str, bool]:
-    """Compute .claude.json flags based on provisioning context."""
+    """Compute .claude.json flags based on provisioning context.
+
+    Cosmetic first-run dialogs are dismissed when unattended OR when the human auto-approved
+    mngr's prompts (--yes); the bypass-permissions-mode acceptance is added only when unattended.
+    """
+    flags = dict(_ALWAYS_CLAUDE_JSON_FLAGS)
+    if ctx.is_unattended or ctx.is_auto_approve:
+        flags.update(_DIALOG_DISMISS_CLAUDE_JSON_FLAGS)
     if ctx.is_unattended:
-        return {**_ALWAYS_CLAUDE_JSON_FLAGS, **_UNATTENDED_CLAUDE_JSON_FLAGS}
-    return dict(_ALWAYS_CLAUDE_JSON_FLAGS)
+        flags.update(_PERMISSION_CLAUDE_JSON_FLAGS)
+    return flags
 
 
 @pure
 def compute_settings_json_flags(ctx: ProvisioningContext) -> Mapping[str, Any]:
-    """Compute settings.json flags based on provisioning context."""
+    """Compute settings.json flags based on provisioning context.
+
+    These govern tool-permission behavior (skip the dangerous-mode prompt), so they apply only
+    to an unattended agent -- not on a bare --yes, which auto-approves prompts but must not
+    silently change tool permissions.
+    """
     if ctx.is_unattended:
         return dict(_UNATTENDED_SETTINGS_FLAGS)
     return {}
@@ -386,8 +392,8 @@ def compute_settings_json_flags(ctx: ProvisioningContext) -> Mapping[str, Any]:
 
 @pure
 def should_trust_work_dir(config: ClaudeAgentConfig, ctx: ProvisioningContext) -> bool:
-    """Determine whether work_dir should be auto-trusted."""
-    return ctx.is_unattended or config.auto_dismiss_dialogs
+    """Determine whether work_dir should be auto-trusted (a dialog-consent decision)."""
+    return ctx.is_unattended or ctx.is_auto_approve or config.auto_dismiss_dialogs
 
 
 _MNGR_AGENT_CONFIG_DIR_MARKER: Final[str] = f"/{_AGENT_CLAUDE_CONFIG_RELPATH.as_posix()}/"
@@ -1683,7 +1689,11 @@ class ClaudeCoreAgent(
         copy_project_config_from: Path | None = None
         if host.is_local and options.transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
             copy_project_config_from = self._find_git_source_path(mngr_ctx.concurrency_group)
-        ctx = ProvisioningContext(is_unattended=not host.is_local, copy_project_config_from=copy_project_config_from)
+        ctx = ProvisioningContext(
+            is_unattended=not host.is_local,
+            is_auto_approve=mngr_ctx.is_auto_approve,
+            copy_project_config_from=copy_project_config_from,
+        )
 
         # Create the config directory (0700: contains credentials and session data)
         host.execute_idempotent_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
@@ -1999,7 +2009,7 @@ class ClaudeAgent(
 
     Adds, on top of :class:`ClaudeCoreAgent`, the keystroke send / readiness
     pipeline, the live streaming snapshot, and session adoption
-    (``--adopt-session`` / ``--from`` carry-forward). The headless variant
+    (``--adopt`` / ``--from`` carry-forward). The headless variant
     inherits the core directly and so carries none of these interactive-only
     capabilities.
     """
@@ -2352,10 +2362,16 @@ class ClaudeAgent(
     ) -> None:
         """Adopt a session so the agent's claude resumes existing context.
 
-        Dispatches to ``_adopt_explicit_sessions`` (``--adopt-session``)
-        or ``_adopt_cloned_session`` (``--from <agent>``); both end in
-        ``_finalize_adopted_session``. The combination is rejected
-        upstream in ``on_before_create``.
+        Delegates to :func:`~imbue.mngr.api.preservation.adopt_sessions`, which copies
+        every ``--adopt`` session (``copy_explicit``) and the ``--from`` clone
+        (``copy_clone``) into this agent, then resumes one (``resume``): the clone when
+        ``--from`` is given, otherwise the last ``--adopt`` value. The rest are left
+        available in the new agent's session switcher. With neither option set nothing
+        is adopted (fresh start). Claude can only resume a single session at a time.
+
+        Each ``copy_explicit`` call copies one named session's source project dir into the
+        destination's encoded project dir, deduplicating by source project dir name across
+        calls (multiple named sessions may share one project dir).
 
         Destination resolution depends on ``use_env_config_dir``:
         - Default (``False``): copies into the per-agent config dir at
@@ -2366,51 +2382,43 @@ class ClaudeAgent(
           in shared mode, and it only adds new project subdirs -- it never
           modifies existing user files.
         """
-        adopt_session_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
-        assert not (adopt_session_args and options.source_agent_state_location is not None), (
-            "--adopt-session and --from <agent> are mutually exclusive (should have been rejected by on_before_create)"
-        )
-        if adopt_session_args:
-            self._adopt_explicit_sessions(host, adopt_session_args)
-        if options.source_agent_state_location is not None:
-            self._adopt_cloned_session(host, options.source_agent_state_location)
-
-    def _adopt_explicit_sessions(
-        self,
-        host: OnlineHostInterface,
-        adopt_session_args: tuple[str, ...],
-    ) -> None:
-        """Position sessions named on the command line under the destination's
-        encoded project dir and finalize. Used by ``--adopt-session``.
-
-        When multiple sessions are named, each one's source project dir is
-        copied into the destination so all of them are available in the new
-        agent's session list, but only the *last* named session is written to
-        ``claude_session_id`` and thus resumed on startup -- Claude can only
-        resume a single session at a time.
-        """
-        config_dir = self.get_claude_config_dir()
+        # Shared across copy_explicit calls so a project dir holding several named
+        # sessions is copied only once.
         copied_project_dirs: set[str] = set()
-        # Claude Code organizes sessions by encoded working directory path,
-        # so place adopted sessions under the project dir matching this
-        # agent's work_dir; see ``_resolve_work_dir_on_host`` for why we
-        # resolve through symlinks.
+
+        adopt_sessions(
+            options.adopt_session,
+            options.source_agent_state_location,
+            copy_explicit=lambda arg: self._copy_explicit_session(host, arg, copied_project_dirs),
+            copy_clone=lambda location: self._adopt_cloned_session(host, location),
+            resume=lambda session_id: self._finalize_adopted_session(
+                host, self._dest_adopted_project_dir(), session_id
+            ),
+        )
+
+    def _copy_explicit_session(self, host: OnlineHostInterface, arg: str, copied_project_dirs: set[str]) -> str:
+        """Resolve one explicit ``--adopt`` value and copy its project dir into this agent.
+
+        ``copied_project_dirs`` is shared across calls so a project dir holding several
+        named sessions is copied only once. Returns the resolved session id; the
+        orchestrator decides which session is resumed.
+        """
+        session_id, source_project_dir = _resolve_adopt_session(arg, self.mngr_ctx)
+        if source_project_dir.name not in copied_project_dirs:
+            with log_span("Adopting session {}", session_id):
+                host.copy_directory(host, source_project_dir, self._dest_adopted_project_dir())
+            copied_project_dirs.add(source_project_dir.name)
+        return session_id
+
+    def _dest_adopted_project_dir(self) -> Path:
+        """Return the encoded project dir adopted sessions are placed under.
+
+        Claude Code organizes sessions by encoded working directory path, so adopted
+        sessions live under the project dir matching this agent's work_dir; see
+        ``_resolve_work_dir_on_host`` for why we resolve through symlinks.
+        """
         dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
-        dest_project_dir = config_dir / "projects" / dest_project_name
-
-        for arg in adopt_session_args:
-            session_id, source_project_dir = _resolve_adopt_session(arg, self.mngr_ctx)
-            # Deduplicate project dir copies (multiple sessions may be in the same project)
-            if source_project_dir.name not in copied_project_dirs:
-                with log_span("Adopting session {}", session_id):
-                    host.copy_directory(host, source_project_dir, dest_project_dir)
-                copied_project_dirs.add(source_project_dir.name)
-            last_session_id = session_id
-
-        assert last_session_id is not None, "adopt_session_args was non-empty but no session ID was set"
-
-        self._finalize_adopted_session(host, dest_project_dir, last_session_id)
-        logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
+        return self.get_claude_config_dir() / "projects" / dest_project_name
 
     def _finalize_adopted_session(
         self,
@@ -2427,7 +2435,7 @@ class ClaudeAgent(
         host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}", timeout_seconds=5.0)
         host.write_text_file(self._get_agent_dir() / "claude_session_id", adopted_session_id)
 
-    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> None:
+    def _adopt_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
         """Rewire the rsynced plugin/ so ``claude --resume`` finds the source's session.
 
         After ``_transfer_source_plugin_data`` rsyncs the source's
@@ -2439,7 +2447,12 @@ class ClaudeAgent(
         (``ls -t``, so we can bail without a second destination round-trip
         if there's nothing to adopt), carries ``claude_session_id_history``
         forward, renames the project subdir to the destination's encoded
-        work_dir, and hands off to ``_finalize_adopted_session``.
+        work_dir, and returns the discovered session id (the caller resumes it).
+
+        A ``--from`` clone is a workspace clone; carrying the source's session
+        forward is a bonus, so a source with no resumable session JSONL warns and
+        returns ``None`` (the caller then resumes the last ``--adopt`` instead, or
+        starts fresh).
 
         Session id comes from the JSONL filename, not the source's
         ``claude_session_id`` file: ``claude -p`` ignores ``--session-id``
@@ -2467,51 +2480,66 @@ class ClaudeAgent(
             timeout_seconds=5.0,
         )
         if not (latest_on_source.success and latest_on_source.stdout.strip()):
-            # Either the source has no sessions (cloned agent gets a fresh
-            # claude session) or the ``ls`` failed; surface either case so
-            # a silent regression doesn't hide as DEBUG noise.
+            # A ``--from`` clone is a workspace clone; carrying the source's session
+            # forward is a bonus, so nothing to resume (no session, or the ``ls``
+            # failed) is not fatal -- warn and let the caller fall back.
             logger.warning(
                 "Clone adopt: no session JSONL found at source {} (ls success={}, stderr={!r}); "
-                "cloned agent will start a fresh claude session",
+                "not resuming the clone's conversation.",
                 source_projects_dir,
                 latest_on_source.success,
                 latest_on_source.stderr.strip(),
             )
-            return
+            return None
         latest_path = Path(latest_on_source.stdout.strip())
         source_project_name = latest_path.parent.name
         adopted_session_id = latest_path.stem
 
-        # Rename source-encoded project subdir to the destination's encoded
-        # work_dir. Same host, so a plain ``mv`` is enough. Refuse to
-        # clobber a pre-existing target: collision means the source had a
-        # multi-cwd setup whose encoded name coincidentally matched ours,
-        # and silent clobber would risk losing data we don't realize is there.
+        # Rekey the source-encoded project subdir onto the destination's encoded
+        # work_dir. The target dir may already exist (e.g. an explicit ``--adopt``
+        # session was copied into it first), so merge the source subdir's *files*
+        # into the target rather than moving the whole dir. Refuse only on a
+        # per-file collision (same filename in both): that means real data would
+        # be lost, while distinct session JSONLs coexist cleanly in one project dir.
         dest_projects_dir = self._get_agent_dir() / _AGENT_CLAUDE_PROJECTS_RELPATH
         dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
         if source_project_name != dest_project_name:
             source_subdir = dest_projects_dir / source_project_name
             target_dir = dest_projects_dir / dest_project_name
-            if host.path_exists(target_dir):
-                logger.warning(
-                    "Refusing to rekey cloned project subdir {} -> {}: target dir already exists. "
-                    "Cloned agent will not resume the source's session.",
-                    source_subdir,
-                    target_dir,
-                )
-                return
-            rename_cmd = f"mv {shlex.quote(str(source_subdir))} {shlex.quote(str(target_dir))}"
-            rename_result = host.execute_idempotent_command(rename_cmd, timeout_seconds=10.0)
-            if not rename_result.success:
-                logger.warning(
-                    "Failed to rekey cloned project subdir {} -> {}: {}",
-                    source_subdir,
-                    target_dir,
-                    rename_result.stderr.strip(),
-                )
-                return
+            self._merge_project_subdir(host, source_subdir, target_dir)
 
-        self._finalize_adopted_session(host, dest_projects_dir / dest_project_name, adopted_session_id)
+        return adopted_session_id
+
+    def _merge_project_subdir(self, host: OnlineHostInterface, source_subdir: Path, target_dir: Path) -> None:
+        """Non-destructively merge ``source_subdir``'s files into ``target_dir``.
+
+        Moves each entry from the source subdir into the (possibly pre-existing)
+        target dir, then removes the now-empty source subdir. Raises
+        :class:`AgentStartError` on a per-file collision (same filename in both),
+        which would otherwise silently lose data.
+        """
+        entry_names = [Path(entry.path).name for entry in host.list_directory(source_subdir)]
+        collisions = sorted(name for name in entry_names if host.path_exists(target_dir / name))
+        if collisions:
+            raise AgentStartError(
+                str(self.name),
+                f"Refusing to merge cloned project subdir {source_subdir} into {target_dir}: "
+                f"file(s) {collisions} already exist in the target, so the cloned agent "
+                "cannot resume the source's session without overwriting existing data.",
+            )
+        # Move each entry by name (portable across BSD/GNU mv -- no -t/-n flags),
+        # then drop the now-empty source subdir.
+        move_steps = [f"mkdir -p {shlex.quote(str(target_dir))}"]
+        for name in entry_names:
+            move_steps.append(f"mv {shlex.quote(str(source_subdir / name))} {shlex.quote(str(target_dir / name))}")
+        move_steps.append(f"rmdir {shlex.quote(str(source_subdir))}")
+        merge_result = host.execute_idempotent_command(" && ".join(move_steps), timeout_seconds=10.0)
+        if not merge_result.success:
+            raise AgentStartError(
+                str(self.name),
+                f"Failed to merge cloned project subdir {source_subdir} into {target_dir}: "
+                f"{merge_result.stderr.strip()}",
+            )
 
 
 def _claude_preserved_items(is_shared_config: bool) -> list[PreservedItem]:
@@ -2640,65 +2668,15 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
 
 
 @hookimpl
-def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem]] | None:
-    """Register the --adopt-session CLI option for the create command."""
-    if command_name == "create":
-        return {
-            "Behavior": [
-                OptionStackItem(
-                    param_decls=("--adopt-session",),
-                    multiple=True,
-                    help="Adopt an existing Claude Code session into this agent. "
-                    "Accepts a session ID or a path to a .jsonl file. A session ID is "
-                    "searched in the current and user-scope Claude config dirs, every "
-                    "live local mngr agent, and preserved sessions from destroyed agents. "
-                    "Repeatable: every named session is made available in the new agent, "
-                    "but only the last one is resumed on startup (Claude can only resume "
-                    "one session at a time).",
-                ),
-            ]
-        }
-    return None
-
-
-@hookimpl
 def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
-    """Validate create args when --adopt-session is used: the agent type must
-    be an interactive Claude agent (claude or an interactive subtype of it), and
-    the option is incompatible with cloning via ``--from <agent>`` (both adopt a
-    session into the new agent).
-    """
-    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
-    if not adopt_session:
-        return None
-
-    # Resolve through the centralized agent-type registry so any interactive
-    # subtype of the claude agent is accepted, not just the literal "claude"
-    # type name. Session adoption resumes a live session, so it is gated to the
-    # interactive ``ClaudeAgent`` -- ``headless_claude`` (which runs
-    # ``claude --print`` and never resumes) does not qualify.
-    resolved = resolve_agent_type(args.agent_options.agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, ClaudeAgent):
-        raise UserInputError(
-            f"--adopt-session can only be used with an interactive Claude agent type "
-            f"(claude or an interactive subtype of it), not '{args.agent_options.agent_type}'."
-        )
-
-    if args.agent_options.source_agent_state_location is not None:
-        raise UserInputError(
-            "--adopt-session is incompatible with cloning via --from <agent>: both "
-            "adopt a session into the new agent. Pick one."
-        )
-
-    # Validate that every named session resolves *now* -- before any host or worktree
-    # is created. The real resolution happens again later in on_after_provisioning, but
-    # that runs inside provision_agent's ConcurrencyGroup, whose __exit__ would re-wrap a
-    # bad-ID UserInputError in a ConcurrencyExceptionGroup and surface it as an
-    # "Unexpected error" with a traceback. Resolving here (the session source is always
-    # local, so the result matches) makes a bad ID a clean, fail-fast user error.
-    for session_arg in adopt_session:
-        _resolve_adopt_session(session_arg, mngr_ctx)
-
+    """Fail-fast pre-resolution of claude ``--adopt`` session ids (see ``run_adopt_session_preflight``)."""
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        ClaudeAgent,
+        lambda session_arg: _resolve_adopt_session(session_arg, mngr_ctx),
+    )
     return None
 
 
