@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from typing import Any
 from typing import Final
 
+import google.auth
 from google.api_core import exceptions as google_api_exceptions
 from google.auth import exceptions as google_auth_exceptions
 from google.cloud import compute_v1
@@ -86,6 +87,23 @@ def get_default_project() -> str | None:
         return config.resolve_project_id(adc_project)
     except (GcpCredentialsError, GcpProjectError, google_auth_exceptions.GoogleAuthError):
         return None
+
+
+# Placeholder image for the reaper client: the reaper only calls list/destroy, which ignore it.
+_REAPER_IMAGE: Final[str] = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+
+
+def make_gcp_reaper_client(project: str) -> GcpVpsClient:
+    """Build a ``GcpVpsClient`` for the session-end hook / standalone reaper.
+
+    The reaper only calls ``list_instances`` + ``destroy_instance``, which ignore the image field,
+    so it is a placeholder. Credentials come from ADC (resolved via ``google.auth.default``); the
+    zone is ``GCP_DEFAULT_ZONE`` (the same zone the release tests and orphan scan operate in).
+    Used by both the conftest session-end leak detector and
+    ``scripts/cleanup_old_gcp_test_instances.py`` so the two share one client-construction path.
+    """
+    credentials, _project = google.auth.default()
+    return GcpVpsClient(credentials=credentials, project_id=project, zone=GCP_DEFAULT_ZONE, image=_REAPER_IMAGE)
 
 
 class FakeOperation:
