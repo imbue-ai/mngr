@@ -2286,7 +2286,7 @@ class ClaudeAgent(
                 raise UserInputError(
                     "use_env_config_dir=True passes mngr's own `--settings` to claude (to load its "
                     "hooks), which collides with the `--settings` you supplied via cli_args/agent_args. "
-                    "Put those settings in the agent type's `settings_overrides` (applied in this mode), "
+                    "Put those settings in the agent type's `settings_overrides`, "
                     "or set use_env_config_dir=False so mngr provisions a per-agent config dir and claude "
                     "layers your `--settings` natively."
                 )
