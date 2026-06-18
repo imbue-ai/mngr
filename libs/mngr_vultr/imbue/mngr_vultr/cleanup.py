@@ -28,8 +28,8 @@ from typing import Protocol
 
 from loguru import logger
 
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 
 class VultrReaperClient(Protocol):

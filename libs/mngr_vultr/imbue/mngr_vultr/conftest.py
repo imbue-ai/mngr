@@ -11,7 +11,7 @@ The mechanism is tag-based:
      (no process-wide leakage): ``mngr-vultr-test-session=<uuid>`` (the
      per-session marker used by the in-process leak check below) and
      ``mngr-vultr-test-created=<YYYY-MM-DD-HH-MM-SS>`` (a UTC session-start
-     timestamp). ``build_vps_tags`` in mngr_vps_docker reads this env var
+     timestamp). ``build_vps_tags`` in mngr_vps reads this env var
      and attaches every entry to each VPS at create time, so every
      test-created VPS carries both tags. The mngr CLI runs as a
      subprocess and inherits the env, so this works transparently across
@@ -61,8 +61,8 @@ from loguru import logger
 from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vultr.cleanup import build_test_created_tag
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.testing import VULTR_RELEASE_TESTS_OPT_IN

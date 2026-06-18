@@ -6,8 +6,8 @@ from datetime import timedelta
 from datetime import timezone
 from typing import Any
 
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vultr.cleanup import VULTR_TEST_CREATED_TAG_KEY
 from imbue.mngr_vultr.cleanup import build_test_created_tag
 from imbue.mngr_vultr.cleanup import cleanup_old_vultr_test_instances
