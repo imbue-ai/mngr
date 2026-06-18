@@ -47,7 +47,8 @@ from imbue.mngr.utils.git_utils import is_git_repository
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
-_SshConnectionInfo = tuple[str, str, int, Path]
+# private_key_path is None when the host has no mngr-owned key (ssh-agent / ~/.ssh/config).
+_SshConnectionInfo = tuple[str, str, int, Path | None]
 
 
 # === Errors ===

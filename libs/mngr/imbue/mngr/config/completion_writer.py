@@ -446,121 +446,124 @@ def write_cli_completions_cache(
     same layering reason as topic_names: the uv-tool receipt helper transitively
     imports the cli layer, which this writer must not depend on.
 
-    Catches OSError from cache writes so filesystem failures do not break
-    CLI commands. Other exceptions are allowed to propagate.
+    The cache-building body runs unguarded so unexpected errors surface; only
+    the final directory-creation + write is wrapped to tolerate OSError so a
+    filesystem write failure does not break CLI commands.
     """
+    all_command_names = sorted(cli_group.commands.keys())
+    alias_to_canonical = detect_alias_to_canonical(cli_group)
+
+    subcommand_by_command: dict[str, list[str]] = {}
+    options_by_command: dict[str, list[str]] = {}
+    flag_options_by_command: dict[str, list[str]] = {}
+    option_choices: dict[str, list[str]] = {}
+    plugin_name_opts: list[str] = []
+    positional_nargs_by_command: dict[str, int | None] = {}
+
+    canonical_names: set[str] = set()
+    for name, cmd in cli_group.commands.items():
+        # Skip alias entries -- only process canonical command names
+        if name in alias_to_canonical:
+            continue
+
+        canonical_name = cmd.name or name
+        canonical_names.add(canonical_name)
+
+        if isinstance(cmd, click.Group) and cmd.commands:
+            if canonical_name not in subcommand_by_command:
+                subcommand_by_command[canonical_name] = sorted(cmd.commands.keys())
+
+            # Extract options, flags, choices, and positional nargs for subcommands
+            for sub_name, sub_cmd in cmd.commands.items():
+                sub_key = f"{canonical_name}.{sub_name}"
+                sub_options = _extract_options_for_command(sub_cmd)
+                if sub_options:
+                    options_by_command[sub_key] = sub_options
+                sub_flags = _extract_flag_options_for_command(sub_cmd)
+                if sub_flags:
+                    flag_options_by_command[sub_key] = sub_flags
+                option_choices.update(_extract_choices_for_command(sub_cmd, sub_key))
+                plugin_name_opts.extend(_extract_plugin_name_options_for_command(sub_cmd, sub_key))
+                positional_nargs_by_command[sub_key] = _extract_positional_nargs(sub_cmd)
+
+            # Also extract options and flags for the group command itself
+            group_options = _extract_options_for_command(cmd)
+            if group_options:
+                options_by_command[canonical_name] = group_options
+            group_flags = _extract_flag_options_for_command(cmd)
+            if group_flags:
+                flag_options_by_command[canonical_name] = group_flags
+            option_choices.update(_extract_choices_for_command(cmd, canonical_name))
+            plugin_name_opts.extend(_extract_plugin_name_options_for_command(cmd, canonical_name))
+        else:
+            # Simple command (not a group)
+            cmd_options = _extract_options_for_command(cmd)
+            if cmd_options:
+                options_by_command[canonical_name] = cmd_options
+            cmd_flags = _extract_flag_options_for_command(cmd)
+            if cmd_flags:
+                flag_options_by_command[canonical_name] = cmd_flags
+            option_choices.update(_extract_choices_for_command(cmd, canonical_name))
+            plugin_name_opts.extend(_extract_plugin_name_options_for_command(cmd, canonical_name))
+            positional_nargs_by_command[canonical_name] = _extract_positional_nargs(cmd)
+
+    git_branch_opts = _filter_keys_by_registered_commands(_GIT_BRANCH_OPTIONS, canonical_names)
+    host_name_opts = _filter_keys_by_registered_commands(_HOST_NAME_OPTIONS, canonical_names)
+
+    # Build per-position positional completions from the spec dicts,
+    # filtering to only include commands that are actually registered.
+    positional_completions: dict[str, list[list[str]]] = {}
+    for cmd_name, entries in _POSITIONAL_COMPLETION_SPEC.items():
+        if cmd_name in canonical_names:
+            positional_completions[cmd_name] = entries
+    for dotted_key, entries in _POSITIONAL_COMPLETION_SUBCOMMAND_SPEC.items():
+        if dotted_key.split(".")[0] in canonical_names:
+            positional_completions[dotted_key] = entries
+
+    # Candidates for `mngr help <arg>`: every top-level command plus every
+    # registered help topic key. Only meaningful if the help command exists.
+    help_targets: list[str] = []
+    if "help" in canonical_names:
+        help_targets = sorted(canonical_names | set(topic_names or []))
+
+    # Inject dynamic choice values from runtime context (config, registries)
+    dynamic = _build_dynamic_completions(mngr_ctx, registered_agent_types or []) if mngr_ctx is not None else None
+    if dynamic is not None:
+        dynamic_as_dict = dynamic._asdict()
+        for opt_key, data_key in _DYNAMIC_CHOICE_OPTIONS.items():
+            cmd_name = opt_key.split(".")[0]
+            if cmd_name in canonical_names and data_key in dynamic_as_dict:
+                option_choices[opt_key] = dynamic_as_dict[data_key]
+
+    # Static catalog package names for `mngr plugin add` completion. Sourced
+    # from the plugin catalog (the same store the `mngr extras` install wizard
+    # uses), not from the runtime context, so it is always available.
+    catalog_package_names = sorted({entry.package_name for entry in get_installable_packages()})
+
+    cache_data = CompletionCacheData(
+        commands=all_command_names,
+        aliases=alias_to_canonical,
+        subcommand_by_command=subcommand_by_command,
+        options_by_command=options_by_command,
+        flag_options_by_command=flag_options_by_command,
+        option_choices=option_choices,
+        git_branch_options=sorted(git_branch_opts),
+        host_name_options=sorted(host_name_opts),
+        plugin_name_options=sorted(set(plugin_name_opts)),
+        plugin_names=dynamic.plugin_names if dynamic is not None else [],
+        catalog_package_names=catalog_package_names,
+        installed_plugin_package_names=sorted(set(installed_plugin_packages or [])),
+        config_keys=dynamic.config_keys if dynamic is not None else [],
+        positional_nargs_by_command=positional_nargs_by_command,
+        positional_completions=positional_completions,
+        config_value_choices=dynamic.config_value_choices if dynamic is not None else {},
+        help_targets=help_targets,
+        setting_option_names=sorted(_SETTING_OPTION_NAMES),
+    )
+
+    # Wrap only the directory-creation + write so a filesystem failure is
+    # tolerated without masking unexpected OSErrors from the build phase above.
     try:
-        all_command_names = sorted(cli_group.commands.keys())
-        alias_to_canonical = detect_alias_to_canonical(cli_group)
-
-        subcommand_by_command: dict[str, list[str]] = {}
-        options_by_command: dict[str, list[str]] = {}
-        flag_options_by_command: dict[str, list[str]] = {}
-        option_choices: dict[str, list[str]] = {}
-        plugin_name_opts: list[str] = []
-        positional_nargs_by_command: dict[str, int | None] = {}
-
-        canonical_names: set[str] = set()
-        for name, cmd in cli_group.commands.items():
-            # Skip alias entries -- only process canonical command names
-            if name in alias_to_canonical:
-                continue
-
-            canonical_name = cmd.name or name
-            canonical_names.add(canonical_name)
-
-            if isinstance(cmd, click.Group) and cmd.commands:
-                if canonical_name not in subcommand_by_command:
-                    subcommand_by_command[canonical_name] = sorted(cmd.commands.keys())
-
-                # Extract options, flags, choices, and positional nargs for subcommands
-                for sub_name, sub_cmd in cmd.commands.items():
-                    sub_key = f"{canonical_name}.{sub_name}"
-                    sub_options = _extract_options_for_command(sub_cmd)
-                    if sub_options:
-                        options_by_command[sub_key] = sub_options
-                    sub_flags = _extract_flag_options_for_command(sub_cmd)
-                    if sub_flags:
-                        flag_options_by_command[sub_key] = sub_flags
-                    option_choices.update(_extract_choices_for_command(sub_cmd, sub_key))
-                    plugin_name_opts.extend(_extract_plugin_name_options_for_command(sub_cmd, sub_key))
-                    positional_nargs_by_command[sub_key] = _extract_positional_nargs(sub_cmd)
-
-                # Also extract options and flags for the group command itself
-                group_options = _extract_options_for_command(cmd)
-                if group_options:
-                    options_by_command[canonical_name] = group_options
-                group_flags = _extract_flag_options_for_command(cmd)
-                if group_flags:
-                    flag_options_by_command[canonical_name] = group_flags
-                option_choices.update(_extract_choices_for_command(cmd, canonical_name))
-                plugin_name_opts.extend(_extract_plugin_name_options_for_command(cmd, canonical_name))
-            else:
-                # Simple command (not a group)
-                cmd_options = _extract_options_for_command(cmd)
-                if cmd_options:
-                    options_by_command[canonical_name] = cmd_options
-                cmd_flags = _extract_flag_options_for_command(cmd)
-                if cmd_flags:
-                    flag_options_by_command[canonical_name] = cmd_flags
-                option_choices.update(_extract_choices_for_command(cmd, canonical_name))
-                plugin_name_opts.extend(_extract_plugin_name_options_for_command(cmd, canonical_name))
-                positional_nargs_by_command[canonical_name] = _extract_positional_nargs(cmd)
-
-        git_branch_opts = _filter_keys_by_registered_commands(_GIT_BRANCH_OPTIONS, canonical_names)
-        host_name_opts = _filter_keys_by_registered_commands(_HOST_NAME_OPTIONS, canonical_names)
-
-        # Build per-position positional completions from the spec dicts,
-        # filtering to only include commands that are actually registered.
-        positional_completions: dict[str, list[list[str]]] = {}
-        for cmd_name, entries in _POSITIONAL_COMPLETION_SPEC.items():
-            if cmd_name in canonical_names:
-                positional_completions[cmd_name] = entries
-        for dotted_key, entries in _POSITIONAL_COMPLETION_SUBCOMMAND_SPEC.items():
-            if dotted_key.split(".")[0] in canonical_names:
-                positional_completions[dotted_key] = entries
-
-        # Candidates for `mngr help <arg>`: every top-level command plus every
-        # registered help topic key. Only meaningful if the help command exists.
-        help_targets: list[str] = []
-        if "help" in canonical_names:
-            help_targets = sorted(canonical_names | set(topic_names or []))
-
-        # Inject dynamic choice values from runtime context (config, registries)
-        dynamic = _build_dynamic_completions(mngr_ctx, registered_agent_types or []) if mngr_ctx is not None else None
-        if dynamic is not None:
-            dynamic_as_dict = dynamic._asdict()
-            for opt_key, data_key in _DYNAMIC_CHOICE_OPTIONS.items():
-                cmd_name = opt_key.split(".")[0]
-                if cmd_name in canonical_names and data_key in dynamic_as_dict:
-                    option_choices[opt_key] = dynamic_as_dict[data_key]
-
-        # Static catalog package names for `mngr plugin add` completion. Sourced
-        # from the plugin catalog (the same store the `mngr extras` install wizard
-        # uses), not from the runtime context, so it is always available.
-        catalog_package_names = sorted({entry.package_name for entry in get_installable_packages()})
-
-        cache_data = CompletionCacheData(
-            commands=all_command_names,
-            aliases=alias_to_canonical,
-            subcommand_by_command=subcommand_by_command,
-            options_by_command=options_by_command,
-            flag_options_by_command=flag_options_by_command,
-            option_choices=option_choices,
-            git_branch_options=sorted(git_branch_opts),
-            host_name_options=sorted(host_name_opts),
-            plugin_name_options=sorted(set(plugin_name_opts)),
-            plugin_names=dynamic.plugin_names if dynamic is not None else [],
-            catalog_package_names=catalog_package_names,
-            installed_plugin_package_names=sorted(set(installed_plugin_packages or [])),
-            config_keys=dynamic.config_keys if dynamic is not None else [],
-            positional_nargs_by_command=positional_nargs_by_command,
-            positional_completions=positional_completions,
-            config_value_choices=dynamic.config_value_choices if dynamic is not None else {},
-            help_targets=help_targets,
-            setting_option_names=sorted(_SETTING_OPTION_NAMES),
-        )
-
         cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
         atomic_write(cache_path, json.dumps(cache_data._asdict()))
     except OSError as e:

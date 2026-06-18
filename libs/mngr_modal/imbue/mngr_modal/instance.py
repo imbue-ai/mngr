@@ -86,6 +86,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
+from imbue.mngr.primitives import build_user_ssh_command
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
@@ -2704,7 +2705,7 @@ log "=== Shutdown script completed ==="
                 host=hostname,
                 port=port,
                 key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                command=build_user_ssh_command(user, hostname, port, key_path),
             )
 
         # Boot time and uptime from SSH-collected data

@@ -1,5 +1,6 @@
 """Tests for primitives."""
 
+import shlex
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import build_user_ssh_command
 from imbue.mngr.primitives import default_branch_name
 
 
@@ -199,3 +201,15 @@ def test_discovered_agent_created_branch_name_raises_on_unexpected_type() -> Non
     ref = _make_discovered_agent({"created_branch_name": 42})
     with pytest.raises(CertifiedDataError, match="Expected str or None"):
         _ = ref.created_branch_name
+
+
+def test_build_user_ssh_command_includes_key_when_present() -> None:
+    result = build_user_ssh_command("root", "example.com", 2222, Path("/tmp/key"))
+    assert result == "ssh -i /tmp/key -p 2222 root@example.com"
+
+
+def test_build_user_ssh_command_omits_key_when_none() -> None:
+    """No empty ``-i ''`` argument when the host has no mngr-owned key."""
+    result = build_user_ssh_command("root", "example.com", 22, None)
+    assert result == "ssh -p 22 root@example.com"
+    assert "-i" not in shlex.split(result)

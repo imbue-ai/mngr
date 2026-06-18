@@ -478,19 +478,26 @@ def is_ancestor(path: Path, ancestor_commit: str, descendant_commit: str, cg: Co
 
 
 def count_commits_between(path: Path, base_ref: str, head_ref: str, cg: ConcurrencyGroup) -> int:
-    """Count the number of commits between two refs (base_ref..head_ref)."""
+    """Count the number of commits between two refs (base_ref..head_ref).
+
+    Raises MngrError if the count cannot be determined (a git failure or an
+    unparseable output), so callers cannot mistake a failure for the valid
+    answer 0 ("no commits between the refs").
+    """
     try:
         result = cg.run_process_to_completion(
             ["git", "rev-list", "--count", f"{base_ref}..{head_ref}"],
             cwd=path,
         )
     except ProcessError as e:
-        logger.debug("Failed to count commits between {} and {}: {}", base_ref, head_ref, e.stderr.strip())
-        return 0
+        raise MngrError(f"Failed to count commits between {base_ref} and {head_ref}: {e.stderr.strip()}") from e
+    raw_count = result.stdout.strip()
     try:
-        return int(result.stdout.strip())
-    except ValueError:
-        return 0
+        return int(raw_count)
+    except ValueError as e:
+        raise MngrError(
+            f"Could not parse commit count between {base_ref} and {head_ref} from git output: {raw_count!r}"
+        ) from e
 
 
 def find_git_common_dir(path: Path, cg: ConcurrencyGroup) -> Path | None:

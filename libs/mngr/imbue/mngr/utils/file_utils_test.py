@@ -5,6 +5,44 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.file_utils import read_json_dict
+from imbue.mngr.utils.testing import capture_loguru
+
+
+def test_read_json_dict_returns_empty_for_missing_file(tmp_path: Path) -> None:
+    """A missing file reads as an empty dict."""
+    assert read_json_dict(tmp_path / "does_not_exist.json") == {}
+
+
+def test_read_json_dict_returns_object_for_valid_json_object(tmp_path: Path) -> None:
+    """A valid top-level JSON object is returned as a dict."""
+    path = tmp_path / "settings.json"
+    path.write_text('{"a": 1, "b": "two"}')
+    assert read_json_dict(path) == {"a": 1, "b": "two"}
+
+
+def test_read_json_dict_warns_and_returns_empty_for_non_object_json(tmp_path: Path) -> None:
+    """A structurally-valid but non-object top-level JSON value warns and reads as empty."""
+    path = tmp_path / "settings.json"
+    path.write_text('["not", "an", "object"]')
+
+    with capture_loguru() as log_output:
+        result = read_json_dict(path)
+
+    assert result == {}
+    assert "Expected a JSON object" in log_output.getvalue()
+
+
+def test_read_json_dict_warns_and_returns_empty_for_malformed_json(tmp_path: Path) -> None:
+    """Unparseable JSON warns and reads as empty."""
+    path = tmp_path / "settings.json"
+    path.write_text("{not valid json")
+
+    with capture_loguru() as log_output:
+        result = read_json_dict(path)
+
+    assert result == {}
+    assert "Could not parse" in log_output.getvalue()
 
 
 def test_atomic_write_creates_file(tmp_path: Path) -> None:

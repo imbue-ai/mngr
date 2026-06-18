@@ -51,6 +51,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
+from imbue.mngr.primitives import build_user_ssh_command
 from imbue.mngr.utils.name_generator import generate_host_name
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
@@ -98,7 +99,7 @@ def _build_host_details_from_host(
                 host=hostname,
                 port=port,
                 key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                command=build_user_ssh_command(user, hostname, port, key_path),
             )
         boot_time = host.get_boot_time()
         uptime_seconds = host.get_uptime_seconds()

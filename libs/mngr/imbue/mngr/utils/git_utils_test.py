@@ -14,6 +14,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.git_utils import build_project_filter_clause
 from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
+from imbue.mngr.utils.git_utils import count_commits_between
 from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import derive_project_name_for_source
 from imbue.mngr.utils.git_utils import derive_project_name_from_path
@@ -925,3 +926,26 @@ def test_rsync_worktree_over_clone_skips_default_excludes(
     assert (clone_dir / "kept.txt").read_text() == "yes\n"
     assert not (clone_dir / ".venv").exists()
     assert not (clone_dir / "__pycache__").exists()
+
+
+def test_count_commits_between_returns_real_count(cg: ConcurrencyGroup, temp_git_repo: Path) -> None:
+    """count_commits_between returns the number of commits added between two refs."""
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=temp_git_repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    (temp_git_repo / "new_file.txt").write_text("content\n")
+    subprocess.run(["git", "add", "new_file.txt"], cwd=temp_git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "add new_file"], cwd=temp_git_repo, check=True, capture_output=True)
+
+    assert count_commits_between(temp_git_repo, base_commit, "HEAD", cg) == 1
+
+
+def test_count_commits_between_returns_zero_when_no_commits_between(cg: ConcurrencyGroup, temp_git_repo: Path) -> None:
+    """count_commits_between returns 0 (the valid answer) when refs are identical."""
+    assert count_commits_between(temp_git_repo, "HEAD", "HEAD", cg) == 0
+
+
+def test_count_commits_between_raises_on_git_failure(cg: ConcurrencyGroup, temp_git_repo: Path) -> None:
+    """count_commits_between raises rather than masking a git failure as 0."""
+    with pytest.raises(MngrError):
+        count_commits_between(temp_git_repo, "nonexistent-ref-abc123", "HEAD", cg)

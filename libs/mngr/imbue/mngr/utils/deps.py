@@ -3,7 +3,9 @@ import shutil
 import subprocess
 from collections.abc import Sequence
 from enum import auto
+from typing import assert_never
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
@@ -60,10 +62,19 @@ class SystemDependency(FrozenModel):
 
     @property
     def install_hint(self) -> str:
-        """Return the installation hint for the current platform."""
-        if platform.system() == "Darwin":
-            return self.macos_hint
-        return self.linux_hint
+        """Return the installation hint for the current platform.
+
+        Raises MngrError (via detect_os) on an unsupported platform rather than
+        silently showing Linux/apt instructions on, e.g., Windows.
+        """
+        os_name = detect_os()
+        match os_name:
+            case OsName.MACOS:
+                return self.macos_hint
+            case OsName.LINUX:
+                return self.linux_hint
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def is_available(self) -> bool:
         """Check if this binary is available on PATH."""
@@ -163,13 +174,25 @@ def check_bash_version(minimum: int = 4) -> bool:
     Returns True if bash >= minimum, False otherwise.
     Only practically relevant on macOS where /bin/bash is version 3.2.
     """
+    # Run bash to report its own major version. A failure to spawn/run bash is
+    # treated conservatively as "below minimum" so the caller offers to install
+    # modern bash rather than crashing on a host without a usable bash.
     try:
         with ConcurrencyGroup(name="check-bash") as cg:
             result = cg.run_process_to_completion(["bash", "-c", "echo ${BASH_VERSINFO[0]}"])
-        version = int(result.stdout.strip())
-        return version >= minimum
-    except (*SUBPROCESS_ERRORS, ValueError):
+    except SUBPROCESS_ERRORS as e:
+        logger.debug("Failed to run bash to check its version: {}", e)
         return False
+
+    # A non-numeric version string also means we could not determine a real
+    # version, so we conservatively treat it as below minimum.
+    raw_version = result.stdout.strip()
+    try:
+        version = int(raw_version)
+    except ValueError:
+        logger.debug("Could not parse bash version from output: {!r}", raw_version)
+        return False
+    return version >= minimum
 
 
 def install_modern_bash() -> bool:

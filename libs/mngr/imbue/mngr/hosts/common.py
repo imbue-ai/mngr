@@ -54,7 +54,7 @@ def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
 
 @pure
 def build_ssh_transport_command(
-    key_path: Path,
+    key_path: Path | None,
     port: int,
     known_hosts_file: Path | None,
 ) -> str:
@@ -65,24 +65,22 @@ def build_ssh_transport_command(
     used via UserKnownHostsFile. When None, the system default (~/.ssh/known_hosts)
     is used without setting UserKnownHostsFile.
 
-    `IdentitiesOnly=yes` + `IdentityAgent=none` pin authentication to the
-    explicit `-i` key. Without this, ssh first consults `SSH_AUTH_SOCK` --
-    on a macOS user session that's the Apple launchd agent socket which
-    forwards to 1Password's biometric prompt. In a BatchMode child like
-    `git push` or `rsync` that prompt cannot fire, and ssh blocks
-    indefinitely on the agent reply with no error surfaced upstream.
+    When key_path is None, the ``-i`` flag is omitted entirely so ssh falls back
+    to the user's ssh-agent / ~/.ssh/config, rather than passing an empty key path.
+
+    When key_path is provided, `IdentitiesOnly=yes` + `IdentityAgent=none` pin
+    authentication to that explicit `-i` key. Without this, ssh first consults
+    `SSH_AUTH_SOCK` -- on a macOS user session that's the Apple launchd agent
+    socket which forwards to 1Password's biometric prompt. In a BatchMode child
+    like `git push` or `rsync` that prompt cannot fire, and ssh blocks
+    indefinitely on the agent reply with no error surfaced upstream. These
+    options are omitted when key_path is None, where falling back to the agent
+    is exactly the intended behavior.
     """
-    parts = [
-        "ssh",
-        "-i",
-        shlex.quote(str(key_path)),
-        "-p",
-        str(port),
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "IdentityAgent=none",
-    ]
+    parts = ["ssh"]
+    if key_path is not None:
+        parts.extend(["-i", shlex.quote(str(key_path)), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"])
+    parts.extend(["-p", str(port)])
     if known_hosts_file is not None:
         parts.extend(
             ["-o", f"UserKnownHostsFile={shlex.quote(str(known_hosts_file))}", "-o", "StrictHostKeyChecking=yes"]

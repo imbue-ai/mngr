@@ -2,6 +2,9 @@
 
 import io
 import json
+import os
+import subprocess
+import tempfile
 from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
@@ -25,6 +28,7 @@ from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import CommandTimeoutError
+from imbue.mngr.errors import CorruptedAgentDataError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -41,6 +45,7 @@ from imbue.mngr.hosts.host import _is_transient_ssh_error
 from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
+from imbue.mngr.hosts.host import read_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -65,6 +70,7 @@ from imbue.mngr.primitives import TmuxWidth
 from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import get_cleanup_failures
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import make_test_agent_details
@@ -535,6 +541,39 @@ def test_create_agent_state_update_preserves_create_time(
     assert updated_agent.id == original_agent.id
     assert updated_agent.create_time == original_create_time
     assert str(updated_agent.get_command()) == "sleep 2"
+
+
+def test_create_agent_state_update_raises_on_corrupt_create_time(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """In update mode, a corrupt existing data.json raises instead of resetting create_time.
+
+    Silently falling back to now() would rewrite the agent's apparent age, so a
+    damaged state file during an update must surface as an error.
+    """
+    host = local_host
+    original_options = CreateAgentOptions(
+        name=AgentName("test-corrupt-update"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    original_agent = host.create_agent_state(temp_work_dir, original_options)
+
+    # Corrupt the existing data.json
+    data_path = temp_host_dir / "agents" / str(original_agent.id) / "data.json"
+    data_path.write_text("not valid json")
+
+    update_options = CreateAgentOptions(
+        agent_id=original_agent.id,
+        name=AgentName("test-corrupt-update"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 2"),
+        is_update=True,
+    )
+    with pytest.raises(CorruptedAgentDataError):
+        host.create_agent_state(temp_work_dir, update_options)
 
 
 def test_create_agent_state_update_overwrites_data(
@@ -1029,25 +1068,25 @@ def test_parse_uptime_output_linux_format() -> None:
 
 
 def test_parse_uptime_output_empty() -> None:
-    """Test parsing empty output returns 0."""
-    assert _parse_uptime_output("") == 0.0
-    assert _parse_uptime_output("  \n") == 0.0
+    """Empty output is unparseable and returns None (uptime unknown)."""
+    assert _parse_uptime_output("") is None
+    assert _parse_uptime_output("  \n") is None
 
 
 def test_parse_uptime_output_unexpected_lines() -> None:
-    """Test parsing output with unexpected number of lines returns 0."""
+    """Output with an unexpected number of lines returns None (uptime unknown)."""
     stdout = "line1\nline2\nline3\n"
-    assert _parse_uptime_output(stdout) == 0.0
+    assert _parse_uptime_output(stdout) is None
 
 
 def test_parse_uptime_output_non_numeric_two_lines() -> None:
-    """Test parsing non-numeric macOS-style output returns 0."""
-    assert _parse_uptime_output("error\nmessage\n") == 0.0
+    """Non-numeric macOS-style output returns None (uptime unknown)."""
+    assert _parse_uptime_output("error\nmessage\n") is None
 
 
 def test_parse_uptime_output_non_numeric_single_line() -> None:
-    """Test parsing non-numeric Linux-style output returns 0."""
-    assert _parse_uptime_output("not_a_number\n") == 0.0
+    """Non-numeric Linux-style output returns None (uptime unknown)."""
+    assert _parse_uptime_output("not_a_number\n") is None
 
 
 # =========================================================================
@@ -2269,36 +2308,65 @@ def test_disconnect_is_safe_without_paramiko_client(
 # =========================================================================
 
 
-def test_format_env_file_simple_values() -> None:
-    """Simple values without special characters should be unquoted."""
-    result = _format_env_file({"KEY": "value", "FOO": "bar"})
-    assert "KEY=value" in result
-    assert "FOO=bar" in result
-    assert result.endswith("\n")
+def _source_env_value(formatted_env_file: str, key: str) -> str:
+    """Source a formatted env file in a real POSIX shell and echo back one value.
+
+    This exercises the contract that actually matters: the agent sources the env
+    file via ``set -a; . env``, so the value the shell ends up with must equal the
+    value we put in -- regardless of which shell metacharacters it contains.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as env_file:
+        env_file.write(formatted_env_file)
+        env_path = env_file.name
+    try:
+        result = subprocess.run(
+            ["sh", "-c", f'set -a; . "$1"; printf "%s" "${key}"', "sh", env_path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    finally:
+        os.unlink(env_path)
+    return result.stdout
 
 
-def test_format_env_file_quotes_values_with_spaces() -> None:
-    """Values with spaces should be double-quoted."""
-    result = _format_env_file({"MSG": "hello world"})
-    assert 'MSG="hello world"' in result
+def test_format_env_file_simple_values_roundtrip() -> None:
+    """Simple values survive sourcing intact."""
+    formatted = _format_env_file({"KEY": "value", "FOO": "bar"})
+    assert formatted.endswith("\n")
+    assert _source_env_value(formatted, "KEY") == "value"
+    assert _source_env_value(formatted, "FOO") == "bar"
 
 
-def test_format_env_file_escapes_double_quotes() -> None:
-    """Values containing double quotes should have them escaped."""
-    result = _format_env_file({"MSG": 'say "hello"'})
-    assert r'MSG="say \"hello\""' in result
+def test_format_env_file_values_with_spaces_roundtrip() -> None:
+    """Values with spaces survive sourcing intact."""
+    formatted = _format_env_file({"MSG": "hello world"})
+    assert _source_env_value(formatted, "MSG") == "hello world"
 
 
-def test_format_env_file_quotes_values_with_single_quotes() -> None:
-    """Values with single quotes should be double-quoted."""
-    result = _format_env_file({"MSG": "it's fine"})
-    assert """MSG="it's fine\"""" in result
+def test_format_env_file_values_with_quotes_roundtrip() -> None:
+    """Values with single and double quotes survive sourcing intact."""
+    assert _source_env_value(_format_env_file({"MSG": 'say "hello"'}), "MSG") == 'say "hello"'
+    assert _source_env_value(_format_env_file({"MSG": "it's fine"}), "MSG") == "it's fine"
 
 
-def test_format_env_file_quotes_values_with_newlines() -> None:
-    """Values with newlines should be double-quoted."""
-    result = _format_env_file({"MSG": "line1\nline2"})
-    assert 'MSG="line1\nline2"' in result
+def test_format_env_file_values_with_newlines_roundtrip() -> None:
+    """Values with newlines survive sourcing intact."""
+    formatted = _format_env_file({"MSG": "line1\nline2"})
+    assert _source_env_value(formatted, "MSG") == "line1\nline2"
+
+
+def test_format_env_file_values_with_shell_metacharacters_roundtrip() -> None:
+    """Values with $, backtick, and backslash are NOT re-interpreted when sourced.
+
+    This is the bug the hand-rolled quoting had: a value like ``pa$$word`` would
+    be mangled by parameter expansion. shlex.quote produces single-quoted output
+    that the shell takes literally.
+    """
+    assert _source_env_value(_format_env_file({"PW": "pa$$word"}), "PW") == "pa$$word"
+    assert _source_env_value(_format_env_file({"CMD": "$(rm -rf /)"}), "CMD") == "$(rm -rf /)"
+    assert _source_env_value(_format_env_file({"TICK": "a`whoami`b"}), "TICK") == "a`whoami`b"
+    assert _source_env_value(_format_env_file({"BS": "a\\b"}), "BS") == "a\\b"
 
 
 def test_format_env_file_empty_dict() -> None:
@@ -2993,12 +3061,17 @@ def test_host_get_agent_additional_commands_handles_old_format(
     assert result[0].window_name is None
 
 
-def test_host_get_agent_additional_commands_returns_empty_when_no_file(
+def test_host_get_agent_additional_commands_raises_when_no_file(
     local_host: Host,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """_get_agent_additional_commands should return empty when data.json is missing."""
+    """_get_agent_additional_commands should raise when data.json is missing.
+
+    A missing data.json means the agent is fundamentally broken, so this must
+    raise (matching the sibling _get_agent_command) rather than silently report
+    "no additional commands".
+    """
     host = local_host
     options = CreateAgentOptions(
         name=AgentName("missing-file-agent"),
@@ -3011,8 +3084,8 @@ def test_host_get_agent_additional_commands_returns_empty_when_no_file(
     data_path = temp_host_dir / "agents" / str(agent.id) / "data.json"
     data_path.unlink()
 
-    result = host._get_agent_additional_commands(agent)
-    assert result == []
+    with pytest.raises(NoCommandDefinedError):
+        host._get_agent_additional_commands(agent)
 
 
 # =========================================================================
@@ -3538,3 +3611,38 @@ def test_merge_agent_type_provisioning_combines_provisioning_and_env() -> None:
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result.provisioning.extra_provision_commands == ("echo setup",)
     assert result.environment.env_vars == (EnvVar(key="KEY", value="val"),)
+
+
+# =========================================================================
+# Tests for read_json_dict_via_host
+# =========================================================================
+
+
+def test_read_json_dict_via_host_returns_object(local_host: Host, tmp_path: Path) -> None:
+    """A JSON object is returned as a dict."""
+    json_path = tmp_path / "data.json"
+    json_path.write_text('{"a": 1, "b": "two"}')
+    assert read_json_dict_via_host(local_host, json_path) == {"a": 1, "b": "two"}
+
+
+def test_read_json_dict_via_host_missing_file_returns_empty(local_host: Host, tmp_path: Path) -> None:
+    """A missing file yields an empty dict (optional-config tolerance)."""
+    assert read_json_dict_via_host(local_host, tmp_path / "missing.json") == {}
+
+
+def test_read_json_dict_via_host_unparseable_warns_and_returns_empty(local_host: Host, tmp_path: Path) -> None:
+    """Unparseable JSON yields an empty dict and logs a warning."""
+    json_path = tmp_path / "bad.json"
+    json_path.write_text("{not valid json")
+    with capture_loguru(level="WARNING") as log_output:
+        assert read_json_dict_via_host(local_host, json_path) == {}
+    assert "Could not parse" in log_output.getvalue()
+
+
+def test_read_json_dict_via_host_non_object_warns_and_returns_empty(local_host: Host, tmp_path: Path) -> None:
+    """Parseable-but-non-object JSON (e.g. a list) yields {} and now logs a warning."""
+    json_path = tmp_path / "list.json"
+    json_path.write_text("[1, 2, 3]")
+    with capture_loguru(level="WARNING") as log_output:
+        assert read_json_dict_via_host(local_host, json_path) == {}
+    assert "Expected a JSON object" in log_output.getvalue()

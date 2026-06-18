@@ -1,0 +1,1 @@
+Corrected the `ResourceGuardMisconfiguration` docstring: an empty `@fixture_uses_resources()` call is allowed and is a no-op, so the docstring no longer lists "empty" as a misuse. Docstring-only change; no behavior change.

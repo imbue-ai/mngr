@@ -1,11 +1,13 @@
 """Unit tests for the editor module."""
 
+import shutil
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.editor import EditorSession
+from imbue.mngr.utils.editor import NoEditorAvailableError
 from imbue.mngr.utils.editor import get_editor_command
 
 
@@ -51,15 +53,43 @@ def test_get_editor_command_uses_editor_when_visual_not_set(monkeypatch: pytest.
     assert get_editor_command() == "nano"
 
 
-def test_get_editor_command_falls_back_to_default_when_no_env_vars(
-    monkeypatch: pytest.MonkeyPatch,
+def _make_isolated_bin_dir_preserving_tmux(tmp_path: Path) -> Path:
+    """Create a bin dir that exposes only a tmux symlink, so PATH can be
+    constrained for editor-resolution tests without breaking the test harness's
+    tmux isolation (which calls tmux at teardown).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_tmux = shutil.which("tmux")
+    if real_tmux is not None:
+        (bin_dir / "tmux").symlink_to(real_tmux)
+    return bin_dir
+
+
+def test_get_editor_command_falls_back_to_editor_on_path_when_no_env_vars(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Test that a fallback editor is used when env vars are not set."""
+    """Test that a fallback editor found on PATH is used when env vars are not set."""
     monkeypatch.delenv("VISUAL", raising=False)
     monkeypatch.delenv("EDITOR", raising=False)
-    result = get_editor_command()
-    # Should find one of the fallback editors or return vim as last resort
-    assert result in ("vim", "vi", "nano", "notepad")
+    # Constrain PATH to a directory containing exactly one fallback editor (nano)
+    # so the result is deterministic regardless of the host's installed editors.
+    bin_dir = _make_isolated_bin_dir_preserving_tmux(tmp_path)
+    _create_executable_script(bin_dir, "nano", "#!/bin/bash\nexit 0\n")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert get_editor_command() == "nano"
+
+
+def test_get_editor_command_raises_when_no_editor_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Test that NoEditorAvailableError is raised when no editor can be found."""
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+    # Constrain PATH to a directory with no editors (but keep tmux available
+    # for the harness) so none of the fallback editors resolve.
+    bin_dir = _make_isolated_bin_dir_preserving_tmux(tmp_path)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    with pytest.raises(NoEditorAvailableError):
+        get_editor_command()
 
 
 def test_editor_session_create_with_no_initial_content() -> None:

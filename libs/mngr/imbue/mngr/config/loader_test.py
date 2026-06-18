@@ -337,6 +337,27 @@ def test_parse_providers_still_raises_on_unknown_backend_when_is_enabled_unset()
         _parse_providers(raw, disabled_plugins=frozenset())
 
 
+def test_parse_providers_explicit_empty_backend_is_not_aliased_to_section_name() -> None:
+    """An explicit empty ``backend = ""`` must not be silently aliased to the section name.
+
+    The section is named ``local`` (a registered backend), so the old ``or``-based
+    default would have collapsed the empty value to ``"local"`` and parsed
+    successfully. With the explicit presence check, the empty backend is preserved
+    and surfaces as a clear error instead of being masked.
+    """
+    raw = {"local": {"backend": ""}}
+    with pytest.raises(ConfigParseError, match="Provider 'local' has an empty 'backend' value"):
+        _parse_providers(raw, disabled_plugins=frozenset())
+
+
+def test_parse_providers_absent_backend_defaults_to_section_name() -> None:
+    """When ``backend`` is absent, it still defaults to the section name."""
+    raw = {"local": {}}
+    result = _parse_providers(raw, disabled_plugins=frozenset())
+    assert ProviderInstanceName("local") in result
+    assert result[ProviderInstanceName("local")].backend == ProviderBackendName("local")
+
+
 # =============================================================================
 # Tests for _parse_agent_types
 # =============================================================================
@@ -1515,43 +1536,55 @@ def test_block_disabled_plugins_is_idempotent() -> None:
 def test_normalize_cli_args_no_cli_args_key() -> None:
     """_normalize_tuple_fields_for_construct should return the input unchanged when no cli_args key."""
     raw = {"some_key": "value"}
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result == {"some_key": "value"}
 
 
 def test_normalize_cli_args_string_value() -> None:
     """_normalize_tuple_fields_for_construct should split a non-empty string into a tuple."""
     raw = {"cli_args": "--verbose --model opus"}
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result["cli_args"] == ("--verbose", "--model", "opus")
 
 
 def test_normalize_cli_args_empty_string() -> None:
     """_normalize_tuple_fields_for_construct should convert an empty string to an empty tuple."""
     raw = {"cli_args": ""}
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result["cli_args"] == ()
 
 
 def test_normalize_cli_args_list_value() -> None:
     """_normalize_tuple_fields_for_construct should convert a list to a tuple."""
     raw = {"cli_args": ["--verbose", "--model", "opus"]}
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result["cli_args"] == ("--verbose", "--model", "opus")
 
 
 def test_normalize_cli_args_tuple_value() -> None:
     """_normalize_tuple_fields_for_construct should pass through a tuple."""
     raw = {"cli_args": ("--verbose",)}
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result["cli_args"] == ("--verbose",)
 
 
-def test_normalize_cli_args_other_type_passes_through() -> None:
-    """_normalize_tuple_fields_for_construct should pass through unrecognized types."""
+def test_normalize_cli_args_other_type_raises() -> None:
+    """_normalize_tuple_fields_for_construct should raise for an unrecognized cli_args type.
+
+    model_construct bypasses validators and the result is not re-validated
+    downstream, so a wrongly-typed value must be rejected here rather than
+    silently constructed into an invalid model.
+    """
     raw = {"cli_args": 42}
-    result = _normalize_tuple_fields_for_construct(raw)
-    assert result["cli_args"] == 42
+    with pytest.raises(ConfigParseError, match="agent_types.test.cli_args"):
+        _normalize_tuple_fields_for_construct(raw, "agent_types.test")
+
+
+def test_normalize_tuple_fields_other_type_raises() -> None:
+    """_normalize_tuple_fields_for_construct should raise for an unrecognized plain-tuple field type."""
+    raw = {"env": {"not": "a list"}}
+    with pytest.raises(ConfigParseError, match="agent_types.test.env"):
+        _normalize_tuple_fields_for_construct(raw, "agent_types.test")
 
 
 def test_normalize_tuple_fields_converts_provisioning_lists() -> None:
@@ -1561,7 +1594,7 @@ def test_normalize_tuple_fields_converts_provisioning_lists() -> None:
         "env": ["FOO=1"],
         "upload_file": ["a.txt:/a.txt"],
     }
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result["extra_provision_command"] == ("echo setup", "echo done")
     assert result["env"] == ("FOO=1",)
     assert result["upload_file"] == ("a.txt:/a.txt",)
@@ -1570,7 +1603,7 @@ def test_normalize_tuple_fields_converts_provisioning_lists() -> None:
 def test_normalize_tuple_fields_ignores_missing_fields() -> None:
     """_normalize_tuple_fields_for_construct should leave config unchanged when no tuple fields present."""
     raw = {"parent_type": "claude", "command": "my-cmd"}
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result == {"parent_type": "claude", "command": "my-cmd"}
 
 
@@ -1581,7 +1614,7 @@ def test_normalize_tuple_fields_handles_all_fields_together() -> None:
         "extra_provision_command": ["echo hi"],
         "create_directory": ["/tmp/test"],
     }
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result["cli_args"] == ("--verbose",)
     assert result["extra_provision_command"] == ("echo hi",)
     assert result["create_directory"] == ("/tmp/test",)
@@ -1593,7 +1626,7 @@ def test_normalize_tuple_fields_wraps_string_in_tuple() -> None:
         "extra_provision_command": "echo setup",
         "env": "FOO=1",
     }
-    result = _normalize_tuple_fields_for_construct(raw)
+    result = _normalize_tuple_fields_for_construct(raw, "agent_types.test")
     assert result["extra_provision_command"] == ("echo setup",)
     assert result["env"] == ("FOO=1",)
 

@@ -86,10 +86,18 @@ def _run_alerter_verification(
     ]
     try:
         result = cg.run_process_to_completion(cmd, timeout=verify_timeout + 5, is_checked_after=False)
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError:
         return VerifyNotificationResult(
             is_sent=False,
             error_message="alerter not found; install with: brew install vjeantet/tap/alerter",
+        )
+    except OSError as e:
+        # The binary's presence is already checked by check_notifier_binary, so a
+        # non-FileNotFoundError here is a genuine launch failure (permissions,
+        # exec-format, resource limits) and must not be mislabeled "not found".
+        return VerifyNotificationResult(
+            is_sent=False,
+            error_message=f"Failed to run alerter: {e}",
         )
 
     is_clicked = result.stdout.strip() in _ALERTER_VERIFY_CLICKED_RESPONSES

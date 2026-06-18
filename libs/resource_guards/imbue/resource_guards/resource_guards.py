@@ -63,7 +63,7 @@ class ResourceGuardViolation(ResourceGuardError):
 
 
 class ResourceGuardMisconfiguration(ResourceGuardError):
-    """@fixture_uses_resources was used incorrectly (empty/stacked/overridden)."""
+    """@fixture_uses_resources was used incorrectly (stacked/overridden)."""
 
 
 @dataclasses.dataclass

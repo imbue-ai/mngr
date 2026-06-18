@@ -209,12 +209,16 @@ def apply_compiled_cel_filters(
     conversion and filter evaluation; otherwise prefer
     `apply_cel_filters_to_context` which composes both steps.
     """
+    # Only CELEvalError (a user-expression evaluation failure, including a
+    # TolerantMapType missing-key miss) is treated as "filter did not match".
+    # A genuine TypeError from inside prgm.evaluate is a real bug and must
+    # propagate so it crashes loudly rather than silently skewing the result.
     for prgm in include_filters:
         try:
             result = prgm.evaluate(cel_context)
             if not result:
                 return False
-        except (CELEvalError, TypeError) as e:
+        except CELEvalError as e:
             if not _is_tolerant_miss(e):
                 logger.warning("Error evaluating include filter on {}: {}", error_context_description, e)
             return False
@@ -224,7 +228,7 @@ def apply_compiled_cel_filters(
             result = prgm.evaluate(cel_context)
             if result:
                 return False
-        except (CELEvalError, TypeError) as e:
+        except CELEvalError as e:
             if not _is_tolerant_miss(e):
                 logger.warning("Error evaluating exclude filter on {}: {}", error_context_description, e)
             continue

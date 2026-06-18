@@ -396,6 +396,18 @@ def test_build_ssh_transport_command_without_known_hosts_uses_strict_checking() 
     assert "UserKnownHostsFile" not in result
 
 
+def test_build_ssh_transport_command_omits_key_when_none() -> None:
+    """When key_path is None, the -i flag is omitted so ssh uses the user's agent/config."""
+    result = build_ssh_transport_command(
+        key_path=None,
+        port=2222,
+        known_hosts_file=None,
+    )
+    assert "-i" not in shlex.split(result)
+    assert "-p 2222" in result
+    assert "-o StrictHostKeyChecking=yes" in result
+
+
 def test_build_ssh_transport_command_quotes_key_path_with_spaces() -> None:
     result = build_ssh_transport_command(
         key_path=Path("/path with spaces/key"),

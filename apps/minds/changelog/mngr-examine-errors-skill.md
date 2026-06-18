@@ -1,0 +1,1 @@
+Adapted to the mngr SSH-key type change: when parsing agent SSH info from `mngr list` JSON, a missing `key_path` now yields `None` (matching `RemoteSSHInfo.key_path: Path | None`) instead of failing or constructing an empty path. No user-visible behavior change for agents that report a key.

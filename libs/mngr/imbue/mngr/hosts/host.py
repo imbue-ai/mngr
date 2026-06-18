@@ -51,6 +51,7 @@ from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import CommandTimeoutError
+from imbue.mngr.errors import CorruptedAgentDataError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -256,7 +257,10 @@ def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, 
     except json.JSONDecodeError as e:
         logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+    if not isinstance(loaded, dict):
+        logger.warning("Expected a JSON object in {} but got {}; treating as empty.", path, type(loaded).__name__)
+        return {}
+    return loaded
 
 
 def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
@@ -597,7 +601,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if self.is_local:
             try:
                 return list(entry.name for entry in path.iterdir())
-            except (FileNotFoundError, OSError):
+            except (FileNotFoundError, NotADirectoryError):
+                # A missing directory (or a path that turned out to be a file) is a
+                # legitimate "nothing here" answer. Other OSErrors -- permission
+                # denied, I/O errors -- are real problems and must surface rather
+                # than be silently reported as an empty directory.
                 return []
         result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null")
         if result.success and result.stdout.strip():
@@ -952,8 +960,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Return the host last stop time as a datetime, or None if unknown."""
         return None
 
-    def get_uptime_seconds(self) -> float:
-        """Get host uptime in seconds."""
+    def get_uptime_seconds(self) -> float | None:
+        """Get host uptime in seconds, or None if it could not be determined.
+
+        Returns None (rather than 0.0) on command failure so callers can tell
+        "uptime unknown" apart from a genuine near-zero uptime. This mirrors the
+        sibling get_boot_time, which also returns None on failure.
+        """
         # Single command that detects the platform on the host and dispatches accordingly,
         # so it works for both local and remote hosts regardless of OS
         result = self.execute_idempotent_command(
@@ -966,7 +979,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if result.success:
             return _parse_uptime_output(result.stdout)
 
-        return 0.0
+        return None
 
     def get_boot_time(self) -> datetime | None:
         """Get the host boot time as a datetime.
@@ -1604,8 +1617,12 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     "git submodule status", cwd=source_path, timeout_seconds=10
                 )
                 submodule_output = result.stdout.strip() if result.success else ""
-        except (ProcessError, Exception):
-            # If we can't check for submodules, just skip the warning
+        except ProcessError:
+            # The submodule check is best-effort: a failed `git submodule status`
+            # (e.g. not a git repo) only means we cannot warn, so skip it. A dead
+            # connection raises HostConnectionError, which we deliberately do NOT
+            # swallow here -- it must surface so the caller doesn't proceed into a
+            # doomed git transfer.
             return
 
         if submodule_output:
@@ -2141,7 +2158,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
             # In update mode, preserve the original create_time from existing data.json
             if options.is_update:
-                create_time = self._read_existing_create_time(state_dir)
+                create_time = self._read_existing_create_time(agent_id, state_dir)
             else:
                 create_time = datetime.now(timezone.utc)
 
@@ -2213,16 +2230,24 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
             return agent
 
-    def _read_existing_create_time(self, state_dir: Path) -> datetime:
-        """Read the create_time from an existing agent's data.json, falling back to now."""
+    def _read_existing_create_time(self, agent_id: AgentId, state_dir: Path) -> datetime:
+        """Read create_time from an existing agent's data.json.
+
+        Called only in update mode, where the agent already exists and its
+        data.json must be present and valid. A missing or corrupt file is a real
+        anomaly: falling back to ``now`` would silently rewrite the agent's
+        apparent age (breaking idle/sort/age-based logic), so we raise instead.
+        """
         data_path = state_dir / "data.json"
         try:
             content = self.read_text_file(data_path)
+        except FileNotFoundError as e:
+            raise CorruptedAgentDataError(agent_id, data_path, e) from e
+        try:
             data = json.loads(content)
             return datetime.fromisoformat(data["create_time"])
-        except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError) as e:
-            logger.warning("Could not read existing create_time from {}: {}", data_path, e)
-            return datetime.now(timezone.utc)
+        except (KeyError, json.JSONDecodeError, ValueError) as e:
+            raise CorruptedAgentDataError(agent_id, data_path, e) from e
 
     def _get_agent_state_dir(self, agent: AgentInterface) -> Path:
         """Get the state directory for an agent."""
@@ -3142,8 +3167,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
-        except FileNotFoundError:
-            return []
+        except FileNotFoundError as e:
+            # A missing data.json means the agent is fundamentally broken, not that
+            # it simply has no additional commands. Raise to match the sibling
+            # _get_agent_command, which reads the same file in the same start flow.
+            raise NoCommandDefinedError(f"No data.json file for agent {agent.name} ({agent.id})") from e
 
         data = json.loads(content)
         raw_commands = data.get("additional_commands", [])
@@ -3476,12 +3504,15 @@ def _build_start_agent_shell_command(
 
 
 @pure
-def _parse_uptime_output(stdout: str) -> float:
+def _parse_uptime_output(stdout: str) -> float | None:
     """Parse the output of the cross-platform uptime command.
 
     Handles two formats:
     - macOS: two lines (boot timestamp, current timestamp) from sysctl + date
     - Linux: single line from /proc/uptime (uptime_seconds idle_seconds)
+
+    Returns None when the output cannot be parsed, so an unparseable result is
+    reported as "uptime unknown" rather than a misleading 0.0.
     """
     output = stdout.strip()
     output_lines = output.split("\n")
@@ -3496,9 +3527,9 @@ def _parse_uptime_output(stdout: str) -> float:
             uptime_str = output.split()[0]
             return float(uptime_str)
         else:
-            return 0.0
+            return None
     except (ValueError, OSError):
-        return 0.0
+        return None
 
 
 @pure
@@ -3516,10 +3547,12 @@ def _parse_boot_time_output(stdout: str) -> datetime | None:
 
 @pure
 def _format_env_file(env: Mapping[str, str]) -> str:
-    """Format a dict as an environment file."""
-    lines: list[str] = []
-    for key, value in env.items():
-        if " " in value or '"' in value or "'" in value or "\n" in value:
-            value = '"' + value.replace('"', '\\"') + '"'
-        lines.append(f"{key}={value}")
+    """Format a dict as an environment file sourced by the agent via ``set -a; . env``.
+
+    Each value is quoted with ``shlex.quote`` so it survives POSIX-shell sourcing
+    intact, including values containing shell metacharacters like ``$``, backtick,
+    backslash, quotes, spaces, and newlines. A hand-rolled escape that only handled
+    spaces/quotes/newlines would mis-export values like ``pa$$word``.
+    """
+    lines = [f"{key}={shlex.quote(value)}" for key, value in env.items()]
     return "\n".join(lines) + "\n"

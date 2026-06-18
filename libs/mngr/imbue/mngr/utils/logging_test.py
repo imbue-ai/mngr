@@ -903,3 +903,38 @@ def test_suppress_warnings_installs_threading_excepthook() -> None:
     finally:
         threading.excepthook = original
         mngr_logging_module._IS_THREADING_EXCEPTHOOK_INSTALLED["installed"] = False
+
+
+def test_merge_with_only_overrides_explicitly_set_fields() -> None:
+    """An override built via model_construct only overrides the fields the TOML actually set."""
+    base = LoggingConfig(max_log_size_mb=100, file_level=LogLevel.DEBUG, is_logging_commands=True)
+    # Simulate a TOML layer that sets only max_log_size_mb (as the loader does via model_construct).
+    override = LoggingConfig.model_construct(max_log_size_mb=50)
+
+    merged = base.merge_with(override)
+
+    assert merged.max_log_size_mb == 50
+    # Unset fields must retain the base value rather than the override's field default.
+    assert merged.file_level == LogLevel.DEBUG
+    assert merged.is_logging_commands is True
+
+
+def test_merge_with_preserves_explicit_false_override() -> None:
+    """An explicitly-set False bool in the override wins over a True base."""
+    base = LoggingConfig(is_logging_commands=True)
+    override = LoggingConfig.model_construct(is_logging_commands=False)
+
+    merged = base.merge_with(override)
+
+    assert merged.is_logging_commands is False
+
+
+def test_merge_with_empty_override_returns_base_unchanged() -> None:
+    """An override with no explicitly-set fields leaves every base value intact."""
+    base = LoggingConfig(max_log_size_mb=77, file_level=LogLevel.TRACE)
+    override = LoggingConfig.model_construct()
+
+    merged = base.merge_with(override)
+
+    assert merged.max_log_size_mb == 77
+    assert merged.file_level == LogLevel.TRACE

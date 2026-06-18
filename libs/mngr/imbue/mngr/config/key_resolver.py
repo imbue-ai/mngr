@@ -92,8 +92,8 @@ def set_at_path(data: dict[str, Any], key_path: Sequence[str], value: Any) -> No
 
 
 def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:
-    """Walk ``base`` along ``path`` and return the value, or None if any
-    intermediate step is missing or untraversable.
+    """Walk ``base`` along ``path`` and return the value, or None if an
+    intermediate step is legitimately absent (a field that no layer has set).
 
     Pydantic models are walked via ``getattr`` (natural attribute access);
     Mapping values are walked via ``.get``. The earlier ``model_dump``
@@ -110,9 +110,21 @@ def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:
     the segment is not a model field on the wrapper, fall back to the
     appropriate inner mapping so the extend resolves against the real base
     value.
+
+    Returning ``None`` is reserved for a *legitimately-unset* base field, for
+    which ``_apply_extend`` correctly treats ``__extend`` as assign. Reaching a
+    non-model, non-Mapping intermediate (e.g. a scalar) while path segments
+    remain is instead a structurally malformed ``__extend`` target: the user
+    asked to descend into ``a.b`` where ``a`` is a scalar. Silently returning
+    ``None`` there would downgrade the extend to an assign and drop the base
+    entries the user meant to extend, so it raises ``ConfigParseError`` to
+    surface the malformed path.
+
+    Raises ``ConfigParseError`` if an intermediate path segment cannot be
+    traversed because it lands on a non-model, non-Mapping value.
     """
     current: Any = base
-    for segment in path:
+    for index, segment in enumerate(path):
         if current is None:
             return None
         if isinstance(current, CommandDefaults) and segment not in current.__class__.model_fields:
@@ -124,7 +136,13 @@ def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:
         elif isinstance(current, Mapping):
             current = current.get(segment)
         else:
-            return None
+            traversed_path = ".".join(path[:index])
+            remaining_path = ".".join(path[index:])
+            raise ConfigParseError(
+                f"__extend target '{'.'.join(path)}' is not valid: the base value at "
+                f"'{traversed_path}' is a scalar ({type(current).__name__}), so it cannot be "
+                f"traversed into '{remaining_path}'. Fix the nested key or use bare assignment."
+            )
     return current
 
 

@@ -118,9 +118,11 @@ class _NarrowingViolation(FrozenModel):
     """A single narrowing assignment, with both sides attributed.
 
     ``assigned_by`` is the higher-precedence layer doing the (narrowing)
-    assignment; ``dropped_from`` is the lower-precedence layer whose value would
-    be silently dropped (``None`` only if no contributing layer could be
-    identified, which should not happen for a real violation).
+    assignment; ``dropped_from`` is the lower-precedence settings layer whose value
+    would be silently dropped. ``dropped_from`` is ``None`` when the narrowed value
+    came from the built-in ``MngrConfig`` defaults rather than from a prior
+    file/env settings layer (so there is no settings file to attribute it to); the
+    error message then simply omits the "would drop a value from ..." line.
     """
 
     key_path: str
@@ -398,8 +400,13 @@ def _collect_layer_narrowing(
     being dropped. Reusing ``detect_settings_narrowing`` here (rather than walking
     field values directly) keeps the field traversal in one place -- the place the
     ``PREVENT_GETATTR`` ratchet already accounts for. ``dropped_from`` is ``None``
-    only if no contributing layer is found (should not happen for a real
-    violation, but keeps the diagnostic robust).
+    when no contributing settings layer can be re-identified for a narrowed path.
+    This is a legitimate state, not a bug: the merged ``base`` also carries the
+    built-in ``MngrConfig`` defaults (e.g. the non-empty ``unset_vars`` default),
+    so the *first* settings layer can narrow a default value that no prior
+    file/env layer ever set. In that case the diagnostic correctly omits the
+    "would drop a value from <layer>" line, because the dropped value came from
+    built-in defaults rather than a user-authored settings file.
     """
     violation_paths = detect_settings_narrowing(base, parsed_layer)
     if not violation_paths:
@@ -607,8 +614,26 @@ def _parse_providers(
 
     for name, raw_config in raw_providers.items():
         raw_config = _normalize_field_keys(raw_config, f"providers.{name}")
-        backend = raw_config.get("backend") or name
-        plugin = raw_config.get("plugin") or backend
+        # ``backend`` defaults to the section name only when it is *absent*. An
+        # explicitly-set but falsy value (e.g. ``backend = ""`` from a templating
+        # mistake) must not be silently aliased to the section name -- preserve it
+        # so it surfaces as a clear error below rather than masking the mistake.
+        raw_backend = raw_config.get("backend")
+        backend = name if raw_backend is None else raw_backend
+        # An explicitly-set blank backend can never resolve to a registered
+        # backend (registered names are non-empty), so reject it directly with a
+        # clear message rather than letting it fall through to the lookup.
+        if isinstance(backend, str) and not backend.strip():
+            if strict:
+                raise ConfigParseError(
+                    f"Provider '{name}' has an empty 'backend' value. Set a valid backend "
+                    f"(e.g. 'local' or 'docker') or remove the 'backend' key to default to the section name."
+                )
+            if not silent:
+                logger.warning("Skipped provider '{}' because its 'backend' value is empty.", name)
+            continue
+        raw_plugin = raw_config.get("plugin")
+        plugin = backend if raw_plugin is None else raw_plugin
         if plugin in disabled_plugins:
             continue
         # Skip disabled providers whose backend plugin is not installed.
@@ -672,7 +697,7 @@ _PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 
-def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
+def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any], field_path_prefix: str) -> dict[str, Any]:
     """Normalize tuple fields from str or list to tuple before model_construct (which bypasses validators).
 
     cli_args gets special shell-splitting behavior for single strings.
@@ -682,6 +707,14 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
     so narrowing detection (``_check_narrowing`` / ``would_assignment_narrow``)
     can recognise the scalar-replacement intent and skip the per-entry
     narrowing check against the lower-precedence layer.
+
+    The constructed model bypasses pydantic validators (``model_construct``)
+    and is not re-validated downstream (``MngrConfig.model_validate`` does not
+    re-validate already-constructed nested instances), so an unrecognized value
+    type for a tuple field cannot be deferred to pydantic. Raises
+    ``ConfigParseError`` here so a wrongly-typed aggregate field (e.g. an int or
+    object where a list of strings is expected) is surfaced rather than silently
+    constructed into an invalid model.
     """
     result = raw_config
     if "cli_args" in result:
@@ -692,7 +725,10 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
         elif isinstance(cli_args, (list, tuple)):
             normalized = tuple(cli_args)
         else:
-            normalized = cli_args
+            raise ConfigParseError(
+                f"Field '{field_path_prefix}.cli_args' must be a string or a list of strings; "
+                f"got: {type(cli_args).__name__}"
+            )
         result = {**result, "cli_args": normalized}
 
     for field_name in _PLAIN_TUPLE_FIELDS:
@@ -705,8 +741,10 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
         elif isinstance(value, (list, tuple)):
             result = {**result, field_name: tuple(value)}
         else:
-            # Unrecognized type: pass through for Pydantic to validate or reject
-            pass
+            raise ConfigParseError(
+                f"Field '{field_path_prefix}.{field_name}' must be a string or a list of strings; "
+                f"got: {type(value).__name__}"
+            )
     return result
 
 
@@ -821,7 +859,7 @@ def _parse_agent_types(
             silent=silent,
             extra_hint=extra_hint,
         )
-        normalized_config = _normalize_tuple_fields_for_construct(cleaned_config)
+        normalized_config = _normalize_tuple_fields_for_construct(cleaned_config, f"agent_types.{name}")
         # Persist the alias-resolved parent_type so downstream resolution sees
         # the canonical type rather than the alias the user wrote.
         if parent_type is not None:

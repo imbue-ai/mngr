@@ -7,8 +7,10 @@ from typing import cast
 
 import pytest
 from paramiko import SSHException
+from pyinfra.api import State as PyinfraState
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
+from pyinfra.api.inventory import Inventory
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
@@ -112,6 +114,49 @@ def test_outer_host_local_get_ssh_connection_info_is_none(temp_mngr_ctx: MngrCon
         mngr_ctx=temp_mngr_ctx,
     )
     assert outer.get_ssh_connection_info() is None
+
+
+def test_outer_host_remote_get_ssh_connection_info_key_is_none_without_mngr_key(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A remote host with no mngr-owned ssh_key returns None for the key path.
+
+    This is the user-configured ssh case (key supplied by ssh-agent / ~/.ssh/config);
+    the key must be None, not an empty Path that would become ``ssh -i ''`` downstream.
+    """
+    pyinfra_host = create_ssh_pyinfra_host_using_user_config("remote.example.com", port=2222, user="root")
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    info = outer.get_ssh_connection_info()
+    assert info is not None
+    user, hostname, port, key_path = info
+    assert user == "root"
+    assert hostname == "remote.example.com"
+    assert port == 2222
+    assert key_path is None
+
+
+def test_outer_host_remote_get_ssh_connection_info_includes_key_when_set(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When the host data carries an ssh_key, it is returned as a Path."""
+    host_data = {"ssh_user": "root", "ssh_port": 2222, "ssh_key": "/tmp/my_key"}
+    inventory = Inventory(([("remote.example.com", host_data)], {}))
+    state = PyinfraState(inventory=inventory)
+    pyinfra_host = inventory.get_host("remote.example.com")
+    pyinfra_host.init(state)
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    info = outer.get_ssh_connection_info()
+    assert info is not None
+    _user, _hostname, _port, key_path = info
+    assert key_path == Path("/tmp/my_key")
 
 
 def test_outer_host_local_executes_command(temp_mngr_ctx: MngrContext) -> None:

@@ -162,7 +162,7 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `host.ssh.user` - SSH username
 - `host.ssh.host` - SSH hostname
 - `host.ssh.port` - SSH port
-- `host.ssh.key_path` - Path to SSH private key
+- `host.ssh.key_path` - Path to SSH private key, or None when the host has no mngr-owned key (ssh falls back to the user's ssh-agent / ~/.ssh/config)
 - `host.ssh.command` - Full SSH command to connect
 - `host.snapshots` - List of available snapshots
 - `host.is_locked` - Whether the host is currently locked for an operation

@@ -13,6 +13,7 @@ from typing import TypeVar
 
 from imbue.concurrency_group.errors import EnvironmentStoppedError
 from imbue.concurrency_group.errors import ProcessError
+from imbue.concurrency_group.errors import ProcessInvariantError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import MutableEvent
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
@@ -112,15 +113,32 @@ class RunningProcess:
             return self._completed_process.returncode
 
         if not thread.is_alive():
+            # The run thread has finished. Synchronize with it via join() before reading its
+            # result: join() acquires the thread's tstate lock, which establishes a
+            # happens-before edge guaranteeing the run thread's assignment of
+            # `_completed_process` is visible here. Re-reading the attribute without this
+            # barrier can still observe a stale `None` -- `is_alive()` reporting the thread dead
+            # does not by itself synchronize this reader with that write -- which is what made
+            # the invariant below fire spuriously under load. join() also re-raises any
+            # exception the thread captured, so a failed setup/run surfaces to the caller.
+            thread.join()
             if self._completed_process is not None:
                 return self._completed_process.returncode
-            if thread.exception_raw is not None:
-                thread.join()
-            return 1007
+            # join() returned without raising and there is still no result. `run()` only
+            # finishes by assigning `_completed_process` or by raising, so this is a genuine
+            # invariant violation -- surface it loudly rather than fabricating an exit code.
+            raise ProcessInvariantError(
+                f"Run thread for command `{' '.join(self._command)}` finished without producing a "
+                "result or recording an exception."
+            )
 
         return None
 
     def is_finished(self) -> bool:
+        # poll() re-raises any exception captured by the run thread (e.g. ProcessSetupError when
+        # the command failed to start). Such a process has finished -- it will never produce more
+        # output or a different exit status -- so report it as finished rather than propagating here;
+        # the failure is surfaced later through wait()/check().
         try:
             return self.poll() is not None
         except ProcessSetupError:

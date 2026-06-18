@@ -58,7 +58,11 @@ class RemoteSSHInfo(FrozenModel):
     user: str = Field(description="SSH username (e.g. 'root')")
     host: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
-    key_path: Path = Field(description="Path to SSH private key file")
+    key_path: Path | None = Field(
+        default=None,
+        description="Path to SSH private key file, or None when the host has no mngr-owned key "
+        "(paramiko falls back to the user's ssh-agent / default keys)",
+    )
 
 
 class SSHTunnelError(Exception):
@@ -662,8 +666,11 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """
     client = paramiko.SSHClient()
 
-    known_hosts_path = ssh_info.key_path.parent / "known_hosts"
-    if known_hosts_path.exists():
+    # The known_hosts file lives alongside the mngr-owned key. When there is no
+    # mngr-owned key (key_path is None), we cannot locate it, so fall back to
+    # AutoAddPolicy and let paramiko use the user's ssh-agent / default keys.
+    known_hosts_path = ssh_info.key_path.parent / "known_hosts" if ssh_info.key_path is not None else None
+    if known_hosts_path is not None and known_hosts_path.exists():
         client.load_host_keys(str(known_hosts_path))
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
     else:
@@ -674,7 +681,7 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
         hostname=ssh_info.host,
         port=ssh_info.port,
         username=ssh_info.user,
-        key_filename=str(ssh_info.key_path),
+        key_filename=str(ssh_info.key_path) if ssh_info.key_path is not None else None,
         timeout=10.0,
     )
 

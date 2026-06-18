@@ -83,33 +83,22 @@ class LoggingConfig(FrozenModel):
     )
 
     def merge_with(self, override: "LoggingConfig") -> "LoggingConfig":
-        """Merge this config with an override config.
+        """Merge this config with an override config, with the override winning per-field.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
+        Only fields the override actually set win; unset fields fall back to
+        this config's value. "Set" is determined by ``model_fields_set``, which
+        is the only reliable signal of intent: an override parsed from TOML via
+        ``model_construct`` populates unset fields with their field *defaults*
+        (not ``None``), so a value-based ``is not None`` check could not tell a
+        deliberately-set override apart from an untouched default. This mirrors
+        the ``model_fields_set``-based merge used across ``config/data_types.py``.
         """
-        return LoggingConfig(
-            file_level=override.file_level if override.file_level is not None else self.file_level,
-            log_dir=override.log_dir if override.log_dir is not None else self.log_dir,
-            max_log_size_mb=override.max_log_size_mb if override.max_log_size_mb is not None else self.max_log_size_mb,
-            console_level=override.console_level if override.console_level is not None else self.console_level,
-            log_file_path=override.log_file_path if override.log_file_path is not None else self.log_file_path,
-            is_logging_commands=override.is_logging_commands
-            if override.is_logging_commands is not None
-            else self.is_logging_commands,
-            is_logging_command_output=override.is_logging_command_output
-            if override.is_logging_command_output is not None
-            else self.is_logging_command_output,
-            is_logging_env_vars=override.is_logging_env_vars
-            if override.is_logging_env_vars is not None
-            else self.is_logging_env_vars,
-            event_type=override.event_type if override.event_type is not None else self.event_type,
-            event_source=override.event_source if override.event_source is not None else self.event_source,
-            enable_paramiko_logging=override.enable_paramiko_logging
-            if override.enable_paramiko_logging is not None
-            else self.enable_paramiko_logging,
-        )
+        explicitly_set = override.model_fields_set
+        if not explicitly_set:
+            return self
+        override_values = override.model_dump()
+        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
+        return self.model_copy_update(*updates)
 
 
 # Custom loguru log level number for BUILD (between DEBUG=10 and INFO=20)
@@ -208,6 +197,10 @@ def _format_user_message(record: Any) -> str:
         else:
             return "{message}\n"
     else:
+        # INFO, CRITICAL, and any future/unmapped level intentionally use the
+        # plain (uncolored) format. This dispatch keys off loguru's level *name*
+        # string rather than the LogLevel enum, so it cannot be an exhaustive
+        # match/assert_never; the plain fallback is the correct default here.
         return "{message}\n"
 
 

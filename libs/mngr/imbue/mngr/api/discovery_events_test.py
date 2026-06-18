@@ -250,6 +250,13 @@ class _FakeHostWithSSH:
         return ("root", "remote.example.com", 2222, Path("/tmp/key"))
 
 
+class _FakeHostWithoutKey:
+    """Stub for a remote host that has no mngr-owned SSH key."""
+
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path | None]:
+        return ("root", "remote.example.com", 2222, None)
+
+
 class _FakeLocalHost:
     """Minimal stub for testing _build_ssh_info_from_host without SSH info."""
 
@@ -265,6 +272,14 @@ def test_build_ssh_info_from_host_returns_ssh_info_for_remote_host() -> None:
     assert result.port == 2222
     assert result.key_path == Path("/tmp/key")
     assert result.command == "ssh -i /tmp/key -p 2222 root@remote.example.com"
+
+
+def test_build_ssh_info_from_host_omits_key_when_host_has_no_key() -> None:
+    result = _build_ssh_info_from_host(cast(OnlineHostInterface, _FakeHostWithoutKey()))
+    assert result is not None
+    assert result.key_path is None
+    # The connect command must not contain an empty ``-i ''`` argument.
+    assert result.command == "ssh -p 2222 root@remote.example.com"
 
 
 def test_build_ssh_info_from_host_returns_none_for_local_host() -> None:

@@ -375,10 +375,12 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         ...
 
     @abstractmethod
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path | None] | None:
         """Get SSH connection info for this host if it's remote.
 
         Returns (user, hostname, port, private_key_path) if remote, None if local.
+        private_key_path is None when the host has no mngr-owned SSH key and ssh
+        should fall back to the user's ssh-agent / ~/.ssh/config.
         """
         ...
 
@@ -560,8 +562,8 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
-    def get_uptime_seconds(self) -> float:
-        """Return the number of seconds since this host was last started."""
+    def get_uptime_seconds(self) -> float | None:
+        """Return the number of seconds since this host was last started, or None if unknown."""
         ...
 
     @abstractmethod

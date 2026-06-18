@@ -123,6 +123,44 @@ def test_ansi_to_html_256color_grayscale_ramp_index_255() -> None:
     assert "color:rgb(238,238,238)" in result
 
 
+def test_ansi_to_html_truecolor_foreground_renders_rgb() -> None:
+    """38;2;r;g;b renders a 24-bit truecolor foreground."""
+    result = ansi_to_html("\x1b[38;2;10;20;30mtrue\x1b[0m")
+    assert "color:rgb(10,20,30)" in result
+    assert "true" in result
+
+
+def test_ansi_to_html_truecolor_foreground_does_not_misread_rgb_as_bold() -> None:
+    """The g/b parameters of a truecolor sequence must not be reinterpreted as standalone codes.
+
+    A green channel of 2 previously fell through to the else branch and was
+    misread as code 2; more importantly a green channel of 1 would have been
+    rendered as bold. Here we use a green channel of 1 to lock in that the RGB
+    parameters are consumed rather than reinterpreted.
+    """
+    result = ansi_to_html("\x1b[38;2;200;1;200mfuchsia\x1b[0m")
+    assert "color:rgb(200,1,200)" in result
+    assert "font-weight:bold" not in result
+
+
+def test_ansi_to_html_background_256color_params_are_consumed() -> None:
+    """48;5;N is not rendered, but its palette index must not be misread as a standalone code."""
+    # 48;5;1 must not produce a foreground color from the trailing "1".
+    result = ansi_to_html("\x1b[48;5;1mtext\x1b[0m")
+    assert "color:" not in result
+    assert "font-weight:bold" not in result
+    assert "text" in result
+
+
+def test_ansi_to_html_background_truecolor_params_are_consumed() -> None:
+    """48;2;r;g;b is not rendered, and its r/g/b params must not be misread as codes."""
+    # A blue channel of 1 would have been misread as bold before the fix.
+    result = ansi_to_html("\x1b[48;2;200;200;1mtext\x1b[0m")
+    assert "color:" not in result
+    assert "font-weight:bold" not in result
+    assert "text" in result
+
+
 def test_ansi_to_html_reset_closes_open_spans() -> None:
     """ESC[0m after a color code closes the open span."""
     result = ansi_to_html("\x1b[32mgreen\x1b[0mplain")

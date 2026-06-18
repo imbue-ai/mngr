@@ -1,5 +1,8 @@
+import pytest
+
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr_notifications.config import NotificationsPluginConfig
+from imbue.mngr_notifications.errors import MisconfiguredPluginError
 
 
 def test_default_config_has_no_terminal() -> None:
@@ -31,14 +34,13 @@ def test_merge_with_override_custom_command() -> None:
     assert merged.custom_terminal_command == "my-cmd $MNGR_AGENT_NAME"
 
 
-def test_merge_with_base_plugin_config_returns_self() -> None:
-    """Merging with a non-NotificationsPluginConfig returns self."""
+def test_merge_with_foreign_subtype_raises() -> None:
+    """Merging with a non-NotificationsPluginConfig fails loudly rather than silently dropping the override."""
     base = NotificationsPluginConfig(terminal_app="iTerm")
     other = PluginConfig(enabled=False)
 
-    merged = base.merge_with(other)
-
-    assert merged is base
+    with pytest.raises(MisconfiguredPluginError):
+        base.merge_with(other)
 
 
 def test_merge_with_preserves_base_when_override_is_none() -> None:

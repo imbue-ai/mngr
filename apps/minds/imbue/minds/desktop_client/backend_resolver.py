@@ -300,11 +300,12 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
             continue
 
         try:
+            raw_key_path = ssh.get("key_path")
             ssh_info = RemoteSSHInfo(
                 user=ssh["user"],
                 host=ssh["host"],
                 port=ssh["port"],
-                key_path=Path(ssh["key_path"]),
+                key_path=Path(raw_key_path) if raw_key_path is not None else None,
             )
             ssh_info_by_id[agent_id_str] = ssh_info
         except (KeyError, ValueError) as e:
