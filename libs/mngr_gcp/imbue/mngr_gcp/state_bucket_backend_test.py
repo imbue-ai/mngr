@@ -21,12 +21,12 @@ from imbue.mngr_gcp.backend import GCP_BACKEND_NAME
 from imbue.mngr_gcp.backend import GcpProvider
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.state_bucket import GcsStateBucket
-from imbue.mngr_gcp.state_bucket_test import _FAKE_CREDENTIALS
-from imbue.mngr_gcp.state_bucket_test import _FakeStorageClient
-from imbue.mngr_gcp.state_bucket_test import _StubbedGcsStateBucket
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
+from imbue.mngr_gcp.testing import _FAKE_CREDENTIALS
+from imbue.mngr_gcp.testing import _FakeStorageClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
+from imbue.mngr_gcp.testing import _StubbedGcsStateBucket
 from imbue.mngr_vps.host_state_store import NullHostDirBackend
 from imbue.mngr_vps.instance_offline import BucketHostDirBackend
 

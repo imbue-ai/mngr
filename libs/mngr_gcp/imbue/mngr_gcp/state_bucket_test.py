@@ -1,228 +1,26 @@
 """Unit tests for ``GcsStateBucket`` / ``GcsVolume`` using an in-memory fake GCS.
 
-The google-cloud-storage SDK has no first-party in-memory testing harness (no
-moto-equivalent), so a small fake covering exactly the methods this module
-calls is built here. Test-only subclasses inject the fake via a constructor
-field (mirroring ``_StubbedGcpVpsClient``); production code is untouched.
-Keeping the fake lean -- and parallel to the production primitives -- makes
-the test boundary obvious; richer behavior (versioning, generations, ACLs) is
-intentionally absent.
+The in-memory fake GCS (``_FakeStorageClient`` and friends) and the
+``_Stubbed*`` injection seams live in ``testing.py`` so multiple test modules
+can import them uniformly (matches ``mngr_azure``'s placement of
+``_StubbedBlobStateBucket``).
 """
 
-from collections.abc import Iterator
-from datetime import datetime
-from datetime import timezone
 from typing import Any
 
 import pytest
 from google.api_core import exceptions as google_api_exceptions
-from google.auth.credentials import AnonymousCredentials
-from pydantic import Field
 
 from imbue.mngr.interfaces.data_types import FileType
-from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import HostId
 from imbue.mngr_gcp.state_bucket import GcsStateBucket
 from imbue.mngr_gcp.state_bucket import GcsStateBucketError
 from imbue.mngr_gcp.state_bucket import GcsVolume
-
-# A credential placeholder for the bucket/volume models: pydantic validates the
-# field type, but the fake client never actually authenticates with it.
-_FAKE_CREDENTIALS = AnonymousCredentials()
-
-
-class _FakeBlob:
-    """A single object in the fake GCS bucket: name + bytes payload + mtime."""
-
-    def __init__(self, parent: "_FakeBucket", name: str, content: bytes) -> None:
-        self.parent = parent
-        self.name = name
-        self.content = content
-        self.updated: datetime = datetime.now(timezone.utc)
-        self.size: int = len(content)
-
-    def upload_from_string(self, data: bytes | str) -> None:
-        content = data.encode("utf-8") if isinstance(data, str) else data
-        self.content = content
-        self.size = len(content)
-        self.updated = datetime.now(timezone.utc)
-        self.parent.blobs[self.name] = self
-
-    def download_as_bytes(self) -> bytes:
-        existing = self.parent.blobs.get(self.name)
-        if existing is None:
-            raise google_api_exceptions.NotFound(f"No such object: {self.name}")
-        return existing.content
-
-    def delete(self) -> None:
-        if self.name not in self.parent.blobs:
-            raise google_api_exceptions.NotFound(f"No such object: {self.name}")
-        del self.parent.blobs[self.name]
-
-    def exists(self) -> bool:
-        return self.name in self.parent.blobs
-
-
-class _FakeBucket:
-    """In-memory GCS bucket: a name -> blob dict plus metadata."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.blobs: dict[str, _FakeBlob] = {}
-        self.storage_class: str = "STANDARD"
-        self.labels: dict[str, str] = {}
-        # The fake's stand-in for ``Bucket.iam_configuration`` -- only the one
-        # attribute production touches.
-        self.iam_configuration = _FakeIamConfiguration()
-        # Set by ``_FakeStorageClient.create_bucket`` (and refreshed by
-        # ``bucket()`` on lookup) so ``delete()`` can faithfully remove the
-        # bucket from its parent registry. None for detached handles that were
-        # never registered, in which case ``delete()`` only clears blobs.
-        self.parent_client: "_FakeStorageClient | None" = None
-
-    def blob(self, name: str) -> _FakeBlob:
-        existing = self.blobs.get(name)
-        if existing is not None:
-            return existing
-        # Mirror the real SDK: ``bucket.blob(name)`` returns a handle whether or
-        # not the object exists. The handle's ``exists()`` / ``delete()`` raise
-        # NotFound when the underlying object is absent.
-        return _FakeBlob(parent=self, name=name, content=b"")
-
-    def delete(self, force: bool = False) -> None:
-        del force
-        self.blobs.clear()
-        # Mirror real GCS: after ``bucket.delete(...)`` the bucket no longer
-        # exists, so a subsequent ``lookup_bucket`` returns None. Without this
-        # the fake's ``bucket_exists()`` would keep returning True after a
-        # production ``delete_bucket()`` and the idempotency contract could
-        # only be verified by external test scaffolding (which would be
-        # tautological).
-        if self.parent_client is not None:
-            self.parent_client.buckets.pop(self.name, None)
-
-
-class _FakeIamConfiguration:
-    """Stand-in for ``Bucket.iam_configuration`` -- production only sets one flag."""
-
-    uniform_bucket_level_access_enabled: bool = False
-
-
-class _FakeListIterator:
-    """A list-iterator that also carries a ``prefixes`` attribute (matches the real SDK)."""
-
-    def __init__(self, blobs: list[_FakeBlob], prefixes: set[str]) -> None:
-        self._blobs = blobs
-        self.prefixes: set[str] = prefixes
-
-    def __iter__(self) -> Iterator[_FakeBlob]:
-        return iter(self._blobs)
-
-
-class _FakeStorageClient:
-    """In-memory GCS client: a bucket-name -> _FakeBucket dict + the methods the bucket calls."""
-
-    def __init__(self) -> None:
-        self.buckets: dict[str, _FakeBucket] = {}
-
-    def bucket(self, name: str) -> _FakeBucket:
-        # The real SDK returns a handle without creating the bucket -- the bucket
-        # itself only materializes via ``create_bucket``. Mirror that: an existing
-        # handle is returned if present, else a fresh detached one.
-        existing = self.buckets.get(name)
-        if existing is not None:
-            return existing
-        return _FakeBucket(name)
-
-    def lookup_bucket(self, name: str) -> _FakeBucket | None:
-        return self.buckets.get(name)
-
-    def get_bucket(self, name: str) -> _FakeBucket:
-        existing = self.buckets.get(name)
-        if existing is None:
-            raise google_api_exceptions.NotFound(f"No such bucket: {name}")
-        return existing
-
-    def create_bucket(self, bucket: _FakeBucket, location: str) -> _FakeBucket:
-        del location
-        if bucket.name in self.buckets:
-            raise google_api_exceptions.Conflict(f"Bucket already exists: {bucket.name}")
-        # Bind the bucket to this client so ``bucket.delete(...)`` can remove
-        # itself from the registry (mirrors the real GCS lifecycle).
-        bucket.parent_client = self
-        self.buckets[bucket.name] = bucket
-        return bucket
-
-    def list_blobs(
-        self,
-        bucket_or_name: str | _FakeBucket,
-        prefix: str = "",
-        delimiter: str | None = None,
-        max_results: int | None = None,
-    ) -> _FakeListIterator:
-        bucket_name = bucket_or_name if isinstance(bucket_or_name, str) else bucket_or_name.name
-        bucket = self.buckets.get(bucket_name)
-        if bucket is None:
-            raise google_api_exceptions.NotFound(f"No such bucket: {bucket_name}")
-        files: list[_FakeBlob] = []
-        prefixes: set[str] = set()
-        for blob in bucket.blobs.values():
-            if not blob.name.startswith(prefix):
-                continue
-            if delimiter is None:
-                files.append(blob)
-                continue
-            # Delimited: split the trailing part on the delimiter; if a delimiter
-            # appears, classify the immediate-child portion as a sub-"directory".
-            tail = blob.name[len(prefix) :]
-            if delimiter in tail:
-                sub = prefix + tail.split(delimiter, 1)[0] + delimiter
-                prefixes.add(sub)
-            else:
-                files.append(blob)
-            if max_results is not None and len(files) >= max_results:
-                break
-        if max_results is not None:
-            files = files[:max_results]
-        return _FakeListIterator(blobs=files, prefixes=prefixes)
-
-
-class _StubbedGcsVolume(GcsVolume):
-    """Test-only ``GcsVolume`` that injects a fake storage client via a constructor field.
-
-    Mirrors ``_StubbedGcpVpsClient`` (in ``testing.py``): production
-    ``GcsVolume._client()`` builds a real ``storage.Client`` lazily; this subclass
-    routes it to the injected fake instead, so the test exercises the
-    request-building and response-handling without real GCS calls and without
-    monkeypatching the module.
-    """
-
-    stubbed_storage_client: Any = Field(default=None, description="Fake storage client")
-
-    def _client(self) -> Any:
-        return self.stubbed_storage_client
-
-
-class _StubbedGcsStateBucket(GcsStateBucket):
-    """Test-only ``GcsStateBucket`` that injects a fake storage client + matching volume.
-
-    Overrides ``_make_host_dir_volume`` to produce a ``_StubbedGcsVolume`` bound
-    to the same fake, so seeded objects on the bucket are visible to the volume
-    reads (the production volume builds its own fresh client otherwise).
-    """
-
-    stubbed_storage_client: Any = Field(default=None, description="Fake storage client")
-
-    def _client(self) -> Any:
-        return self.stubbed_storage_client
-
-    def _make_host_dir_volume(self) -> Volume:
-        return _StubbedGcsVolume(
-            credentials=self.credentials,
-            project_id=self.project_id,
-            bucket_name=self.bucket_name,
-            stubbed_storage_client=self.stubbed_storage_client,
-        )
+from imbue.mngr_gcp.testing import _FAKE_CREDENTIALS
+from imbue.mngr_gcp.testing import _FakeBucket
+from imbue.mngr_gcp.testing import _FakeStorageClient
+from imbue.mngr_gcp.testing import _StubbedGcsStateBucket
+from imbue.mngr_gcp.testing import _StubbedGcsVolume
 
 
 @pytest.fixture
