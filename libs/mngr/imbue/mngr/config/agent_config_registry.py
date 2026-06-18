@@ -1,6 +1,7 @@
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.agent_class_registry import get_agent_class
@@ -13,16 +14,15 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 
-# Fields on AgentTypeConfig that are inheritance-routing metadata, not runtime config
-# values. They are cleared before a parent/child merge so they never flow into the result.
-_METADATA_FIELDS: frozenset[str] = frozenset({"parent_type", "plugin"})
-
 
 def _without_routing_metadata(config: AgentTypeConfig) -> AgentTypeConfig:
     """Return a copy of ``config`` with the inheritance-routing metadata
     (``parent_type`` / ``plugin``) cleared, so a parent/child merge never carries it into
-    the merged runtime config."""
-    return config.model_copy(update={name: None for name in _METADATA_FIELDS})
+    the merged runtime config. These two fields are routing metadata, not runtime config."""
+    return config.model_copy_update(
+        to_update(config.field_ref().parent_type, None),
+        to_update(config.field_ref().plugin, None),
+    )
 
 
 # =============================================================================

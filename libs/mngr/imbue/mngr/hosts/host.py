@@ -259,7 +259,9 @@ def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, 
     return loaded if isinstance(loaded, dict) else {}
 
 
-def write_json_dict_via_host(host: OnlineHostInterface, path: Path, data: dict, *, make_parent: bool = False) -> None:
+def write_json_dict_via_host(
+    host: OnlineHostInterface, path: Path, data: dict[str, Any], *, make_parent: bool = False
+) -> None:
     """Write-side counterpart to ``read_json_dict_via_host``.
 
     Serializes ``data`` as pretty-printed JSON (two-space indent, trailing
