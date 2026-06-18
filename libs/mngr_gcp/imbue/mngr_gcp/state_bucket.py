@@ -97,9 +97,7 @@ class GcsStateBucket(BaseStateBucket):
         try:
             return self._client().lookup_bucket(self.bucket_name) is not None
         except google_api_exceptions.GoogleAPICallError as e:
-            raise GcsStateBucketError(
-                f"Failed to check existence of GCS bucket {self.bucket_name!r}: {e}"
-            ) from e
+            raise GcsStateBucketError(f"Failed to check existence of GCS bucket {self.bucket_name!r}: {e}") from e
 
     def ensure_bucket(self) -> bool:
         """Idempotently create the state bucket, returning True iff it was created.
