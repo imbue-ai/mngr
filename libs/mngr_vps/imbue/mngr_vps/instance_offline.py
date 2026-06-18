@@ -204,7 +204,10 @@ class OfflineCapableVpsProvider(VpsProvider):
         )
         # The placement is stopped (host_dir quiesced) but the instance is still
         # reachable: capture host_dir to the bucket now, before the pause. ``capture``
-        # raises on failure, so pause in a ``finally`` -- a capture failure surfaces
+        # raises on a genuine failure (a lost connection, an rsync error, a bucket
+        # write error). The pause is billing-critical -- an un-paused instance keeps
+        # billing and, with the record already marked STOPPED, becomes undiscoverable
+        # -- so the ``finally`` pauses first, guaranteeing a capture failure surfaces
         # (failing ``mngr stop``) without ever leaving a running instance.
         try:
             self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
