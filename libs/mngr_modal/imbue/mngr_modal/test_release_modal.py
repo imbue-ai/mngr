@@ -65,7 +65,6 @@ from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.instance import ModalProviderInstance
-from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.testing import MODAL_RELEASE_TESTS_OPT_IN
 
 # The Modal provider-instance name (and thus the ``[providers.modal]`` settings
@@ -160,27 +159,26 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
     def create_extra_args(self) -> Sequence[str]:
         return ()
 
-    def _live_sandbox_id_by_host_name(self, host_name: str) -> str | None:
-        """Return the object id of the live sandbox tagged with ``host_name``, or None.
+    def _live_sandbox_object_id(self) -> str | None:
+        """Return the object id of this trip's single live sandbox, or None.
 
-        Resets the provider's caches first so each probe sees fresh Modal state
-        (``_list_sandboxes`` is cached and would otherwise hide a just-created or
-        just-terminated sandbox). ``Sandbox.list`` returns only live sandboxes,
-        so a terminated sandbox drops off the list -- this is the reliable
-        running/gone signal across all trip steps.
+        The alignment fixture gives the test an exclusive Modal environment + app, so the one
+        live sandbox there is this trip's host. mngr tags the sandbox with the (coolname) host
+        name it assigns -- not the agent name passed to ``mngr create`` -- so the host is
+        identified by that exclusivity rather than by matching a name, which also rides out the
+        object-id change when a resumed host comes back as a fresh sandbox. Caches are reset so
+        each probe sees fresh Modal state; ``Sandbox.list`` returns only live sandboxes, so a
+        terminated host drops to a count of zero -- the reliable running/gone signal.
         """
         self._provider.reset_caches()
-        for sandbox in self._provider._list_sandboxes():
-            if sandbox.get_tags().get(TAG_HOST_NAME) == host_name:
-                return sandbox.get_object_id()
-        return None
+        object_ids = [sandbox.get_object_id() for sandbox in self._provider._list_sandboxes()]
+        return object_ids[0] if len(object_ids) == 1 else None
 
     def find_launched_host_handle(self, host_name: str) -> str | None:
-        return self._live_sandbox_id_by_host_name(host_name)
+        return self._live_sandbox_object_id()
 
     def is_host_compute_running(self, handle: str) -> bool:
-        self._provider.reset_caches()
-        return any(sandbox.get_object_id() == handle for sandbox in self._provider._list_sandboxes())
+        return self._live_sandbox_object_id() is not None
 
     def is_host_compute_stopped(self, handle: str) -> bool:
         # Never called for Modal: supports_shutdown_hosts is False, so the
@@ -189,17 +187,17 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
 
     def force_strand_host(self, handle: str) -> None:
         # Terminate the sandbox out of band, bypassing `mngr destroy`. Idempotent without
-        # swallowing errors: if the sandbox is already gone (the finally backstop can re-run
-        # after gc), there is nothing left to strand, so check liveness first and let any
-        # genuine terminate failure surface.
-        if not self.is_host_compute_running(handle):
+        # swallowing errors: if it is already gone (the finally backstop can re-run after gc),
+        # there is nothing left to strand, so re-resolve liveness first and let any genuine
+        # terminate failure surface.
+        object_id = self._live_sandbox_object_id()
+        if object_id is None:
             return
-        self._provider._modal_interface.sandbox_from_id(handle).terminate()
+        self._provider._modal_interface.sandbox_from_id(object_id).terminate()
 
     def is_backend_clean(self, handle: str) -> bool:
-        # Clean iff the sandbox is no longer in the live list (terminated /
-        # garbage-collected). Mirrors is_host_compute_running's signal.
-        return not self.is_host_compute_running(handle)
+        # Clean iff no live sandbox remains in the test's exclusive env/app (terminated / gc'd).
+        return self._live_sandbox_object_id() is None
 
 
 @pytest.fixture()
