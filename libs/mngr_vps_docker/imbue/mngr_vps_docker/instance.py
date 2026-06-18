@@ -2598,8 +2598,15 @@ class OfflineCapableVpsDockerProvider(VpsDockerProvider):
         )
         # The container is stopped (so host_dir is quiesced) but the instance is
         # still reachable: capture host_dir to the bucket now, before the pause.
-        self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
-        self._pause_cloud_instance(host_record.config.vps_instance_id)
+        # The pause is billing-critical -- an un-paused instance keeps billing and,
+        # with the record already marked STOPPED, becomes undiscoverable -- so a
+        # ``finally`` guarantees it runs even if capture somehow raises (capture is
+        # best-effort and already swallows its own errors; this is defense in depth
+        # for the sequencing).
+        try:
+            self._capture_host_dir_before_pause(host_id, host_record.vps_ip)
+        finally:
+            self._pause_cloud_instance(host_record.config.vps_instance_id)
 
     @property
     def _host_dir_backend(self) -> HostDirBackend:
@@ -3206,7 +3213,15 @@ class BucketHostDirBackend(HostDirBackend):
                         files[rel] = outer.read_file(abs_path)
                     if files:
                         self.bucket.volume_for_host(host_id).write_files(files)
-        except (HostConnectionError, MngrError) as e:
+        # Best-effort: swallow the expected failure modes -- a connection drop
+        # (HostConnectionError), a bucket storage error (MngrError), or a raw
+        # paramiko SFTP transfer error (a bare OSError mid-read while the container
+        # is quiescing -- the failure that crashed `mngr stop` before this catch
+        # was widened). A failed capture only costs offline-host_dir freshness. Any
+        # other (unexpected) error still surfaces, but stop_host's ``finally``
+        # guarantees the instance is paused first, so it can never leak a running
+        # instance.
+        except (HostConnectionError, MngrError, OSError) as e:
             logger.warning(
                 "Failed to capture host_dir to the bucket for host {}; the offline copy will be as of the "
                 "previous capture: {}",

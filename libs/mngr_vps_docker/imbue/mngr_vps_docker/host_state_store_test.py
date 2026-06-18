@@ -175,8 +175,9 @@ class _CaptureFakeBucket:
 class _FakeOuter:
     """Fake outer host exposing the host_dir tree (recursive list + per-file read)."""
 
-    def __init__(self, files: dict[str, bytes]) -> None:
+    def __init__(self, files: dict[str, bytes], *, raise_on_read: bool = False) -> None:
         self._files = files
+        self._raise_on_read = raise_on_read
 
     def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
         return [
@@ -185,6 +186,10 @@ class _FakeOuter:
         ]
 
     def read_file(self, path: Path) -> bytes:
+        # Models a raw paramiko SFTP failure mid-transfer (a bare OSError, not a
+        # HostConnectionError/MngrError) -- the failure mode that crashed `mngr stop`.
+        if self._raise_on_read:
+            raise OSError("Failure")
         return self._files[Path(path).relative_to(_HOST_DIR_ON_OUTER).as_posix()]
 
 
@@ -218,5 +223,20 @@ def test_bucket_host_dir_backend_capture_is_best_effort() -> None:
     bucket = _CaptureFakeBucket()
     backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider(None), bucket=bucket)
     # The connection error inside capture must be swallowed (not re-raised here).
+    backend.capture(HostId.generate(), "203.0.113.4")
+    assert bucket.volume.written == {}
+
+
+def test_bucket_host_dir_backend_capture_swallows_raw_oserror() -> None:
+    """A raw OSError from the SFTP read (mid-transfer, not a HostConnectionError/MngrError) is swallowed.
+
+    This is the failure mode that crashed `mngr stop` in real-cloud testing: a
+    bare paramiko `OSError: Failure` escaped a too-narrow except, propagated out of
+    stop_host before the instance paused, and left the instance running.
+    """
+    bucket = _CaptureFakeBucket()
+    outer = _FakeOuter({"events/e.jsonl": b"evt"}, raise_on_read=True)
+    backend = BucketHostDirBackend.model_construct(provider=_CaptureFakeProvider(outer), bucket=bucket)
+    # Must not raise (capture is strictly best-effort).
     backend.capture(HostId.generate(), "203.0.113.4")
     assert bucket.volume.written == {}
