@@ -56,7 +56,7 @@ const WORKSPACE_PACKAGES = {
   'imbue-mngr-lima':        'libs/mngr_lima',
   'imbue-mngr-modal':       'libs/mngr_modal',
   'imbue-mngr-ovh':         'libs/mngr_ovh',
-  'imbue-mngr-vps':  'libs/mngr_vps',
+  'imbue-mngr-vps':         'libs/mngr_vps',
   'imbue-common':           'libs/imbue_common',
   'concurrency-group':      'libs/concurrency_group',
   'resource-guards':        'libs/resource_guards',

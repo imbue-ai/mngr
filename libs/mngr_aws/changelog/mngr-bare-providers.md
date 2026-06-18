@@ -62,3 +62,6 @@ Behavior-preserving dedup against the shared offline layer. The AWS `_state_stor
 
 
 Bugfix: `mngr rename` now re-stamps the EC2 `Name` identity tag (read by offline discovery) so a renamed-then-stopped host lists under its new name in `mngr list`. Previously the `Name` tag was stamped only at create, so a host renamed while running still surfaced under its old name once stopped. Implemented via a new `AwsVpsClient.set_instance_tags` (an EC2 `create_tags` upsert) called from the AWS provider's `_remirror_host_name` hook.
+
+Doc: removed a stale README note about speculative EBS `create_snapshot` /
+`list_snapshots` / `delete_snapshot` client methods that no longer exist.

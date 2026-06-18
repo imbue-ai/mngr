@@ -74,3 +74,11 @@ discovery reads (previously stamped only at create), so a host renamed and then
 stopped lists under its new name rather than its old one. The re-stamp merges into
 the VM's existing tags rather than replacing them, preserving the other index tags
 (`mngr-host-id`, `mngr-provider`, etc.).
+
+Doc: removed a stale README note about speculative `create_snapshot` /
+`list_snapshots` / `delete_snapshot` client methods that no longer exist.
+
+Internal cleanup (no behavior change): renamed `_build_self_deallocate_script`'s
+`sentinel_on_outer` parameter to `sentinel_to_remove` (clearer that `None` means no
+sentinel to delete, i.e. the bare path), and dropped the now-unused
+`sentinel_on_outer` parameter from the `_idle_watcher_service_unit` override.

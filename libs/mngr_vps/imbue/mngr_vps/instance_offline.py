@@ -633,15 +633,15 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         super()._create_shutdown_script(host)
 
-    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
+    def _idle_watcher_service_unit(self) -> str:
         """Hook: the oneshot ``.service`` body the host-side idle watcher runs.
 
         Default (AWS/GCP) powers the host off with ``shutdown -P now`` (the poweroff
         script removes the sentinel first so a resumed instance is not immediately
         re-stopped). Azure overrides this to run its installed ARM self-deallocate
-        script.
+        script. The sentinel removal lives in those scripts, not the unit body, so
+        this needs no sentinel path.
         """
-        del sentinel_on_outer
         return build_poweroff_idle_watcher_service_unit()
 
     def _prepare_idle_watcher_outer(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
@@ -677,7 +677,7 @@ class OfflineCapableVpsProvider(VpsProvider):
                 )
                 outer.write_text_file(
                     Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
-                    self._idle_watcher_service_unit(sentinel_on_outer),
+                    self._idle_watcher_service_unit(),
                 )
                 outer.execute_idempotent_command("systemctl daemon-reload")
                 outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")

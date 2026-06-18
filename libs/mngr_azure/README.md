@@ -259,7 +259,7 @@ size has no capacity in the region right now; pick another size with
   cloud-init with the Azure datasource, so the shared `mngr_vps` bootstrap
   works unchanged). Configurable via `image_publisher` / `image_offer` /
   `image_sku` / `image_version`.
-- **No snapshot workflow:** the Azure client exposes no managed-disk-snapshot surface (the speculative `create_snapshot` / `list_snapshots` / `delete_snapshot` client methods are not part of `VpsClientInterface`). Restore from a fresh `mngr create` instead.
+- **No snapshot workflow:** the Azure client exposes no managed-disk-snapshot surface, so a hard-killed host cannot be rehydrated.
 - **Spot** (`--azure-spot`): `priority=Spot`, `eviction_policy=Delete`,
   `max_price=-1` — evicted only on capacity, and deleted (not stopped) on
   eviction, matching AWS spot's terminate-on-reclaim.

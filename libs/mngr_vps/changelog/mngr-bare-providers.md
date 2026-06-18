@@ -222,3 +222,7 @@ the identity through their cloud API. The hook runs whether the host is up or
 stopped, since the cloud-API tag/metadata write does not require a reachable host.
 
 Performance: `mngr stop` on a bare (`isolation=NONE`) host no longer hangs for minutes while it captures the host's `host_dir`. A bare `host_dir` holds the agent's full working tree (a git checkout is thousands of small files), and the offline capture writes one object per file to the state bucket; these uploads previously ran serially, so one wide-area round-trip per object made the capture take minutes (the EC2 pause only happens after the capture completes). The per-file uploads now run concurrently across a bounded worker pool, turning a minutes-long stop into seconds. Found by a real-cloud smoke test; container hosts were unaffected (their `host_dir` is small).
+
+Internal cleanup (no behavior change): dropped the unused `sentinel_on_outer`
+parameter from the `_idle_watcher_service_unit` hook -- the sentinel removal lives
+in the poweroff/deallocate scripts, not the oneshot `.service` body.
