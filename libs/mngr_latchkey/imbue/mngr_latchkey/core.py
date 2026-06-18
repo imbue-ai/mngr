@@ -86,13 +86,9 @@ _REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
 # Node-runtime startup on cold filesystems.
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 
-# Minimum version of the upstream ``latchkey`` CLI this package will operate
-# against. Bump this together with the version mngr/minds bundles and installs
-# (see ``remote_gateway.LATCHKEY_VERSION`` and the minds ``package.json`` pin)
-# so the wrapper never requires a CLI newer than the one that actually ships.
-# (2.14.0 was the first release supporting GitHub git operations over the
-# gateway, which backups rely on; the floor has since been raised alongside
-# that pin.)
+# Minimum version of the upstream ``latchkey`` CLI this package will
+# operate against. 2.14.0 is the first release that supports GitHub git
+# operations over the gateway (including permissions) which is used for backups.
 LATCHKEY_MIN_VERSION: Final[str] = "2.17.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1

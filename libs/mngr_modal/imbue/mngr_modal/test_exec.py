@@ -76,10 +76,6 @@ def test_exec_echo_on_modal(
     assert "hello-from-modal" in result.stdout
 
 
-# Creating a Modal host can transiently fail with a modal-side deploy race
-# (``ModalProxyError: ... Function <id> not found`` while deploying
-# ``snapshot_and_shutdown.py``), unrelated to the code under test. Let offload
-# retry via @pytest.mark.flaky so the infra flake doesn't fail CI.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync

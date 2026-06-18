@@ -23,10 +23,6 @@ from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
 
 
-# Creating a Modal host can transiently fail with a modal-side deploy race
-# (``ModalProxyError: ... Function <id> not found`` while deploying
-# ``snapshot_and_shutdown.py``), unrelated to the code under test. Let offload
-# retry via @pytest.mark.flaky so the infra flake doesn't fail CI.
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
