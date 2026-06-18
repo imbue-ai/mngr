@@ -362,8 +362,10 @@ class GcpProvider(OfflineCapableVpsProvider):
     # The base ``OfflineCapableVpsProvider`` owns the idle-watcher install and the
     # shutdown-script write. GCP's ``.service`` body is the default
     # ``shutdown -P now`` (a GCE guest poweroff stops the instance), so GCP
-    # overrides none of those hooks. GCP does not sync host_dir to an object store,
-    # so ``_host_dir_backend`` stays the base ``NullHostDirBackend`` and nothing is installed.
+    # overrides none of those hooks. Offline ``host_dir`` is captured operator-side
+    # at ``mngr stop`` to the GCS state bucket; ``_host_dir_backend`` (selected
+    # below) is bucket-backed when the bucket exists and the feature is enabled,
+    # and the no-op backend otherwise.
 
     def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
         """Match on the host id stored verbatim in instance metadata (GCE labels cannot hold a raw mngr host id)."""
