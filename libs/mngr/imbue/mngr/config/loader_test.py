@@ -374,7 +374,7 @@ def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings:
     assert any("bogus_option" in msg and "agent_types.claude" in msg for msg in log_warnings)
 
 
-class _TestParentConfig(AgentTypeConfig):
+class _ParentConfigForTests(AgentTypeConfig):
     """Test config subclass with an extra field for loader tests."""
 
     extra_field: bool = Field(default=False)
@@ -384,14 +384,14 @@ def test_parse_agent_types_uses_parent_type_config_class() -> None:
     """Custom types with parent_type should use the parent's config class for field validation."""
     reset_agent_config_registry()
     try:
-        register_agent_config("test-parent", _TestParentConfig)
+        register_agent_config("test-parent", _ParentConfigForTests)
 
         # A custom type referencing parent_type should accept the parent's fields
         raw = {"worker": {"parent_type": "test-parent", "extra_field": True, "cli_args": "--verbose"}}
         result = _parse_agent_types(raw, disabled_plugins=frozenset())
 
         worker_config = result[AgentTypeName("worker")]
-        assert isinstance(worker_config, _TestParentConfig)
+        assert isinstance(worker_config, _ParentConfigForTests)
         assert worker_config.extra_field is True
         assert worker_config.cli_args == ("--verbose",)
         assert worker_config.parent_type == AgentTypeName("test-parent")
@@ -404,7 +404,7 @@ def test_parse_agent_types_resolves_alias_parent_type_to_canonical() -> None:
     reset_agent_config_registry()
     reset_agent_alias_registry()
     try:
-        register_agent_config("test-parent", _TestParentConfig)
+        register_agent_config("test-parent", _ParentConfigForTests)
         register_agent_alias("tp", "test-parent")
 
         raw = {"worker": {"parent_type": "tp", "extra_field": True}}
@@ -413,7 +413,7 @@ def test_parse_agent_types_resolves_alias_parent_type_to_canonical() -> None:
         worker_config = result[AgentTypeName("worker")]
         # The stored parent_type is the canonical name, not the alias.
         assert worker_config.parent_type == AgentTypeName("test-parent")
-        assert isinstance(worker_config, _TestParentConfig)
+        assert isinstance(worker_config, _ParentConfigForTests)
         assert worker_config.extra_field is True
     finally:
         reset_agent_config_registry()
@@ -480,7 +480,7 @@ def test_parse_agent_types_no_plugin_hint_when_type_is_registered() -> None:
     should NOT be added -- the user really did make a typo."""
     reset_agent_config_registry()
     try:
-        register_agent_config("claude", _TestParentConfig)
+        register_agent_config("claude", _ParentConfigForTests)
 
         raw = {"claude": {"bogus_option": True}}
         with pytest.raises(ConfigParseError) as exc_info:
@@ -520,7 +520,7 @@ def test_parse_agent_types_skips_custom_type_with_disabled_parent() -> None:
     """_parse_agent_types should skip custom types whose parent_type is a disabled plugin."""
     reset_agent_config_registry()
     try:
-        register_agent_config("test-parent", _TestParentConfig)
+        register_agent_config("test-parent", _ParentConfigForTests)
 
         raw = {"worker": {"parent_type": "test-parent", "extra_field": True}}
         result = _parse_agent_types(raw, disabled_plugins=frozenset({"test-parent"}))
@@ -639,11 +639,6 @@ def test_apply_plugin_overrides_enables_existing_plugin() -> None:
     assert "my-plugin" not in disabled
 
 
-# Marked flaky because session_cleanup occasionally blames this test for
-# leaked subprocesses spawned by other tests in the same xdist sandbox (e.g.
-# the documented `sleep 30` leak from concurrency_group_test). The test body
-# is pure config-dict manipulation and cannot itself leak -- retry is safe.
-@pytest.mark.flaky
 def test_apply_plugin_overrides_creates_disabled_plugin() -> None:
     """_apply_plugin_overrides should create new disabled plugins."""
     plugins: dict[PluginName, PluginConfig] = {}
@@ -903,7 +898,11 @@ def test_parse_config_accepts_every_mngr_config_field() -> None:
 
 
 def test_load_config_threads_every_field_from_toml(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """load_config must thread every config-file field through to the final MngrConfig.
 
@@ -911,11 +910,7 @@ def test_load_config_threads_every_field_from_toml(
     config_dict assembly, this test will fail because the field's value from the
     TOML file won't appear in the final config.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.delenv("MNGR_HEADLESS", raising=False)
 
     mngr_dir = tmp_path / ".mngr"
@@ -1107,7 +1102,7 @@ def test_on_load_config_hook_is_called(
     hook_called = False
     received_config_dict: dict[str, Any] = {}
 
-    class TestPlugin:
+    class _RecordingPlugin:
         @hookimpl
         def on_load_config(self, config_dict: dict[str, Any]) -> None:
             nonlocal hook_called, received_config_dict
@@ -1117,7 +1112,7 @@ def test_on_load_config_hook_is_called(
     # Set up plugin manager with our test plugin
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
-    pm.register(TestPlugin())
+    pm.register(_RecordingPlugin())
     load_all_registries(pm)
 
     # Ensure no config files interfere
@@ -1129,9 +1124,12 @@ def test_on_load_config_hook_is_called(
         concurrency_group=cg,
     )
 
-    # Verify hook was called
-    assert hook_called, "on_load_config hook was not called"
-    assert "prefix" in received_config_dict or "providers" in received_config_dict
+    # Verify the hook was called and received the fully-assembled config dict,
+    # including the resolved default prefix and the populated container blocks.
+    assert hook_called is True
+    assert received_config_dict["prefix"] == "mngr-"
+    assert "providers" in received_config_dict
+    assert "agent_types" in received_config_dict
 
 
 def test_on_load_config_hook_can_modify_config(
@@ -1139,7 +1137,7 @@ def test_on_load_config_hook_can_modify_config(
 ) -> None:
     """Test that on_load_config hook can modify the config dict."""
 
-    class TestPlugin:
+    class _PrefixModifyingPlugin:
         @hookimpl
         def on_load_config(self, config_dict: dict[str, Any]) -> None:
             # Modify the config dict to change the prefix
@@ -1148,7 +1146,7 @@ def test_on_load_config_hook_can_modify_config(
     # Set up plugin manager with our test plugin
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
-    pm.register(TestPlugin())
+    pm.register(_PrefixModifyingPlugin())
     load_all_registries(pm)
 
     # Ensure no config files interfere
@@ -1169,7 +1167,7 @@ def test_on_load_config_hook_can_add_new_fields(
 ) -> None:
     """Test that on_load_config hook can add new config fields."""
 
-    class TestPlugin:
+    class _AgentTypeAddingPlugin:
         @hookimpl
         def on_load_config(self, config_dict: dict[str, Any]) -> None:
             # Add a custom agent type
@@ -1180,7 +1178,7 @@ def test_on_load_config_hook_can_add_new_fields(
     # Set up plugin manager with our test plugin
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
-    pm.register(TestPlugin())
+    pm.register(_AgentTypeAddingPlugin())
     load_all_registries(pm)
 
     # Ensure no config files interfere
@@ -1370,14 +1368,14 @@ def test_get_or_create_user_id_returns_same_id_on_subsequent_calls(tmp_path: Pat
 
 
 def test_load_config_rejects_unknown_fields_by_default(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """load_config should raise on unknown config fields when MNGR_ALLOW_UNKNOWN_CONFIG is not set."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
 
     mngr_dir = tmp_path / ".mngr"
@@ -1399,13 +1397,10 @@ def test_load_config_allows_unknown_fields_with_env_var(
     temp_git_repo_cwd: Path,
     cg: ConcurrencyGroup,
     log_warnings: list[str],
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """load_config should warn (not raise) on unknown fields when MNGR_ALLOW_UNKNOWN_CONFIG is set."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
 
     mngr_dir = tmp_path / ".mngr"
@@ -1425,14 +1420,13 @@ def test_load_config_allows_unknown_fields_with_env_var(
 
 
 def test_load_config_preserves_default_destroyed_host_persisted_seconds_from_toml(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """load_config should forward default_destroyed_host_persisted_seconds from TOML to the final config."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
 
     # Write a user config with custom default_destroyed_host_persisted_seconds
     mngr_dir = tmp_path / ".mngr"
@@ -1621,14 +1615,14 @@ def test_parse_mngr_env_overrides_skips_old_command_form() -> None:
 
 
 def test_load_config_raises_when_in_pytest_and_not_allowed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """load_config should raise ConfigParseError when is_allowed_in_pytest is False and PYTEST_CURRENT_TEST is set."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     # Write config that disables pytest
@@ -1643,18 +1637,18 @@ def test_load_config_raises_when_in_pytest_and_not_allowed(
 
 
 def test_load_config_allows_pytest_when_config_opts_in(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """load_config runs during pytest when the loaded config sets is_allowed_in_pytest = true.
 
     Configs written specifically for tests set this flag; real configs (which
     default to False) stay blocked even when picked up by a poorly-scoped test.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     mngr_dir = tmp_path / ".mngr"
@@ -1662,23 +1656,25 @@ def test_load_config_allows_pytest_when_config_opts_in(
     profile_dir = get_or_create_profile_dir(mngr_dir)
     (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
-    # Should NOT raise.
-    load_config(pm=pm, concurrency_group=cg)
+    # Should NOT raise, and the opt-in must be reflected in the loaded config.
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    assert mngr_ctx.config.is_allowed_in_pytest is True
+    assert mngr_ctx.config.prefix == "mngr-"
 
 
 def test_load_config_raises_when_in_pytest_and_config_omits_opt_in(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """A loaded config that omits is_allowed_in_pytest raises during pytest.
 
     This pins the default: is_allowed_in_pytest defaults to False, so a config
     file that does not set it cannot be picked up during a pytest run.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     # A real config file that sets an unrelated key but does not opt in.
@@ -1692,7 +1688,11 @@ def test_load_config_raises_when_in_pytest_and_config_omits_opt_in(
 
 
 def test_load_config_raises_when_one_layer_opts_in_but_another_does_not(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """A non-opted-in layer trips the guard even when a higher layer opts in.
 
@@ -1704,11 +1704,7 @@ def test_load_config_raises_when_one_layer_opts_in_but_another_does_not(
     check must still raise on the user layer. Without this, a test config opting
     in could silently mask a real config riding in beneath it.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     # Lower-precedence user/profile layer: a real config that does NOT opt in.
@@ -1733,25 +1729,26 @@ def test_load_config_raises_when_one_layer_opts_in_but_another_does_not(
 
 
 def test_load_config_allows_pytest_when_no_config_file_loaded(
-    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """load_config runs during pytest when no config file is picked up at all.
 
     The guard only fires when a config file was actually loaded; with nothing to
     protect against, a test that loads no config file needs no opt-in.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     # No settings.toml is written anywhere: the HOME-based profile dir is empty
     # and the isolated git repo cwd has no .mngr/, so no config file is loaded.
 
-    # Should NOT raise.
-    load_config(pm=pm, concurrency_group=cg)
+    # Should NOT raise, and the resolved config falls back to defaults.
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    assert mngr_ctx.config.prefix == "mngr-"
+    assert mngr_ctx.config.is_allowed_in_pytest is False
 
 
 # =============================================================================
@@ -1760,14 +1757,13 @@ def test_load_config_allows_pytest_when_no_config_file_loaded(
 
 
 def test_load_config_applies_mngr_env_overrides(
-    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """load_config should merge ``MNGR__*`` env overrides into the final config."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("MNGR__COMMANDS__CREATE__CONNECT", "false")
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1778,14 +1774,13 @@ def test_load_config_applies_mngr_env_overrides(
 
 
 def test_load_config_headless_default_is_false(
-    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """By default, config.headless is False."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.delenv("MNGR_HEADLESS", raising=False)
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1794,14 +1789,13 @@ def test_load_config_headless_default_is_false(
 
 
 def test_load_config_mngr_headless_env_var_true(
-    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """MNGR_HEADLESS=true sets config.headless to True."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("MNGR_HEADLESS", "true")
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1810,14 +1804,13 @@ def test_load_config_mngr_headless_env_var_true(
 
 
 def test_load_config_mngr_headless_env_var_false(
-    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """MNGR_HEADLESS=false sets config.headless to False."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.setenv("MNGR_HEADLESS", "false")
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1826,14 +1819,13 @@ def test_load_config_mngr_headless_env_var_false(
 
 
 def test_load_config_headless_from_config_file(
-    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """headless = true in settings.toml sets config.headless to True."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     monkeypatch.delenv("MNGR_HEADLESS", raising=False)
 
     # Write a project settings file with headless = true. is_allowed_in_pytest
@@ -1848,14 +1840,13 @@ def test_load_config_headless_from_config_file(
 
 
 def test_load_config_mngr_headless_env_overrides_config_file(
-    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """MNGR_HEADLESS env var overrides headless setting from config file."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     # Config file says headless = true, but env var says false
     monkeypatch.setenv("MNGR_HEADLESS", "false")
 
@@ -2017,7 +2008,13 @@ def test_parse_config_accepts_extend_suffix_on_field_name() -> None:
     # agent-type config, but the failure point we care about is the top-level
     # name shape check, which must pass. Use strict=False so the agent-type
     # parser drops the unknown field with a warning instead of raising.
-    parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    result = parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    # The top-level normalisation must not have dropped the whole agent_types
+    # block: the ``my_agent`` entry survives the parse (the unknown
+    # ``cli_args__extend`` field is stripped by the non-strict agent-type parser,
+    # leaving the entry with default cli_args).
+    assert AgentTypeName("my_agent") in result.agent_types
+    assert result.agent_types[AgentTypeName("my_agent")].cli_args == ()
 
 
 def test_parse_config_rejects_sibling_lowercase_collision_within_block() -> None:
@@ -2066,7 +2063,11 @@ def _write_two_layer_narrowing_config(tmp_path: Path, allow_narrowing: bool | No
 
 
 def test_load_config_narrowing_raises_by_default(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """Two settings layers that assign over a non-empty list raise without the opt-in.
 
@@ -2075,11 +2076,7 @@ def test_load_config_narrowing_raises_by_default(
     silently dropping ``X=4``. The safety net catches this and tells the user
     how to opt in (or switch to ``__extend``).
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
 
@@ -2088,14 +2085,14 @@ def test_load_config_narrowing_raises_by_default(
 
 
 def test_load_config_narrowing_allowed_when_opted_in(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """Setting ``allow_settings_key_assignment_narrowing = true`` silences the safety net."""
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     _write_two_layer_narrowing_config(tmp_path, allow_narrowing=True)
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
 
@@ -2105,17 +2102,17 @@ def test_load_config_narrowing_allowed_when_opted_in(
 
 
 def test_load_config_extend_avoids_narrowing_without_opt_in(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+    isolated_load_config_pm: pluggy.PluginManager,
 ) -> None:
     """Using ``env__extend`` in the higher-precedence layer preserves base entries
     and never trips the narrowing guard. The merged value contains both layers'
     entries in precedence order.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-
-    _isolate_load_config_env(monkeypatch)
+    pm = isolated_load_config_pm
     (tmp_path / "settings.toml").write_text('is_allowed_in_pytest = true\n\n[commands.create]\nenv = ["X=4"]\n')
     (tmp_path / "settings.local.toml").write_text(
         'is_allowed_in_pytest = true\n\n[commands.create]\nenv__extend = ["X=5"]\n'

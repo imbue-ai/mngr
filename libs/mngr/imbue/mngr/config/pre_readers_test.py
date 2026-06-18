@@ -114,6 +114,22 @@ def test_read_default_command_local_overrides_project(
     assert read_default_command("mngr") == "stop"
 
 
+def test_read_default_command_project_survives_when_local_omits_it(
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
+) -> None:
+    """A project default_subcommand should survive when the local layer does not set one."""
+    (project_config_dir / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.mngr]\ndefault_subcommand = "list"\n'
+    )
+    # Local config exists but sets an unrelated command, leaving commands.mngr untouched.
+    (project_config_dir / "settings.local.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.snapshot]\ndefault_subcommand = "destroy"\n'
+    )
+
+    assert read_default_command("mngr") == "list"
+
+
 def test_read_default_command_empty_string_disables(
     project_config_dir: Path,
     temp_git_repo_cwd: Path,
@@ -210,15 +226,39 @@ def test_read_disabled_plugins_local_overrides_project(
     project_config_dir: Path,
     temp_git_repo_cwd: Path,
 ) -> None:
-    """read_disabled_plugins should let local config re-enable a plugin disabled in project config."""
+    """read_disabled_plugins should let local config re-enable a plugin disabled in project config.
+
+    The project layer disables two plugins; local re-enables only one of them. The
+    other must remain disabled, proving the re-enable is selective rather than the
+    merge silently dropping everything.
+    """
     (project_config_dir / "settings.toml").write_text(
-        "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = false\n"
+        "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = false\n\n[plugins.docker]\nenabled = false\n"
     )
     (project_config_dir / "settings.local.toml").write_text(
         "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = true\n"
     )
 
-    assert "modal" not in read_disabled_plugins()
+    result = read_disabled_plugins()
+    assert "modal" not in result
+    assert "docker" in result
+
+
+def test_read_disabled_plugins_local_disables_plugin_not_disabled_in_project(
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
+) -> None:
+    """read_disabled_plugins should pick up a plugin disabled only at local scope."""
+    (project_config_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = true\n"
+    )
+    (project_config_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n[plugins.docker]\nenabled = false\n"
+    )
+
+    result = read_disabled_plugins()
+    assert "docker" in result
+    assert "modal" not in result
 
 
 def test_read_disabled_plugins_multiple_plugins(
@@ -278,12 +318,23 @@ def test_resolve_project_config_dir_falls_back_to_git_root_when_env_var_not_set(
 def test_read_default_command_uses_mngr_project_config_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
 ) -> None:
-    """read_default_command should find config from MNGR_PROJECT_CONFIG_DIR."""
+    """read_default_command should read from MNGR_PROJECT_CONFIG_DIR, not the git-root config dir.
+
+    A conflicting value is written into the git-root ``.<root_name>`` config dir
+    (where resolution would fall back without the env var) to prove the env-var
+    dir takes precedence and the git-root dir is not consulted.
+    """
     custom_dir = tmp_path / "custom_project"
     custom_dir.mkdir()
     (custom_dir / "settings.toml").write_text(
         'is_allowed_in_pytest = true\n\n[commands.mngr]\ndefault_subcommand = "create"\n'
+    )
+    # Conflicting value in the git-root config dir, which must be ignored.
+    (project_config_dir / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.mngr]\ndefault_subcommand = "list"\n'
     )
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "nonexistent"))
@@ -294,12 +345,26 @@ def test_read_default_command_uses_mngr_project_config_dir(
 def test_read_disabled_plugins_uses_mngr_project_config_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
 ) -> None:
-    """read_disabled_plugins should find config from MNGR_PROJECT_CONFIG_DIR."""
+    """read_disabled_plugins should read from MNGR_PROJECT_CONFIG_DIR, not the git-root config dir.
+
+    A conflicting value is written into the git-root ``.<root_name>`` config dir
+    (where resolution would fall back without the env var) to prove the env-var
+    dir takes precedence and the git-root dir is not consulted.
+    """
     custom_dir = tmp_path / "custom_project"
     custom_dir.mkdir()
     (custom_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = false\n")
+    # The git-root config dir disables a different plugin; if it were consulted,
+    # "docker" would appear in the result.
+    (project_config_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n[plugins.docker]\nenabled = false\n"
+    )
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "nonexistent"))
 
-    assert "modal" in read_disabled_plugins()
+    result = read_disabled_plugins()
+    assert "modal" in result
+    assert "docker" not in result
