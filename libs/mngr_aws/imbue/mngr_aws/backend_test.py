@@ -394,7 +394,7 @@ class _RecordingStateBucket:
     S3 bucket.
     """
 
-    def __init__(self, record_json: str | None = None) -> None:
+    def __init__(self, *, record_json: str | None = None) -> None:
         self.deleted_host_ids: list[HostId] = []
         self._record_json = record_json
 
@@ -420,9 +420,9 @@ class _RecordingStateBucket:
         raise NotImplementedError
 
 
-def _seed_state_store_bucket(provider: AwsProvider, record_json: str | None = None) -> _RecordingStateBucket:
+def _seed_state_store_bucket(provider: AwsProvider, *, record_json: str | None = None) -> _RecordingStateBucket:
     """Pre-seed the provider's cached ``_state_store`` with a recording bucket."""
-    bucket = _RecordingStateBucket(record_json)
+    bucket = _RecordingStateBucket(record_json=record_json)
     provider.__dict__["_state_store"] = BucketHostStateStore(bucket=bucket, bucket_label="test bucket")
     return bucket
 
@@ -466,7 +466,9 @@ def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     seed_stopped_host_record(provider, host_id)
-    bucket = _seed_state_store_bucket(provider, _stopped_host_record_json(host_id, vps_ssh_key_id="mngr-key"))
+    bucket = _seed_state_store_bucket(
+        provider, record_json=_stopped_host_record_json(host_id, vps_ssh_key_id="mngr-key")
+    )
     # The offline path resolves the instance from the tag listing, terminates it,
     # then cleans up the per-host EC2 KeyPair recovered from the mirrored record.
     stubber.add_response("describe_instances", _stopped_instance_describe_response("i-stopped", host_id))
@@ -519,6 +521,66 @@ def test_destroy_host_offline_is_idempotent_when_instance_already_gone(temp_mngr
     bucket = _seed_state_store_bucket(provider)
     stubber.add_response("describe_instances", _describe_instances_response([]))
     stubber.add_response("describe_instances", _describe_instances_response([]))
+    stubber.activate()
+    try:
+        provider.destroy_host(host_id)
+    finally:
+        stubber.deactivate()
+    stubber.assert_no_pending_responses()
+    assert bucket.deleted_host_ids == [host_id]
+
+
+def test_destroy_host_offline_dispatch_ignores_stale_cached_record_with_vps_ip(temp_mngr_ctx: MngrContext) -> None:
+    """A stopped host whose cache still holds a vps_ip-set record is destroyed offline, not over SSH.
+
+    Regression guard for the warm-cache case (``mngr stop`` then ``mngr destroy``
+    discovery in one process): the cached ``VpsDockerHostRecord`` keeps its
+    pre-stop ``vps_ip``, so the base ``destroy_host`` would try a doomed SSH
+    teardown against a dead address and leak the still-billing instance. Dispatch
+    on the instance's own (stopped) power state instead, so the offline terminate
+    runs and no outer SSH connection is ever opened (the sentinel-raising
+    ``_make_outer_for_vps_ip`` proves it).
+    """
+    host_id = HostId.generate()
+
+    class _OuterRaisingAwsProvider(AwsProvider):
+        @contextmanager
+        def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+            raise _OnVolumeReached("base SSH teardown must not run for a stopped host")
+            yield
+
+    base, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    provider = _OuterRaisingAwsProvider(
+        name=base.name,
+        host_dir=base.host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=base.config,
+        vps_client=base.aws_client,
+        aws_client=base.aws_client,
+        aws_config=base.aws_config,
+    )
+    # Seed the warm cache with a reachable-looking record (vps_ip + config set), as
+    # an in-process ``mngr stop`` leaves it; the dispatch must still go offline.
+    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="myhost",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+        vps_ip="1.2.3.4",
+        config=VpsHostConfig(
+            vps_instance_id=VpsInstanceId("i-stopped"),
+            region="us-east-1",
+            plan="t3.small",
+            container_name="mngr-c",
+            volume_name="mngr-vol",
+        ),
+    )
+    bucket = _seed_state_store_bucket(provider)
+    stubber.add_response("describe_instances", _stopped_instance_describe_response("i-stopped", host_id))
+    stubber.add_response("terminate_instances", {})
     stubber.activate()
     try:
         provider.destroy_host(host_id)
