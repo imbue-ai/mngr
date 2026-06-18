@@ -27,6 +27,7 @@ from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -201,7 +202,90 @@ class HostInterface(MutableModel, ABC):
         """
 
 
-class OuterHostInterface(MutableModel, ABC):
+class HostFileReadInterface(MutableModel, ABC):
+    """Read-only access to a host's persistent files.
+
+    The subset of file operations that work even when a host is not online for
+    command execution, as long as its persistent storage (volume) is reachable.
+    All paths are absolute paths as seen under the host's ``host_dir``.
+
+    Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), reading the
+      live filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, reading the
+      host's persisted volume when the host itself is stopped.
+
+    Splitting these reads out of :class:`OuterHostInterface` lets callers that
+    only need to *read* files (log / transcript / session readers, session
+    preservation, ``mngr file get``/``list``) accept a stopped-but-volume-backed
+    host without it having to pretend it can execute commands or write files.
+    """
+
+    @abstractmethod
+    def read_file(self, path: Path) -> bytes:
+        """Read a file and return its contents as bytes."""
+        ...
+
+    @abstractmethod
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        """Read a file and return its contents as a string."""
+        ...
+
+    @abstractmethod
+    def path_exists(self, path: Path) -> bool:
+        """Whether ``path`` exists on this host."""
+        ...
+
+    @abstractmethod
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        """Return the modification time of a file, or None if the file doesn't exist."""
+        ...
+
+    @abstractmethod
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        """List the entries under directory ``path``.
+
+        Returns one :class:`~imbue.mngr.interfaces.data_types.VolumeFile` per
+        entry, each with an absolute ``path`` under the host's ``host_dir``.
+        When ``recursive`` is True, descends into subdirectories and returns
+        every nested entry. Returns an empty list if ``path`` does not exist or
+        is not a directory.
+        """
+        ...
+
+
+class HostFileWriteInterface(MutableModel, ABC):
+    """Write access to a host's files.
+
+    The companion to :class:`HostFileReadInterface`. Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), writing the live
+      filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, writing the
+      host's persisted volume when the host itself is stopped (so files can be
+      staged for the next time it starts). File modes are not settable on a
+      volume write, so ``mode`` is ignored there.
+
+    All paths are absolute paths as seen under the host's ``host_dir``.
+    """
+
+    @abstractmethod
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+        """Write bytes content to a file."""
+        ...
+
+    @abstractmethod
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+    ) -> None:
+        """Write string content to a file."""
+        ...
+
+
+class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
     """Minimal interface for the "outer" machine that hosts a container/sandbox.
 
     Outer hosts have a strictly smaller surface than mngr-managed hosts: just the
@@ -291,50 +375,23 @@ class OuterHostInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def read_file(
-        self,
-        path: Path,
-    ) -> bytes:
-        """Read a file and return its contents as bytes."""
-        ...
-
-    @abstractmethod
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file."""
-        ...
-
-    @abstractmethod
-    def read_text_file(
-        self,
-        path: Path,
-        encoding: str = "utf-8",
-    ) -> str:
-        """Read a file and return its contents as a string."""
-        ...
-
-    @abstractmethod
-    def write_text_file(
-        self,
-        path: Path,
-        content: str,
-        encoding: str = "utf-8",
-        mode: str | None = None,
-    ) -> None:
-        """Write string content to a file."""
-        ...
-
-    @abstractmethod
-    def get_file_mtime(self, path: Path) -> datetime | None:
-        """Return the modification time of a file, or None if the file doesn't exist."""
-        ...
-
-    @abstractmethod
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Get SSH connection info for this host if it's remote.
 
         Returns (user, hostname, port, private_key_path) if remote, None if local.
         """
         ...
+
+    def get_outer_ssh_port(self) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default. A provider whose host reaches a separate
+        outer sshd on a non-obvious port (e.g. a slice's VM-root sshd via a
+        box-forwarded port) surfaces it here so ``mngr create --format json``
+        can report it. The default is sufficient for hosts whose only SSH
+        endpoint is the one ``get_ssh_connection_info`` returns.
+        """
+        return None
 
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
@@ -573,7 +630,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def destroy_agent(self, agent: AgentInterface) -> None:
-        """Remove an agent and all its associated state from this host."""
+        """Remove an agent and all its associated state from this host.
+
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes; raises ``CleanupFailedGroup`` if any real resources were left behind.
+        See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -583,7 +646,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
-        """Stop the specified agents gracefully within the given timeout."""
+        """Stop the specified agents gracefully within the given timeout.
+
+        Best-effort and aggregate-and-continue: attempts every step for every agent and
+        collects every real failure. Returns normally on full success or benign "already
+        gone" outcomes; raises ``CleanupFailedGroup`` if any real resources were left
+        behind. See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -972,7 +1041,14 @@ class CreateAgentOptions(FrozenModel):
     plugin_data: dict[str, Any] = Field(
         default_factory=dict,
         description="Opaque dict for plugins to pass data through the creation pipeline. "
-        "Keys are namespaced by plugin (e.g. 'adopt_session' for ClaudeAgent).",
+        "Keys are namespaced by plugin.",
+    )
+    adopt_session: tuple[str, ...] = Field(
+        default=(),
+        description="Session id(s) or path(s) to adopt into the new agent so it resumes that "
+        "conversation (the --adopt option). Repeatable; the last named session is the one resumed "
+        "on startup. Only valid for agent types that support session adoption "
+        "(HasSessionAdoptionMixin); mutually exclusive with cloning via --from.",
     )
     source_agent_state_location: HostLocation | None = Field(
         default=None,

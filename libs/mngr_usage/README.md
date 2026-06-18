@@ -27,6 +27,39 @@ The `<source>` segment is free-form -- whatever the writer plugin chose.
 When multiple writers contribute, each renders as its own `[source]` section in
 human output and as an entry in the JSON `sources` array.
 
+## Destroyed agents
+
+A destroyed agent's usage still counts. Before an agent's (or its whole host's)
+state directory is deleted, its `events/<source>/usage` directories are copied to
+`<local_host_dir>/preserved/<agent-name>--<agent-id>/`; for remote agents the
+files are pulled to the local machine so they survive host destruction. This is
+on by default and
+controlled by the `preserve_on_destroy` option on the `usage` plugin config (set
+it to `false` to discard usage on destroy).
+
+`mngr usage` reads these preserved files back **by default**, so a destroyed
+agent's accumulated cost and rate-limit history still counts toward the totals.
+Pass `--no-preserved` (on `mngr usage` and `mngr usage wait`) to consider only
+live agents.
+
+## Filtering by event age
+
+Pass `--since DURATION` (e.g. `--since 1h`, `--since 7d`) on `mngr usage` or
+`mngr usage wait` to restrict the per-session cost aggregation by age.
+Sessions whose last event is older than `--since` are dropped from
+`sessions[]` and from the per-mode aggregates (`subscription_cost.*` /
+`api_cost.*`) computed off them. Default is 24h, configurable via the
+`since_seconds` option on the `usage` plugin config.
+
+`--since` only shapes the cost surface. Rate-limit windows always reflect the
+freshest reading across all agents -- they track an account-level counter, so
+there's no older reading to drop.
+
+`--stale-after` is **not** an age filter: it's only the stale-warning
+threshold for the snapshot file (controls whether the human output prints a
+"snapshot last updated X ago" warning). It does not change which events are
+aggregated.
+
 ## Output formats
 
 - `mngr usage` (human summary: per-mode cost line(s) + window lines)

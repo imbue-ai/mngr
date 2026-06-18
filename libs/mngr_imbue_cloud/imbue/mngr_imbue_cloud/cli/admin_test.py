@@ -12,12 +12,14 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr_imbue_cloud.cli.admin import PoolHostUnderlyingTeardown
 from imbue.mngr_imbue_cloud.cli.admin import _CONTAINER_SSH_PORT
 from imbue.mngr_imbue_cloud.cli.admin import _INSERT_POOL_HOST_SQL
 from imbue.mngr_imbue_cloud.cli.admin import _ufw_provision_commands
 from imbue.mngr_imbue_cloud.cli.admin import build_extra_tags_env_value
 from imbue.mngr_imbue_cloud.cli.admin import build_pool_host_insert_values
 from imbue.mngr_imbue_cloud.cli.admin import pool
+from imbue.mngr_imbue_cloud.cli.admin import resolve_underlying_teardown
 
 
 def test_build_extra_tags_env_value_empty() -> None:
@@ -193,3 +195,154 @@ def test_pool_create_rejects_malformed_tag(tmp_path: Any) -> None:
     )
     assert result.exit_code != 0
     assert "KEY=VALUE" in result.output or "KEY=VALUE" in str(result.exception)
+
+
+def _slice_create_args(extra: list[str]) -> list[str]:
+    """Base ``pool create --backend slice`` argv (with a DSN + server-id so resolution succeeds).
+
+    Carries no identity attributes: repo_url / repo_branch_or_tag are derived from
+    the bake source (--from-tag / --workspace-dir), never passed in --attributes.
+    """
+    return [
+        "create",
+        "--backend",
+        "slice",
+        "--count",
+        "1",
+        "--region",
+        "US-EAST-VA",
+        "--server-id",
+        "11111111-1111-1111-1111-111111111111",
+        "--database-url",
+        "postgres://example",
+        *extra,
+    ]
+
+
+def test_pool_create_slice_backend_requires_server_id() -> None:
+    """``--server-id`` is required for the slice backend (we never auto-select a box)."""
+    args = [
+        "create",
+        "--backend",
+        "slice",
+        "--count",
+        "1",
+        "--region",
+        "US-EAST-VA",
+        "--database-url",
+        "postgres://example",
+        "--from-tag",
+        "v0.3.0",
+    ]
+    result = CliRunner().invoke(pool, args)
+    assert result.exit_code != 0
+    assert "--server-id is required for --backend slice" in result.output
+
+
+def test_pool_create_ovh_backend_rejects_server_id(tmp_path: Any) -> None:
+    """``--server-id`` is slice-only; passing it to the OVH backend is a usage error."""
+    key_file = tmp_path / "mgmt.pub"
+    key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
+    result = CliRunner().invoke(
+        pool,
+        [
+            "create",
+            "--backend",
+            "ovh_vps",
+            "--count",
+            "1",
+            "--region",
+            "US-EAST-VA",
+            "--database-url",
+            "postgres://example",
+            "--management-public-key-file",
+            str(key_file),
+            "--server-id",
+            "11111111-1111-1111-1111-111111111111",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--server-id is only supported for --backend slice" in result.output
+
+
+def test_pool_create_requires_a_bake_source_selector() -> None:
+    """Neither --from-tag nor --workspace-dir is a usage error (exactly one is required)."""
+    result = CliRunner().invoke(pool, _slice_create_args([]))
+    assert result.exit_code != 0
+    assert "--from-tag" in result.output and "--workspace-dir" in result.output
+
+
+def test_pool_create_rejects_both_bake_source_selectors(tmp_path: Any) -> None:
+    """Passing both --from-tag and --workspace-dir is a usage error."""
+    result = CliRunner().invoke(pool, _slice_create_args(["--from-tag", "v0.3.0", "--workspace-dir", str(tmp_path)]))
+    assert result.exit_code != 0
+    assert "exactly one" in result.output
+
+
+def test_pool_create_slice_backend_rejects_tag() -> None:
+    """``--tag`` is OVH-only; using it with ``--backend slice`` is a usage error before any work."""
+    result = CliRunner().invoke(pool, _slice_create_args(["--tag", "k=v"]))
+    assert result.exit_code != 0
+    assert "--tag is not applicable to --backend slice" in result.output
+
+
+def test_pool_create_slice_backend_rejects_management_key(tmp_path: Any) -> None:
+    """Slices authorize the pool key from POOL_SSH_PRIVATE_KEY, so the mgmt-key flag is rejected."""
+    key_file = tmp_path / "mgmt.pub"
+    key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
+    result = CliRunner().invoke(pool, _slice_create_args(["--management-public-key-file", str(key_file)]))
+    assert result.exit_code != 0
+    assert "--management-public-key-file is not applicable to --backend slice" in result.output
+
+
+def test_pool_create_ovh_backend_requires_management_key() -> None:
+    """The OVH backend still requires the management public key (now validated, not click-required)."""
+    result = CliRunner().invoke(
+        pool,
+        [
+            "create",
+            "--count",
+            "1",
+            "--region",
+            "US-EAST-VA",
+            "--attributes",
+            "{}",
+            "--workspace-dir",
+            ".",
+            "--database-url",
+            "postgres://example",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--management-public-key-file is required for --backend ovh_vps" in result.output
+
+
+def test_resolve_underlying_teardown_slice_destroys_vm() -> None:
+    """A slice row tears down its lima VM (not an OVH cancel) -- the regression this fix closes."""
+    assert (
+        resolve_underlying_teardown(backend_kind="slice", is_skip_requested=False)
+        == PoolHostUnderlyingTeardown.SLICE_VM
+    )
+
+
+def test_resolve_underlying_teardown_ovh_vps_cancels_vps() -> None:
+    assert (
+        resolve_underlying_teardown(backend_kind="ovh_vps", is_skip_requested=False)
+        == PoolHostUnderlyingTeardown.OVH_VPS
+    )
+
+
+def test_resolve_underlying_teardown_legacy_null_backend_treated_as_ovh() -> None:
+    """Rows written before the backend_kind column existed (None) take the OVH path."""
+    assert (
+        resolve_underlying_teardown(backend_kind=None, is_skip_requested=False) == PoolHostUnderlyingTeardown.OVH_VPS
+    )
+
+
+def test_resolve_underlying_teardown_skip_overrides_every_backend() -> None:
+    """--skip-vps-cancel drops the row only, regardless of backend."""
+    for backend_kind in ("slice", "ovh_vps", None):
+        assert (
+            resolve_underlying_teardown(backend_kind=backend_kind, is_skip_requested=True)
+            == PoolHostUnderlyingTeardown.NONE
+        )

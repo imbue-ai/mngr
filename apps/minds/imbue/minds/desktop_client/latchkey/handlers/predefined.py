@@ -44,8 +44,6 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -60,6 +58,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -69,6 +69,7 @@ class GrantOutcome(UpperCaseStrEnum):
     GRANTED = auto()
     DENIED = auto()
     NEEDS_MANUAL_CREDENTIALS = auto()
+    FAILED = auto()
 
 
 class GrantResult(FrozenModel):
@@ -77,15 +78,16 @@ class GrantResult(FrozenModel):
     outcome: GrantOutcome = Field(description="Which branch the grant flow took.")
     message: str = Field(
         description=(
-            "Plain-text user/agent-facing message. For ``GRANTED``/``DENIED`` it has "
+            "Plain-text user/agent-facing message. For ``GRANTED`` it has "
             "already been delivered to the agent via ``mngr message``; for "
-            "``NEEDS_MANUAL_CREDENTIALS`` it is shown only to the user."
+            "``FAILED`` and ``NEEDS_MANUAL_CREDENTIALS`` it is shown only to the user "
+            "(the request stays pending, so the agent is not notified)."
         ),
     )
     response_event: RequestResponseEvent | None = Field(
         description=(
             "The freshly-appended response event when the request was resolved. "
-            "``None`` for ``NEEDS_MANUAL_CREDENTIALS`` because the request stays pending."
+            "``None`` for ``FAILED`` and ``NEEDS_MANUAL_CREDENTIALS`` because the request stays pending."
         ),
     )
     set_credentials_example: str | None = Field(
@@ -104,19 +106,19 @@ def _format_granted_message(service_display_name: str, granted: Sequence[str]) -
     permissions = ", ".join(granted)
     return (
         f"Your permission request for {service_display_name} was granted with the following "
-        f"permissions: {permissions}. Please retry the call that was blocked."
+        f"permissions: {permissions}."
     )
 
 
 def _format_denied_message(service_display_name: str) -> str:
-    return f"Your permission request for {service_display_name} was denied. Do not retry the blocked call."
+    return f"Your permission request for {service_display_name} was denied."
 
 
 def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
     suffix = f" Reason: {detail}" if detail else ""
     return (
-        f"Your permission request for {service_display_name} could not be completed because the user's "
-        f"sign-in flow did not finish.{suffix} Do not retry yet; report this to the user."
+        f"Sign-in to {service_display_name} did not complete, so the permission could not be "
+        f"granted at the moment.{suffix}"
     )
 
 
@@ -218,7 +220,7 @@ def _render_unknown_scope_fragment(request_id: str, scope: str) -> str:
         '<h1 class="text-xl font-semibold text-zinc-900 leading-tight">Unknown scope</h1>'
         '<p class="mt-2 text-zinc-600">'
         f"The agent requested permissions under scope <code>{escaped_scope}</code>, "
-        "but this scope is not in the latchkey gateway's permission catalog. "
+        "but this scope is not in the latchkey service catalog. "
         "The request can only be denied from here."
         "</p>"
         '<form id="permissions-form" method="POST" '
@@ -246,12 +248,16 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     * A ``GRANTED`` response event has been appended for ``request_event_id``.
     * ``mngr message`` has been attempted (failures logged).
 
-    When ``grant`` returns ``GrantOutcome.DENIED`` (failed browser sign-in):
+    When ``grant`` returns ``GrantOutcome.FAILED`` (the browser sign-in
+    flow -- including the one-off ``latchkey auth browser-prepare`` step --
+    did not complete):
 
     * ``latchkey_permissions.json`` is unchanged.
-    * A ``DENIED`` response event has been appended (the agent is told the
-      reason via the message, not via a distinct status).
-    * ``mngr message`` has been attempted.
+    * No response event has been written; the request stays pending so a
+      fresh Approve click can retry the sign-in. A failed approval is a
+      transient failure, not a denial -- it is surfaced to the user in the
+      dialog rather than recorded as a resolution.
+    * No ``mngr message`` has been sent (the agent stays blocked, waiting).
 
     When ``grant`` returns ``GrantOutcome.NEEDS_MANUAL_CREDENTIALS`` (the
     service has no valid credentials and latchkey doesn't expose a browser
@@ -270,8 +276,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     latchkey: Latchkey = Field(description="Latchkey wrapper used to probe credentials and run sign-in flows.")
     services_catalog: ServicesCatalog = Field(
         description=(
-            "Lazy in-memory snapshot of the latchkey services catalog fetched from the "
-            "gateway's ``/permissions/available`` endpoint. Empty when the fetch failed."
+            "Lazy in-memory snapshot of the latchkey services catalog, read from the bundled "
+            "``services.json`` data file that ships with mngr_latchkey."
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(description="Sends mngr message to the waiting agent.")
@@ -360,21 +366,16 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
             is_success, detail = self.latchkey.auth_browser(service_info.name)
             if not is_success:
-                # No separate AUTH_FAILED status: a failed sign-in is
-                # surfaced as DENIED with a distinct message so the agent
-                # can tell the user something went wrong.
-                message = _format_auth_failed_message(service_info.display_name, detail)
-                response_event = self._write_response_and_notify(
-                    request_event_id=request_event_id,
-                    agent_id=agent_id,
-                    scope=service_info.scope,
-                    status=RequestStatus.DENIED,
-                    message=message,
-                )
+                # The browser sign-in (or its one-off ``auth
+                # browser-prepare`` step) did not complete. Treat this as a
+                # FAILED approval, not a denial: leave the request pending
+                # (no response event, gateway record untouched, agent not
+                # notified) so a fresh Approve click can retry, and surface
+                # the reason to the user in the dialog.
                 return GrantResult(
-                    outcome=GrantOutcome.DENIED,
-                    message=message,
-                    response_event=response_event,
+                    outcome=GrantOutcome.FAILED,
+                    message=_format_auth_failed_message(service_info.display_name, detail),
+                    response_event=None,
                     set_credentials_example=None,
                 )
 

@@ -45,12 +45,12 @@ def reset_backend_registry() -> None:
 
 
 # Provider backends that require credentials at registration time (e.g.
-# Modal SDK auth, Vultr API key) or at first ``discover_hosts`` (e.g. an
-# imbue_cloud session). Tests use ``load_local_backend_only`` to skip
-# these. Lima is intentionally excluded: its backend defers limactl
-# checks to first use, so registering it is safe even without limactl
-# installed.
-_REMOTE_BACKEND_NAMES: frozenset[str] = frozenset({"modal", "vultr", "imbue_cloud"})
+# Modal SDK auth, Vultr API key, AWS access keys) or at first
+# ``discover_hosts`` (e.g. an imbue_cloud session). Tests use
+# ``load_local_backend_only`` to skip these. Lima is intentionally
+# excluded: its backend defers limactl checks to first use, so
+# registering it is safe even without limactl installed.
+_REMOTE_BACKEND_NAMES: frozenset[str] = frozenset({"aws", "azure", "gcp", "imbue_cloud", "modal", "vultr"})
 
 
 def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_remote: bool) -> None:
@@ -59,7 +59,7 @@ def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_re
     The pm parameter is the pluggy plugin manager. If include_docker is True,
     the Docker backend is included (requires a Docker daemon). If include_remote
     is True, plugin-provided backends that require external services
-    (Modal, Lima, Vultr, ...) are included.
+    (Modal, Lima, Vultr, AWS, ...) are included.
     """
     if _registry_state["backends_loaded"]:
         return
@@ -68,7 +68,7 @@ def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_re
     pm.register(ssh_backend_module, name="ssh")
     if include_docker:
         pm.register(docker_backend_module, name="docker")
-    # Note: remote backends (modal, lima, vultr, ...) are loaded via plugin entry points
+    # Note: remote backends (modal, lima, vultr, aws, ...) are loaded via plugin entry points
 
     registrations = pm.hook.register_provider_backend()
 
@@ -125,26 +125,54 @@ def list_backends() -> list[str]:
     return sorted(str(k) for k in _backend_registry.keys())
 
 
+def resolve_backend_and_config(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+) -> tuple[type[ProviderBackendInterface], ProviderInstanceConfig]:
+    """Resolve the backend class and config for a provider-instance name.
+
+    Two cases:
+    1. The name matches a configured provider instance in ``mngr_ctx.config.providers``:
+       return the declared backend and the user's config.
+    2. Otherwise, treat the name as a bare backend name and instantiate the
+       backend's default config (supports e.g. ``--provider local`` /
+       ``--provider docker`` without a ``[providers.<name>]`` block).
+
+    Used by both ``get_provider_instance`` and the ``mngr create``
+    bootstrap path so the "configured-instance vs. bare-backend-name"
+    fallback logic lives in exactly one place.
+    """
+    if provider_name in mngr_ctx.config.providers:
+        provider_config = mngr_ctx.config.providers[provider_name]
+        backend_name = provider_config.backend
+    else:
+        backend_name = ProviderBackendName(str(provider_name))
+        config_class = get_provider_config_class(str(backend_name))
+        provider_config = config_class(backend=backend_name)
+    return get_backend(backend_name), provider_config
+
+
 def build_provider_instance(
     instance_name: ProviderInstanceName,
     backend_name: ProviderBackendName,
     config: ProviderInstanceConfig,
     mngr_ctx: MngrContext,
-    is_for_host_creation: bool = False,
 ) -> BaseProviderInstance:
     """Build a provider instance using the registered backend.
 
-    ``is_for_host_creation`` is forwarded to the backend so that backends with
-    one-time bootstrap resources (currently: the Modal backend's per-user
-    environment) can distinguish create-host construction from construction
-    for read-only / existing-host operations.
+    ``mngr create`` callers should invoke ``backend.bootstrap_for_host_creation``
+    before calling this (see ``api/create.py``); ``build_provider_instance``
+    itself is always treated as read-only-or-existing-host and must not
+    bootstrap backend-side state. Backends with one-time resources (the Modal
+    per-user environment, the Docker singleton state container) raise
+    ``ProviderEmptyError`` here when those resources are missing, so read paths
+    skip the provider rather than creating them on first use.
     """
     backend_class = get_backend(backend_name)
     obj = backend_class.build_provider_instance(
         name=instance_name,
         config=config,
         mngr_ctx=mngr_ctx,
-        is_for_host_creation=is_for_host_creation,
     )
     if not isinstance(obj, BaseProviderInstance):
         raise ConfigStructureError(

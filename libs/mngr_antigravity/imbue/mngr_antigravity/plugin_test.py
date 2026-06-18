@@ -2,19 +2,28 @@
 
 import json
 import os
+import re
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.api.preservation import get_local_preserved_agent_dir
+from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -22,15 +31,21 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
-from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
-from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
+from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
+from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
+from imbue.mngr_antigravity.plugin import _AGENT_CONVERSATIONS_RELPATH
+from imbue.mngr_antigravity.plugin import _resolve_adopt_session
+from imbue.mngr_antigravity.plugin import on_before_create
+from imbue.mngr_antigravity.plugin import register_agent_aliases
 from imbue.mngr_antigravity.plugin import register_agent_type
 
 
@@ -71,20 +86,87 @@ def test_antigravity_agent_subclasses_interactive_tui_agent() -> None:
 
 
 def test_antigravity_agent_advertises_tui_ready_indicator() -> None:
-    """Ready indicator is a footer-hint substring that only appears once the input prompt is drawn.
+    """Ready indicator is a regex for the input box, matching only once the prompt is drawn.
 
-    Pinned because the obvious-but-wrong choice ("Antigravity CLI" from the
-    splash banner) matches earlier than the input row is actually ready --
-    agy emits a "Welcome to the Antigravity CLI. You are currently not
-    signed in." line while still authing, which is too early to paste
-    into. See plugin.py for the rationale.
+    agy 1.0.9 dropped the "? for shortcuts" footer hint, and the splash banner is
+    unusable (it appears before the input row exists, and scrolls off on resume),
+    so readiness keys off the box chrome: a rule, the ``>`` prompt, and a rule.
     """
-    assert AntigravityAgent.TUI_READY_INDICATOR == "? for shortcuts"
+    pattern = AntigravityAgent.TUI_READY_INDICATOR
+    assert isinstance(pattern, re.Pattern)
+    # An empty, ready input box matches.
+    ready_pane = "Antigravity CLI 1.0.9\n" + "─" * 80 + "\n>\n" + "─" * 80 + "\n"
+    assert pattern.search(ready_pane) is not None
+    # Multi-line input between the rules still matches (agy keeps both rules pinned).
+    busy_pane = "─" * 80 + "\n> a multi\nline message\n" + "─" * 80 + "\n"
+    assert pattern.search(busy_pane) is not None
+    # At the minimum terminal width the rule is just two dashes; still matches.
+    min_width_pane = "──\n>\n──\n"
+    assert pattern.search(min_width_pane) is not None
+    # The early splash banner -- before the input box is drawn -- must NOT match,
+    # so mngr does not paste keystrokes onto the floor.
+    splash_only = "Welcome to the Antigravity CLI. You are currently not signed in.\n"
+    assert pattern.search(splash_only) is None
 
 
 def test_antigravity_agent_implements_send_enter_and_validate() -> None:
     """AntigravityAgent fills in the abstract method by picking a strategy."""
     assert "_send_enter_and_validate" not in AntigravityAgent.__abstractmethods__
+
+
+class _RecordingHost(FakeHost):
+    """FakeHost that records stateful commands and reports success without running them.
+
+    Lets ``_send_enter_and_validate`` exercise the wait-for strategy without
+    actually invoking tmux (so the resource guard stays quiet) while we assert
+    the command it issues.
+    """
+
+    recorded: list[str] = Field(default_factory=list)
+
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.recorded.append(command)
+        return CommandResult(stdout="", stderr="", success=True)
+
+
+def test_send_enter_and_validate_waits_on_per_session_submit_channel(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """``_send_enter_and_validate`` uses the tmux wait-for strategy on the per-session channel.
+
+    agy's statusLine fires ``tmux wait-for -S mngr-submit-<session>`` when the
+    agent starts processing the submitted message; mngr registers a waiter on
+    that exact channel (parity with the shell side). The strategy also sends
+    Enter from a backgrounded subshell, which must appear in the issued command.
+    """
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    recording_host = _RecordingHost()
+    agent = AntigravityAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-antigravity"),
+        agent_type=AgentTypeName("antigravity"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=HostName(LOCAL_HOST_NAME),
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=AntigravityAgentConfig(),
+        host=recording_host,
+    )
+    agent._send_enter_and_validate(agent.tmux_target)
+    assert len(recording_host.recorded) == 1
+    issued = recording_host.recorded[0]
+    assert f"mngr-submit-{agent.session_name}" in issued
+    # The strategy sends Enter (from the backgrounded subshell) alongside the wait.
+    assert "tmux send-keys" in issued
+    assert "tmux wait-for" in issued
 
 
 def test_register_agent_type_returns_antigravity_class_and_config() -> None:
@@ -94,11 +176,102 @@ def test_register_agent_type_returns_antigravity_class_and_config() -> None:
     assert config_class is AntigravityAgentConfig
 
 
+def test_register_agent_aliases_maps_agy_to_antigravity() -> None:
+    assert register_agent_aliases() == {"agy": "antigravity"}
+
+
+# =============================================================================
+# Capability-mixin contract methods (install / unattended / permission policy)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_agy() -> None:
+    agent = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig())
+    assert agent.get_install_binary_name() == "agy"
+
+
+def test_get_install_command_installs_agy() -> None:
+    agent = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig())
+    assert agent.get_install_command() == "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig(auto_allow_permissions=True))
+    attended = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def test_get_permission_policy_returns_configured_permissions_block() -> None:
+    policy = {"allow": ["command(git)"]}
+    agent = AntigravityAgent.model_construct(
+        agent_config=AntigravityAgentConfig(settings_overrides={"permissions": policy})
+    )
+    assert agent.get_permission_policy() == policy
+
+
+def test_get_permission_policy_is_empty_when_unset() -> None:
+    agent = AntigravityAgent.model_construct(agent_config=AntigravityAgentConfig())
+    assert agent.get_permission_policy() == {}
+
+
+class _BinaryPresentStubHost(FakeHost):
+    """FakeHost that reports the install-check binary as present and records commands.
+
+    Lets ``provision`` run its install-check line (``command -v agy``) without
+    triggering an install: the binary is reported present, so ``ensure_cli_installed``
+    returns after the check. Other commands fall through to the local FakeHost.
+    """
+
+    executed_commands: list[str] = []
+
+    def _execute_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.executed_commands.append(command)
+        if command.startswith("command -v "):
+            return CommandResult(stdout="/usr/local/bin/agy", stderr="", success=True)
+        return super()._execute_command(command, user, cwd, env, timeout_seconds)
+
+
+def test_provision_runs_install_check_when_enabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
+) -> None:
+    """With ``check_installation=True``, provision issues the ``command -v agy`` install check.
+
+    The binary is reported present so no install command runs; reaching the
+    ``command -v`` probe proves the install-check line executed.
+    """
+    agent = _make_antigravity_agent(
+        local_provider, tmp_path, AntigravityAgentConfig(check_installation=True, auto_dismiss_dialogs=True)
+    )
+    stub_host: Any = _BinaryPresentStubHost(host_dir=tmp_path, is_local=True)
+    agent.provision(
+        host=stub_host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    assert any(command.startswith("command -v agy") for command in stub_host.executed_commands)
+
+
 def _make_antigravity_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     agent_config: AntigravityAgentConfig,
 ) -> AntigravityAgent:
+    # These setup tests run against a real local host where agy is not installed; the
+    # install check is irrelevant to provision setup (files/trust/config) and is covered
+    # separately, so skip it unless a caller opted in explicitly.
+    # FIXME: this should be routed through the real config-loading path (a settings.toml
+    # [agent_types.antigravity] config_overrides block) rather than mutating the config
+    # object here based on model_fields_set introspection.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -200,6 +373,10 @@ def _make_subclassed_agent_with_flags(
     is_auto_approve: bool = False,
 ) -> AntigravityAgent:
     """Build a subclassed agent with the requested MngrContext flags set."""
+    # Skip the binary install-check (agy is not on the test host): these tests
+    # exercise the trust/provision flow, not install. Install is covered separately.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -896,6 +1073,30 @@ def test_provision_symlinks_playwright_cache_to_shared_host_cache(
     assert Path(os.readlink(dest)) == isolated_home.joinpath(*subpath)
 
 
+def test_provision_symlinks_macos_keychain_into_per_agent_home(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """On macOS the per-agent home's Library/Keychains is symlinked to the host's; Linux is a no-op.
+
+    agy's embedded Chromium os_crypt resolves the login keychain at
+    $HOME/Library/Keychains, so the relocated per-agent $HOME hides it and agy
+    blocks on a modal "keychain cannot be found" dialog. The plugin symlinks the
+    directory to the host's so discovery works (macOS only -- Linux has no such
+    keychain and Chromium uses its file-based store). The link points at
+    *host_home*'s Library/Keychains (here the isolated HOME); the target need not
+    exist for the symlink to be created.
+    """
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    dest = agent._get_agy_home_dir() / "Library" / "Keychains"
+    if is_macos():
+        assert dest.is_symlink()
+        assert Path(os.readlink(dest)) == isolated_home / "Library" / "Keychains"
+    else:
+        assert not dest.exists()
+        assert not dest.is_symlink()
+
+
 # =============================================================================
 # provision: per-agent hooks.json
 # =============================================================================
@@ -919,36 +1120,114 @@ def test_provision_writes_hooks_json_under_per_agent_home_config(
     assert hooks_path.exists()
 
 
-def test_provision_hooks_json_sets_active_marker_on_preinvocation_and_clears_on_stop(
+def test_provision_hooks_json_emits_only_conversation_id_capture(
     antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """The active marker hooks are always present (they drive RUNNING vs WAITING).
+    """The lone hook is the PreInvocation conversation-id capture; no Stop block.
 
-    PreInvocation runs set_active_marker.sh (touch + record the turn's root);
-    Stop runs the root-gated clear script, which removes the marker only on the
-    root agent's fully-idle Stop.
+    Lifecycle (RUNNING/WAITING) is driven by the statusLine command, so the
+    provisioned hooks config carries no marker handler and no Stop block. The
+    capture hook is present because the statusLine payload only reports the root
+    conversation.
     """
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     mngr = _read_hooks_json(agent)["mngr"]
+    assert set(mngr) == {"PreInvocation"}
     assert (
-        mngr["PreInvocation"][0]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"'
-    )
-    assert (
-        mngr["Stop"][0]["command"]
-        == f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"'
+        mngr["PreInvocation"][0]["command"]
+        == f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"'
     )
 
 
-def test_provision_installs_clear_active_marker_when_idle_script(
+def test_provision_settings_json_has_mngr_owned_statusline(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """The per-agent settings.json carries the mngr-owned lifecycle statusLine.
+
+    agy invokes it on every agent-state change; statusline.sh is the source of
+    truth for RUNNING/WAITING and message-submission confirmation.
+    """
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    settings = _read_per_agent_settings(agent)
+    assert settings["statusLine"] == {
+        "type": "command",
+        "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"',
+    }
+
+
+def test_provision_composes_user_statusline_from_settings_overrides(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path, log_warnings: list[str]
+) -> None:
+    """A runnable user statusLine is composed, not discarded: mngr's is the agy
+    statusLine, and the user's command is recorded for statusline.sh to run.
+
+    agy allows only one statusLine command, and mngr's must be it (lifecycle
+    correctness), so a user's own command-type statusLine is preserved by recording
+    it in the per-agent user_statusline_command file; statusline.sh runs it and
+    appends its output. No warning for this composable case.
+    """
+    agent = _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(
+            auto_dismiss_dialogs=True,
+            settings_overrides={"statusLine": {"type": "command", "command": "echo user-owned"}},
+        ),
+    )
+    _provision(agent)
+    settings = _read_per_agent_settings(agent)
+    # The agy statusLine is mngr's (so agy invokes statusline.sh).
+    assert settings["statusLine"]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
+    # ...and the user's command is recorded for statusline.sh to compose.
+    assert agent._get_user_statusline_command_file_path().read_text() == "echo user-owned"
+    # A composable statusLine is preserved, not dropped, so no warning fires.
+    assert not any("statusLine" in msg for msg in log_warnings)
+
+
+def test_provision_warns_and_drops_non_composable_statusline(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path, log_warnings: list[str]
+) -> None:
+    """A statusLine that is not a runnable command block is dropped with a warning.
+
+    Only ``{"type": "command", "command": <str>}`` can be composed; any other shape
+    (here a non-command type) can't be run, so mngr warns and records nothing.
+    """
+    agent = _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(
+            auto_dismiss_dialogs=True,
+            settings_overrides={"statusLine": {"type": "static", "text": "unsupported"}},
+        ),
+    )
+    _provision(agent)
+    settings = _read_per_agent_settings(agent)
+    assert settings["statusLine"]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
+    # Nothing recorded to compose, and the drop is surfaced as a warning.
+    assert not agent._get_user_statusline_command_file_path().exists()
+    assert any("statusLine" in msg for msg in log_warnings)
+
+
+def test_provision_records_no_user_statusline_when_none(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path, log_warnings: list[str]
+) -> None:
+    """With no user statusLine, mngr injects its own with nothing to compose and no warning."""
+    _provision(antigravity_agent_auto_dismiss)
+    assert not antigravity_agent_auto_dismiss._get_user_statusline_command_file_path().exists()
+    assert not any("statusLine" in msg for msg in log_warnings)
+
+
+def test_provision_installs_statusline_script(
     auto_approve_ctx: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """provision() installs clear_active_marker_when_idle.sh into the commands/ dir.
+    """provision() installs statusline.sh into the commands/ dir.
 
-    The Stop hook invokes this script by that path
-    (build_antigravity_hooks_config), so it must be provisioned for the
-    fully-idle-gated WAITING transition to work.
+    agy's statusLine command invokes this script by that path
+    (build_antigravity_statusline_settings), so it must be provisioned for the
+    RUNNING/WAITING lifecycle and message-submission signal to work.
     """
     agent = auto_approve_ctx
     agent.provision(
@@ -956,32 +1235,12 @@ def test_provision_installs_clear_active_marker_when_idle_script(
         options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
         mngr_ctx=agent.mngr_ctx,
     )
-    script_path = agent._get_agent_dir() / "commands" / CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
+    script_path = agent._get_agent_dir() / "commands" / STATUSLINE_SCRIPT_NAME
     assert script_path.exists()
-    # Sanity-check it's the idle-gate script (keys on the fullyIdle field).
-    assert "fullyIdle" in script_path.read_text()
-
-
-def test_provision_installs_set_active_marker_script(
-    auto_approve_ctx: AntigravityAgent,
-    isolated_home: Path,
-) -> None:
-    """provision() installs set_active_marker.sh into the commands/ dir.
-
-    The PreInvocation hook invokes this script by that path
-    (build_antigravity_hooks_config), so it must be provisioned for the marker
-    to be set and the turn's root recorded.
-    """
-    agent = auto_approve_ctx
-    agent.provision(
-        host=agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
-        mngr_ctx=agent.mngr_ctx,
-    )
-    script_path = agent._get_agent_dir() / "commands" / SET_ACTIVE_MARKER_SCRIPT_NAME
-    assert script_path.exists()
-    # Sanity-check it's the marker/root script (records the root conversation).
-    assert "root_conversation" in script_path.read_text()
+    # Sanity-check it's the statusline script (keys on agent_state, records the root).
+    text = script_path.read_text()
+    assert "agent_state" in text
+    assert "root_conversation" in text
 
 
 def test_provision_does_not_write_hooks_into_work_dir(
@@ -1081,3 +1340,365 @@ def test_provision_writes_supervisor_even_when_common_transcript_disabled(
         antigravity_agent_without_common_transcript._get_agent_dir() / "commands" / "antigravity_background_tasks.sh"
     )
     assert expected.exists()
+
+
+# =============================================================================
+# Preservation on destroy
+# =============================================================================
+
+
+def test_antigravity_config_preserves_on_destroy_by_default() -> None:
+    assert AntigravityAgentConfig().preserve_on_destroy is True
+
+
+def _populate_antigravity_transcripts(agent: AntigravityAgent) -> None:
+    """Write the raw/common transcripts and the conversation-id history into the state dir."""
+    agent_dir = agent._get_agent_dir()
+    (agent_dir / "logs" / "antigravity_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "logs" / "antigravity_transcript" / "events.jsonl").write_text('{"type":"raw"}\n')
+    (agent_dir / "events" / "antigravity" / "common_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "events" / "antigravity" / "common_transcript" / "events.jsonl").write_text('{"type":"common"}\n')
+    (agent_dir / ROOT_CONVERSATION_FILENAME).write_text("conv-root\n")
+    (agent_dir / CONVERSATION_IDS_FILENAME).write_text("conv-root\nconv-sub\n")
+
+
+@pytest.mark.rsync
+def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy copies transcripts and conversation-id history to the mirrored preserved layout."""
+    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(preserve_on_destroy=True))
+    _populate_antigravity_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert (dest_dir / "logs" / "antigravity_transcript" / "events.jsonl").read_text() == '{"type":"raw"}\n'
+    assert (
+        dest_dir / "events" / "antigravity" / "common_transcript" / "events.jsonl"
+    ).read_text() == '{"type":"common"}\n'
+    assert (dest_dir / ROOT_CONVERSATION_FILENAME).read_text() == "conv-root\n"
+    assert (dest_dir / CONVERSATION_IDS_FILENAME).read_text() == "conv-root\nconv-sub\n"
+
+
+def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy preserves nothing when preserve_on_destroy is False."""
+    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(preserve_on_destroy=False))
+    _populate_antigravity_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert not dest_dir.exists()
+
+
+# =============================================================================
+# Session adoption (--adopt / --from)
+# =============================================================================
+
+
+def _seed_conversation_store(conversations_dir: Path, conversation_id: str, suffix: str = ".db") -> Path:
+    """Write a fake ``<id><suffix>`` store file into ``conversations_dir`` and return it."""
+    conversations_dir.mkdir(parents=True, exist_ok=True)
+    store = conversations_dir / f"{conversation_id}{suffix}"
+    store.write_text("fake-store-bytes")
+    return store
+
+
+def test_resolve_adopt_session_accepts_store_file_path(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """An absolute path to a ``<id>.db`` store resolves to (stem, parent dir)."""
+
+    store = _seed_conversation_store(tmp_path / "store", "conv-abc")
+    conversation_id, source_dir = _resolve_adopt_session(str(store), local_provider.mngr_ctx)
+    assert conversation_id == "conv-abc"
+    assert source_dir == store.parent
+
+
+def test_resolve_adopt_session_accepts_single_conversation_directory(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An absolute path to a directory holding exactly one store resolves unambiguously."""
+
+    conversations_dir = tmp_path / "conversations"
+    _seed_conversation_store(conversations_dir, "only-conv")
+    conversation_id, source_dir = _resolve_adopt_session(str(conversations_dir), local_provider.mngr_ctx)
+    assert conversation_id == "only-conv"
+    assert source_dir == conversations_dir
+
+
+def test_resolve_adopt_session_rejects_empty_conversation_directory(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A directory with no store files is a clear user error."""
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    with pytest.raises(UserInputError, match="No conversation store"):
+        _resolve_adopt_session(str(empty_dir), local_provider.mngr_ctx)
+
+
+def test_resolve_adopt_session_rejects_multi_conversation_directory(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A directory with multiple conversations is ambiguous; require the full file path."""
+
+    conversations_dir = tmp_path / "conversations"
+    _seed_conversation_store(conversations_dir, "conv-one")
+    _seed_conversation_store(conversations_dir, "conv-two")
+    with pytest.raises(UserInputError, match="multiple conversations"):
+        _resolve_adopt_session(str(conversations_dir), local_provider.mngr_ctx)
+
+
+def test_resolve_adopt_session_rejects_missing_absolute_path(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An absolute path that is neither a store file nor a directory is rejected."""
+
+    missing = tmp_path / "does-not-exist"
+    with pytest.raises(UserInputError, match="not found"):
+        _resolve_adopt_session(str(missing), local_provider.mngr_ctx)
+
+
+def test_resolve_adopt_session_finds_id_in_user_native_store(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A bare id is found in the user-native ``~/.gemini`` conversations store.
+
+    HOME is redirected to ``tmp_path`` for tests, so the user-native store lives under it.
+    """
+
+    user_store_dir = get_antigravity_conversations_dir(Path.home())
+    _seed_conversation_store(user_store_dir, "user-conv")
+    conversation_id, source_dir = _resolve_adopt_session("user-conv", local_provider.mngr_ctx)
+    assert conversation_id == "user-conv"
+    assert source_dir.resolve() == user_store_dir.resolve()
+
+
+def test_resolve_adopt_session_finds_id_in_live_agent_store(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A bare id is found in a live local mngr agent's per-agent conversations dir."""
+
+    agent_conversations = get_agents_root_dir(tmp_path / ".mngr") / "some-agent-id" / _AGENT_CONVERSATIONS_RELPATH
+    _seed_conversation_store(agent_conversations, "agent-conv")
+    conversation_id, source_dir = _resolve_adopt_session("agent-conv", local_provider.mngr_ctx)
+    assert conversation_id == "agent-conv"
+    assert source_dir.resolve() == agent_conversations.resolve()
+
+
+def test_resolve_adopt_session_rejects_unknown_id(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A bare id present in no searched store is a clean user error."""
+
+    with pytest.raises(UserInputError, match="not found"):
+        _resolve_adopt_session("nonexistent-conv", local_provider.mngr_ctx)
+
+
+def test_resolve_adopt_session_rejects_ambiguous_id(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A bare id present in two distinct stores is rejected as ambiguous."""
+
+    _seed_conversation_store(get_antigravity_conversations_dir(Path.home()), "dup-conv")
+    agent_conversations = get_agents_root_dir(tmp_path / ".mngr") / "agent-x" / _AGENT_CONVERSATIONS_RELPATH
+    _seed_conversation_store(agent_conversations, "dup-conv")
+    with pytest.raises(UserInputError, match="multiple conversation directories"):
+        _resolve_adopt_session("dup-conv", local_provider.mngr_ctx)
+
+
+def test_finalize_adopted_session_writes_resume_pointers(antigravity_agent: AntigravityAgent) -> None:
+    """The root-conversation file holds the bare id; the ids file is newline-terminated."""
+    antigravity_agent._finalize_adopted_session(antigravity_agent.host, "conv-final")
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-final"
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_conversation_ids_file_path()) == "conv-final\n"
+
+
+@pytest.mark.rsync
+def test_copy_adopted_session_copies_store_and_returns_id(antigravity_agent: AntigravityAgent, tmp_path: Path) -> None:
+    """``_copy_adopted_session`` copies the source store into the per-agent home and returns the id.
+
+    It writes no resume pointer (the caller decides which adopted id to resume).
+    """
+    source_store_dir = tmp_path / "source_conversations"
+    _seed_conversation_store(source_store_dir, "conv-adopt")
+    conversation_id = antigravity_agent._copy_adopted_session(
+        antigravity_agent.host, str(source_store_dir / "conv-adopt.db")
+    )
+
+    assert conversation_id == "conv-adopt"
+    dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
+    assert (dest_dir / "conv-adopt.db").read_text() == "fake-store-bytes"
+    assert not antigravity_agent._get_root_conversation_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_adopt_session_copies_every_adopt_value_and_resumes_last(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """Multiple ``--adopt`` values all coexist as separate stores; the LAST one is resumed."""
+    first_dir = tmp_path / "first"
+    _seed_conversation_store(first_dir, "conv-first")
+    last_dir = tmp_path / "last"
+    _seed_conversation_store(last_dir, "conv-last")
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("antigravity"),
+        adopt_session=(str(first_dir / "conv-first.db"), str(last_dir / "conv-last.db")),
+    )
+    antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+
+    dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
+    assert (dest_dir / "conv-first.db").read_text() == "fake-store-bytes"
+    assert (dest_dir / "conv-last.db").read_text() == "fake-store-bytes"
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-last"
+
+
+@pytest.mark.rsync
+def test_adopt_session_with_adopt_and_from_copies_both_and_resumes_clone(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """Combining ``--adopt`` and ``--from`` copies both stores in; the clone is the one resumed."""
+    adopt_dir = tmp_path / "adopt"
+    _seed_conversation_store(adopt_dir, "conv-explicit")
+    source_state = tmp_path / "source_agent_state"
+    _seed_source_agent_state(source_state, "conv-clone", with_root_pointer=True)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("antigravity"),
+        adopt_session=(str(adopt_dir / "conv-explicit.db"),),
+        source_agent_state_location=HostLocation(host=antigravity_agent.host, path=source_state),
+    )
+    antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+
+    dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
+    assert (dest_dir / "conv-explicit.db").read_text() == "fake-store-bytes"
+    assert (dest_dir / "conv-clone.db").read_text() == "fake-store-bytes"
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-clone"
+
+
+def test_adopt_session_noop_without_adopt_or_clone(antigravity_agent: AntigravityAgent) -> None:
+    """With neither ``--adopt`` nor ``--from``, adoption writes no resume pointer."""
+    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"))
+    antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+    assert not antigravity_agent._get_root_conversation_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_via_adopt_session(antigravity_agent: AntigravityAgent, tmp_path: Path) -> None:
+    """``on_after_provisioning`` resumes a ``--adopt`` conversation into the new agent."""
+    source_dir = tmp_path / "src"
+    _seed_conversation_store(source_dir, "conv-prov")
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("antigravity"), adopt_session=(str(source_dir / "conv-prov.db"),)
+    )
+    antigravity_agent.on_after_provisioning(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+    assert antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path()) == "conv-prov"
+
+
+def _seed_source_agent_state(state_dir: Path, conversation_id: str, *, with_root_pointer: bool) -> None:
+    """Seed a fake source agent state dir with a conversations store and optional root pointer."""
+    _seed_conversation_store(state_dir / _AGENT_CONVERSATIONS_RELPATH, conversation_id)
+    if with_root_pointer:
+        (state_dir / ROOT_CONVERSATION_FILENAME).write_text(conversation_id)
+
+
+@pytest.mark.rsync
+def test_copy_cloned_session_returns_source_root_conversation(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """``--from`` transfers the source store and returns the source's recorded root conversation.
+
+    The id is returned (not written) -- the caller resumes it.
+    """
+    source_state = tmp_path / "source_agent_state"
+    _seed_source_agent_state(source_state, "conv-clone-root", with_root_pointer=True)
+    source_location = HostLocation(host=antigravity_agent.host, path=source_state)
+
+    conversation_id = antigravity_agent._copy_cloned_session(antigravity_agent.host, source_location)
+
+    assert conversation_id == "conv-clone-root"
+    dest_dir = get_antigravity_conversations_dir(antigravity_agent._get_agy_home_dir())
+    assert (dest_dir / "conv-clone-root.db").read_text() == "fake-store-bytes"
+    assert not antigravity_agent._get_root_conversation_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_copy_cloned_session_falls_back_to_latest_store_without_root_pointer(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """Without a root pointer, the most-recent transferred store id is returned."""
+    source_state = tmp_path / "source_agent_state"
+    _seed_source_agent_state(source_state, "conv-clone-latest", with_root_pointer=False)
+    source_location = HostLocation(host=antigravity_agent.host, path=source_state)
+
+    conversation_id = antigravity_agent._copy_cloned_session(antigravity_agent.host, source_location)
+
+    assert conversation_id == "conv-clone-latest"
+
+
+def test_copy_cloned_session_warns_and_returns_none_when_source_has_no_store(
+    antigravity_agent: AntigravityAgent, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """A source agent with no conversations store warns and starts fresh (``--from`` carry is a bonus)."""
+    source_state = tmp_path / "empty_source_state"
+    source_state.mkdir()
+    source_location = HostLocation(host=antigravity_agent.host, path=source_state)
+
+    conversation_id = antigravity_agent._copy_cloned_session(antigravity_agent.host, source_location)
+
+    assert conversation_id is None
+    assert any("no agy conversation store" in msg for msg in log_warnings)
+    assert not antigravity_agent._get_root_conversation_file_path().exists()
+
+
+@pytest.mark.rsync
+def test_adopt_session_dispatches_to_clone_for_source_location(
+    antigravity_agent: AntigravityAgent, tmp_path: Path
+) -> None:
+    """``adopt_session`` routes ``--from`` (source_agent_state_location) to the clone path."""
+    source_state = tmp_path / "source_agent_state"
+    _seed_source_agent_state(source_state, "conv-from-clone", with_root_pointer=True)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("antigravity"),
+        source_agent_state_location=HostLocation(host=antigravity_agent.host, path=source_state),
+    )
+    antigravity_agent.adopt_session(antigravity_agent.host, options, antigravity_agent.mngr_ctx)
+    assert (
+        antigravity_agent.host.read_text_file(antigravity_agent._get_root_conversation_file_path())
+        == "conv-from-clone"
+    )
+
+
+def test_on_before_create_resolves_adopt_ids_for_antigravity(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """``on_before_create`` fails fast on an unknown ``--adopt`` id for an antigravity agent."""
+    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"), adopt_session=("no-such-conv",))
+    args = OnBeforeCreateArgs(
+        target_host=local_provider.create_host(HostName(LOCAL_HOST_NAME)),
+        agent_options=options,
+        create_work_dir=True,
+    )
+    with pytest.raises(UserInputError, match="not found"):
+        on_before_create(args, local_provider.mngr_ctx)
+
+
+def test_on_before_create_noop_without_adopt_session(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """``on_before_create`` is a no-op when no ``--adopt`` was requested."""
+    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"))
+    args = OnBeforeCreateArgs(
+        target_host=local_provider.create_host(HostName(LOCAL_HOST_NAME)),
+        agent_options=options,
+        create_work_dir=True,
+    )
+    assert on_before_create(args, local_provider.mngr_ctx) is None
+
+
+def test_on_before_create_noop_for_non_antigravity_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """``on_before_create`` skips resolution (and would-be errors) for a non-antigravity type.
+
+    The id is unresolvable, but the agent type is not antigravity, so the preflight no-ops
+    rather than raising -- another plugin owns that type.
+    """
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"), adopt_session=("no-such-conv",))
+    args = OnBeforeCreateArgs(
+        target_host=local_provider.create_host(HostName(LOCAL_HOST_NAME)),
+        agent_options=options,
+        create_work_dir=True,
+    )
+    assert on_before_create(args, local_provider.mngr_ctx) is None

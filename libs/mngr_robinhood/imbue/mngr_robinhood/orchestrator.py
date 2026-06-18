@@ -18,6 +18,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.config.data_types import MngrContext
@@ -27,12 +28,16 @@ from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
@@ -55,8 +60,6 @@ from imbue.mngr_robinhood.output_modes import StreamingOutputWriter
 from imbue.mngr_robinhood.output_modes import monotonic_ms_since
 from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
 from imbue.mngr_robinhood.raw_transcript import RawTranscriptParser
-from imbue.mngr_robinhood.stream_buffer import buffer_body
-from imbue.mngr_robinhood.stream_buffer import compute_stream_delta
 
 # Extra settings applied when the caller requests live streaming (via
 # --include-partial-messages or --stream-plain-text). These enable the
@@ -116,17 +119,12 @@ class _TranscriptReadFailureWarner(MutableModel):
 class _StreamBufferConsumer(MutableModel):
     """Polls the agent's stream_buffer and emits incremental assistant-text deltas.
 
-    The buffer's first line is the last-complete-assistant-message id and the
-    remaining lines are the in-progress assistant text (strict-append within a
-    message, reset across messages). Streaming is line-buffered: ``poll()`` emits
-    only the *complete* lines (everything up to the last newline), holding back
-    the still-streaming final line because its rendering churns as it grows.
-    ``flush()`` is called at turn end to deliver that withheld final line exactly
-    once, using the most recent non-empty buffer content. We diff the considered
-    text against what we last emitted: a prefix-extension is a same-message delta;
-    a non-prefix body is a new message and the whole body is emitted. Best-effort
-    previews -- the authoritative assistant message still arrives via the
-    transcript path.
+    Reads the full snapshot each tick and hands it to the agent's
+    :class:`LiveOutputReader`, which extracts the new delta (holding back the
+    still-streaming final line, whose rendering churns as it grows). ``poll()``
+    emits that delta; ``flush()`` is called at turn end to deliver the withheld
+    final line and reset the reader for the next turn. Best-effort previews --
+    the authoritative assistant message still arrives via the transcript path.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -134,8 +132,7 @@ class _StreamBufferConsumer(MutableModel):
     host: OnlineHostInterface = Field(description="Host to read the buffer file from")
     buffer_path: Path = Field(description="Absolute path to the agent's stream_buffer file")
     writer: StreamingOutputWriter = Field(description="Writer that renders the deltas")
-    emitted_body: str = Field(default="", description="Body text already emitted as deltas")
-    last_content: str = Field(default="", description="Most recent non-empty buffer content (for the final flush)")
+    reader: LiveOutputReader = Field(description="Extracts text deltas from successive buffer snapshots")
 
     def poll(self) -> None:
         try:
@@ -143,34 +140,20 @@ class _StreamBufferConsumer(MutableModel):
         except (FileNotFoundError, OSError, MngrError):
             # The buffer may not exist yet (watcher still starting up); benign.
             return
-        if buffer_body(content).strip():
-            self.last_content = content
-        # During streaming, only emit complete lines; the still-streaming last
-        # line is held back because its rendering churns as it grows (e.g. an
-        # emphasis span's closing marker shifts), which would otherwise force a
-        # re-emit and duplicate text.
-        delta, self.emitted_body = compute_stream_delta(content, self.emitted_body, is_flush=False)
-        if delta:
+        for delta in self.reader.feed(content):
             self.writer.emit_partial_text(delta)
 
     def flush(self) -> None:
-        """Emit any remaining (held-back) text from the last non-empty buffer.
+        """Emit the held-back final line and reset the reader for the next turn.
 
         Called at turn end (the watcher empties the buffer when the agent goes
         idle), so the final line -- never emitted during streaming because it was
-        the volatile last line -- is delivered exactly once.
-
-        The emitted/last-content state is then cleared so the next turn diffs
-        against an empty baseline. Each turn is an independent message, so without
-        this reset a new message that happens to share a leading prefix with the
-        previous one would have that prefix stripped by ``compute_stream_delta``'s
-        divergence path and be emitted truncated.
+        the volatile last line -- is delivered exactly once. The reset is what
+        keeps the next turn (an independent message) from having a shared leading
+        prefix stripped by the reader's divergence path and emitted truncated.
         """
-        delta, self.emitted_body = compute_stream_delta(self.last_content, self.emitted_body, is_flush=True)
-        if delta:
+        for delta in self.reader.finalize():
             self.writer.emit_partial_text(delta)
-        self.emitted_body = ""
-        self.last_content = ""
 
 
 def run(
@@ -300,8 +283,9 @@ def _run_with_agent(
     if partition.include_partial_messages or partition.stream_plain_text:
         stream_consumer = _StreamBufferConsumer(
             host=host,
-            buffer_path=agent.get_stream_buffer_path(),
+            buffer_path=agent.get_live_output_path(),
             writer=writer,
+            reader=agent.make_live_output_reader(),
         )
 
     state = _RunState(agent=agent, host=host, writer=writer)
@@ -384,13 +368,20 @@ def _build_agent_name() -> AgentName:
 
 def _send_user_turn(mngr_ctx: MngrContext, agent: ClaudeAgent, prompt: str) -> None:
     """Deliver a follow-up prompt to the running agent via ``send_message_to_agents``."""
-    include_filter = f'id == "{agent.id}"'
+    # The orchestrator only runs against locally-created Claude agents (see
+    # _build_events_target), so the host and provider are fixed; no discovery
+    # round-trip is needed to construct the AgentMatch.
+    match = AgentMatch(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host_id=agent.host_id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=LOCAL_PROVIDER_NAME,
+    )
     result = send_message_to_agents(
         mngr_ctx=mngr_ctx,
         message_content=prompt,
-        include_filters=(include_filter,),
-        exclude_filters=(),
-        all_agents=False,
+        agents_to_message=(match,),
         error_behavior=ErrorBehavior.ABORT,
         is_start_desired=False,
     )

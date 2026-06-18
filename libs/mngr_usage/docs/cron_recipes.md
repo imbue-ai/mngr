@@ -143,21 +143,16 @@ elapsed="$(jq -r '
 
 [[ "$elapsed" == "yes" ]] || exit 0
 
-# Make sure the warmer is up: create it the first time, else (re)start the one we
-# stopped last boundary (`|| true` tolerates it already running from an
-# interrupted run).
-if mngr list --include "name == \"$WARMER\"" --ids | grep -q .; then
-  mngr start "$WARMER" 2>/dev/null || true
-else
-  mngr create "$WARMER" claude --no-connect -- --model haiku
-fi
+# Clean up any warmer left over from an interrupted run, then spin up a fresh one.
+mngr destroy "$WARMER" --force 2>/dev/null || true
+mngr create "$WARMER" claude --no-connect -- --model haiku
 
-# One cheap prompt opens the new 5h window. Wait for the turn to finish, then STOP
-# (don't destroy): a stopped agent keeps its events, so the snapshot reflects the
-# new window and the check above won't re-fire until the next window rolls.
+# One cheap prompt opens the new 5h window. Wait for the turn to finish, then
+# destroy the warmer -- it's a throwaway, and its usage events are preserved on
+# destroy (the `preserve_on_destroy` usage-plugin option, on by default).
 mngr message "$WARMER" --message 'just say hi'
 mngr wait "$WARMER" WAITING --timeout 5m
-mngr stop "$WARMER"
+mngr destroy "$WARMER" --force
 ```
 
 ## Dispatch tasks from a queue directory
@@ -197,7 +192,7 @@ alive="$(mngr list --include 'labels.queue == "live" && state == "RUNNING"' --id
 # Only launch if there's spare capacity going unused.
 "$(dirname "$0")/spare-capacity.sh" || exit 0
 
-# Grab the oldest queued task, if any.
+# Grab the oldest queued task, if any. (For a random order, use `sort -R`.)
 task_file="$(find "$TODO_DIR" -maxdepth 1 -name '*.md' -type f | sort | head -n1)"
 [[ -n "$task_file" ]] || exit 0
 
@@ -212,10 +207,12 @@ mv "$task_file" "$claimed" || exit 0
 name="$(basename "$claimed" .md | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
 [[ -n "$name" ]] || name="task-$(date +%s)"
 
-# Create the agent in the project repo we cd'd into, tag it into the live pool,
-# and hand it the task file as its first message. --no-connect keeps it
-# non-interactive (cron has no TTY to attach a tmux session to).
-mngr create "$name" claude --label queue=live \
+# Create the agent, tag it into the live pool, and hand it the task file as its
+# first message. --no-connect keeps it non-interactive (cron has no TTY to attach
+# a tmux session to). --from ":$PROJECT_DIR" sources from the project repo, and
+# --branch main: gives each agent its own fresh branch off main (empty NEW ->
+# mngr/<name>) so concurrent tasks never share a working branch.
+mngr create "$name" claude --from ":$PROJECT_DIR" --branch main: --label queue=live \
   --message-file "$claimed" --no-connect
 ```
 

@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Generator
 from pathlib import Path
@@ -170,6 +171,14 @@ def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, No
             "LATCHKEY_DIRECTORY": str(latchkey_directory),
             "TEST_PERMISSIONS_CONFIG_PATH": str(permissions_config_path),
             "PATH": "/usr/bin:/bin",
+            # File-sharing path validation rejects paths outside the WebDAV
+            # mount roots, which the extension derives from the process's
+            # HOME / TMPDIR (Node's ``homedir()`` / ``tmpdir()``). Pin both
+            # to deterministic values so tests can use stable in-root paths
+            # (``/home/example/...`` and ``/tmp/...``) regardless of the
+            # runner's real HOME / TMPDIR.
+            "HOME": "/home/example",
+            "TMPDIR": "/tmp",
         },
         text=True,
     )
@@ -320,6 +329,171 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     assert perm_schema["properties"]["method"] == {"enum": list(expected_methods)}
 
 
+@pytest.mark.parametrize(
+    "target_path",
+    [
+        "/home/example/My Documents/data.txt",
+        "/home/example/My Documents/",
+        "/home/example/r\u00e9sum\u00e9s/sp ace/d\u00ef.txt",
+    ],
+)
+def test_file_sharing_pattern_matches_percent_encoded_request_path(
+    node_extension: tuple[str, Path, Path],
+    target_path: str,
+) -> None:
+    """A shared path with spaces / non-ASCII matches the encoded request path.
+
+    The gateway builds the permission check's request from a WHATWG URL,
+    so detent matches the per-file schema's ``pattern`` against the
+    percent-encoded ``URL.pathname`` (a space becomes ``%20``, non-ASCII
+    its UTF-8 ``%XX`` sequence). The pattern must therefore embed the
+    encoded form -- embedding the raw path (with a literal space) would
+    never match the request and the grant would be silently inert.
+    """
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "needs the shared directory",
+            "type": "file-sharing",
+            "payload": {"path": target_path, "access": "READ"},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    # The schema *name* is a human-readable plaintext key, so it keeps
+    # the raw path verbatim for auditability.
+    permission_name = _file_sharing_permission_name(target_path, "READ")
+    schema = parsed["effect"]["schemas"][permission_name]
+    path_pattern = re.compile(schema["properties"]["path"]["pattern"])
+    # ``urllib.parse.quote`` with ``safe='/'`` reproduces the WHATWG
+    # path-percent-encode set for these characters (space -> %20,
+    # non-ASCII -> UTF-8 %XX), matching what detent sees on the request.
+    encoded_path = urllib.parse.quote(f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}", safe="/")
+    raw_path = f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}"
+    # The encoded request path matches; the raw (literal-space) path does
+    # not -- the request never arrives un-encoded, and matching it would
+    # be a sign the pattern was built from the wrong (raw) form.
+    assert path_pattern.fullmatch(encoded_path), encoded_path
+    assert path_pattern.fullmatch(f"{encoded_path}/sub"), encoded_path
+    if raw_path != encoded_path:
+        assert not path_pattern.fullmatch(raw_path), raw_path
+
+
+@pytest.mark.parametrize(
+    ("requested_path", "expanded_path"),
+    [
+        ("~", "/home/example"),
+        ("~/", "/home/example/"),
+        ("~/Documents/shared.txt", "/home/example/Documents/shared.txt"),
+        ("~/My Documents/data.txt", "/home/example/My Documents/data.txt"),
+    ],
+)
+def test_post_expands_tilde_home_path_in_file_sharing(
+    node_extension: tuple[str, Path, Path],
+    requested_path: str,
+    expanded_path: str,
+) -> None:
+    """A ``~`` / ``~/...`` path expands to the current user's home directory.
+
+    The fixture pins ``HOME=/home/example`` (Node's ``homedir()``), so
+    the grant must be stored and built against the expanded absolute
+    path -- the persisted payload, the per-file schema name, and the
+    WebDAV pattern all use the expanded form rather than the ``~``
+    shorthand.
+    """
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "wants something in the home directory",
+            "type": "file-sharing",
+            "payload": {"path": requested_path, "access": "READ"},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    # The persisted payload carries the expanded absolute path, not the
+    # ``~`` shorthand the agent supplied.
+    assert parsed["payload"]["path"] == expanded_path
+    expanded_name = _file_sharing_permission_name(expanded_path, "READ")
+    requested_name = _file_sharing_permission_name(requested_path, "READ")
+    schemas = parsed["effect"]["schemas"]
+    assert expanded_name in schemas
+    assert requested_name not in schemas
+    # The WebDAV pattern matches the percent-encoded expanded path.
+    path_pattern = re.compile(schemas[expanded_name]["properties"]["path"]["pattern"])
+    encoded_webdav_path = urllib.parse.quote(f"{_FILE_SHARING_PROXY_PATH_PREFIX}{expanded_path}", safe="/")
+    assert path_pattern.fullmatch(encoded_webdav_path), encoded_webdav_path
+
+
+def test_post_rejects_tilde_user_notation_in_file_sharing(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """``~user`` (another user's home) cannot be resolved here and is rejected."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "~otheruser/secret.txt", "access": "READ"},
+        },
+    )
+    assert status == 400, body
+    message = json.loads(body)["error"]
+    assert "~user" in message
+
+
+def test_post_rejects_tilde_traversal_in_file_sharing(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """``~/../...`` must not escape the home directory via expansion."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "~/../etc/passwd", "access": "READ"},
+        },
+    )
+    assert status == 400, body
+    assert "traversal" in json.loads(body)["error"].lower()
+
+
+def test_approve_with_tilde_path_override_expands_home(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A ``~``-prefixed path edited into the approve dialog expands to home."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "needs a file",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/requested.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+
+    approve_status, approve_body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "~/Documents/Shared"},
+    )
+    assert approve_status == 200, approve_body
+    applied = json.loads(permissions_config_path.read_text())
+    expanded_name = _file_sharing_permission_name("/home/example/Documents/Shared", "READ")
+    assert applied["rules"] == [{_FILE_SHARING_SCOPE_NAME: [expanded_name]}]
+    assert expanded_name in applied["schemas"]
+
+
 def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
     node_extension: tuple[str, Path, Path],
 ) -> None:
@@ -440,6 +614,41 @@ def test_post_rejects_traversal_in_file_sharing(node_extension: tuple[str, Path,
         assert "traversal" in message or "absolute" in message, (traversal_path, message)
 
 
+def test_post_rejects_path_outside_mount_roots(node_extension: tuple[str, Path, Path]) -> None:
+    """A path outside the home / temp WebDAV mounts is rejected at creation."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "wants a system file",
+            "type": "file-sharing",
+            "payload": {"path": "/etc/passwd", "access": "READ"},
+        },
+    )
+    assert status == 400, body
+    message = json.loads(body)["error"]
+    assert "shared root" in message
+    # The error names the roots so the agent can self-correct.
+    assert "/home/example" in message
+    assert "/tmp" in message
+
+
+def test_post_accepts_path_under_temp_root(node_extension: tuple[str, Path, Path]) -> None:
+    """A path under the system temp mount is accepted (the temp dir is a shared root)."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "share a scratch file",
+            "type": "file-sharing",
+            "payload": {"path": "/tmp/scratch/output.txt", "access": "WRITE"},
+        },
+    )
+    assert status == 201, body
+
+
 def test_post_rejects_extraneous_top_level_field(node_extension: tuple[str, Path, Path]) -> None:
     base_url, *_ = node_extension
     status, body = _post_json(
@@ -490,6 +699,29 @@ def test_post_rejects_unknown_permission_in_predefined(node_extension: tuple[str
     error = json.loads(body)["error"]
     assert "permissions" in error
     assert "made-up-perm" in error
+
+
+@pytest.mark.parametrize("scope", ["slack-api", "linear-api"])
+def test_post_accepts_any_permission_for_known_scope(node_extension: tuple[str, Path, Path], scope: str) -> None:
+    """The catch-all ``any`` permission is valid under any known scope.
+
+    This holds even for a scope whose catalog enumerates no permissions
+    (``linear-api``), so a caller can always request unrestricted access
+    under a known scope.
+    """
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": scope, "permissions": ["any"]},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["effect"] == {"rules": [{scope: ["any"]}]}
 
 
 def test_post_rejects_permission_from_a_different_scope(node_extension: tuple[str, Path, Path]) -> None:
@@ -696,6 +928,179 @@ def test_approve_404s_on_unknown_request_id(node_extension: tuple[str, Path, Pat
     status, body = _post_json(f"{base_url}/permission-requests/approve/nope", None)
     assert status == 404
     assert "not found" in json.loads(body)["error"].lower()
+
+
+def test_approve_with_path_override_recomputes_file_sharing_effect(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A user-edited path in the approve body retargets the file-sharing grant.
+
+    The agent requests one path; the user edits it before approving. The
+    grant that lands must target the user's path -- the per-file schema
+    name and pattern derive from the edited path, and the originally
+    requested path must not appear in the applied permissions.
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    requested_path = "/home/example/requested.txt"
+    edited_path = "/home/example/Documents/Shared"
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "needs a file",
+            "type": "file-sharing",
+            "payload": {"path": requested_path, "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+
+    approve_status, approve_body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": edited_path},
+    )
+    assert approve_status == 200, approve_body
+
+    applied = json.loads(permissions_config_path.read_text())
+    edited_name = _file_sharing_permission_name(edited_path, "READ")
+    requested_name = _file_sharing_permission_name(requested_path, "READ")
+    # The grant targets the edited path, not the originally requested one.
+    assert applied["rules"] == [{_FILE_SHARING_SCOPE_NAME: [edited_name]}]
+    assert edited_name in applied["schemas"]
+    assert requested_name not in applied["schemas"]
+    # The schema's URL pattern embeds the edited path under the WebDAV mount.
+    pattern = applied["schemas"][edited_name]["properties"]["path"]["pattern"]
+    assert edited_path in pattern
+    assert requested_path not in pattern
+
+
+def test_approve_with_path_override_preserves_requested_access_mode(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """Editing the path must not change the access mode fixed at request time."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "needs to write",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/orig", "access": "WRITE"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    approve_status, _ = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/home/example/edited"},
+    )
+    assert approve_status == 200
+    applied = json.loads(permissions_config_path.read_text())
+    # The recomputed schema keeps the WRITE access mode (write verbs present).
+    write_name = _file_sharing_permission_name("/home/example/edited", "WRITE")
+    assert write_name in applied["schemas"]
+    methods = applied["schemas"][write_name]["properties"]["method"]["enum"]
+    assert "PUT" in methods and "DELETE" in methods
+
+
+def test_approve_rejects_path_override_for_predefined_request(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A path override only makes sense for file-sharing; reject it elsewhere."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    status, body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/home/example/whatever"},
+    )
+    assert status == 400, body
+    assert "file-sharing" in json.loads(body)["error"]
+    # The grant was not applied (the request stays pending).
+    assert not permissions_config_path.exists()
+
+
+def test_approve_rejects_traversal_in_path_override(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A ``..`` segment in the edited path is rejected just like at creation."""
+    base_url, *_ = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/ok.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    status, body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/home/example/../../etc/shadow"},
+    )
+    assert status == 400, body
+    assert "traversal" in json.loads(body)["error"].lower()
+
+
+def test_approve_rejects_path_override_outside_mount_roots(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """An edited path outside the WebDAV mounts is rejected on approve, same as at creation."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/ok.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    status, body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/etc/shadow"},
+    )
+    assert status == 400, body
+    assert "shared root" in json.loads(body)["error"]
+    # The grant was not applied (the request stays pending).
+    assert not permissions_config_path.exists()
+
+
+def test_approve_rejects_extraneous_field_in_override_body(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """Only ``path`` is allowed in the approve override body."""
+    base_url, *_ = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/ok.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    status, body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "/home/example/ok.txt", "access": "WRITE"},
+    )
+    assert status == 400, body
+    assert "access" in json.loads(body)["error"]
 
 
 def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) -> None:

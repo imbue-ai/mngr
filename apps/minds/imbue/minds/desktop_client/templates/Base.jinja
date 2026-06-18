@@ -1,4 +1,4 @@
-{#def title="Minds", body_class="bg-zinc-50 text-zinc-900 font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
+{#def title="Minds", body_class="bg-white text-zinc-900 font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
 {#
   Base layout. Every page wraps its content in this component.
   Pulls in the Tailwind Play CDN JS (downloaded once into /_static/tailwind.js
@@ -9,9 +9,13 @@
   Args:
     title       contents. Defaults to "Minds".
     body_class  classes on body. Default is the light page surface.
-    body_style  inline style on body. Used to set --workspace-accent on
-                in-workspace pages so the top stripe picks up the
-                deterministic per-project color.
+    body_style  free-form inline style on body. The chrome page uses
+                this to set ``background-color: var(--titlebar-bg, ...)``
+                so the body color bleeds through the content iframe's
+                rounded top corners; other pages can use it for any
+                document-root CSS variable they need to scope to a
+                single page (e.g. a per-workspace ``--workspace-accent``
+                feeding accent-spine / accent-swatch consumers).
     body_attrs  extra attributes on body, as a raw HTML fragment (e.g.
                 'data-is-mac="true" data-mngr-forward-origin="..."').
     head        extra head content (page-specific link/meta tags). HTML.

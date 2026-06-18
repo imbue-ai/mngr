@@ -36,7 +36,23 @@ from imbue.minds.errors import BackupProvisioningError
 
 _T = TypeVar("_T")
 
-_RESTIC_BINARY: Final[str] = "restic"
+
+def _get_restic_binary() -> str:
+    """Resolve the restic CLI path.
+
+    Prefers ``MINDS_RESTIC_BINARY`` -- the bundled binary that ships in
+    ``resources/restic/restic``. Electron's backend.js sets it in both
+    dev and packaged mode (via ``paths.getResticPath()``); tests get it
+    from the session conftest. End users -- and devs running tests --
+    never need a system-wide restic install. Falls back to ``"restic"``
+    (PATH lookup) only as a last resort.
+
+    Resolved at every call site rather than at import time so a fixture
+    can set the env var before the first restic operation runs.
+    """
+    return os.environ.get("MINDS_RESTIC_BINARY") or "restic"
+
+
 # restic treats locks older than 30 minutes as stale and ignores them.
 _LOCK_STALE_SECONDS: Final[float] = 30 * 60.0
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 60.0
@@ -65,11 +81,19 @@ class ResticTransientAuthError(BackupProvisioningError):
 
 
 def ensure_restic_available() -> None:
-    """Raise ``ResticNotInstalledError`` if ``restic`` is not on PATH."""
-    if shutil.which(_RESTIC_BINARY) is None:
+    """Raise ``ResticNotInstalledError`` if ``restic`` cannot be located.
+
+    The bundled binary at ``resources/restic/restic`` is the expected
+    source; a missing binary means the dev tree hasn't run ``pnpm
+    build`` (which downloads restic) and ``pnpm start``'s ``prestart``
+    hook hasn't run either.
+    """
+    binary = _get_restic_binary()
+    if shutil.which(binary) is None:
         raise ResticNotInstalledError(
-            "restic is not installed on this machine; install it to enable backups "
-            "(https://restic.readthedocs.io/en/stable/020_installation.html)"
+            f"restic binary not found at {binary!r}. The minds build is supposed "
+            "to bundle it; run `pnpm build` in apps/minds/ to download "
+            "resources/restic/restic, or set MINDS_RESTIC_BINARY explicitly."
         )
 
 
@@ -87,7 +111,7 @@ def _run_restic(
     cg = parent_cg.make_concurrency_group(name="restic") if parent_cg is not None else ConcurrencyGroup(name="restic")
     with cg:
         return cg.run_process_to_completion(
-            command=[_RESTIC_BINARY, *args],
+            command=[_get_restic_binary(), *args],
             env=env,
             timeout=float(timeout_seconds),
             is_checked_after=False,

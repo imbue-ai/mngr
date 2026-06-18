@@ -7,7 +7,7 @@
 
 ```text
 mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--adopt <SESSION>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
@@ -99,13 +99,13 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
 | `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types | `False` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
-| `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file [repeatable]. | None |
 
 ## Source Data (what to include in the new agent)
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH &#x7C; GIT_URL]. A bare name refers to an agent; use :PATH for a directory. GIT_URL (e.g. https://github.com/owner/repo or git@gitlab.com:owner/repo.git) is cloned to ~/.mngr/clones/<name>-<id>/ using local git auth. Defaults to git root if omitted | None |
+| `--adopt`, `--adopt-session` | text | Adopt an existing session into this newly created agent so it resumes that conversation. Accepts a session id or a path to the session file; a session id is searched across the relevant user/config store, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: every named session is copied in, and the last is resumed on startup (unless combined with --from, in which case the source agent's session is resumed). | None |
 | `--rsync`, `--no-rsync` | boolean | Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled] | None |
 | `--rsync-args` | text | Additional arguments to pass to rsync | None |
 
@@ -204,13 +204,68 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 
 ## Provider Build/Start Arguments
 
+Provider: aws
+  EC2-specific args (consumed by provider, not passed to docker):
+    --aws-region=REGION         Must match the provider config's default_region;
+                                the client is bound to one region at construction
+                                and refuses cross-region creates. To target multiple
+                                regions, define one [providers.aws-<region>] block
+                                per region (see mngr_aws README 'Multiple regions').
+    --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
+    --aws-ami=AMI-ID            Override the per-host AMI for this create only
+                                (default: provider config's default_ami_id /
+                                default_ami_by_region for the chosen region)
+    --aws-spot                  Run on EC2 spot capacity (presence-only flag).
+                                AWS may reclaim with ~2 min notice; the host is
+                                terminated, not stopped, on reclaim. Opt-in only.
+    --git-depth=N               Shallow-clone build context to depth N before upload
+
+  All other build args are passed to 'docker build' on the EC2 instance.
+  Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
+Provider: azure
+  Azure-specific args (consumed by provider, not passed to docker):
+    --azure-region=REGION       Azure region / location (default: westus)
+    --azure-vm-size=SIZE        Azure VM size (default: Standard_B2s)
+    --azure-spot                Run on Azure Spot capacity (presence-only flag).
+                                Azure may reclaim on capacity pressure; the host is
+                                deleted, not stopped, on eviction. Opt-in only.
+    --git-depth=N               Shallow-clone build context to depth N before upload
+
+  All other build args are passed to 'docker build' on the VM.
+  Example: -b --azure-vm-size=Standard_D2s_v5 -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
 Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
+Provider: gcp
+  GCE-specific args (consumed by provider, not passed to docker):
+    --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal
+                             the provider's configured zone; defaults to the config's
+                             default_zone, the active gcloud compute/zone, or us-west1-a)
+    --gcp-machine-type=TYPE  GCE machine type (default: e2-small)
+    --gcp-image=IMAGE        GCE boot-disk source image for this host, overriding the
+                             config's default_source_image (a full image / family URL)
+    --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).
+    --git-depth=N            Shallow-clone build context to depth N before upload
+
+  When --gcp-image is omitted the VM image is taken from the provider config
+  (default_source_image).
+
+  All other build args are passed to 'docker build' on the GCE instance.
+  Example: -b --gcp-machine-type=e2-medium -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 Provider: imbue_cloud
   Build args constrain which pool host the connector leases for this `mngr create`. Recognized keys (see LeaseAttributes): repo_url, repo_branch_or_tag, cpus, memory_gb, gpu_count. Unknown keys are rejected. Example: `mngr create my-agent@my-host.imbue_cloud_alice --new-host -b cpus=4 -b repo_branch_or_tag=v1.2.3`.
   Start args are not used by the imbue_cloud provider.
+
+Provider: imbue_cloud_slice
+  Slice args are passed through to the shared vps_docker bake (e.g. --file=Dockerfile, the build context).
+  Start args are passed directly to 'docker run' inside the slice VM.
 
 Provider: lima
   Supported build arguments for the lima provider:
@@ -255,14 +310,14 @@ Provider: modal
   No start arguments are supported for the modal provider.
 
 Provider: ovh
-  VPS-specific args (consumed by provider, not passed to docker):
-    --vps-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)
-    --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
-    --vps-os=NAME         OVH image name (default: 'Debian 12 - Docker')
+  OVH-specific args (consumed by provider, not passed to docker):
+    --ovh-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)
+                          (alias: --ovh-region=)
+    --ovh-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
     --git-depth=N         Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the VPS.
-  Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .
+  Example: -b --ovh-plan=vps-2025-model1 -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 Provider: ssh
@@ -281,14 +336,13 @@ Provider: ssh
   No start arguments are supported for the SSH provider.
 
 Provider: vultr
-  VPS-specific args (consumed by provider, not passed to docker):
-    --vps-region=REGION  Vultr region (default: ewr)
-    --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
-    --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
-    --git-depth=N        Shallow-clone build context to depth N before upload
+  Vultr-specific args (consumed by provider, not passed to docker):
+    --vultr-region=REGION  Vultr region (default: ewr)
+    --vultr-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
+    --git-depth=N          Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the VPS.
-  Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
+  Example: -b --vultr-plan=vc2-2c-4gb -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 

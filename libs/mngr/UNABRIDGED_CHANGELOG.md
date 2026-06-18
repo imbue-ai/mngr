@@ -4,6 +4,1337 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+Loosened the `create_test_agent` test helper's `agent_class` parameter (and return type) to accept any `BaseAgent` subclass, including ones parameterized on a specific `AgentTypeConfig` subclass (e.g. `OpenCodeAgent`). The generic is invariant, so the previous base parameterization rejected such agents, making it impossible to type-check a test that provisions a concrete agent type. No runtime behavior change.
+
+The plugin install wizard (`mngr plugin install-wizard`, `mngr extras -i`) now knows about the usage plugins. Phase 1 recommends the base `imbue-mngr-usage` plugin for everyone. Phase 2 offers each per-agent usage provider (`imbue-mngr-claude-usage`, `imbue-mngr-codex-usage`, `imbue-mngr-opencode-usage`, `imbue-mngr-pi-coding-usage`) only when both its agent plugin and the base usage plugin are present -- already installed or selected earlier in the wizard. This is expressed by a per-entry `gate` field on catalog entries -- a `SignalGate` (detected tool) or `RequiredPackagesGate` (other packages must be present) -- which replaces the previous separate `signal` / `requires_packages` fields and lets the wizard ask each entry whether it is unlocked rather than branching on shape. Antigravity has no usage provider, so none is offered for it.
+
+Added shared agent-preservation wiring so any plugin can mirror the claude/usage preserve-on-destroy behavior with minimal code.
+
+- `build_transcript_preserved_items(event_source)` returns the standard raw (`logs/<source>_transcript`) and common (`events/<source>/common_transcript`) transcript directories an agent writes, centralizing the on-disk convention.
+
+- `preserve_agent_state(items, agent, host)` is a thin online-path wrapper (for a plugin's `on_destroy`) that resolves the agent's state directory and local preserved-files destination.
+
+- `preserve_host_agents_on_destroy(host, mngr_ctx, agent_type, items_for_agent)` is the shared body for a plugin's `on_before_host_destroy` hookimpl: it skips hosts with no readable volume, filters discovered agents by `agent_type`, and preserves each opted-in agent straight off the host volume.
+
+- `flag_gated_items(ref, flag_name, items)` is the shared offline selector helper: it returns `items` only when the discovered agent's persisted `agent_config[flag_name]` is truthy (else `None`), so plugins no longer hand-roll the same opt-in dict-walk for `on_before_host_destroy`.
+
+- The shared agent release lifecycle (`run_agent_release_lifecycle`) now asserts preservation: its destroy step verifies the agent's raw and common transcripts actually landed in `<local_host_dir>/preserved/<agent-name>--<agent-id>/` (keyed on the seeded secret), so a swallowed preservation failure can no longer pass silently. Every plugin built on the shared lifecycle inherits the check.
+
+- Profiles can declare `native_session_preserved_relpaths` so the lifecycle also asserts the agent's native resumable session store was preserved on destroy (not just the transcripts). A FIXME marks where this should grow into an actual resume-from-preserved-store check once `--adopt-session` lands for these agents.
+
+## Azure provider registration
+
+- Added `azure` to the set of remote provider backends that are skipped when tests load local-only backends (`_REMOTE_BACKEND_NAMES` in `providers/registry.py`), so the new `mngr_azure` plugin behaves like `aws` / `gcp` / `vultr` during test isolation.
+
+- `ProviderUnavailableError` now accepts an optional `user_help_text` override. The default still tells the user to start Docker / disable the provider, but cloud providers (whose "unavailable" cause is a credential/subscription problem, not a local daemon) can pass curated guidance instead -- so a cloud auth failure no longer advises "start Docker". Used by the Azure provider.
+
+- Regenerated `mngr azure` and `mngr ovh` CLI docs: `mngr azure prepare` / `mngr azure cleanup` and `mngr ovh list` now take a `--provider` option (and the standard common options) so they read defaults from the selected `[providers.NAME]` settings.toml block.
+
+- Added the `azure` provider backend (`imbue-mngr-azure`) to the install-wizard plugin catalog (`PLUGIN_CATALOG`), so `mngr plugin install` offers it alongside `aws` / `gcp` / `ovh` / `vultr`.
+
+- `mngr gc` gained a provider garbage-collection hook (`ProviderInstanceInterface.gc_provider_resources`, a no-op by default) so a provider can reclaim orphaned cloud resources that are not attached to any host. Reclaimed resources are reported in the gc summary (human / JSON / JSONL) under "Provider resources" and honor `--dry-run`. The Azure provider uses it to reap NIC / public-IP orphans from failed VM creates; that cleanup previously ran at the start of the next `create_instance`.
+
+Changed: `mngr_common_transcript_flush` (shared common-transcript helper) now takes an
+optional lock-acquire timeout (seconds), exported as `MNGR_CONVERT_LOCK_TIMEOUT` to each
+synchronous converter pass. This lets a latency-sensitive caller (e.g. a SIGTERM/SIGINT
+handler) cap how long the flush blocks waiting for the convert lock -- its only
+potentially-slow step. Implemented without `timeout(1)` so it stays portable to macOS.
+Callers that pass no argument are unchanged (default 30s).
+
+- `mngr git push`, `mngr git pull`, and `mngr rsync` now run the underlying `git` / `rsync` binary as a plain subprocess with the user's stdout/stderr (no redirection), so progress, errors, and pager-style output flow directly to the terminal. stdin is redirected to /dev/null, so the underlying binary can't block waiting for input (credential prompts, host-key confirmations, merge-message editors, etc.) -- those are misconfigurations and we'd rather fail fast than have the agent hang. mngr still waits for the underlying process to exit, so destination-side cleanup -- including `mngr rsync --uncommitted-changes=merge`'s stash pop -- continues to run as before. The `_complete` JSONL terminating events (`{"success": true}` for git, `{"event": "rsync_complete", ...}` for rsync) and the trailing "Rsync complete: N files, M bytes transferred" human line are gone; on a non-zero exit, mngr raises its own `GitSyncError` / `MngrError` so the CLI still surfaces the failure (the underlying exit code is included in the message).
+- `imbue.mngr.api.git.git_push` / `git_pull` and `imbue.mngr.api.rsync.rsync` / `rsync_to_remote` / `rsync_from_remote` grow an optional `run_in_terminal: bool = False` parameter. Default behavior (captured stdout/stderr via `ConcurrencyGroup`) is unchanged, so in-process callers like `mngr_pair` and `mngr_mapreduce` are unaffected; only the `mngr` CLI passes `True`. The terminal-stdio path goes through the existing `imbue.mngr.utils.interactive_subprocess.run_interactive_subprocess` helper, called with `stdin=subprocess.DEVNULL`.
+- `RsyncResult`, `imbue.mngr.utils.rsync_utils.parse_rsync_output`, and the whole `rsync_utils` module are removed. The rsync API functions now return `None` -- the existing callers (the `mngr rsync` CLI and `mngr_mapreduce`) already discarded the return value, and the `files_transferred` / `bytes_transferred` counts were already useless in `run_in_terminal=True` mode. rsync still runs with `--stats`, so CLI users still see the summary block in their terminal at the end of a transfer.
+
+`mngr stop`, `mngr destroy`, and `mngr cleanup` now aggregate and classify cleanup failures instead of hanging on, or silently swallowing, problems.
+
+Previously the stop path ran its tmux/process-collection shell commands (`tmux list-windows`, `tmux list-panes`, `tmux kill-session`, the `pgrep` descendant walk, the `MNGR_AGENT_ID` env scan, and the SIGTERM/SIGKILL loop) without a timeout, so a wedged `tmux list-panes` could block `Host.stop_agents` indefinitely; and both the stop and destroy paths swallowed most other failures (logging a warning and exiting 0), so a partially-failed cleanup looked identical to a clean one.
+
+Now every cleanup step is bounded and its outcome is classified as either benign (the target was already gone -- no error, exit 0) or a real failure (a resource is actually left behind). Real failures are aggregated across all steps/agents/hosts (cleanup continues rather than failing fast), each tagged with a cause category, and surfaced two ways:
+
+- The process exits with a cause-specific, informative exit code (the most severe cause when several occur): `2` timeout, `3` processes remain, `4` local state remains, `5` host/infrastructure remains, `6` provider inaccessible, `1` other. A clean or only-benign run still exits `0`.
+
+- Structured output (`--format json`) now reports a `failures` list (each with `category`, `message`, `agent_name`, `host_id`) and an `exit_code` field, replacing the old `errors` string list.
+
+Benign detection: shell commands (stop, `rm`) classify by stderr message matching (e.g. tmux "can't find session", kill "No such process"); the destroy path classifies by provider exception type (e.g. Docker `NotFound`). Timeouts are treated as one failure cause among many. Stopping an agent on an offline host is now reported as a real `PROVIDER_INACCESSIBLE` failure (the host is unreachable so the agents cannot be verified stopped) rather than a silent skip.
+
+`Host.stop_agents`, `Host.destroy_agent`, and `ProviderInstance.destroy_host` now raise a `CleanupFailedGroup` (an `ExceptionGroup` whose leaves carry the classified `CleanupFailure`s) when a real resource is left behind, and return normally otherwise -- so a caller can never silently drop a leftover-resource failure by ignoring a return value. `execute_idempotent_command` gains an opt-in `raise_on_timeout` flag that normalizes the two backends' differing timeout signals (local: a killed process; remote: `socket.timeout`) into a single `CommandTimeoutError`; other callers are unchanged. See `specs/cleanup-error-aggregation.md`.
+
+`mngr gc` now reports cleanup failures as structured, categorized failures (consistent with `mngr destroy`/`stop`/`cleanup`) and **exits with a cause-specific exit code** (`2`/`3`/`4`/`5`/`6`, most severe when several occur) when garbage collection leaves a resource behind -- e.g. a snapshot or volume that could not be deleted (`5` host/infrastructure remains), a work dir, source dir, log, or build-cache entry that could not be removed (`4` local state remains), or an explicitly-requested provider that was unavailable (`6` provider inaccessible). Previously gc only exited non-zero when an explicitly-requested provider was skipped, so failed snapshot/volume/work-dir deletions did not affect the exit code. Structured output (`--output json`/`jsonl`) now includes a `failures` list (each with `category`, `message`, `agent_name`, `host_id`) alongside the existing `errors` strings.
+
+Gave `test_cli_create_rejects_dirty_tree_by_default` a 30s `@pytest.mark.timeout` (matching its sibling `test_cli_create_via_subprocess`) so a cold `uv run mngr create` startup under load no longer races the global 10s pytest timeout.
+
+- **Concurrent SSH keypair creation is now race-free.** `load_or_create_ssh_keypair` (`providers/ssh_utils.py`) serializes first-time creation behind an exclusive file lock, and `save_ssh_keypair` writes both key files atomically (temp file + `os.replace`, via the shared `atomic_write` helper) before applying their permissions. The parallel host-discovery fan-out opens one SSH connection per VPS and each lazily creates this keypair on first use; previously racing writers could leave a transient zero-byte or mismatched `.pub`, which surfaced as `ValueError: Not enough fields for public blob` deep in paramiko's certificate probe and aborted `mngr create`. This was observed intermittently on the OVH (and, via the same discovery path, Vultr) release tests.
+
+- **paramiko's bare key-probe `ValueError` is now surfaced as a structured `HostConnectionError`.** `OuterHost._ensure_connected` wraps the `ValueError` paramiko raises when it parses a malformed/half-written `.pub` next to the private key, so callers that catch `MngrError` (e.g. best-effort host discovery) treat it as an ordinary per-host connection failure instead of letting it abort the whole operation.
+
+## 2026-06-15
+
+Regenerated the bundled CLI reference docs to include the new `mngr imbue_cloud admin server pricing` command (per-slice OVH bare-metal pricing table).
+
+Regenerated the `imbue_cloud` CLI reference docs to include the new `admin server` command group (list / register / allocate-slice / set-status) added for the OVH bare-metal slices feature.
+
+- `mngr create --format json` (and `--format jsonl`) now also reports the created host's name and SSH connection (`ssh_user` / `ssh_host` / `ssh_port`), plus an `outer_ssh_port` when the provider exposes a separate outer/management sshd (e.g. an OVH-slice's VM-root port reached via a box-forwarded port). Previously only `agent_id` / `host_id` were emitted. A new `HostInterface.get_outer_ssh_port` hook (default `None`) backs this.
+
+- `VpsDockerProvider.record_outer_host_key` pins an outer (VPS-root) sshd host key in the provider's known_hosts -- used when operating on a VPS the provider did not order itself (e.g. the imbue_cloud rebuild on a leased host) so its outer connections pass strict host-key checking.
+
+- `mngr create --format json` now also reports the agent SSH endpoint's on-disk private key path (`ssh_key_path`), so pool-bake tooling can run post-bake SSH steps against the host without a second `mngr list` round-trip.
+
+Added a `--window` (`-w`) option to `mngr capture` for capturing a non-primary tmux window in the agent's session, by index (e.g. `--window 1`) or name. Without it, capture still reads the agent's primary window as before.
+
+Added a shared shell library `mngr_common_transcript_lib.sh`, provisioned to every
+agent's `commands/` dir alongside `mngr_log.sh` and `mngr_transcript_lib.sh` (via
+`Host._ensure_shared_shell_libs`). It centralizes the common-transcript converter
+primitives shared across agent plugins:
+
+- the convert lock (a coarse mkdir-based mutex serializing the converter's
+read-modify-write so the background daemon and an on-demand `--single-pass` flush
+can't append duplicate events), and
+
+- the turn-end flush (one synchronous `--single-pass` of the raw streamer + common
+converter, in pipeline order), used by agent turn-end hooks so a WAITING-signal
+consumer can't outrun the converter.
+
+Centralized the Claude Code CLI presence check. `mngr extras` status (`_claude_plugin_status`) and the `is_claude_installed` test helper now both defer to the canonical `CLAUDE.is_available()` system-dependency check instead of re-implementing `shutil.which("claude")` inline, so the binary name and lookup logic live in one place.
+
+Also removed a duplicate subprocess-error tuple: `extras.py` now imports the shared `SUBPROCESS_ERRORS` from `imbue.mngr.utils.deps` (promoted from the previously private `_SUBPROCESS_ERRORS`) rather than defining its own copy.
+
+Fixed a regression in the e2e test fixture that wrote a malformed `settings.local.toml`
+(a duplicated `type = "claude"` key under `[commands.create]`). The duplicate key made
+every `mngr` invocation in the e2e/tutorial release suite fail to parse its config and
+exit non-zero, cascading into a large block of release-test failures.
+
+Also updated two e2e tutorial tests (`test_config_set_unknown_key_fails`,
+`test_config_set_rejects_unknown_key`) that assumed the project `settings.toml` does not
+exist until a command writes it. The e2e fixture now intentionally pre-seeds that file
+with the pytest opt-in key, so these tests now verify that a rejected `config set` leaves
+the file unchanged (and never writes the bad key) rather than asserting the file is absent.
+
+All test-only changes; they do not change `mngr`'s runtime behavior.
+
+## GCP provider integration
+
+- `mngr create` CLI markdown docs regenerated to include the new `gcp` provider's build-args help (`--gcp-zone`, `--gcp-machine-type`, `--gcp-image`, `--gcp-spot`, `--git-depth`), and the `mngr gcp` operator command group docs added (`docs/commands/secondary/gcp.md`), covering both `mngr gcp prepare` and `mngr gcp cleanup`.
+- `gcp` added to `_REMOTE_BACKEND_NAMES` in `providers/registry.py` (alongside `aws`/`vultr`/`modal`/`imbue_cloud`). The GCP backend resolves Application Default Credentials at build time, and `google.auth.default()` probes the GCE metadata server as its last fallback, which blocks for seconds in non-GCE environments without credentials. Marking it remote means `load_local_backend_only` (the test default) skips it, so provider-enumerating tests no longer build a default GCP provider and hang on that probe.
+- `gcp` and `ovh` added to the install-wizard plugin catalog (`plugin_catalog.py`) as INDEPENDENT provider backends, so `mngr` offers them during plugin installation alongside `aws`/`vultr`/`modal`. (`ovh` was already published but had been missing from the catalog.)
+- New `ssh_utils.wait_for_expected_host_key` (and the `parse_openssh_public_key_blob` helper): polls a server's live SSH host key until it matches a known expected key, then returns. Used by the GCP provider, whose `startup-script` installs the host key only after sshd has already booted with a random one; waiting before the strict-checked connection avoids a host-key-mismatch abort without resorting to TOFU.
+
+CLI docs (`libs/mngr/docs/commands/secondary/usage.md`, regenerated via `scripts/make_cli_docs.py`): reflect the `mngr usage` help-output regrouping and the `--max-age` -> `--stale-after` rename in `imbue-mngr-usage`. `--stale-after` and `--detail` now appear under a `## Display` section; `--since` and `--preserved/--no-preserved` now appear under `## Filtering` alongside the agent-filter flags. The old `## Other Options` section is gone. The rendered synopsis is updated to `mngr usage [--stale-after DURATION] [--detail] [--since DURATION] [--no-preserved] [COMMAND]`.
+
+`test_synopsis_lists_all_non_optout_flags` (in `libs/mngr/imbue/mngr/cli/help_formatter_test.py`): no longer silently skips commands whose synopsis is a placeholder like `[OPTIONS]`. Such commands' custom non-Common flags are now reported as missing from the synopsis (and the author must either enumerate them or add them to `_SYNOPSIS_OPTOUT_FLAGS`). Factored out a shared `_AGENT_FILTER_FLAGS` constant covering the 11 flags injected by `add_agent_filter_options`.
+
+`mngr connect`, `mngr gc`, `mngr list`, `mngr snapshot create`, `mngr snapshot list`, `mngr snapshot destroy`: replace placeholder `[OPTIONS]` synopses with enumerated ones. For `list`, behavior/input flags (`--stdin`, `--schema`, `--ids`, `--addrs`, `--fields`, `--sort`) are pulled to the front, followed by the standard filter set, with `--limit` and `--on-error` trailing. For `connect`, `[future]` flags (`--reconnect`, `--session-command`) are omitted -- they remain unimplemented stubs.
+
+`[future]`-flag detection: extract `_check_connect_future_options` in `connect.py` (mirroring `_check_create_future_options` / `_check_list_future_options` in `snapshot.py`) and pin every `[future]` flag with parametrized tests (`test_future_flags_raise_not_implemented_error` in `connect_test.py`; `test_snapshot_create_future_flags_raise_not_implemented_error` / `test_snapshot_list_future_flags_raise_not_implemented_error` in `snapshot_test.py`) that fail when any `[future]` flag stops raising `NotImplementedError`. The failure message tells the author to add the flag to its command's synopsis and delete the corresponding test case.
+
+CLI docs regenerated: `libs/mngr/docs/commands/primary/connect.md`, `libs/mngr/docs/commands/primary/list.md`, `libs/mngr/docs/commands/secondary/gc.md`, `libs/mngr/docs/commands/secondary/kanpan.md`.
+
+Added a shared `WaitingReason` enum (`imbue.mngr.primitives`) and a shared `classify_waiting_reason` rule (`imbue.mngr.hosts.common`) so agent plugins compute the `waiting_reason` field from one source of truth instead of each defining their own. The codex and claude plugins now import these instead of duplicating the enum and the gating logic, and use the existing `OnlineHostInterface.path_exists` for marker checks rather than a private file-existence helper.
+
+## 2026-06-14
+
+- Changed: `mngr extras` status (`_print_extras_status`) now accepts an injectable `claude_status_fn` (mirroring the existing `status_fn` seam on the `_install_*` helpers), so its test can skip shelling out to the `claude` CLI. This removes the slow, variable Node-process startup that made `test_print_extras_status_runs_without_error` flaky under the offload timeout. Internal/test-only; default behavior is unchanged.
+
+Fixed `mngr clone` failing with "destination path ... already exists and is not an empty directory" when cloning a remote agent to a local target (e.g. `mngr clone <agent> <name> --provider local`). The git-mirror transfer initializes a bare repo at the target before fetching, but the remote-source-to-local-target path used `git clone --mirror`, which refuses a non-empty destination. It now performs a mirror-style `git fetch` into the existing bare repo instead.
+
+User-facing CLI errors (`MngrError` and its subclasses) now render their `Error:` line in bold red on a color-capable terminal, matching the colored `ERROR:` prefix already used for `logger.error`. Previously click printed the line in the default terminal color, so an actionable failure (for example, "run `mngr gcp prepare` first" before the firewall rule exists) was visually indistinguishable from normal output. Coloring is gated on the same policy as other mngr output: it is suppressed when stderr is not a TTY or when `NO_COLOR` is set, so piped/captured output stays plain. Exit semantics are unchanged (still a clean exit 1, never a traceback).
+
+Fix the "branch already checked out" error from `mngr create` to suggest the correct flag. It previously pointed users at `--in-place`, which no longer exists (it was consolidated into `--transfer`); it now suggests `--transfer=none`.
+
+Fixed `mngr clone` (and any agent creation) failing when transferring a git repo from one remote host to another remote host. Previously the git push was run directly on the remote source host but pointed at the target's SSH key and known_hosts files, which only exist on the local orchestrator machine -- producing errors like "Identity file ... not accessible" and "Host key verification failed". The transfer now relays through a local bare mirror: it pulls from the source using the source's credentials, then pushes to the target using the target's, both run locally where those files exist. This matches the existing remote-to-remote handling already used for rsync transfers.
+
+Fixed the SSH-backed-host test fixture (`local_sshd`) leaking `git config --global` writes into the developer's real `~/.gitconfig`. Tests that exercise remote git transfers run `git config --global --add safe.directory ...` over the SSH connection, where the test's HOME-redirection fixtures cannot reach; the fake sshd now sets `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` for its sessions so those writes stay inside the test sandbox.
+
+## 2026-06-13
+
+Fixed a data-loss bug in volume garbage collection and made discovery fail
+loudly (instead of silently skipping) when a provider's backend is unreachable.
+
+The data-loss bug: when the Docker daemon became briefly unavailable during a
+`mngr` operation that runs GC (e.g. a Docker daemon restart), the Docker
+provider's `discover_hosts` swallowed the failure and returned an empty host
+list. GC then treated every volume as orphaned and deleted it -- wiping the
+per-host data of still-live hosts, so their containers could no longer be
+restarted. The Docker provider's `discover_hosts` now raises
+`ProviderUnavailableError` when the daemon is unreachable instead of returning
+`[]`, so an unreachable daemon can no longer be mistaken for "this provider has
+zero hosts". GC skips an unavailable provider at its own boundary (it must not
+delete volumes it cannot verify).
+
+"Unreachable" is judged by the transport, not by the exception base class: a
+dropped connection or timeout (including the daemon disappearing mid-operation,
+which surfaces as a raw `requests` connection error rather than a
+`DockerException`) maps to `ProviderUnavailableError`, while a
+`docker.errors.APIError` -- meaning the daemon was reached and answered with an
+error -- propagates as a real fault. This keeps a healthy-but-erroring daemon
+from being silently treated as offline (and its provider wrongly skipped by GC).
+
+Discovery no longer hides an unreachable provider. Previously, multi-provider
+discovery silently skipped a provider whose backend was down. That meant a
+command could quietly do a partial job -- e.g. `mngr message my-agent`, intended
+to reach every instance of `my-agent`, could miss an instance on a down provider
+without telling you. Now `discover_hosts_and_agents` propagates
+`ProviderUnavailableError`, so commands that scan every provider (`message`,
+`limit`, `snapshot`, `create`) fail loudly rather than silently omit agents on
+the unreachable provider.
+
+Targeted commands now scope discovery so an *unrelated* down provider can't fail
+them. `mngr rsync`, `mngr git push`/`pull`, and `mngr event <host>` now resolve
+only the provider(s) that could actually hold the target -- via the `.PROVIDER`
+qualifier and/or the agent name (resolved through the discovery event stream) --
+instead of blindly scanning every provider. So `mngr rsync ./x agent@host.local`
+keeps working when an unrelated Docker daemon is down (Docker is never queried),
+while a command whose target really is on the down provider fails with a clear
+"provider is not available" error.
+
+- `mngr snapshot create`, `mngr snapshot list`, and `mngr snapshot destroy` now take agent and host targets as a single positional list. The `--agent`/`--host` flags have been removed; write `agent`, `agent@host[.provider]`, `@host[.provider]`, or a bare `host-...` ID instead.
+- `mngr event @host[.provider]` now narrows discovery to the pinned provider, matching the agent path's behavior.
+
+- `mngr message` (alias `msg`) no longer accepts `--provider`. The set of providers to query during discovery is now derived from the agent addresses themselves: the union of providers named by the addresses, or a full scan if any address omits its provider. Previously the discovery call ignored the providers named by the addresses and only honored `--provider`, so e.g. `mngr msg agent@host.provider_a --provider provider_b` would query the wrong provider and report the agent missing.
+- Internally, `mngr message` now routes through `find_all_agents` like the other agent-address subcommands instead of running its own CEL-filter pipeline. The `send_message_to_agents` API now accepts a pre-resolved `Sequence[AgentMatch]` instead of CEL `include_filters` / `exclude_filters` / `all_agents` / `provider_names`. No behavioral change for users beyond the `--provider` removal above.
+
+Fixed the DESCRIPTION (and other prose) sections of `mngr <command> --help` to be indented to the man-page depth of seven spaces in an interactive terminal (the pager / rich path). Previously these sections rendered flush-left, unlike the piped/plain output and the surrounding sections.
+
+## 2026-06-12
+
+Updated the auto-generated `mngr create` docs for the `--adopt-session` option: a bare session ID is now searched in the current and user-scope Claude config dirs, every live local mngr agent, and preserved sessions from destroyed agents.
+
+Internal: added `get_agents_root_dir(host_dir)` as the single source of truth for the agents-state root directory, defined alongside `get_agent_state_dir_path` in `imbue.mngr.hosts.common` (a low-level module importable without circular-import issues). Consolidated the previously hand-written `host_dir / "agents"[ / str(agent_id)]` path constructions across the codebase to route through these two helpers. No behavior change.
+
+Added support for agent-type aliases and made disabled-plugin errors name the real owning plugin.
+
+- Plugins can now register short alternate names for the agent types they provide via the new `register_agent_aliases` hook. An alias is accepted anywhere its canonical type is and resolves to the same agent (e.g. `mngr create my-agent agy` is equivalent to `mngr create my-agent antigravity`). Aliases are a name-resolution layer above the agent-type registries: an alias is not itself a distinct agent type, so it does not appear in `mngr plugin list --kind agent-type`, but it is tab-completable for `--type` and the persisted agent records the canonical type name. If you define a custom `[agent_types.X]` block whose name matches a built-in alias, your custom type takes precedence: the alias is dropped (with a warning) and the name resolves to your custom type.
+
+- mngr now records which plugin registered each agent type, so the "plugin is disabled, enable it with `mngr plugin enable ...`" message names the actual registering plugin instead of assuming the plugin name equals the agent-type name. This fixes the message for types whose name differs from their plugin's entry-point name (e.g. the `pi-coding` type registered by the `pi_coding` plugin).
+
+Tab completion now completes the `-S`/`--setting` config override (`KEY=VALUE`) on every command.
+
+- Pressing TAB after `-S` (or `--setting`) completes the config KEY against the same catalog of keys behind `mngr config set` (e.g. `mngr create -S head<TAB>` -> `headless=`). Keys with a constrained value set (booleans, enums like log levels, provider/agent-type names) insert `KEY=` and then list the allowed values on the next TAB; free-form keys complete to the bare key name.
+
+- Values complete too: `mngr create -S logging.console_level=<TAB>` lists `TRACE`/`DEBUG`/... and `mngr create -S headless=<TAB>` lists `true`/`false`. Works in both zsh and bash (which tokenize `KEY=VALUE` differently).
+
+- Fixed a related completion bug: short value-taking options (`-S`, `-m`, `-b`, `-l`, `-n`, `-t`, `-o`, `-i`, `-s`, `-w`) were not recognized as consuming their value, so their argument was miscounted as a positional. This could suppress completion of a later positional argument on commands with a fixed argument count (e.g. after `-S KEY=VALUE`). Long and short option forms are now classified uniformly (this also fixes the same miscount for the long `--verbose` count option), and the bash `=`-word-break splitting of `KEY=VALUE` values is handled so the value pieces are not miscounted.
+
+- `agent_types.*` keys now complete for builtin/registered agent types (e.g. `agent_types.claude.*`, `agent_types.codex.*`), not just the custom agent types defined in your config. These are derived from each agent type's config schema, so every settable field is offered (including container fields like `config_overrides` that have no value set yet), and constrained fields complete their values (`parent_type` -> agent type names, boolean fields -> `true`/`false`).
+
+- Config keys now complete one dotted segment at a time instead of dumping every fully-qualified key at once. For both `-S`/`--setting` and `mngr config get`/`set`/`unset`, the first TAB shows the top-level keys (with deeper keys collapsed to a `section.` branch, e.g. `agent_types.`, `logging.`), and each further TAB drills into the next segment. The trailing `.` on a branch is inserted with no following space so you can keep typing the next segment (in zsh and bash). For `-S`, a key with a constrained value set is completed to `KEY=` the same way -- its allowed values are deferred to the next TAB rather than listed as soon as the key prefix matches.
+
+- Shell completion now installs as a small, stable shim in your rc that sources a managed completion file (`~/.mngr/completions/mngr.{zsh,bash}`) which mngr keeps up to date. This means completion improvements (like the segment-at-a-time drilling above) apply automatically when you upgrade mngr -- no need to re-edit your rc file. The managed files are refreshed automatically in the background (e.g. on `mngr list`) and by `mngr extras completion`.
+
+- If you have an older self-contained completion function in your rc (from before the shim), tab completion now prints a nudge (rate-limited to at most once a day, and only while the install is out of date) to run `mngr extras completion` to switch to the managed shim. `mngr extras completion` recognizes an outdated install (rather than treating any existing completion as already-configured), installs the up-to-date shim, and **removes the old self-contained completion block** when it byte-for-byte matches a form mngr generated (a hand-edited or unrecognized block is left untouched). So migrating is a single command with no leftover cruft. After installing, it prints the exact `source` command to activate completion in your current shell without opening a new one.
+
+Fixed environment-variable forwarding for remote streaming SSH commands
+(`OuterHost.execute_streaming_command` with `env=...`). The streaming path
+prepended env vars as a bare `KEY=VAL command` prefix, which in the shell only
+applies to the single simple command it precedes -- so for a compound command
+like `install && tool ...` the var was gone by the time the second command ran.
+It now uses `export KEY=VAL && command` (mirroring the non-streaming pyinfra
+path), so the var is set in the shell environment for the whole command. This is
+what made remote `depot build` fail with "missing API token" even though
+`DEPOT_TOKEN` was supplied via `env`. Extracted the prefixing into a pure
+`_prepend_env_exports` helper with unit tests.
+
+Also fixed provider-config parsing to coerce field types. `_parse_providers` used
+`model_construct`, which stored raw TOML scalars without coercion -- so an enum
+field like `builder = "DEPOT"` stayed the string `"DEPOT"` and a `tuple` field
+stayed a list. That tripped pydantic serializer warnings on `model_dump` and, for
+a provider block defined in a single config layer (no merge to re-coerce it),
+broke identity checks like `builder is DockerBuilder.DEPOT` (silently falling
+back to the non-depot path). It now uses `model_validate`, which coerces while
+still recording only the provided keys in `model_fields_set` so per-field
+config-layer merging is unaffected. This also coerces nested-model provider
+fields (e.g. SSH static `hosts` tables to `SSHHostConfig`), subsuming the
+dedicated post-`model_construct` coercion helper that previously handled only
+that case.
+
+Added a `ScalarTuple` marker type (and the `ScalarStrTuple` annotated alias) for
+tuple-typed settings fields that are semantically a single scalar value -- a
+higher-precedence config layer that sets one replaces the whole value rather
+than tripping the settings-narrowing guard. `StringDerivedTuple` (string-shaped
+TOML values like `cli_args = "..."`) is now a specialization of it. This lets a
+field like the AWS provider's `allowed_ssh_cidrs` be tightened in a developer's
+`settings.local.toml` without the guard rejecting it as "dropping" the committed
+default -- combining CIDRs across config layers is never the intent. The marker
+is applied by `model_validate` (via the after-validator), so it relies on the
+provider-parsing switch to `model_validate` described above.
+
+## AWS provider support: shared layer changes
+
+The `mngr_aws` plugin lands as a new provider backend. The shared `mngr` layer picks up the following supporting changes:
+
+- New `resolve_backend_and_config(provider_name, mngr_ctx)` helper on `mngr/providers/registry.py`. Both `get_provider_instance` and the `mngr create` bootstrap path use it, replacing duplicated "configured-instance vs. bare-backend-name fallback" logic.
+- `is_for_host_creation` removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d by every other backend); replaced with a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method that Modal overrides and that `mngr create` invokes before `build_provider_instance`.
+- The Docker state-container leak fix (read-only commands like `mngr list`/`gc` no longer lazily create the singleton state container) is carried into this new shape: the Docker backend's `build_provider_instance` now unconditionally raises `ProviderEmptyError` when the state container is missing (it is always read-only), and the Docker backend overrides `bootstrap_for_host_creation` to create the container on the `mngr create` path. This replaces main's `is_for_host_creation`-gated version of the same fix.
+- `mngr/api/create.py`'s host-creation bootstrap helper is now public as `bootstrap_backend_for_host_creation(provider_name, mngr_ctx)` so other entry points (e.g. `mngr_tmr`'s snapshot path) can trigger the same one-time bootstrap before calling `get_provider_instance`.
+- `aws` added to the remote-backend list and `mngr` plugin catalog.
+- `mngr create` CLI markdown docs regenerated to include the AWS provider's build-args help.
+- `test_cleanup_stop_action_with_real_agent` and `test_list_command_with_running_filter_alias` marked `@pytest.mark.flaky` after observing intermittent 10s-timeout failures on loaded offload sandboxes; pass locally in <3s.
+- `_is_transient_ssh_error` (in both `hosts/host.py` and `hosts/outer_host.py`) now treats Python's built-in `TimeoutError` as transient. pyinfra's `read_output_buffers` raises a bare `TimeoutError` when an SSH command's response doesn't arrive within its per-command read timeout (e.g. when the remote sshd is reloaded mid-read during cloud-init bootstrap); the retry loop now picks it up rather than letting it escape host creation.
+- `_run_shell_command`, `_get_file`, `_put_file`, and `execute_streaming_command` on `OuterHost` (and `Host._run_shell_command`) now catch the post-retry `TimeoutError` and surface it as a structured `HostConnectionError`. Their inner retry handlers also disconnect on `TimeoutError` so retries rebuild the SSH connection rather than reusing the dead channel.
+
+- Resizing the terminal while attached to a remote agent (AWS or any SSH-backed provider) now reflows correctly instead of showing a field of padding dots once the window grew past a fixed size. The post-attach step previously ran `tmux resize-window -A`, which has a documented side effect of switching the window's `window-size` option to `manual` -- pinning the window at its attach-time size so it no longer tracked the client. It now only sends `SIGWINCH` to the pane processes (to prompt a redraw), leaving `window-size` at tmux's default `latest` so the window resizes with the client on every change.
+
+- **De-duplicated the SSH error-translation chain in `OuterHost`.** The identical `except TimeoutError / OSError "Socket is closed" / EOFError,SSHException -> HostConnectionError` block that was copy-pasted across `_run_shell_command`, `_get_file`, `_put_file`, `execute_streaming_command`, and `list_directory` is now a single `_translate_ssh_errors(...)` context manager parameterized by the per-operation messages. No behavior change (the list-directory path still lets a raw `TimeoutError` propagate via the optional `timed_out` arg).
+
+Regenerated the `mngr schedule` CLI reference docs to include the new
+`--timezone` option on `schedule add` (added in the mngr-schedule plugin),
+which pins the IANA timezone the `--schedule` cron expression is interpreted in.
+
+Moved the built-in `codex` agent type out of mngr core into the external `imbue-mngr-codex` plugin (added to the plugin catalog as a recommended INDEPENDENT-tier agent type); removed the in-core `codex_agent` stub and its direct registration.
+
+Updated the codex tutorial e2e tests (`test_create_basic.py`, `test_agent_types.py`) to match: codex is now a real agent-type plugin rather than a command-driven stub, so the tests create it with `--no-auto-start` (the real codex run is covered by the `mngr_codex` plugin's own release test) instead of faking it with a `command` override. Two of them were also dropped from `@pytest.mark.modal`: real codex can't run on the throwaway Modal hosts (no binary/auth), which is exactly what the old `sleep` fake worked around; Modal-path coverage of the create mechanism remains in the other (non-codex) tutorial tests. Also fixed a pre-existing duplicate `type = "claude"` key in the e2e test fixture's `settings.local.toml` template, which the old codex tests had been masking by rewriting the file via `mngr config set`.
+
+Added `mngr list --schema`, a machine- and human-readable catalog of every field you can reference in `--include`/`--exclude`, `--sort`, and `--fields`/`--format`.
+
+- `mngr list --schema` lists each referenceable field with its type, description, and the contexts it works in: `cel` (usable in `--include`/`--exclude` and `--sort`, which share one evaluation context) and `template` (also usable in `--fields`/`--format`). It composes with `--format json`, `--format jsonl`, and `--format` template strings, and is rejected (with a clear error) if combined with any agent-selection option since the catalog is static.
+
+- The catalog is derived live from the real data shape (`AgentDetails`/`HostDetails`), so it always reflects the actual models -- including deeply nested fields like `host.resource.cpu.count` and `host.ssh.host`. The non-model fields (the computed `age`/`runtime`/`idle`, the `host.provider`/`project` aliases, and dynamic patterns like `labels.$KEY`) are listed explicitly and pinned to the real computation/alias tables by tests.
+
+- The `project` field is now usable in CEL filters and sorts (e.g. `--include 'project == "mngr"'`, `--sort project`), mirroring the existing `host.provider` alias and the `--project` flag; previously it only worked in `--fields`/`--format` templates.
+
+- The `mngr list` help "Available Fields" section (and the generated `docs/commands/primary/list.md` on GitHub) is now rendered from this same catalog, so the documented fields can no longer drift from the models.
+
+Marked the `pi-coding` agent type plugin (`imbue-mngr-pi-coding`) as recommended
+in the plugin catalog, so `mngr extras` offers it by default alongside the other
+agent types (claude, opencode, antigravity) now that it has real lifecycle
+support.
+
+Added reusable gitignore-status helpers (with a `GitignoreStatus` result) to `mngr.api.git`. Given a host, a repo path, and any repo-relative path (which need not exist yet), they report whether that path is gitignored -- resolving symlinks anywhere along the path (e.g. `.claude -> .agents`) first so `git check-ignore` doesn't choke with "beyond a symbolic link":
+
+- `check_path_gitignore_status` -- ignored by any rule (returns `SKIP` / `IGNORED` / `NOT_IGNORED`).
+
+- `check_path_repo_gitignore_status` -- same, but a path ignored only by the user's global excludes returns `ONLY_GLOBAL` rather than `IGNORED` (for preflight checks whose result must also hold on a remote host / fresh clone, which has no global excludes).
+
+Plugins use these to guard files they write into an agent worktree against showing up as untracked changes.
+
+Added a canonical schema for the agent-agnostic common-transcript envelope
+(`imbue.mngr.agents.common_transcript_records`). It is the single source of truth
+for the `user_message` / `assistant_message` / `tool_result` records every agent
+plugin emits into the stream `mngr transcript` reads, with a validator and a
+conformance test asserting that all five emitters -- claude, antigravity,
+opencode, pi-coding, and codex -- produce records matching it, so the
+independently written emitters cannot silently drift on the shared fields.
+A meta-test discovers every registered agent type that emits a common transcript
+and fails if any lacks such a conformance test, so the requirement is enforced
+rather than relying on convention -- a new agent plugin cannot merge without one.
+
+Added a shared agent release-lifecycle harness
+(`imbue.mngr.agents.agent_release_testing`) that drives the common create -> WAITING ->
+message -> transcript -> stop/start resume -> destroy arc with per-agent profiles, so
+each plugin's release test is a thin profile and every agent is held to the same
+lifecycle and the same canonical-transcript contract.
+
+## 2026-06-11
+
+Replaced direct built-in exception raises (ValueError/RuntimeError) in config key resolution, docker provider config validation, and agent discovery with dedicated custom exception types.
+
+Added an `OPT_IN_PLUGINS` set to the config pre-reader (`config/pre_readers.py`) for plugins that are **disabled by default** and must be explicitly enabled with `[plugins.<name>] enabled = true`. This inverts the normal default (plugins load unless explicitly disabled) for the listed plugins, reusing the same `enabled` config key. The first opt-in plugin is `claude_subagent_proxy`, which is very experimental and breaks other tooling.
+
+The docker provider now raises a typed, actionable `DockerRuntimeNotRegisteredError`
+when the configured `docker_runtime` (e.g. `runsc` for gVisor) is not registered
+with the Docker daemon, instead of letting Docker's raw exit-125 `ProcessError`
+propagate. The old behavior surfaced the entire `docker run` command line with the
+real cause ("unknown or invalid runtime name: runsc") buried inside it and no
+guidance. The new error renders as a clean message naming the runtime and provider,
+with `user_help_text` pointing at the fix (install the runtime, or set
+`docker_runtime=runc` via `mngr config set` / the
+`MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME` env var). Because it is an `MngrError`
+subclass, `mngr create --format jsonl` now emits `error_class:
+"DockerRuntimeNotRegisteredError"` so callers can branch on the type.
+
+## 2026-06-10
+
+Added the `log_warnings` loguru-capture fixture to the shared plugin test helper (`register_plugin_test_fixtures` in `imbue.mngr.utils.plugin_testing`), so plugin test suites that register the standard fixtures can assert on emitted warnings without defining their own copy. The capture logic lives in a single `capture_log_warnings()` context manager in `imbue.mngr.utils.testing`, which both that fixture and mngr's own `conftest.py` `log_warnings` fixture delegate to. (Affects test infrastructure only.)
+
+Improved test quality for the top-level `imbue/mngr` modules: replaced tests that passed without verifying behavior. `mngr --version` is now asserted to succeed unconditionally (the prior test accepted a since-fixed failure mode); deleted tautological `ToolRequirement` constructor tests and a type-enforced catalog signal check; strengthened the installable-packages, catalog-floor, and create-time parsing assertions; and removed a permanently-skipped upgrade-discovery test whose behavior is already covered by `hosts/host_test.py` and `test_install.py`.
+
+- Sending a message to a Claude agent now confirms submission as soon as the message is accepted into the agent's queue, instead of always waiting on the `UserPromptSubmit` hook. The hook only fires when the prompt reaches the model, which for a message sent to a *busy* agent is when the agent finally dequeues it -- potentially many minutes later -- so `mngr message` (and any caller of the send path, e.g. an HTTP front-end) could block up to the full submission timeout and exceed a front-door proxy timeout, even though the message was already queued and would be processed. `send_enter_via_tmux_wait_for_hook` now watches a fresh `enqueue` event in the agent's transcript log *concurrently* with the hook's `tmux wait-for` signal (in a single remote command) and returns as soon as either lands. This keeps the call fast for busy agents while still confirming via the hook for prompts that never enqueue a model turn (the `/clear` and `/compact` TUI-local commands, whose signal is fired from `SessionStart`). Behavior is unchanged for TUIs that don't supply an acceptance-marker command (they keep the original hook-only wait). The shared `tui_utils` module stays agent-neutral: it watches an opaque, agent-supplied "message accepted" marker command for a fresh monotonic token, and the Claude-specific transcript-log/`enqueue`-event schema now lives in the Claude plugin rather than in the shared module.
+
+The git repo-detection helpers (`find_git_worktree_root`, `is_git_repository`, `find_git_common_dir`) no longer silently swallow unexpected `git` failures. Previously any `ProcessError` (a non-zero exit, a timeout, or a failure to even spawn the subprocess) was caught and turned into a "not in a git repository" answer (None/False), so a transient or environmental git problem would silently drop the project-scope config layer (e.g. disabled plugins would not be blocked) or otherwise misreport repository state, with no explanation. Now only git's own "not a git repository" result maps to that sentinel; every other failure is raised with git's actual return code and stderr, so problems surface loudly instead of causing confusing downstream misbehavior. The detection calls also force a C locale so the check cannot be defeated by a localized git. This is the production-side fix for a rare flaky failure of `test_create_plugin_manager_blocks_disabled_plugins` in CI. No change to behavior when running inside or outside a git repository normally.
+
+Regenerated the `mngr kanpan` CLI reference doc to document the new `--format json` / `--format jsonl` output (the command now prints a board snapshot for programmatic use instead of ignoring the flag).
+
+- `mngr create --reuse` now scopes the existing-agent lookup to the host named in the agent address (e.g. `babatest` in `system-services@babatest.docker`), not just the provider. Previously, when creating a new host (`--new-host`), the reuse lookup ignored the address's host name and matched *any* same-named agent on the provider, so it raised "Multiple agents found with name '<name>'. Use address syntax ..." as soon as two or more same-named agents were discoverable -- even though the address already specified the host. This broke callers that deliberately share one agent name across many hosts and rely on the host name for identity (the minds desktop client names every workspace's primary agent the constant `system-services`). With the fix, a create targeting a brand-new host finds nothing to reuse and proceeds to create, while a re-create targeting an existing host reuses exactly the agent on that host. Genuinely ambiguous reuse (a shared name with no host in the address) still raises the disambiguation error.
+
+Regenerated command docs: the `file` and `tmr` See-Also sections now link to `mngr rsync` instead of the removed `push`/`pull` commands, fixing broken `[mngr help push](mngr help push)` / `[mngr help pull](mngr help pull)` markdown links. The doc generator (`scripts/make_cli_docs.py`) now fails `--check` on any See-Also reference that resolves to neither a known command nor a help topic, so stale references like these are caught going forward.
+
+`test_create_plugin_manager_blocks_disabled_plugins` now asserts up front that `MNGR_LOAD_ALL_PLUGINS` is not set, failing loudly with a diagnostic message if it is. That env var disables plugin blocking, so a leak from another test or imported module would otherwise silently mask the test; rather than papering over it, the test acts as a tripwire that surfaces the leak so it gets fixed at its source.
+
+Strengthened several weak or fragile unit tests under `imbue/mngr/utils` so they actually catch regressions:
+
+- `build_cel_context` tests now assert the converted CEL value types (`StringType`, nested `MapType`) and exact values, instead of merely checking that keys are present. They now catch a regression that stopped converting raw values to `celpy.celtypes`, which would break dot-notation filtering.
+- The `imbue.mngr` import smoke test now asserts the package name and that the `cli` console-script entrypoint is a real Click command, instead of the tautological `assert mngr`; the file was also renamed from `test_mngr_import.py` to `mngr_import_test.py` to match the unit-test naming convention.
+- `get_current_branch` test now checks out a deterministic, uniquely-named branch and asserts the exact returned name, so it would fail if the function returned a commit-ish or remote ref rather than the branch name.
+- `check_bash_version` test now exercises the version-comparison branch (an unreachable `minimum=999` returns `False`) instead of only asserting the return type.
+- `_format_arg_value` complex-object test now asserts the exact rendered repr via an inline snapshot, catching dropped fields or changed quoting.
+- The asciinema cast-player init-script test now verifies the script wires `AsciinemaPlayer.create(...)` to the correct player div id (`player-0`) and runs inside the `DOMContentLoaded` handler, rather than just checking for substrings.
+- Editor test sleep scripts now use large, globally-unique durations to avoid leak-detector collisions, with clarifying comments about why the long sleeps make the synchronous `is_running()` assertions race-free.
+- The name-generator uniqueness tests now assert the observable behavior -- that 50 draws yield at least 10 distinct names -- instead of a probabilistic `>= 5` threshold or a seed-pinned exact count. The threshold is chosen so a correct generator's flake probability is ~1e-24, while not coupling the test to wordlist size or RNG draw order. (Per-name validity is covered by the existing per-style tests.)
+- Relocated the name-generator tests from `test_name_generator.py` (integration-test naming) to `name_generator_test.py` (unit-test naming) to match their actual nature and the `_test.py` convention.
+- Removed two tautological dataclass/enum tests (`InstallMethod` field round-trip and `DependencyCategory` member values) whose behavior is already covered by the behavioral install-command tests; added a comment to the logging-suppressor buffering test explaining why its count bound is `>=`.
+- Raised the coverage floor from 80% to 85% (CI measures ~87%).
+
+- `libs/mngr`: regenerate the `mngr forward` CLI reference (`docs/commands/secondary/forward.md`). The `--port` option's help text and default drifted out of sync with the dynamic-port behavior; the regenerated doc now describes the "try 8421, fall back to an OS-assigned port" semantics.
+
+## 2026-06-10
+
+Addressed Josh's review feedback on PR #1937:
+
+- `mngr gc --provider <name>` now exits non-zero when an explicitly-named provider is unavailable. The other selected providers still run to completion; the unavailable provider is reported as an error in the summary so the user can see what was not gc'd. Empty providers (e.g. a fresh Modal per-user environment with nothing to collect) remain silently skipped, since their state is known to be empty and there is nothing to do. The automatic post-destroy gc path (which always passes `--all-providers` internally and tolerates skips) is unaffected.
+
+- Removed the `-a` / `--all` / `--all-agents` flag from `mngr message` (alias `mngr msg`). The tutorial and CLI examples now use the explicit `mngr list --ids | mngr msg -` pattern. Users who relied on `-a` should switch to piping ids from `mngr list` (optionally with `--include` / `--exclude` to scope the broadcast).
+
+- Dropped `--no-ensure-clean` from the agent-type e2e tutorial tests. The e2e fixture now gitignores the per-test project config directory (where `mngr config set` writes its files), so the working tree stays clean and the flag is no longer needed. The `@pytest.mark.rsync` markers on those tests (whose only purpose was to satisfy the resource guard for the rsync path that `--no-ensure-clean` happened to trigger) are removed alongside.
+
+- Removed a stale duplicate `type = "claude"` line in the e2e fixture's seeded `settings.local.toml` that was causing every release-tier e2e/tutorial test to fail with "Cannot overwrite a value".
+
+## 2026-06-09
+
+Fixed the SSH provider silently disabling strict host-key checking for statically-configured hosts.
+
+- A host defined under `[providers.<pool>.hosts.<host>]` that set **both** `key_file` and
+  `known_hosts_file` lost its `known_hosts_file` whenever the backend expanded the `key_file` path.
+  `SSHProviderBackend.build_provider_instance` rebuilt the `SSHHostConfig` by re-listing only
+  `address`/`port`/`user`/`key_file`, so `known_hosts_file` silently became `None` and strict
+  host-key checking was turned off for that host. The backend now updates only the `key_file`
+  field, preserving `known_hosts_file` (and any future fields), matching the dynamic-hosts path
+  that already did this correctly.
+- Consolidated the `key_file` path-expansion logic (previously hand-rolled separately in the static
+  and dynamic host paths) into a single `SSHHostConfig.with_expanded_key_file()` method that both
+  paths now call, so neither can silently drop a field if `SSHHostConfig` gains one in the future.
+
+Fixed a crash that made statically-configured SSH hosts unusable, and added documentation for the SSH provider.
+
+- Static `[providers.<pool>.hosts.<host>]` tables defined in `settings.toml` previously crashed every
+  host-enumerating command (`mngr list`, `mngr connect`, `mngr create <agent>@<host>.<pool>`, ...) with
+  `AttributeError: 'dict' object has no attribute 'key_file'`. Provider configs are built with
+  `model_construct` (to keep unset top-level fields `None` for config-layer merging), which does not
+  coerce nested values, so each host entry stayed a raw dict instead of an `SSHHostConfig` and blew up
+  as soon as the backend touched it. The config loader now coerces nested pydantic-model fields (the
+  only one today being the SSH provider's `hosts` map) after `model_construct`, so static SSH hosts load
+  and resolve correctly. A malformed host entry now produces a clear `providers.<pool>.hosts` config
+  error instead of a late crash.
+- Added an [SSH provider documentation page](../docs/core_plugins/providers/ssh.md) covering host
+  configuration (`address`/`port`/`user`/`key_file`/`known_hosts_file`), the dynamic-hosts file, the
+  `NAME@HOST.PROVIDER` form for running an agent on a configured host, and the provider's limitations
+  (no host creation/snapshots/tags). Registered the `ssh` backend in the provider concepts doc.
+
+Fixed the Docker provider leaking singleton "state containers". Read-only commands (`mngr list`, `mngr gc`, `mngr cleanup`, and any cross-provider discovery) no longer create a Docker state container when none already exists: the Docker backend now treats the provider as empty and skips it, mirroring how the Modal backend skips a provider whose environment does not exist. Only `mngr create` (which passes `is_for_host_creation=True`) creates the state container. Behavior for existing Docker hosts is unchanged.
+
+Also hardened the test suite against leaked Docker state containers: fixed an off-by-one in the leaked-container detector, and the per-worker session cleanup now fails the suite when a state container created under one of its own test prefixes is left behind (while still warn-and-cleaning unattributable containers from other concurrent workers or older sessions).
+
+Fixed create-template `setting`/`setting__extend` entries being silently dropped. A `--template` whose definition sets `setting__extend = ["providers.docker.docker_runtime=runsc"]` (or any other config key) now actually reaches the resolved config instead of being ignored. Direct CLI `-S` still wins over a template-provided setting for the same key.
+
+A template `setting` that targets `commands.*` or `create_templates.*` now raises a clear error (those sections are resolved before template settings are applied, so the value could never take effect) instead of being silently ignored.
+
+Fixed `mngr config get` and `mngr config list --all` so they surface provider-subclass fields (e.g. `docker_runtime` on a docker provider) instead of reporting "Key not found".
+
+Introduced a standard way for plugins to preserve files from an agent's state directory when
+the agent (or its whole host) is destroyed, and made stopped hosts readable through a uniform
+interface.
+
+- New `HostFileReadInterface` (in `interfaces/host.py`) captures the read-only file operations
+  (`read_file`, `read_text_file`, `path_exists`, `get_file_mtime`, `list_directory`) that work
+  even when a host is not online, as long as its persistent storage (volume) is reachable.
+  `OuterHostInterface` now extends it, so every online host is a `HostFileReadInterface`.
+- New `OfflineHostWithVolume` (in `hosts/offline_host.py`) implements `HostFileReadInterface`
+  on top of a stopped host's persisted volume, addressing files by absolute paths under
+  `host_dir` exactly as an online host would. `make_readable_offline_host()` wraps a plain
+  `OfflineHost` in this readable form when the provider yields a volume for it (else returns the
+  plain `OfflineHost`), and every provider's offline-host construction now does so -- so a
+  stopped host is readable whether it is reached via `get_host` (the destroy/GC path) or
+  `to_offline_host`. The volume *reference* is fetched via a new provider method,
+  `get_volume_reference_for_host`, which (unlike `get_volume_for_host`) skips any network
+  existence probe -- e.g. Modal's `listdir` -- and returns the lazy reference, so constructing a
+  readable offline host (including during host discovery) adds no per-host probe; only providers
+  that actually probe (Modal) override the method, and a since-deleted volume surfaces as a
+  read/write failure at access time. This lets callers treat a stopped-but-volume-backed host
+  uniformly with an online one instead of branching on online-vs-offline and reaching for the
+  raw `Volume` API.
+- New `api/preservation.py` with `PreservedItem`, `preserve_agent_data()`, and
+  `get_preserved_agent_dir()`. Callers declare a list of paths (relative to the agent state
+  dir) to keep; the same declaration is executed against either an online host (rsync for
+  directories) or a volume-backed offline host (file-by-file walk). Preserved files mirror the
+  agent-state-dir layout verbatim under `<local_host_dir>/preserved/<agent-name>--<agent-id>/`.
+- `OuterHost` gained a `list_directory()` implementation (local filesystem walk, or SFTP
+  `listdir_attr` over the same paramiko channel used for remote file reads).
+- The listing-entry type `VolumeFile` is now the shared return type for every
+  `HostFileReadInterface.list_directory` (hosts as well as volumes). Its `file_type` uses the
+  full `FileType` enum (file, directory, symlink, pipe, socket, block, character, other), moved
+  into core `interfaces/data_types.py` from `mngr_file` (which now re-exports it), with a
+  canonical `FileType.from_stat_mode` classifier; `VolumeFile` also gained an optional
+  `permissions` string. Producers fill these to the fidelity their source allows: a host
+  classifies the real `stat`/`lstat` mode and reports a permissions string, while a bare volume
+  only distinguishes file vs. directory and leaves `permissions` None. (`VolumeFileType` is gone,
+  folded into `FileType`.)
+- New `HostFileWriteInterface` (`write_file`, `write_text_file`), the write companion to
+  `HostFileReadInterface`. `OuterHostInterface` extends it (so every online host writes), and
+  `OfflineHostWithVolume` implements it by writing the stopped host's volume (file modes are not
+  settable through a volume write, so `mode` is ignored there). This lets write commands target
+  an online or a stopped host through one interface.
+- `api/events.py` now reads and discovers event journals through `HostFileReadInterface`
+  (an online host, or a readable stopped host whose volume is reachable) addressed by a single
+  absolute events path under the host's `host_dir`. This removes the separate code paths that
+  shelled out `find`/`cat` over SSH for online hosts and used a separately-fetched
+  events-scoped `Volume` for everything else, collapsing the dual `online_host`/`volume`
+  representation on `EventsTarget` into one `host` handle. It also drops the trailing-newline
+  "sentinel-cat" workaround: the host read path is byte-exact (local reads bytes directly,
+  remote uses SFTP), so a file's exact trailing-newline state survives without the sentinel.
+
+Regenerated the `mngr usage` command reference docs to include the new `--preserved` / `--no-preserved` flag (on `mngr usage` and `mngr usage wait`). The behavior itself lives in the `mngr_usage` plugin; this is just the generated CLI doc reflecting it.
+
+# Docstring: update stale provider-field example
+
+`ProviderInstanceConfig.merge_with` used `is_host_in_docker` as an illustrative
+provider field in its docstring. That field was removed from the Lima provider
+(which no longer runs agents in a nested Docker container); the example now
+references `is_run_as_root`. No behavior change.
+
+Fixed the e2e tutorial test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that
+wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated
+`settings.local.toml`. The duplicate key caused every e2e tutorial command to fail
+with a TOML parse error ("Cannot overwrite a value"). Removing the redundant line
+restores config parsing so the e2e tutorial tests run.
+
+Fixed: the very first `mngr create --provider modal NAME` (including the
+`--reuse` form) against a brand-new per-user Modal environment no longer fails
+with `Provider 'modal' has no state yet`. The CLI create path resolved the
+new-host provider (used to tear the host down if a post-create step fails) with
+read-only semantics, so on a not-yet-existing Modal environment it raised
+`ProviderEmptyError` before the create could bootstrap the environment. It now
+resolves that provider with `is_for_host_creation=True`, matching the API-layer
+resolution, so the environment is created on first use as documented.
+
+Fixed the e2e test fixture's generated `settings.local.toml`, which defined the
+`type` key twice under `[commands.create]`. The duplicate key produced invalid
+TOML ("Cannot overwrite a value"), causing every `mngr` invocation in e2e
+tutorial tests to fail while parsing the config file.
+
+Fixed the e2e test fixture that wrote a duplicate `type` key into
+`settings.local.toml`, which produced invalid TOML and broke
+`mngr observe --discovery-only` (and other config-reloading commands) under
+the e2e suite. Also strengthened `test_advanced_observe_stream` to verify the
+documented DISCOVERY_FULL snapshot contract (source, agents/hosts/providers
+collections, and presence of the local provider).
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) so the
+`settings.local.toml` it writes is valid TOML. The fixture had an accidental
+duplicate `type = "claude"` key under `[commands.create]`, which made the
+strict (tomllib) config read path fail with "Cannot overwrite a value". This
+broke e2e tests whose commands parse config strictly, e.g.
+`mngr list --running --format json` in `test_advanced_watch_dashboard_running`.
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml`, which produced invalid TOML ("Cannot overwrite a value") and broke every e2e tutorial test's environment setup.
+
+Fixed the e2e tutorial test fixture and the command-agent dev-server test.
+
+- Removed a duplicate `type = "claude"` key in the `[commands.create]` section of the
+  `settings.local.toml` written by the shared `e2e` fixture (`e2e/conftest.py`). The duplicate
+  key was a merge artifact that made the TOML unparseable, so every e2e tutorial command that
+  loaded the config failed with "Cannot overwrite a value".
+- `test_command_agent_dev_server_extra_windows` is a purely local command-agent test, so it no
+  longer carries a spurious `@pytest.mark.modal` (which the resource guard rejected as "marked
+  but never invoked"). Its verification listing is now scoped to `--provider local`, mirroring
+  the sibling `test_command_agent_python_http`; the Modal command-agent path remains covered by
+  `test_command_agent_batch_job_modal`.
+
+Fixed the e2e tutorial test fixture: removed a duplicate `type = "claude"` key in the generated `settings.local.toml` that produced an invalid TOML file ("Cannot overwrite a value"), which caused `mngr create` to fail in command-agent tutorial tests.
+
+Fixed the e2e test fixture so the shared `settings.local.toml` it writes is valid
+TOML. The `[commands.create]` table contained a duplicate `type = "claude"` key,
+which `tomlkit` rejects with "Cannot overwrite a value". This broke any e2e command
+that loaded the merged config (e.g. `mngr config edit`), surfacing a config-parse
+error instead of the command's real behavior.
+
+Also strengthened `test_config_edit_editor_failure` to assert that `mngr config edit`
+propagates the editor's exact exit code (1 from `/bin/false`) rather than merely
+exiting non-zero.
+
+Fixed the e2e tutorial test fixture which wrote a duplicate `type = "claude"`
+key under `[commands.create]` in `settings.local.toml`. The duplicate produced
+invalid TOML, causing `mngr` commands in affected e2e tests to fail at config
+parse time with "Cannot overwrite a value" instead of exercising the command
+under test. Also hardened `test_config_edit_scope_missing_editor` to assert the
+missing-editor error names the editor and points at `$EDITOR`/`$VISUAL`.
+
+Fixed the e2e tutorial test fixture so the `mngr config` tutorial tests pass again. The shared `e2e` fixture had two regressions: a duplicate `type = "claude"` key inside `[commands.create]` of the seeded `settings.local.toml` (which made the file unparseable, breaking `config path`/`config edit`), and a stray seed of the project-scope `settings.toml` (which prevented `config edit`/`config set` tests from exercising genuine first-use behavior, where the project config file does not yet exist). No user-facing behavior change; this is test-infrastructure only.
+
+Fixed the e2e tutorial test fixture and the `test_config_edit` release test.
+
+- The shared e2e subprocess fixture wrote a `settings.local.toml` containing a
+  duplicate `type = "claude"` key under `[commands.create]`, which made tomlkit
+  reject the file ("Cannot overwrite a value") and broke every e2e tutorial
+  test. Removed the duplicate key.
+- Adapted `test_config_edit` to the fixture's seeded project `settings.toml`:
+  the project-scope config file already exists, so the test now verifies that
+  `config edit` opens that exact file in `$EDITOR` and that the editor's marker
+  persists into it, instead of asserting the file was created from scratch.
+- Added `@pytest.mark.timeout(60)` to `test_config_edit`, which now runs two
+  mngr subprocesses and exceeded the default 10s function timeout.
+
+Fix duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml`. The duplicate line made the TOML unparseable, causing config-reading tutorial tests (e.g. `test_config_get_missing_key`) to fail with a parse error instead of exercising the intended behavior.
+
+Fixed the e2e test fixture's local `settings.local.toml` template, which had a
+duplicate `type = "claude"` key under `[commands.create]`. The duplicate made the
+file invalid TOML, so any test that exercised `mngr config set --scope local`
+(e.g. the `test_config_get` tutorial test) failed when tomlkit re-parsed the file
+with "Cannot overwrite a value".
+
+Fixed the e2e tutorial test fixture so that the generated `settings.local.toml`
+no longer contains a duplicate `type = "claude"` key under `[commands.create]`.
+The duplicate produced invalid TOML that tomlkit rejected when `mngr config set
+... --scope local` re-saved the file, breaking config tutorial tests such as
+`test_config_list_json`.
+
+Fixed the e2e test fixture so `mngr config` tutorial tests work again.
+
+- The shared e2e fixture wrote `settings.local.toml` with the `type = "claude"` key duplicated
+  under `[commands.create]`, producing invalid TOML. Any `mngr config` command that loaded the
+  merged config (e.g. `mngr config list --scope user`) then failed with a "Cannot overwrite a
+  value" parse error. Removed the duplicate so the fixture emits valid TOML.
+- Strengthened `test_config_list_scope` to assert real scope isolation: the fixture's
+  `connect_command` value lives only in the local scope, so it must appear under
+  `--scope local` and must not bleed into the user/project views.
+
+Fixed the e2e test fixture that seeded a malformed `settings.local.toml` with a duplicate `type = "claude"` key under `[commands.create]`. TOML disallows duplicate keys, so any `mngr config set --scope local` (which re-parses and re-saves the file via tomlkit) failed with "Cannot overwrite a value". This unblocks the config tutorial e2e tests (e.g. `test_config_list`).
+
+Fixed the e2e test fixture that seeds the local-scope config file: it wrote a
+duplicate `type = "claude"` key under `[commands.create]`, producing an
+unparseable `settings.local.toml`. This caused `test_config_path_invalid_scope`
+(and any command that loaded the merged config) to fail with a TOML parse error
+instead of exercising the intended behavior.
+
+Fixed the e2e test fixture that seeded a malformed `settings.local.toml` with a
+duplicate `type = "claude"` key under `[commands.create]`, which made every config
+command fail to parse the file ("Cannot overwrite a value"). This unblocks
+`test_config_path_scope` and the other CONFIGURATION tutorial e2e tests.
+
+Fixed the e2e test fixture in `imbue/mngr/e2e/conftest.py` that wrote an invalid `settings.local.toml`: the `[commands.create]` table contained a duplicate `type = "claude"` key (introduced by a botched merge), which made every `mngr` invocation fail with "Cannot overwrite a value". This unblocks the e2e tutorial config tests (e.g. `test_config_path`).
+
+Fixed the e2e test fixture's `settings.local.toml`, which wrote a duplicate `type = "claude"` key under `[commands.create]`. The duplicate is invalid TOML and caused `mngr config set` (which re-parses the file with a strict editing parser) to fail with "Cannot overwrite a value". Also added an explicit 60s timeout to `test_config_set_default_provider`, which runs two `mngr` invocations and was exceeding the 10s default.
+
+Fixed the `test_config_set_headless` e2e tutorial test. The e2e fixture now seeds the project `settings.toml` with the pytest opt-in, so the test no longer appends a duplicate `is_allowed_in_pytest` key (which produced a TOML "Cannot overwrite a value" parse error). Also removed a duplicate `type = "claude"` key that the fixture wrote into `settings.local.toml`, which broke `mngr config set` whenever it loaded the merged config via tomlkit. Strengthened the test to assert the value lands in the project scope and is actually written to the on-disk `settings.toml`.
+
+Fixed the e2e test fixture that seeded an invalid `settings.local.toml`: a bad
+merge had added a duplicate `type = "claude"` key under `[commands.create]`,
+which made the file unparseable TOML and broke `test_config_set_scope` (and any
+other config test that loads the local layer).
+
+Fixed the e2e config tests: the shared `e2e` fixture wrote a duplicate `type = "claude"` key into the local `settings.toml`, which is invalid TOML and broke `mngr config set` of an unknown key. Also updated `test_config_set_unknown_key_fails` to verify the rejected key is absent from the project settings file (the fixture now seeds that file with the pytest opt-in) rather than asserting the file does not exist.
+
+Fixed the e2e test fixture that seeded a malformed `settings.local.toml` with a
+duplicate `type = "claude"` key under `[commands.create]`. The duplicate caused
+`mngr config set` (which round-trips the file through tomlkit) to fail with
+"Cannot overwrite a value", breaking `test_config_set` and other config tests.
+
+Fixed the e2e test fixture's `settings.local.toml`, which contained a duplicate
+`type = "claude"` key under `[commands.create]` and was therefore invalid TOML.
+Any e2e command that performed a full merged-config load (e.g. `mngr config
+unset`) failed with a "Failed to parse config file" error instead of running.
+Also tightened `test_config_unset_missing_key` to assert the error names the
+specific missing key.
+
+Fixed the e2e tutorial test for `mngr config unset`. The shared e2e fixture
+wrote a `settings.local.toml` with a duplicate `type = "claude"` key under
+`[commands.create]`, which made `tomllib` reject the file and broke config
+loading for every e2e mngr command. Removed the duplicate. Also reworked
+`test_config_unset` to set `commands.create.provider` before unsetting it (a
+key that is never set cannot be unset) and to verify the value is actually
+removed from the project settings file.
+
+Fixed the e2e tutorial test fixture, which wrote an invalid `settings.local.toml` with a
+duplicated `type = "claude"` key under `[commands.create]`. This caused every command run
+through the fixture to abort with a TOML parse error ("cannot overwrite a value") instead of
+exercising the actual code path.
+
+Also strengthened `test_connect_by_agent_id_fictional` to assert that connecting to a
+nonexistent agent id reports a clean user-facing "not found" error with no leaked Python
+traceback.
+
+Fixed the e2e tutorial connect tests (`test_connect.py`). The shared e2e
+fixture wrote a `settings.local.toml` with a duplicate `type = "claude"` key
+under `[commands.create]`, which made every `mngr create` in these tests fail
+with a TOML parse error; removed the duplicate. The interactive
+`run_connect_interactively` helper now clears the inherited `$TMUX`/`$TMUX_PANE`
+and forces the builtin tmux attach (via `MNGR_CONNECT_COMMAND_ACTIVE`) so the
+standalone `mngr connect` performs a real attach instead of being intercepted by
+the no-op connect command or refused by the nested-tmux guard. The four
+interactive connect tests also got a `@pytest.mark.timeout(120)` since the
+create/attach/detach flow exceeds the default 10s per-test timeout. Test-only
+change; no user-facing behavior changed.
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml`, which caused a TOML parse error ("cannot overwrite a value") and broke e2e tutorial tests. No user-visible behavior change.
+
+Fixed the e2e test fixture (`conftest.py`) that wrote an invalid `settings.local.toml` with a duplicate `type = "claude"` key under `[commands.create]`. The duplicate key caused a TOML parse error ("cannot overwrite a value") that broke every e2e tutorial command, including `test_connect_explicit_host`.
+
+Fixed the e2e tutorial connect tests (`test_connect.py`):
+
+- Repaired the e2e fixture, which wrote a duplicate `type = "claude"` key into
+  `settings.local.toml` and caused every `mngr create` in the e2e suite to fail
+  with a TOML "Cannot overwrite a value" parse error.
+- Added `@pytest.mark.timeout(120)` to the interactive `mngr connect` tests, which
+  perform a full agent create plus interactive connect and exceed the default 10s
+  per-test timeout.
+- Added `test_connect_no_start_fails_when_stopped`, covering the documented
+  unhappy path for `mngr connect --no-start` (it refuses to connect to a stopped
+  agent rather than auto-starting it).
+
+Fixed the e2e tutorial connect tests. The shared e2e fixture wrote a `settings.local.toml` with a duplicated `type = "claude"` key under `[commands.create]`, which made every `mngr` invocation fail with a TOML "Cannot overwrite a value" parse error; the duplicate line is removed. Also added a `@pytest.mark.timeout(120)` override to `test_connect_short_form`, which drives an interactive `mngr conn` attach that polls for up to 30s and so needs more than the 10s global pytest timeout.
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated
+`settings.local.toml`, which caused every e2e tutorial test to fail with a TOML
+"Cannot overwrite a value" parse error when running `mngr create`.
+
+Added `test_connect_with_start_restarts_stopped_agent`, an e2e test that shares
+the `mngr connect --start` tutorial block but stops the agent first, verifying
+that `--start` actually restarts a stopped agent (the existing test only connects
+to an already-running agent, where `--start` is a no-op).
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated
+`settings.local.toml` that produced invalid TOML ("Cannot overwrite a value"),
+causing `mngr` config loading to fail in e2e tutorial tests. Also strengthened
+the `test_control_mngr_via_env_rejects_invalid_value` release test to assert on
+the specific "Unknown provider backend" rejection message.
+
+Fixed the e2e test fixture (`conftest.py`) which wrote a duplicate `type = "claude"` key into the generated `settings.local.toml`, causing all e2e tutorial tests to fail config parsing ("Cannot overwrite a value"). Also tightened `test_create_agent_args_require_dash_separator` to assert on the specific unrecognized-option failure mode.
+
+Fixed the e2e test fixture so tutorial tests can run again, and strengthened the
+create-and-destroy tutorial test.
+
+- The e2e conftest fixture wrote a `settings.local.toml` with a duplicate
+  `type = "claude"` key under `[commands.create]` (a merge artifact). tomlkit
+  rejects duplicate keys, so every e2e tutorial command failed up front with
+  "Cannot overwrite a value". Removed the duplicate line.
+- `test_create_and_destroy_agent` now asserts the agent appears in `mngr list`
+  before it is destroyed, making the post-destroy absence check a real
+  before/after contrast.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`), which wrote a
+`settings.local.toml` with a duplicate `type = "claude"` key under `[commands.create]`.
+TOML rejects the duplicate ("Cannot overwrite a value"), which made every e2e command
+(`mngr create`, etc.) fail to parse its config. Removed the redundant line.
+
+Added `@pytest.mark.timeout(300)` to the `test_rename.py` e2e tests so that
+`mngr list --format json` has time to complete remote-provider discovery (matching the
+convention used by the other create+list e2e tests), and strengthened
+`test_create_and_rename_agent` to verify the renamed agent is preserved in place (same
+command, still alive) rather than only checking its name.
+
+Fixed the `test_create_codex_agent` e2e tutorial test. The e2e fixture was
+writing a duplicate `type = "claude"` key into `[commands.create]` in the
+generated `settings.local.toml`, which produced invalid TOML and broke any
+command (such as `mngr config set --scope local`) that loads and re-saves that
+file via tomlkit. Removed the duplicate. Also added a `@pytest.mark.timeout(120)`
+to the test (it runs three sequential mngr operations that each perform full
+provider discovery, exceeding the default 10s timeout) and removed the spurious
+`@pytest.mark.modal` (the test only creates a local agent and never invokes the
+modal CLI binary the resource guard tracks).
+
+Fixed the e2e test fixture that seeded `settings.local.toml` with a duplicate
+`type = "claude"` key under `[commands.create]`. The duplicate parsed on initial
+load but caused `mngr config set --scope local` to fail with "Cannot overwrite a
+value" when it re-saved the file, breaking `test_create_codex_explicit_type`.
+
+Fixed the e2e tutorial test fixture and the `test_create_codex_positional` release test.
+
+- The e2e fixture's `settings.local.toml` was emitting a duplicate `type = "claude"` key under
+  `[commands.create]`, producing malformed TOML. Any `mngr config set` that re-parsed the merged
+  config then failed with "Cannot overwrite a value". Removed the duplicate line.
+- `test_create_codex_positional` now scopes its verification `mngr list` to `--provider local`
+  (the agent is created locally) and raises the per-test timeout to 120s, matching the sibling
+  `test_create_codex_explicit_type`. The previous unscoped `mngr list` fanned out to every
+  provider (including Modal) and exceeded the default 10s timeout. The test also now asserts the
+  created agent reached a RUNNING/WAITING state, not just that it has the codex type.
+
+Fixed the e2e tutorial test fixture and the `--type command -- <cmd>` create test.
+
+- Removed a duplicate `type = "claude"` key under `[commands.create]` in the e2e
+  `settings.local.toml` that the fixture writes (`e2e/conftest.py`). The duplicate key made
+  the file invalid TOML, so every `mngr` invocation in an e2e test aborted with
+  "Cannot overwrite a value".
+- Added `@pytest.mark.timeout(120)` to
+  `test_create_command_agent_runs_post_dash_command_in_agent`, matching its sibling
+  real-create tests. A real create (tmux session + asciinema connect, plus a one-time ttyd
+  install) followed by `mngr exec` and `mngr list` routinely exceeds the default 10s
+  function timeout.
+
+Fixed the e2e test fixture's generated `settings.local.toml`, which had a duplicate `type = "claude"` key under `[commands.create]`. The duplicate produced invalid TOML ("Cannot overwrite a value"), causing every e2e command to fail to parse its config. Removed the duplicate line so the fixture writes valid TOML again.
+
+Strengthened `test_create_command_custom_script` to confirm the forwarded command is actually running as a process inside the agent (via `mngr exec ... ps`), rather than only checking the recorded metadata and state.
+
+Fixed the e2e tutorial test fixture so the `command`-type agent tutorial tests run again.
+
+- The shared `e2e` fixture (`e2e/conftest.py`) was writing a `settings.local.toml` with a
+  duplicate `type = "claude"` key under `[commands.create]`, which is invalid TOML and made
+  every `mngr` invocation in the affected e2e tests fail with "Cannot overwrite a value". Removed
+  the duplicate key.
+- `test_create_command_python_http` now carries `@pytest.mark.timeout(120)` (matching its
+  sibling `test_create_command_custom_script`), since creating a command agent plus the
+  follow-up `mngr list`/`mngr exec` provider discovery can exceed the default 10s per-test
+  timeout when a remote provider is unreachable.
+
+Fixed the e2e tutorial test fixture and the `test_create_copy` release test.
+
+- The e2e `settings.local.toml` written by the test fixture contained a duplicate
+  `type = "claude"` key under `[commands.create]`, which made TOML parsing fail for
+  every `mngr` command in the e2e tutorial suite. The duplicate has been removed.
+- `test_create_copy` carried a spurious `@pytest.mark.modal` mark even though it only
+  creates a local agent with a local git-mirror transfer; the resource guard's
+  NEVER_INVOKED check failed the test. The mark has been removed.
+- Strengthened `test_create_copy` to verify the git-mirror copy is a functional
+  repository that carries over the source repo's commit history (via `git log`), not
+  merely a directory containing a `.git` folder.
+
+Fixed the `test_create_custom_yolo_agent_type` e2e tutorial test. The shared e2e
+fixture wrote a duplicate `type = "claude"` key into `settings.local.toml`,
+producing invalid TOML that made `mngr config edit` fail to parse the config. The
+test also configured the custom `yolo` agent type with only a `command` (no
+`parent_type`), so the type could not resolve to a concrete agent class. The test
+now points `yolo` at the built-in `command` parent, scopes its verification
+`mngr list` to the local provider, and drops the spurious `@pytest.mark.modal`
+mark (the test only exercises the local provider).
+
+Fixed a duplicate `type = "claude"` key under `[commands.create]` in the e2e tutorial test fixture's `settings.local.toml`. The duplicate caused a TOML "Cannot overwrite a value" parse error that broke `mngr create` in every e2e tutorial test.
+
+Fixed the e2e tutorial test fixture (`e2e/conftest.py`) that wrote an invalid
+`settings.local.toml` with a duplicate `type = "claude"` key under
+`[commands.create]`, which caused `mngr create` to fail with a TOML parse error
+("Cannot overwrite a value") in every e2e tutorial test. Also added a
+`@pytest.mark.timeout(120)` mark to `test_create_default_branch`, which was
+exceeding the default 10s per-test timeout because it runs `mngr create` plus
+several `mngr exec` commands.
+
+Fixed the e2e test fixture, which wrote a duplicate `type = "claude"` key into the generated `settings.local.toml`, producing invalid TOML that made every `mngr` subprocess fail to parse its config. Also gave `test_create_default_project_label` a 120s timeout (matching its sibling agent-creation tests) so it no longer trips the 10s default pytest timeout while `mngr list` performs provider discovery.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that wrote a
+`settings.local.toml` containing a duplicate `type = "claude"` key under
+`[commands.create]`. The duplicate produced invalid TOML, causing every e2e
+tutorial test that loads the local config to fail with "Cannot overwrite a
+value". Removed the duplicate line.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that wrote a
+duplicate `type = "claude"` key under `[commands.create]` in the generated
+`settings.local.toml`. The duplicate key produced invalid TOML, so every e2e
+command that loaded the merged config failed with `Failed to parse config file
+... Cannot overwrite a value`. Removed the redundant line so the fixture emits
+valid TOML.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) which wrote a
+`settings.local.toml` containing a duplicate `type = "claude"` key under
+`[commands.create]`. The duplicate (a merge artifact) made the file invalid TOML,
+so every `mngr create` invoked from an e2e test aborted with
+`Failed to parse config file ...: Cannot overwrite a value`. Removing the duplicate
+key restores the fixture so the docker (and all other) tutorial e2e tests can run.
+
+Fixed the e2e test fixture's `settings.local.toml` template, which contained a
+duplicate `type = "claude"` key under `[commands.create]`. The duplicate made
+the file invalid TOML, so every `mngr` command in the docker tutorial e2e tests
+failed with "Cannot overwrite a value" instead of exercising the docker provider.
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated
+`settings.local.toml` (`libs/mngr/imbue/mngr/e2e/conftest.py`). The duplicate
+produced a "Cannot overwrite a value" TOML parse error that caused every e2e
+tutorial `mngr` command to exit 1 before reaching the provider. This unblocks
+the Docker create tutorial tests (and all other e2e tests sharing the fixture).
+
+Fixed the e2e test fixture (`mngr/e2e/conftest.py`) which wrote a `settings.local.toml` containing a duplicate `type = "claude"` key under `[commands.create]`. The duplicate key is invalid TOML and caused every Docker e2e tutorial test (e.g. `test_create_docker_volume_start_arg`) to fail with "Cannot overwrite a value" when `mngr` parsed the config file.
+
+Fixed the e2e test fixture so `mngr` commands run again: the generated
+`settings.local.toml` had a duplicate `type = "claude"` key under
+`[commands.create]`, which made the config fail to parse with "Cannot overwrite
+a value" and broke every e2e test. Also gave `test_create_duplicate_name_fails`
+a 120s timeout (matching sibling e2e tests) since it creates a live agent and
+runs `mngr list`, whose provider discovery can exceed the default 10s timeout.
+
+Fixed the e2e test fixture, which wrote an invalid `settings.local.toml` containing a duplicate `type = "claude"` key under `[commands.create]`. This caused every e2e tutorial test to fail with a "Cannot overwrite a value" TOML parse error. Also gave `test_create_from_another_agent` a 120s timeout (it runs two `mngr create` operations plus a clone) and added `test_create_from_another_agent_source_alias` to cover the documented `--source` alias for `--from`.
+
+Test maintenance for the tutorial e2e suite (no user-facing behavior change):
+
+- Fixed the e2e test fixture so it no longer writes an invalid `settings.local.toml`. The
+  `[commands.create]` section had a duplicate `type = "claude"` key, which made every `mngr`
+  command in an e2e tutorial test fail with "Cannot overwrite a value" while parsing the config.
+- Strengthened `test_create_git_mirror_with_existing_branch`: it now also verifies that the
+  agent's git mirror is checked out at the same commit the existing branch points to in the
+  source repo (not merely that a same-named branch exists). Hardened its `mngr exec` verification
+  calls with a longer timeout to absorb agent/provider-discovery latency under local load.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) which wrote a
+duplicate `type = "claude"` key into the generated `settings.local.toml`. TOML
+forbids duplicate keys, so every e2e tutorial test using this fixture failed with
+"Cannot overwrite a value" while parsing the config. Removed the duplicate.
+
+Also gave `test_create_headless` the same `@pytest.mark.timeout(120)` its sibling
+multi-operation tests carry (it runs create + list + exec, exceeding the 10s
+default), and strengthened its assertion to verify the headless agent actually
+runs inside its dedicated worktree rather than only checking the `exec` exit code.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) so the generated
+`settings.local.toml` no longer wrote `type = "claude"` twice under `[commands.create]`.
+The duplicate key produced invalid TOML ("Cannot overwrite a value"), which made every
+e2e tutorial command fail to parse its config. Removing the duplicate restores the intended
+single default agent type and unblocks the e2e tutorial tests (e.g. `test_create_headless`).
+
+Fixed the e2e test fixture, which wrote a `settings.local.toml` containing a
+duplicate `type = "claude"` key under `[commands.create]`. TOML rejects a
+repeated key, so every `mngr` command run through the e2e fixture failed with a
+config parse error. Removing the duplicate restores the e2e suite.
+
+Strengthened `test_create_help_succeeds` to assert that `mngr create --help`
+emits the command's own NAME summary, SYNOPSIS, and EXAMPLES sections (not just
+two flag strings), confirming the help genuinely belongs to the `create` command.
+
+Fixed the e2e tutorial test fixture (`conftest.py`) that wrote a duplicate `type = "claude"` key into `settings.local.toml` under `[commands.create]`, producing invalid TOML and causing `mngr create` to fail with "Cannot overwrite a value" during e2e tutorial tests.
+
+Fixed the e2e test fixture that seeded a malformed `settings.local.toml` with a
+duplicate `type = "claude"` key under `[commands.create]`, which made every
+`mngr create` invoked from an e2e tutorial test fail with a TOML "Cannot
+overwrite a value" parse error. Removed the duplicate key.
+
+Fixed the e2e test fixture that generated an invalid `settings.local.toml`: the
+`[commands.create]` table set `type = "claude"` twice, which is not valid TOML
+("Cannot overwrite a value") and caused every e2e tutorial test to fail at config
+load. Removed the duplicate key.
+
+Also added an e2e test (`test_create_unnamed_agent_gets_random_name`) covering the
+documented behavior that `mngr create` with no name argument generates a random
+agent name.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that wrote an
+invalid `settings.local.toml` with a duplicate `type = "claude"` key under
+`[commands.create]`. The duplicate key caused every e2e test using this fixture
+to fail with "Cannot overwrite a value" when mngr parsed the config, before any
+command logic ran. Removed the duplicate line.
+
+Fixed the e2e test fixture (`e2e/conftest.py`) that wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`, which made the file invalid TOML and caused every `mngr` command in e2e tests to fail with a config parse error. Also strengthened `test_create_short_forms` to exercise the tutorial's positional agent-type argument (`mngr create my-task command`) and to assert that the resolved agent type and stand-in command are correct.
+
+Fixed the e2e test fixture so the release tests in `test_create_basic.py` run again.
+
+- The shared e2e `settings.local.toml` fixture (in `e2e/conftest.py`) wrote `type = "claude"`
+  twice under `[commands.create]`, producing invalid TOML. Every `mngr` invocation in these
+  tests aborted with "Cannot overwrite a value" before doing any work. Removed the duplicate
+  key.
+- Added `@pytest.mark.timeout(120)` to `test_create_with_agent_args`, which runs two sequential
+  `mngr` operations (create, list) each performing full provider discovery and so exceeds the
+  default 10s pytest-timeout.
+
+Fixed the e2e test fixture (`imbue/mngr/e2e/conftest.py`) that wrote `type = "claude"` twice into the `[commands.create]` table of the generated `settings.local.toml`. The duplicate key produced invalid TOML ("Cannot overwrite a value"), causing every tutorial e2e test that runs `mngr create` to fail with a config parse error. Removed the duplicate line.
+
+Fixed a malformed `settings.local.toml` written by the e2e test fixture: a duplicate `type = "claude"` key under `[commands.create]` caused every `mngr` command in the e2e tutorial tests to abort with a TOML "Cannot overwrite a value" parse error. Removing the duplicate line restores the e2e tutorial release tests (e.g. `test_create_with_connect_command`).
+
+Fixed the e2e test fixture (`imbue/mngr/e2e/conftest.py`) that wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The duplicate key caused TOML parsing to fail with "Cannot overwrite a value", breaking e2e tutorial tests including `test_create_with_custom_branch_pattern`.
+
+Fixed the e2e test fixture that wrote a duplicate `type = "claude"` key under `[commands.create]` in `settings.local.toml`, which caused every config-loading e2e command to fail with a TOML "Cannot overwrite a value" parse error instead of running. Also strengthened `test_create_with_dirty_tree_fails` to verify no agent is left behind when the clean-working-tree guard aborts.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) so it no
+longer writes a duplicate `type = "claude"` key into the per-test
+`settings.local.toml`. The duplicate made tomlkit reject the config file
+("Cannot overwrite a value"), causing every e2e tutorial test that creates an
+agent to fail. This affected `test_create_with_env_file` and its siblings in
+`test_env_vars.py`.
+
+Also added `test_create_with_missing_env_file_is_rejected`, an unhappy-path e2e
+test covering the same `--env-file` tutorial block: it verifies that pointing
+`--env-file` at a nonexistent file is rejected with a clear error and creates no
+agent.
+
+Fixed two e2e test-fixture issues that broke the create-time env-var tutorial tests:
+
+- The e2e fixture wrote a duplicate `type = "claude"` key into the same
+  `[commands.create]` table of `settings.local.toml` (a stray line left by a
+  bulk merge), which is invalid TOML and made *every* e2e command fail with
+  "Cannot overwrite a value". Removed the duplicate.
+- `test_create_with_env_vars` still carried a stale `@pytest.mark.modal` even
+  though it creates on the default provider and never invokes Modal (its sibling
+  default-provider tests had the mark removed in the same merge). The resource
+  guard correctly flagged the superfluous mark; removed it.
+
+Fixed the e2e tutorial test `test_create_with_env` and its shared fixture:
+
+- Removed a duplicate `type = "claude"` key in the e2e `settings.local.toml`
+  written by the `e2e` fixture, which made the file invalid TOML and caused
+  every `mngr create` in the e2e tutorial tests to fail with a config parse
+  error.
+- Reworked the `--env` test to launch its agent body via `bash -c '...'` so the
+  compound command and `$MNGR_TEST_VAR` expansion run inside the agent's shell,
+  instead of being collapsed into a single (non-existent) command word by the
+  command agent's per-argument shell quoting.
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml`, which caused a TOML parse error ("Cannot overwrite a value") and broke `mngr` commands in all e2e tutorial tests.
+
+Fixed the e2e tutorial test fixture: `settings.local.toml` was written with a duplicate
+`type = "claude"` key under `[commands.create]`, which made every `mngr` command in the e2e
+tutorial suite fail to parse its config ("Cannot overwrite a value"). Removed the duplicate key.
+
+Also strengthened `test_create_with_extra_tmux_windows` to verify that the extra tmux windows
+are actually running their configured commands (not just that windows with the right names
+exist), matching the tutorial's promise that `-w name="cmd"` starts a window running that command.
+
+Fixed the e2e test fixture (`conftest.py`) which wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The duplicate key caused every command in affected e2e tests to fail with a TOML parse error ("Cannot overwrite a value") before reaching the behavior under test. This unblocks `test_create_with_invalid_label_format` and other e2e tutorial tests.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) which wrote a
+duplicate `type = "claude"` key into the generated `settings.local.toml`, making the
+file unparseable and causing every e2e `mngr` command to fail with "Cannot overwrite
+a value". Removed the duplicate key.
+
+Strengthened `test_create_with_json_output` to verify that the `agent_id`/`host_id`
+returned by `mngr create --format json` actually match the agent reported by
+`mngr list --format json`, and that the agent is in a running state -- confirming the
+machine-readable identifiers are real and usable for scripting, not just well-formed.
+
+Fixed the e2e test fixture, which wrote a duplicate `type` key into its generated `settings.local.toml` and caused every e2e `mngr` command to fail config parsing. Added an e2e test that the `mngr create --quiet` flag suppresses all console output while still creating the agent.
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's
+`settings.local.toml` that made the file invalid TOML, causing
+`test_create_with_label` (and any e2e test loading local config) to fail with
+"Cannot overwrite a value".
+
+Extended `test_create_with_label` to verify labels and host labels actually
+drive `mngr list` filtering (matching values include the agent, non-matching
+values exclude it).
+
+Fixed the e2e test fixture (`conftest.py`) which wrote a duplicate `type = "claude"` key into the `[commands.create]` block of `settings.local.toml`, producing invalid TOML that made every `mngr create` in the release e2e suite fail with a config parse error. Also added an unhappy-path e2e test (`test_create_rejects_malformed_label`) covering a `--label` value that is not in KEY=VALUE format.
+
+Fixed the e2e test fixture's `settings.local.toml` generation, which wrote a
+duplicate `type = "claude"` key under `[commands.create]` and caused every e2e
+`mngr create` to fail with a TOML "Cannot overwrite a value" parse error.
+
+Strengthened `test_create_with_message` to verify the initial message is
+actually delivered into the agent's tmux pane (via `tmux capture-pane`), rather
+than only checking that mngr logged "Sending initial message".
+
+Fixed the e2e tutorial test fixture, which wrote a duplicate `type = "claude"`
+key under `[commands.create]` in `settings.local.toml`, making the file
+unparseable and breaking every e2e tutorial test that depended on it. Added a
+120s function-timeout override to `test_create_with_no_ensure_clean` (a real
+create plus `mngr list` exceeds the default 10s), and added an unhappy-path test
+verifying that `mngr create` aborts on a dirty working tree when
+`--no-ensure-clean` is omitted.
+
+Fixed a duplicated `type = "claude"` key in the e2e test fixture's generated
+`settings.local.toml`, which made `tomllib` reject the file and caused every
+`mngr` command in e2e tests to fail with a config parse error instead of
+exercising the real code path. Also strengthened the nonexistent-base-branch
+e2e test to assert the failure is actually about the missing base branch, so it
+can no longer pass for an unrelated reason.
+
+Fixed the e2e tutorial test fixture and broadened coverage of the `mngr create --pass-env`
+tutorial block.
+
+- Removed a duplicate `type = "claude"` key the `e2e` fixture wrote into the generated
+  `settings.local.toml`. The duplicate produced invalid TOML, so every `mngr` command in the
+  e2e/tutorial release suite failed with `Cannot overwrite a value`.
+- Added `test_create_with_pass_env_skips_unset_var`, an unhappy-path test for the same
+  `--pass-env` tutorial block: forwarding a variable that is not set in the current shell does
+  not fail `create`; the variable is simply absent from the agent's environment.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) which wrote a duplicate `type = "claude"` key into `[commands.create]` in the generated `settings.local.toml`, causing every e2e tutorial test to fail with a TOML "Cannot overwrite a value" parse error. Also added the `@pytest.mark.timeout(120)` marker to the `test_create_with_pass_env` and `test_create_with_pass_env_unset` tutorial tests so they no longer hit the default 10s pytest timeout while running multiple `mngr` subprocess commands.
+
+Fixed the e2e tutorial test fixture that wrote a duplicate `type = "claude"` key into the generated `settings.local.toml`, which produced an invalid-TOML parse error and broke every e2e tutorial test. Added a `@pytest.mark.timeout(120)` to `test_create_with_pass_env` so it matches its sibling tests and does not hit the default 10s timeout during the slow `mngr list` provider-discovery step.
+
+Strengthened `test_create_with_pass_env` to additionally exec into the running agent and assert the forwarded `API_KEY` is visible in its live environment, not just in the on-disk env file.
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml` that caused a TOML parse error ("Cannot overwrite a value") in all e2e tutorial tests. Also strengthened `test_create_with_plugin_flags` to verify the failed create leaves no agent behind.
+
+Fixed the e2e tutorial test fixture: removed a duplicate `type = "claude"` key
+in the generated `settings.local.toml` that produced invalid TOML and broke
+`mngr create` across e2e tests. Also added a `@pytest.mark.timeout(120)` mark to
+`test_create_with_project_label` so its multi-step `mngr` subprocess calls are
+not killed by the global 10s pytest timeout.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) which wrote a
+duplicate `type = "claude"` key under `[commands.create]` in the generated
+`settings.local.toml`. TOML rejects the duplicate key, causing every e2e test
+that loads this config (including `test_create_with_quiet_output`) to fail with
+"Cannot overwrite a value". Removed the duplicate line.
+
+Fixed the e2e test fixture (`conftest.py`) that wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The duplicate key produced invalid TOML ("Cannot overwrite a value"), causing every `mngr` command run inside the e2e tests to fail config parsing. Removing the duplicate restores valid config and unblocks the affected e2e tests.
+
+Fixed the e2e tutorial test fixture, which wrote a duplicate `type = "claude"` key into `[commands.create]` in the generated `settings.local.toml`. The duplicate key made the file invalid TOML, causing every e2e tutorial command to fail with a config parse error ("Cannot overwrite a value").
+
+Also strengthened `test_create_with_source_path_no_git` to assert that a non-git source folder produces no agent git branch and that the agent's work directory is not a git repository, reinforcing the tutorial's claim that mngr does not require git.
+
+Fixed the e2e test fixture's generated `settings.local.toml` which had a duplicate `type = "claude"` key under `[commands.create]`, causing all e2e tutorial tests using the fixture to fail at config-parse time with "Cannot overwrite a value".
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) so the seeded `settings.local.toml` no longer contains a duplicate `type = "claude"` key under `[commands.create]`. The duplicate produced invalid TOML, causing every e2e tutorial command that loads this config to fail with a "Cannot overwrite a value" parse error (most visibly breaking `test_create_with_template_modal_disabled`, which then failed for the wrong reason).
+
+Fixed the e2e test fixture and expanded coverage for `mngr create --template`.
+
+- The e2e `settings.local.toml` written by the test fixture contained a duplicate
+  `type = "claude"` key under `[commands.create]`, which made tomlkit refuse to parse the
+  config ("Cannot overwrite a value") and broke every e2e test that loaded it. Removed the
+  duplicate line.
+- Added `test_create_with_nonexistent_template`, an unhappy-path companion to
+  `test_create_with_template`, verifying that creating with an unconfigured template name
+  fails with a helpful error that names the missing template and lists the available ones,
+  and that no agent is created.
+
+Fixed the e2e test fixture in `conftest.py` that wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The duplicate produced invalid TOML, causing every e2e tutorial test (including `test_create_with_transfer_none`) to fail config parsing with "Cannot overwrite a value".
+
+Fixed the e2e test fixture (`e2e/conftest.py`) so that the `settings.local.toml` it writes no
+longer contains a duplicate `type = "claude"` key under `[commands.create]`. The duplicate key
+caused tomlkit to fail config parsing ("Cannot overwrite a value"), which made every e2e tutorial
+test (including the Docker tutorial tests) fail before running any `mngr` command.
+
+Fixed the e2e test fixture that wrote a duplicate `type = "claude"` key into
+`settings.local.toml`, which made every e2e tutorial command fail to parse its
+config. Also corrected the `test_destroy_all_via_stdin` release test: it only
+manages local agents, so it never invokes Modal and no longer carries the
+`@pytest.mark.modal` mark. Strengthened the test to assert that both agents are
+reported as destroyed by the piped `mngr list --ids | mngr destroy - --force`
+command.
+
+Fixed the release e2e test `test_destroy_by_session_name_happy_path` (destroy section).
+
+- Fixed the shared e2e fixture (`e2e/conftest.py`): the generated `settings.local.toml` had a
+  duplicate `type = "claude"` key inside `[commands.create]` (introduced by a squashed
+  conflict resolution), which made tomlkit reject the file with "Cannot overwrite a value" and
+  broke `mngr create` for every e2e test using the fixture. Removed the duplicate line.
+- Removed the stale `@pytest.mark.modal` marker from the test. It only creates a local
+  `command`-type agent and destroys it by tmux session name; it never invokes the bare `modal`
+  CLI (the only path the resource guard observes), so the guard failed the test with "marked
+  with @pytest.mark.modal but never invoked modal". The mark has no effect on CI selection
+  (release offload filters by `release`).
+
+Fixed the e2e test fixture, which wrote a duplicate `type = "claude"` key under
+`[commands.create]` in the generated `settings.local.toml`, causing every e2e
+test to fail with a TOML parse error ("Cannot overwrite a value"). The default
+agent type is now written exactly once.
+
+Strengthened `test_destroy_multiple_at_once` to also assert on the
+"Successfully destroyed 3 agent(s)" summary line, verifying that a single
+`mngr destroy a b c --force` command tears down the exact number of agents
+requested.
+
+Fixed the e2e test fixture that wrote an invalid `settings.local.toml` containing a duplicate `type = "claude"` key under `[commands.create]`, which made TOML parsing fail and broke agent creation across e2e tests. Also added the missing `@pytest.mark.timeout(120)` marker to `test_destroy_no_gc` so it no longer falls back to the too-short default timeout.
+
+Fixed the e2e test fixture's generated `settings.local.toml`, which contained a
+duplicate `type = "claude"` key under `[commands.create]` and caused every e2e
+tutorial test to fail with a TOML parse error during `mngr create`.
+
+Added `test_destroy_keeps_branch_by_default`, a companion test for the
+`mngr destroy --remove-created-branch` tutorial block that verifies the documented
+safe default: a plain destroy leaves the agent's git branch intact.
+
+Fixed the e2e test fixture's generated `settings.local.toml`, which contained a
+duplicate `type = "claude"` key under `[commands.create]` that made TOML parsing
+fail ("Cannot overwrite a value") and broke `mngr create` in every tutorial e2e
+test. Also removed an incorrect `@pytest.mark.modal` from
+`test_destroy_short_form_running_requires_force`: that unhappy-path test refuses
+to destroy a running local agent without `--force`, so it never invokes modal.
+
+Fixed the e2e tutorial test fixture so the `mngr rm` short-form destroy release test passes. The shared `settings.local.toml` written by the e2e fixture had a duplicate `type = "claude"` key under `[commands.create]` (a merge artifact), which made every `mngr create` in the e2e tutorial tests fail with a TOML "Cannot overwrite a value" parse error. Also removed the superfluous `@pytest.mark.modal` mark from `test_destroy_short_form`, which only creates a local `command`-type agent and never invokes the `modal` binary, so the resource guard failed it with a "marked modal but never invoked modal" violation.
+
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's `settings.local.toml`, which caused every e2e test to fail at agent creation with a TOML "Cannot overwrite a value" parse error.
+
+Fixed the e2e tutorial test fixture: removed a duplicate `type = "claude"` key in the generated `settings.local.toml`, which caused a TOML parse error ("Cannot overwrite a value") that broke all e2e tutorial tests using the shared fixture.
+
+Fixed the e2e tutorial test fixture (`E2eSession`) that wrote an invalid `settings.local.toml` containing a duplicate `type = "claude"` key under `[commands.create]`, which made every `mngr` command in the e2e tutorial tests fail to parse its config. Also added a `@pytest.mark.timeout(60)` override to `test_env_var_mngr_headless`, which makes several sequential `mngr` subprocess calls and was timing out under the default 10s limit.
+
+Fixed the e2e test fixture (`conftest.py`) that wrote an invalid `settings.local.toml`: the `[commands.create]` table contained a duplicate `type = "claude"` key, which TOML rejects ("Cannot overwrite a value"). This broke `mngr create` in every e2e test. Also removed a duplicate `_parse_jsonl_events` helper definition in `test_event.py`.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that wrote a
+duplicate `type = "claude"` key into the generated `settings.local.toml`,
+producing invalid TOML that made every tutorial e2e agent-creation command fail
+with "Cannot overwrite a value". The fixture now writes the default agent type
+once. This unblocks the `mngr event` tutorial e2e tests (including
+`test_event_follow_filter_source`).
+
+Fixed the e2e tutorial test fixture so agent creation works again. The shared
+`settings.local.toml` written by the e2e session fixture contained a duplicate
+`type = "claude"` key under `[commands.create]`, which made the config file
+invalid TOML and caused every `mngr create` in the tutorial e2e tests to fail
+with "Cannot overwrite a value". Removed the duplicate key.
+
+Also removed a redundant second definition of the `_parse_jsonl_events` helper
+in `test_event.py` that shadowed the stronger original (the original asserts
+each parsed line is a JSON object).
+
+Fixed the e2e tutorial test fixture so `mngr event` tutorial tests can create agents again.
+
+- The e2e fixture wrote a duplicate `type = "claude"` key inside `[commands.create]` in the
+  generated `settings.local.toml`, producing invalid TOML. Every tutorial command that creates
+  an agent failed with "Cannot overwrite a value". Removed the duplicate key.
+- Test-only cleanup in `test_event.py`: removed a duplicated `_parse_jsonl_events` helper (the
+  second, weaker definition shadowed the first) and strengthened
+  `test_event_head_conflicts_with_tail` to assert that no events are emitted to stdout when
+  `--head` and `--tail` are combined.
+
+Test-only changes (no user-visible behavior change):
+
+- Fixed the e2e tutorial test fixture (`e2e/conftest.py`): the generated
+  `settings.local.toml` had a duplicate `type = "claude"` key under
+  `[commands.create]`, which made TOML parsing fail with "Cannot overwrite a
+  value". This broke agent creation for every e2e tutorial test. Removed the
+  redundant key.
+- Cleaned up `e2e/tutorial/test_event.py`: removed a duplicate
+  `_parse_jsonl_events` definition that shadowed the stricter one, and
+  strengthened `test_event_head` to assert that `--head` returns the leading
+  prefix of the full event stream (the earliest events, not the tail).
+
+Fixed the e2e tutorial test fixture, which wrote an invalid `settings.local.toml` containing a
+duplicate `type = "claude"` key under `[commands.create]`. This caused every tutorial e2e test
+that creates an agent to fail with a TOML parse error ("Cannot overwrite a value"). The duplicate
+line was removed so the generated config is valid.
+
+Also strengthened `test_event_include_filter_rejects_invalid_cel` to assert that a rejected
+`--include` CEL filter produces no event output on stdout, verifying the command fails loudly
+rather than silently emitting events.
+
+Fixed the e2e test fixture that generated an invalid `settings.local.toml`: the
+`[commands.create]` table contained a duplicate `type = "claude"` key, which made
+tomlkit reject the file ("Cannot overwrite a value") and caused every `mngr create`
+in the e2e tutorial tests to fail. Removed the duplicate key. Also removed a
+shadowing duplicate `_parse_jsonl_events` helper in the event tutorial tests so the
+stricter (object-asserting) parser is the one actually used.
+
+Fixed the e2e tutorial test fixture so the generated `settings.local.toml` no longer emits a duplicate `type = "claude"` key under `[commands.create]`, which produced an invalid-TOML parse error ("Cannot overwrite a value") and broke `mngr create` in the tutorial event tests. Also strengthened `test_event_tail` to verify the `--tail 20` JSONL contract (at most 20 events, each carrying the guaranteed fields), matching its sibling event tests, and removed a duplicate `_parse_jsonl_events` helper definition.
+
+Fixed the e2e tutorial test fixture (`conftest.py`) that wrote an invalid `settings.local.toml` with a duplicated `type = "claude"` key under `[commands.create]`. The duplicate key caused a TOML parse error ("Cannot overwrite a value") during `mngr create`, breaking agent creation in the e2e tutorial tests.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that wrote an
+invalid `settings.local.toml`: the `[commands.create]` table defined `type = "claude"`
+twice, which TOML rejects ("Cannot overwrite a value"). This caused every `mngr create`
+in the e2e tutorial suite to fail at setup with a config-parse error. Removed the
+duplicate key so the fixture writes a single `type = "claude"` default, unblocking the
+`mngr exec` tutorial tests (and all other e2e tests sharing this fixture).
+
+Fixed the e2e tutorial test fixture and expanded `mngr exec --cwd` coverage.
+
+- The e2e fixture wrote a duplicate `type = "claude"` key into the generated
+  `settings.local.toml`, which the TOML parser rejected ("Cannot overwrite a
+  value"). Every tutorial test that creates an agent (`mngr create`) failed at
+  the create step before reaching its actual assertions. Removed the duplicate
+  key so the fixture-generated config parses.
+- Added `test_exec_cwd_nonexistent`, an unhappy-path test sharing the
+  `mngr exec --cwd` tutorial block: it verifies that pointing `--cwd` at a
+  directory that does not exist on the agent host causes exec to exit nonzero
+  rather than silently running in the default work_dir.
+
+Fixed the e2e tutorial fixture so `mngr create` works again: the generated
+`settings.local.toml` had a duplicate `type = "claude"` key under
+`[commands.create]`, which made the TOML parser reject the config ("Cannot
+overwrite a value"). Removed the duplicate.
+
+Gave `test_exec_git_log` a `@pytest.mark.timeout(60)` override (matching the
+identically-shaped `test_exec_branch_show_current`), since `mngr create` plus
+`mngr exec` together exceed the 10s default pytest timeout.
+
+Fixed the e2e tutorial test fixture that generated an invalid `settings.local.toml` with a duplicate `type = "claude"` key under `[commands.create]`, which made every e2e tutorial test fail to create agents. Also added a 120s timeout to `test_exec_git_push_then_merge`, which exercises a slow `mngr exec`, so it no longer trips the default 10s pytest timeout.
+
+Fixed the e2e tutorial test fixture, which wrote a duplicate `type = "claude"`
+key into the per-test `settings.local.toml`, producing invalid TOML that made
+`mngr create` (and therefore every e2e tutorial test) fail to load its config.
+Also gave `test_exec_short_form` an explicit `@pytest.mark.timeout(120)` so the
+create+exec cycle is not killed by the repo-wide 10s default timeout.
+
+Fixed a bug in the e2e tutorial test fixture (`conftest.py`) that wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The config parser rejected the duplicate key ("Cannot overwrite a value"), causing every e2e tutorial test's `mngr create` step to fail. Removed the duplicate key.
+
+Fixed the e2e tutorial test fixture that wrote a malformed `settings.local.toml` containing a duplicate `type = "claude"` key under `[commands.create]`, which caused a TOML parse error ("Cannot overwrite a value") and made `mngr create` fail in every tutorial e2e test.
+
+Fixed the e2e `test_full_lifecycle` release test (and the shared e2e fixture it depends on):
+
+- Removed a duplicate `type = "claude"` key under `[commands.create]` in the e2e conftest's
+  generated `settings.local.toml`. The duplicate made tomlkit refuse to parse the file
+  ("Cannot overwrite a value"), causing every `mngr` command in e2e tests to fail at config
+  load.
+- Added `@pytest.mark.timeout(300)` to `test_full_lifecycle`, matching the convention used by
+  the other multi-command e2e tests. Without it the test inherited the global 10s `func_only`
+  timeout and was killed partway through its sequence of `mngr` commands.
+
+Fixed the e2e test fixture's generated `settings.local.toml`, which defined the `[commands.create]` `type` key twice. TOML forbids redefining a key in the same table, so every e2e tutorial test failed at startup with "Cannot overwrite a value" before any command ran. Removed the duplicate key.
+
+Fixed the e2e test fixture so it no longer writes a duplicate `type = "claude"` key into the generated `settings.local.toml`. The duplicate caused a TOML parse error ("Cannot overwrite a value") that broke `test_invalid_provider_fails` (and any other e2e test that loaded the merged config), masking the real behavior under test.
+
+Fixed the e2e test fixture so it no longer emits an invalid `settings.local.toml`: the
+`[commands.create]` table set `type = "claude"` twice, which is a duplicate-key TOML error
+("Cannot overwrite a value") that caused every command loading the merged config (e.g.
+`mngr list`) to fail. Removed the duplicate key.
+
+Added a happy-path companion to the `mngr list --fields "name,state,initial_branch"` tutorial
+test (`test_list_fields_original_branch_with_agent`) that creates an agent and asserts the
+`initial_branch` column actually displays the branch mngr created for it (`mngr/my-task`),
+complementing the existing empty-list ("No agents found") coverage.
+
+Test-only changes (no user-visible behavior change).
+
+- Fixed the e2e test fixture: the generated `settings.local.toml` defined `type = "claude"` twice
+  under `[commands.create]`, which is an invalid duplicate TOML key and caused every `mngr` command
+  in the e2e suite to fail with a config parse error. Removed the duplicate.
+- Strengthened `test_list_filter_by_state` to also assert that the `--stopped` flag returns exactly
+  the same set of agents as its documented CEL alias `--include 'state == "STOPPED"'`.
+
+Fixed a bug in the shared e2e test fixture (`e2e/conftest.py`) where the generated
+`settings.local.toml` contained a duplicate `type = "claude"` key under
+`[commands.create]`. The duplicate key made the file invalid TOML, so every `mngr`
+command run by an e2e test failed during config parsing with
+`Cannot overwrite a value`. Removing the redundant line restores a valid config and
+unblocks the docker tutorial e2e tests (and all other e2e tests sharing this fixture).
+
+Fixed the e2e test fixture (`conftest.py`) that wrote an invalid `settings.local.toml` with a duplicate `type = "claude"` key under `[commands.create]`, which made every e2e `mngr create` fail with a TOML "Cannot overwrite a value" parse error.
+
+Strengthened `test_multiple_agents_coexist` to verify that coexisting agents each occupy a distinct working directory (their own worktree), rather than only checking that an `echo` command runs on each.
+
+Fixed the e2e test fixture so it no longer writes a duplicate `type = "claude"` key into the generated `settings.local.toml`, which had been causing every config load (and thus commands like `mngr plugin disable`) to fail with a TOML "Cannot overwrite a value" parse error. Also added a 60s `@pytest.mark.timeout` to the plugin e2e tests, which run several real `mngr` subprocess invocations and exceed the default 10s per-test timeout.
+
+Fixed the e2e test fixture and the plugin e2e tests so the plugin disable/enable roundtrip
+release test runs correctly:
+
+- Removed a duplicate `type = "claude"` key from the `[commands.create]` table that the e2e
+  fixture writes into `settings.local.toml`. The duplicate produced invalid TOML, so every
+  command in an affected e2e test failed up front with "Cannot overwrite a value".
+- Added `@pytest.mark.timeout(300)` to the two plugin e2e tests, matching the convention used
+  by other multi-command e2e release tests. Their several real CLI subprocess invocations
+  exceed the global 10s `func_only` timeout.
+
+Fixed the e2e test fixture's generated `settings.local.toml`, which contained a
+duplicate `type = "claude"` key under `[commands.create]` (a squash-merge
+artifact) that produced invalid TOML and broke every e2e test with a config
+parse error. Also strengthened `test_plugin_list_active_to_see_types` to verify,
+via JSON output, that the `claude`, `codex`, and `command` agent types appear as
+their own enabled plugin entries rather than relying on loose substring matches.
+
+Fixed the e2e tutorial test fixture (`e2e` in `conftest.py`) which wrote a malformed `settings.local.toml` containing a duplicate `type = "claude"` key under `[commands.create]`. The config loader now rejects duplicate TOML keys, so this broke every e2e tutorial test with "Cannot overwrite a value". Removed the accidental duplicate line.
+
+Also strengthened `test_recipe_launch_check_cleanup` to verify that destroy removes the agent itself (gone from `mngr list`, no longer resolvable by `mngr exec`), not just its branch.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that wrote an invalid `settings.local.toml`: a merge artifact had duplicated the `type = "claude"` key inside the `[commands.create]` table, causing every `mngr` command in e2e tests to fail with `Failed to parse config file ...: Cannot overwrite a value`. Removed the duplicate key.
+
+Fixed the e2e test fixture that wrote a duplicate `type = "claude"` key into the
+generated `settings.local.toml`, which produced an invalid-TOML parse error
+("Cannot overwrite a value") and broke every e2e command (e.g. `mngr create`).
+
+Strengthened `test_rename_dry_run_does_not_rename` to also verify (via `mngr
+exec`) that the agent remains reachable and running its command under its
+original name after a dry-run, not just that the name is unchanged in
+`mngr list`.
+
+Test-only changes (no user-visible behavior change):
+
+- Fixed the e2e `e2e` fixture (`e2e/conftest.py`), which wrote a `[commands.create]`
+  block with a duplicate `type = "claude"` key into `settings.local.toml`. TOML rejects
+  duplicate keys, so every e2e test using the fixture failed at the first `mngr` command
+  with "Cannot overwrite a value". Removed the duplicate line.
+- Strengthened `test_tips_exec_env_inspect`: it now cross-checks that the
+  `MNGR_AGENT_ID` exported into the exec'd environment matches the id mngr records for
+  the agent, and verifies the `env | sort` output is actually sorted.
+
+Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that wrote a duplicate
+`type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The
+duplicate key made the file invalid TOML, so every `mngr` command run through the e2e fixture
+failed with "Cannot overwrite a value". Removing the duplicate restores the e2e tutorial tests
+(including `test_tips_transcript_tail_assistant`).
+
+Fixed the e2e tutorial test fixture and strengthened the unknown-command test.
+
+- The e2e `settings.local.toml` written by the tutorial-test fixture contained a duplicate
+  `type = "claude"` key under `[commands.create]` (a merge artifact). This is invalid TOML and
+  made every e2e tutorial command abort with a config parse error ("Cannot overwrite a value")
+  instead of running. Removed the duplicate so the fixture config parses again.
+- `test_unknown_command_fails` now asserts the precise Click usage exit code (2), that stdout is
+  empty (clean for scripting), and that the error names the offending command, in addition to
+  pointing the user back at `mngr --help`.
+
 ## 2026-06-08
 
 # Install the agent-coordination Claude Code skills

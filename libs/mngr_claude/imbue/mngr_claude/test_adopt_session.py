@@ -1,21 +1,16 @@
-"""Release tests for ``mngr create --adopt-session``.
+"""Release tests for ``mngr create --adopt``.
 
 Verifies end-to-end that a new mngr-managed claude agent created with
-``--adopt-session`` actually resumes from the source session: the destination
+``--adopt`` actually resumes from the source session: the destination
 agent's claude process must receive the prior conversation as context and be
 able to recall a unique secret that was planted in the source session.
 
-Two source variants are covered:
-
-* ``test_adopt_session_brings_context_from_vanilla_claude_session`` --
-  source session was produced by the ``claude`` CLI with no mngr involvement,
-  so its JSONL lives under ``~/.claude/projects/<encoded-cwd>/``.
-
-* ``test_adopt_session_brings_context_from_mngr_claude_agent_session`` --
-  source session was produced by an existing mngr-managed claude agent, so
-  its JSONL lives under that agent's per-agent ``CLAUDE_CONFIG_DIR`` (a
-  different directory layout than the vanilla case). The ``--adopt-session``
-  argument is the full path to the source ``.jsonl``.
+Covers adopting a session produced by the vanilla ``claude`` CLI with no mngr
+involvement (``test_adopt_session_brings_context_from_vanilla_claude_session``),
+whose JSONL lives under ``~/.claude/projects/<encoded-cwd>/`` and is adopted by
+bare session id. Adoption from an mngr-managed agent's own session is covered
+end-to-end by the shared release harness (``test_claude_agent_e2e.py``), which
+preserves a destroyed agent's session and adopts it into a fresh worktree.
 
 These are release tests; release tests do not run in CI. To run manually::
 
@@ -219,79 +214,6 @@ def _create_vanilla_claude_session(work_dir: Path, secret: str, env: dict[str, s
     return jsonl_path.stem, jsonl_path
 
 
-def _create_mngr_claude_session(
-    agent_name: str,
-    work_dir: Path,
-    secret: str,
-    env: dict[str, str],
-) -> tuple[str, Path]:
-    """Plant a session via an mngr-managed claude agent.
-
-    Runs ``mngr create ... -- -p <seed prompt>`` so claude executes the seed
-    prompt in print mode and exits, leaving a JSONL under the agent's
-    per-agent ``CLAUDE_CONFIG_DIR``. The agent is left on disk (not
-    destroyed) so the test that owns this fixture can pass the ``.jsonl``
-    path to ``--adopt-session`` of a second agent.
-
-    Returns ``(session_id, jsonl_path)``.
-    """
-    seed_prompt = _SEED_PROMPT_TEMPLATE.format(secret=secret)
-    _run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            agent_name,
-            "claude",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--yes",
-            "--source",
-            str(work_dir),
-            "--pass-env",
-            "ANTHROPIC_API_KEY",
-            "--",
-            "--dangerously-skip-permissions",
-            "-p",
-            seed_prompt,
-        ],
-        env=env,
-        timeout=float(_PROVISION_TIMEOUT_SECONDS),
-    )
-
-    # The per-agent CLAUDE_CONFIG_DIR is at <agent_dir>/plugin/claude/anthropic
-    # (per ClaudeAgent.get_claude_config_dir at plugin.py:1320). agent_dir is
-    # <host_dir>/agents/<agent_id>. The autouse setup_test_mngr_env fixture
-    # isolates host_dir per test, so a single-element glob suffices. We do
-    # not assert on the encoded-project-dir name because mngr's default is
-    # to create the agent in a fresh worktree (under .mngr/worktrees/), so
-    # the agent's work_dir -- and thus the encoded project name -- differs
-    # from the ``--source`` argument. Claude may still be running asynchronously
-    # when mngr create returns, so poll for the JSONL.
-    host_dir = Path(env["MNGR_HOST_DIR"])
-    project_root = host_dir / "agents"
-
-    def _find_session_jsonls() -> list[Path] | None:
-        matches = list(project_root.glob("*/plugin/claude/anthropic/projects/*/*.jsonl"))
-        return matches or None
-
-    candidates, _, _ = poll_for_value(
-        _find_session_jsonls,
-        timeout=float(_VANILLA_CLAUDE_TIMEOUT_SECONDS),
-        poll_interval=2.0,
-    )
-    assert candidates is not None and len(candidates) == 1, (
-        f"Expected exactly one session JSONL under "
-        f"{project_root}/*/plugin/claude/anthropic/projects/*/; "
-        f"got {len(candidates) if candidates else 0} within "
-        f"{_VANILLA_CLAUDE_TIMEOUT_SECONDS}s. tree: "
-        f"{sorted(project_root.rglob('*.jsonl')) if project_root.exists() else 'no agents/ dir'}"
-    )
-    jsonl_path = candidates[0]
-    return jsonl_path.stem, jsonl_path
-
-
 def _wait_for_text_in_pane(session_name: str, expected: str, env: dict[str, str], timeout: float) -> str:
     """Poll ``tmux capture-pane`` until ``expected`` shows up; return the matching capture.
 
@@ -336,13 +258,18 @@ def _verify_adopted_context(
     secret: str,
     env: dict[str, str],
 ) -> None:
-    """Create the destination agent with ``--adopt-session`` and assert it can recall ``secret``.
+    """Create the destination agent with ``--adopt`` and assert it can recall ``secret``.
 
     Launches the destination interactively (no ``-p``) so we can drive it
     with ``mngr message`` after startup. ``mngr destroy`` is invoked on the
     way out regardless of success.
     """
-    create_result = _run(
+    # ``_run`` defaults to ``check=True``, so a non-zero ``mngr create`` exit
+    # already fails the test with full stdout/stderr -- create-success is
+    # verified structurally here, without coupling to mngr's "Done." log
+    # wording. The load-bearing behavioral check is the secret recall in the
+    # destination agent's pane below.
+    _run(
         [
             "uv",
             "run",
@@ -357,16 +284,13 @@ def _verify_adopted_context(
             str(dest_work_dir),
             "--pass-env",
             "ANTHROPIC_API_KEY",
-            "--adopt-session",
+            "--adopt",
             adopt_arg,
             "--",
             "--dangerously-skip-permissions",
         ],
         env=env,
         timeout=float(_PROVISION_TIMEOUT_SECONDS),
-    )
-    assert "Done." in create_result.stdout, (
-        f"Expected 'Done.' in mngr create stdout. stdout:\n{create_result.stdout}\nstderr:\n{create_result.stderr}"
     )
     try:
         _run(
@@ -400,7 +324,7 @@ def test_adopt_session_brings_context_from_vanilla_claude_session(
     """Adopt a session created by the vanilla ``claude`` CLI; the new agent must recall the secret.
 
     Source layout: ``$HOME/.claude/projects/<encoded-cwd>/<session_id>.jsonl``.
-    Adopt by session ID (``--adopt-session <id>``).
+    Adopt by session ID (``--adopt <id>``).
     """
     secret = uuid.uuid4().hex
     session_id, _ = _create_vanilla_claude_session(source_work_dir, secret, trusted_subprocess_env)
@@ -413,36 +337,3 @@ def test_adopt_session_brings_context_from_vanilla_claude_session(
         secret=secret,
         env=trusted_subprocess_env,
     )
-
-
-@pytest.mark.release
-@pytest.mark.tmux
-@pytest.mark.rsync
-@pytest.mark.timeout(2 * _PROVISION_TIMEOUT_SECONDS + _VANILLA_CLAUDE_TIMEOUT_SECONDS + _RESPONSE_TIMEOUT_SECONDS + 60)
-def test_adopt_session_brings_context_from_mngr_claude_agent_session(
-    source_work_dir: Path,
-    dest_work_dir: Path,
-    trusted_subprocess_env: dict[str, str],
-) -> None:
-    """Adopt a session created by an mngr-managed claude agent; the new agent must recall the secret.
-
-    Source layout: ``<agent_dir>/plugin/claude/anthropic/projects/<encoded-cwd>/<session_id>.jsonl``
-    (different config-dir layout than the vanilla case). Adopt by full
-    ``.jsonl`` path so the resolver does not need to know about the source
-    agent's config dir.
-    """
-    secret = uuid.uuid4().hex
-    source_agent_name = f"adopt-src-{get_short_random_string()}"
-    _, jsonl_path = _create_mngr_claude_session(source_agent_name, source_work_dir, secret, trusted_subprocess_env)
-
-    dest_agent_name = f"adopt-mngr-{get_short_random_string()}"
-    try:
-        _verify_adopted_context(
-            dest_agent_name=dest_agent_name,
-            dest_work_dir=dest_work_dir,
-            adopt_arg=str(jsonl_path),
-            secret=secret,
-            env=trusted_subprocess_env,
-        )
-    finally:
-        _destroy_agent(source_agent_name, trusted_subprocess_env)

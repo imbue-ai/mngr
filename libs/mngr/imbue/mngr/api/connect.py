@@ -33,14 +33,19 @@ CONNECT_COMMAND_ACTIVE_ENV_VAR: Final[str] = "MNGR_CONNECT_COMMAND_ACTIVE"
 
 
 @pure
-def build_post_attach_resize_script(session_name: str) -> str:
-    """Build a shell command that resizes tmux windows and sends SIGWINCH.
+def build_post_attach_sigwinch_script(session_name: str) -> str:
+    """Build a shell command that sends SIGWINCH to every pane's child processes.
 
-    After a tmux client attaches, resize each window to match the client
-    (resize-window -A), then explicitly send SIGWINCH to each pane's child
-    processes. The explicit SIGWINCH is needed because resize-window -A can
-    be a no-op (and thus not trigger SIGWINCH) when the window already
-    matches the client size (e.g., due to window-size=latest).
+    After a tmux client attaches, the agent process needs a SIGWINCH to re-query
+    its terminal size (TIOCGWINSZ) and redraw at the client's dimensions. We send
+    the signal directly rather than via ``tmux resize-window`` because
+    resize-window has a documented side effect of switching the window's
+    ``window-size`` option to ``manual`` -- which pins the window at its current
+    size and stops it tracking later client resizes, so the user sees a field of
+    padding dots once their terminal grows past the pinned size. With
+    ``window-size`` left at tmux's default (``latest``), the window already
+    resizes to match the client on attach and on every subsequent terminal
+    resize; this script's only job is to nudge the in-pane process to redraw.
 
     Uses pgrep -P to find child processes of each pane. This avoids any
     dependency on matching the agent's process name, which is unreliable
@@ -55,7 +60,6 @@ def build_post_attach_resize_script(session_name: str) -> str:
     return (
         f"tmux list-windows -t {session_target} -F '#I' | "
         f"while read W; do "
-        f"tmux resize-window -t {session_target}:$W -A; "
         f"tmux list-panes -t {session_target}:$W -F '#{{pane_pid}}' "
         f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null; "
         f"done"
@@ -94,20 +98,24 @@ def _build_ssh_activity_wrapper_script(
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
     signal_file = host_dir / "signals" / session_name
-    # Force a terminal resize after attaching to trigger SIGWINCH delivery, but
-    # skip it when the agent's window is pinned ("manual" window-size) so the
-    # configured dimensions survive an interactive attach. The check runs on the
-    # remote host at attach time (window-size is a window option, read via -wv).
-    # Redirect stdout too (not just stderr) so control mode (-CC) is not corrupted
-    # by stray tmux command output on the SSH stdout stream. Target the primary
-    # window by name (not the literal :0 index) so the manual-pin guard holds
-    # regardless of the user's tmux base-index, matching how the window is created
-    # and targeted everywhere else.
+    # After attaching, nudge the agent to redraw by sending SIGWINCH to its pane
+    # processes. Skip it when the agent's window is pinned ("manual" window-size):
+    # such a window never changes size on attach, so there is nothing to redraw,
+    # and we leave the deliberately-fixed dimensions untouched. The check runs on
+    # the remote host at attach time (window-size is a window option, read via -wv).
+    # We deliberately do NOT use `tmux resize-window` here: it would flip
+    # window-size to manual as a side effect, pinning the window and breaking the
+    # live resize tracking that the default window-size=latest otherwise provides.
+    # Target the primary window by name (not the literal :0 index) so the
+    # manual-pin guard holds regardless of the user's tmux base-index, matching how
+    # the window is created and targeted everywhere else.
     agent_window_target = TmuxWindowTarget(session_name=session_name, window=primary_window_name).as_shell_arg()
-    resize_step = (
+    sigwinch_step = (
         f"(sleep 3; "
         f'if [ "$(tmux show-options -t {agent_window_target} -wv window-size 2>/dev/null)" != manual ]; then '
-        f"{build_post_attach_resize_script(session_name)}; fi) >/dev/null 2>&1 & "
+        # Redirect stdout too (not just stderr) so control mode (-CC) is not
+        # corrupted by stray tmux command output on the SSH stdout stream.
+        f"{build_post_attach_sigwinch_script(session_name)}; fi) >/dev/null 2>&1 & "
     )
     # Render the shared attach argv to a shell-command string. shlex.join quotes
     # each token (matching TmuxSessionTarget.as_shell_arg for the target), so this
@@ -122,7 +130,7 @@ def _build_ssh_activity_wrapper_script(
         f'printf \'{{\\n  "time": %d,\\n  "ssh_pid": %d\\n}}\\n\' "$TIME_MS" "$$" > \'{activity_file}\'; '
         f"sleep 5; done) & "
         "MNGR_ACTIVITY_PID=$!; "
-        f"{resize_step}"
+        f"{sigwinch_step}"
         # actually attach. Route the -t target through TmuxSessionTarget so the
         # = exact-match prefix and shell-escaping rule are uniform with the rest
         # of the codebase (see TmuxSessionTarget docstring for the prefix-matching

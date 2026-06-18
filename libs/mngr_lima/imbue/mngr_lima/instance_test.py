@@ -1,41 +1,23 @@
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 
 import pytest
 
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
-from imbue.mngr_lima.instance import _build_agent_container_extra_args
 from imbue.mngr_lima.instance import _parse_size_to_gb
-
-
-def test_build_agent_container_extra_args_default_is_empty() -> None:
-    # No runtime and no passthrough args -> no extra docker run args.
-    assert _build_agent_container_extra_args(None, ()) == []
-
-
-def test_build_agent_container_extra_args_runtime_only() -> None:
-    assert _build_agent_container_extra_args("runsc", ()) == ["--runtime", "runsc"]
-
-
-def test_build_agent_container_extra_args_passthrough_only() -> None:
-    # Passthrough run args apply even without a custom runtime.
-    assert _build_agent_container_extra_args(None, ("--workdir=/",)) == ["--workdir=/"]
-
-
-def test_build_agent_container_extra_args_runtime_and_passthrough_order() -> None:
-    # Runtime is prepended; passthrough args follow in order (the gVisor case).
-    assert _build_agent_container_extra_args(
-        "runsc",
-        ("--workdir=/", "--security-opt=no-new-privileges"),
-    ) == ["--runtime", "runsc", "--workdir=/", "--security-opt=no-new-privileges"]
+from imbue.mngr_lima.limactl import LimaSshConfig
 
 
 def test_provider_capabilities(lima_provider: LimaProviderInstance) -> None:
@@ -199,6 +181,40 @@ def test_record_pre_injected_host_key_rewrites_on_port_change(lima_provider: Lim
     assert "[127.0.0.1]:60099" in known_hosts
     assert "[127.0.0.1]:60022" not in known_hosts
     assert known_hosts.count("\n") == 1
+
+
+def test_effective_ssh_user_non_root_uses_lima_user(lima_provider: LimaProviderInstance) -> None:
+    """The default (non-root) provider connects as Lima's own user and key."""
+    ssh_config = LimaSshConfig(
+        hostname="127.0.0.1", port=60022, user="josh", identity_file=Path("/home/josh/.lima/key")
+    )
+    user, identity = lima_provider._effective_ssh_user_and_identity(ssh_config, is_run_as_root=False)
+    assert user == "josh"
+    assert identity == Path("/home/josh/.lima/key")
+
+
+def test_effective_ssh_user_root_uses_root_key(temp_mngr_ctx: MngrContext) -> None:
+    """A run-as-root host connects as root using mngr's injected root client key."""
+    config = LimaProviderConfig(
+        host_dir=Path("/mngr"),
+        is_host_data_volume_exposed=False,
+        is_run_as_root=True,
+        default_idle_timeout=60,
+    )
+    provider = LimaProviderInstance(
+        name=ProviderInstanceName("lima-root-test"),
+        host_dir=Path("/mngr"),
+        mngr_ctx=temp_mngr_ctx,
+        config=config,
+    )
+    ssh_config = LimaSshConfig(
+        hostname="127.0.0.1", port=60022, user="josh", identity_file=Path("/home/josh/.lima/key")
+    )
+    user, identity = provider._effective_ssh_user_and_identity(ssh_config, is_run_as_root=True)
+    assert user == "root"
+    # The injected root client key materializes under the provider's keys dir.
+    assert identity.name == "root_ssh_key"
+    assert identity.exists()
 
 
 def test_delete_host_removes_keypair_dir(lima_provider: LimaProviderInstance) -> None:

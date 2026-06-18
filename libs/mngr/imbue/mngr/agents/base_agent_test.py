@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -16,6 +17,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import ActivitySource
@@ -36,13 +38,15 @@ def test_agent(
     local_provider: LocalProviderInstance,
     temp_work_dir: Path,
 ) -> BaseAgent:
+    # SendKeysAgent (a BaseAgent subclass) so the send-keys methods are present for the
+    # message-sending tests; all base-behavior tests are unaffected (it adds only send_message).
     return create_test_agent(
         local_provider,
         temp_work_dir,
         agent_config=None,
         agent_type=None,
         extra_data=None,
-        agent_class=BaseAgent,
+        agent_class=SendKeysAgent,
     )
 
 
@@ -366,6 +370,56 @@ def test_tmux_target_uses_exact_match_named_primary_window(
 
 
 @pytest.mark.tmux
+def test_capture_pane_content_targets_requested_window(
+    test_agent: BaseAgent,
+) -> None:
+    """capture_pane_content(window=...) should read the requested window, not window 0.
+
+    The agent runs in window 0, but sessions can hold extra windows (watchers,
+    ttyd, manually-opened terminals). Passing an explicit window must capture that
+    window's pane rather than the agent's primary one.
+    """
+    session_name = test_agent.session_name
+    window_zero_marker = "WINDOW_ZERO_MARKER"
+    window_one_marker = "WINDOW_ONE_MARKER"
+
+    test_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 'echo {window_zero_marker}; sleep 493827'",
+        timeout_seconds=5.0,
+    )
+    try:
+        session_target = TmuxSessionTarget(session_name=session_name)
+        test_agent.host.execute_idempotent_command(
+            f"tmux new-window -t {session_target.as_shell_arg()} -d 'echo {window_one_marker}; sleep 493827'",
+            timeout_seconds=5.0,
+        )
+
+        def _default_capture_shows_window_zero() -> bool:
+            content = test_agent.capture_pane_content() or ""
+            return window_zero_marker in content
+
+        wait_for(
+            _default_capture_shows_window_zero,
+            error_message=f"Expected default capture to contain {window_zero_marker!r}",
+        )
+
+        def _window_one_capture_shows_window_one() -> bool:
+            content = test_agent.capture_pane_content(window=1) or ""
+            return window_one_marker in content
+
+        wait_for(
+            _window_one_capture_shows_window_one,
+            error_message=f"Expected window-1 capture to contain {window_one_marker!r}",
+        )
+
+        # Cross-check: window 1's content is distinct from the default (window 0) content.
+        assert window_zero_marker not in (test_agent.capture_pane_content(window=1) or "")
+        assert window_one_marker not in (test_agent.capture_pane_content() or "")
+    finally:
+        cleanup_tmux_session(session_name)
+
+
+@pytest.mark.tmux
 def test_send_tmux_literal_keys_short_message_with_leading_dash(
     test_agent: BaseAgent,
 ) -> None:
@@ -375,20 +429,23 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
     argv parser treats the leading dash as a flag and errors with
     `invalid flag --`, so the message never reaches the pane.
     """
-    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    # The fixture builds a SendKeysAgent; narrow so the send-keys method is in view.
+    assert isinstance(test_agent, SendKeysAgent)
+    send_keys_agent: SendKeysAgent = test_agent
+    session_name = f"{send_keys_agent.mngr_ctx.config.prefix}{send_keys_agent.name}"
     tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
     message = "--model gemma --flag-leading-message"
 
     # `cat` echoes typed characters via the PTY's line discipline, so the
     # message becomes visible in the pane without needing to press Enter.
-    test_agent.host.execute_idempotent_command(
+    send_keys_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' -x 200 -y 24 'cat'",
         timeout_seconds=5.0,
     )
 
     try:
         # If the bug is back, this raises SendMessageError with "invalid flag --".
-        test_agent._send_tmux_literal_keys(tmux_target, message)
+        send_keys_agent._send_tmux_literal_keys(tmux_target, message)
 
         def _message_visible() -> bool:
             result = test_agent.host.execute_idempotent_command(
@@ -1000,9 +1057,9 @@ def _create_named_agent_with_stub_host(
     temp_mngr_ctx: MngrContext,
     stub: _StubHost,
     name: AgentName,
-    cls: type[BaseAgent] = BaseAgent,
+    cls: type[SendKeysAgent] = SendKeysAgent,
     **kwargs: Any,
-) -> BaseAgent:
+) -> SendKeysAgent:
     """Create an agent with a stub host for command recording.
 
     Uses model_construct to bypass Pydantic validation so the stub host
@@ -1027,9 +1084,11 @@ def _create_named_agent_with_stub_host(
 def _create_agent_with_stub_host(
     temp_mngr_ctx: MngrContext,
     stub: _StubHost,
-    cls: type[BaseAgent] = BaseAgent,
+    cls: type[SendKeysAgent] = SendKeysAgent,
     **kwargs: Any,
-) -> BaseAgent:
+) -> SendKeysAgent:
+    # Default to SendKeysAgent so the send-keys methods (_send_tmux_literal_keys /
+    # _send_message_simple) are available; it is a BaseAgent for every other test.
     return _create_named_agent_with_stub_host(temp_mngr_ctx, stub, AgentName("stub-agent"), cls, **kwargs)
 
 

@@ -10,6 +10,7 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 from imbue.mngr_robinhood.agent_runtime import build_pass_env_vars
 from imbue.mngr_robinhood.data_types import OutputFormat
 from imbue.mngr_robinhood.orchestrator import _StreamBufferConsumer
@@ -60,7 +61,7 @@ def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() ->
     )
     host = _FakeBufferHost()
     consumer = _StreamBufferConsumer.model_construct(
-        host=host, buffer_path=Path("/buffer"), writer=writer, emitted_body="", last_content=""
+        host=host, buffer_path=Path("/buffer"), writer=writer, reader=SnapshotDeltaReader()
     )
 
     _drive_consumer_turn(consumer, host, ["id1\nThe answer is\n", "id1\nThe answer is 42.\nx"])
@@ -81,11 +82,6 @@ def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() ->
     stdout.seek(0)
     _drive_consumer_turn(consumer, host, [])
     assert stdout.getvalue() == ""
-
-
-def test_build_pass_env_vars_is_populated() -> None:
-    options = build_pass_env_vars()
-    assert len(options.env_vars) > 0
 
 
 def test_build_pass_env_vars_drops_kitty_terminal_vars(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,6 +130,19 @@ def test_monotonic_ms_since_returns_non_negative_int() -> None:
     elapsed = monotonic_ms_since(start)
     assert isinstance(elapsed, int)
     assert elapsed >= 0
+
+
+def test_monotonic_ms_since_scales_to_milliseconds() -> None:
+    """Guard the ``* 1000`` scaling without any wall-clock-timing assumption. The internal
+    ``time.monotonic()`` read happens between ``lower_ms`` and ``upper_ms``; because monotonic is
+    non-decreasing, the result is mathematically bracketed by them regardless of how long the call
+    takes, so this is deterministic, not merely improbable-to-flake. A dropped ``* 1000`` would
+    return seconds (~1) instead of milliseconds (~1000), falling below the lower bound."""
+    start = time.monotonic() - 1.0
+    lower_ms = (time.monotonic() - start) * 1000
+    result = monotonic_ms_since(start)
+    upper_ms = (time.monotonic() - start) * 1000
+    assert int(lower_ms) <= result <= upper_ms
 
 
 def test_transcript_read_failure_warner_warns_once() -> None:
@@ -201,7 +210,7 @@ def _make_ticker_target(local_host: Host, tmp_path: Path) -> tuple[EventsTarget,
     transcript_path.parent.mkdir(parents=True)
     transcript_path.write_text("")
     target = EventsTarget(
-        online_host=local_host,
+        host=local_host,
         events_path=events_path,
         display_name="agent 'agent-x'",
     )
@@ -390,6 +399,8 @@ def test_ticker_picks_up_terminal_event_appended_during_polling(local_host: Host
     timer = threading.Timer(0.25, _append)
     timer.start()
     try:
+        # The 0.25s append delay vs the 2.0s deadline is a deliberate 8x margin:
+        # it is the flakiness guard for this wall-clock-dependent test.
         deadline = time.monotonic() + 2.0
         result: AgentLifecycleState | None = None
         while result is None and time.monotonic() < deadline:

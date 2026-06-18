@@ -77,7 +77,7 @@ Setting `attach_args = ["-CC"]` makes `mngr connect` (and `mngr create`/`start` 
 
 ### Extra session config (`user_config_path`)
 
-The generated `~/.mngr/tmux.conf` already sources your `~/.tmux.conf`, but it is marked "do not edit" and is rewritten each time an agent starts. To add tmux config that applies only to `mngr` sessions (custom status styling, keybindings, etc.), point `user_config_path` at a file and put your config there -- `mngr` sources it (if it exists) into every session and never touches it. For remote agents the path is resolved on the agent's host, so the file must exist there.
+tmux loads your `~/.tmux.conf` itself when its server starts, so `mngr` does not re-source it (re-sourcing non-idempotent config on every agent start could corrupt your setup). The generated `~/.mngr/tmux.conf` holds only `mngr`'s own settings and is marked "do not edit" (it is rewritten each time an agent starts). To add tmux config that applies only to `mngr` sessions (custom status styling, keybindings, etc.), point `user_config_path` at a file and put your config there -- `mngr` sources it (if it exists) into every session and never touches it. For remote agents the path is resolved on the agent's host, so the file must exist there.
 
 ### tmux `base-index`
 

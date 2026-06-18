@@ -202,6 +202,7 @@ def test_format_event_human_assistant_message_with_text() -> None:
         "timestamp": "2026-01-01T00:00:01.456Z",
         "text": "Here is my response",
         "tool_calls": [],
+        "parts": [{"type": "text", "content": "Here is my response"}],
     }
     result = _format_event_human(event)
     assert "[2026-01-01T00:00:01Z] assistant:" in result
@@ -214,7 +215,10 @@ def test_format_event_human_assistant_message_with_tool_calls() -> None:
         "timestamp": "2026-01-01T00:00:02Z",
         "text": "",
         "tool_calls": [
-            {"tool_name": "Read", "input_preview": '{"file":"test.py"}'},
+            {"tool_call_id": "c1", "tool_name": "Read", "input_preview": '{"file":"test.py"}'},
+        ],
+        "parts": [
+            {"type": "tool_call", "tool_call_id": "c1", "tool_name": "Read", "input_preview": '{"file":"test.py"}'},
         ],
     }
     result = _format_event_human(event)

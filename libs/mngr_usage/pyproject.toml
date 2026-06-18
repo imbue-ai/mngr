@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-usage"
-version = "0.1.0"
+version = "0.1.5"
 description = "mngr usage subcommand: agent-agnostic rolling-window quota / usage CLI (provider plugins implement the data side via the current_usage_snapshot hook)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.11",
+    "imbue-mngr==0.2.16",
     "click>=8.0",
     "click-option-group>=0.5.6",
     "pydantic>=2.0",
@@ -75,4 +75,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 90

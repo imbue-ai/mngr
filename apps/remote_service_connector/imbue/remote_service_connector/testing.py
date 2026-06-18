@@ -869,6 +869,10 @@ class FakePoolRow:
     leased_to_user: str | None
     leased_at: str | None
     released_at: str | None
+    backend_kind: str
+    lima_instance_name: str | None
+    lima_disk_name: str | None
+    bare_metal_server_id: UUID | None
 
 
 def _row_attributes(row: "FakePoolRow") -> dict[str, Any]:
@@ -927,6 +931,11 @@ def _make_pool_row(
     row.released_at = None
     row.attributes = None
     row.region = region
+    # Default to a real OVH VPS; slice-specific tests set these explicitly.
+    row.backend_kind = "ovh_vps"
+    row.lima_instance_name = None
+    row.lima_disk_name = None
+    row.bare_metal_server_id = None
     return row
 
 
@@ -1004,14 +1013,33 @@ class FakeCursor:
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
-                    self._results = [(row.leased_to_user, row.status, row.vps_instance_id)]
+                    self._results = [
+                        (
+                            row.leased_to_user,
+                            row.status,
+                            row.vps_instance_id,
+                            row.backend_kind,
+                            row.lima_instance_name,
+                            row.lima_disk_name,
+                            row.bare_metal_server_id,
+                        )
+                    ]
                     break
 
-        elif "select id, vps_instance_id from pool_hosts where status = 'removing'" in query_lower:
+        elif "select id, vps_instance_id" in query_lower and "status = 'removing'" in query_lower:
             # Cleanup sweep: every row still marked 'removing'.
             for row in self._backend.pool_rows:
                 if row.status == "removing":
-                    self._results.append((row.host_id, row.vps_instance_id))
+                    self._results.append(
+                        (
+                            row.host_id,
+                            row.vps_instance_id,
+                            row.backend_kind,
+                            row.lima_instance_name,
+                            row.lima_disk_name,
+                            row.bare_metal_server_id,
+                        )
+                    )
 
         elif (
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower

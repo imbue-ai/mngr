@@ -40,7 +40,6 @@ from loguru import logger
 from pydantic import Field
 from pydantic import JsonValue
 from pydantic import PrivateAttr
-from pydantic import ValidationError
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -189,47 +188,6 @@ class StreamedPermissionRequest(FrozenModel):
             "approved. Carried here mainly for traceability; the desktop client does not have "
             "to interpret it."
         ),
-    )
-
-
-class AvailablePermission(FrozenModel):
-    """A single grantable permission schema and its plain-English summary."""
-
-    name: str = Field(min_length=1, description="Detent permission schema name (e.g. ``slack-read-all``).")
-    description: str = Field(
-        default="",
-        description="Plain-English summary of the permission (detent's ``$comment``).",
-    )
-
-
-class AvailableServiceEntry(FrozenModel):
-    """Single scope entry within a service's ``GET /permissions/available`` value.
-
-    Each service in the catalog maps to a *list* of these entries (a
-    service may expose more than one detent scope). Mirrors the wire
-    shape that the gateway extension's bundled ``services.json``
-    advertises for one scope entry: one detent scope schema, a
-    human-readable display name, and the list of detent permission
-    schemas under that scope that the user may grant. The ``any``
-    catch-all is intentionally absent here -- the gateway never lists
-    it because every scope implicitly admits it; the dialog layer
-    (:mod:`services_catalog`) injects it client-side as an opt-in
-    choice.
-
-    ``description`` carries detent's ``$comment`` summary for the scope,
-    and each :class:`AvailablePermission` carries its own. Both are
-    optional so older catalogs without them still validate.
-    """
-
-    scope: str = Field(min_length=1, description="Detent scope schema name (e.g. ``slack-api``).")
-    display_name: str = Field(min_length=1, description="Human-readable label shown in the dialog header.")
-    description: str = Field(
-        default="",
-        description="Plain-English summary of the scope (detent's ``$comment``).",
-    )
-    permissions: tuple[AvailablePermission, ...] = Field(
-        default=(),
-        description="Permissions the user can grant for this scope, each with its plain-English summary.",
     )
 
 
@@ -484,7 +442,7 @@ class LatchkeyGatewayClient(MutableModel):
                 f"DELETE {url} returned {response.status_code}: {response.text.strip()}",
             )
 
-    def approve_permission_request(self, request_id: str) -> None:
+    def approve_permission_request(self, request_id: str, override_path: str | None = None) -> None:
         """Approve the named pending request via the gateway's bundled extension.
 
         Wraps ``POST /permission-requests/approve/<request_id>``. The
@@ -493,6 +451,14 @@ class LatchkeyGatewayClient(MutableModel):
         permissions.json, and removes the pending-request file. Failure
         leaves the request pending so the user can retry.
 
+        ``override_path`` is set only for *file-sharing* requests whose
+        shared path the user edited in the approval dialog before
+        approving. When provided, it is sent as a ``{"path": ...}`` JSON
+        body and the gateway recomputes the file-sharing effect for that
+        path (re-validating it for traversal) instead of using the
+        agent-supplied one. Leaving it ``None`` sends no body, so the
+        gateway applies the precomputed effect verbatim.
+
         Unlike :meth:`delete_permission_request`, ``404`` is *not*
         tolerated here -- approving a request that the gateway has
         forgotten about would silently drop the user's intent on the
@@ -500,68 +466,16 @@ class LatchkeyGatewayClient(MutableModel):
         """
         self.ensure_initialized()
         url = f"{self._require_base_url().rstrip('/')}/permission-requests/approve/{request_id}"
+        json_body = {"path": override_path} if override_path is not None else None
         try:
             with self._one_shot_client() as client:
-                response = client.post(url, headers=self._build_headers())
+                response = client.post(url, headers=self._build_headers(), json=json_body)
         except httpx.HTTPError as e:
             raise self._wrap_transport_error(e, f"POST {url} failed") from e
         if response.status_code >= 400:
             raise LatchkeyGatewayClientError(
                 f"POST {url} returned {response.status_code}: {response.text.strip()}",
             )
-
-    def get_available_services(self) -> dict[str, tuple[AvailableServiceEntry, ...]]:
-        """Fetch the ``/permissions/available`` catalog from the gateway.
-
-        Returns a mapping keyed by raw service name (e.g. ``slack``)
-        with a tuple of validated :class:`AvailableServiceEntry` per
-        value (a service may expose more than one detent scope). HTTP
-        failures, non-JSON bodies, non-object top-level values, values
-        that are not arrays, and entries that fail
-        :class:`AvailableServiceEntry` validation all raise
-        :class:`LatchkeyGatewayClientError` so callers have a single
-        error type to catch.
-
-        The entry-level validation lives here (rather than in the
-        catalog module that consumes the result) because the wire shape
-        of ``/permissions/available`` is the gateway's contract; making
-        this method the sole place that asserts it lets every consumer
-        of the catalog work with a typed mapping instead of
-        ``dict[str, object]``.
-        """
-        self.ensure_initialized()
-        url = f"{self._require_base_url().rstrip('/')}/permissions/available"
-        try:
-            with self._one_shot_client() as client:
-                response = client.get(url, headers=self._build_headers())
-        except httpx.HTTPError as e:
-            raise self._wrap_transport_error(e, f"GET {url} failed") from e
-        if response.status_code >= 400:
-            raise LatchkeyGatewayClientError(
-                f"GET {url} returned {response.status_code}: {response.text.strip()}",
-            )
-        try:
-            payload = response.json()
-        except ValueError as e:
-            raise LatchkeyGatewayClientError(f"GET {url} returned non-JSON body: {e}") from e
-        if not isinstance(payload, dict):
-            raise LatchkeyGatewayClientError(f"GET {url} returned non-object JSON: {payload!r}")
-        validated: dict[str, tuple[AvailableServiceEntry, ...]] = {}
-        for service_name, raw_entries in payload.items():
-            if not isinstance(raw_entries, list):
-                raise LatchkeyGatewayClientError(
-                    f"GET {url} value for service {service_name!r} is not a JSON array: {raw_entries!r}",
-                )
-            entries: list[AvailableServiceEntry] = []
-            for index, raw_entry in enumerate(raw_entries):
-                try:
-                    entries.append(AvailableServiceEntry.model_validate(raw_entry))
-                except ValidationError as e:
-                    raise LatchkeyGatewayClientError(
-                        f"GET {url} entry {index} for service {service_name!r} has an invalid shape: {e}",
-                    ) from e
-            validated[service_name] = tuple(entries)
-        return validated
 
     def get_granted_permissions_for_scopes(
         self,
@@ -619,7 +533,8 @@ class LatchkeyGatewayClient(MutableModel):
 
         Wraps ``POST /permissions/rules?path=<...>&rule_key=<...>`` with
         a JSON-array body of permission-schema names. The extension
-        creates the target file if it does not yet exist; it refuses
+        creates the target file (and any missing parent directories,
+        e.g. ``hosts/<host_id>/``) if it does not yet exist; it refuses
         any path outside ``LATCHKEY_EXTENSION_PERMISSIONS_ROOT`` with
         a 403, which we surface verbatim so misconfigurations are
         loud.

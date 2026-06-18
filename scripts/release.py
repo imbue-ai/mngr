@@ -18,11 +18,11 @@ Usage:
 
 The script refuses to cut a release while there are unconsolidated entries in
 any project's ``<project_dir>/changelog/`` (those bullets would otherwise be
-omitted from the version's release notes). When the gate fires it prints the
-on-demand invocation of the
-``changelog-consolidation`` schedule on stderr; run that, land the resulting
-PR, then re-run this script. ``--dry-run`` downgrades the gate to a warning
-so the preview still works.
+omitted from the version's release notes). When the gate fires it points the
+user at ``just changelog-trigger`` on stderr (which runs the
+``changelog-consolidation`` schedule on demand and opens a PR); land that PR,
+then re-run this script. ``--dry-run`` downgrades the gate to a warning so the
+preview still works.
 """
 
 import argparse
@@ -36,19 +36,15 @@ from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Final
-from typing import TextIO
 
 import httpx
 import semver
 import tomlkit
+from changelog_consolidate import pending_changelog_entries
 from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
-from consolidate_changelog import pending_changelog_entries
+from changelog_schedule_utils import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
 from tomlkit.items import Array
-from trigger_changelog_consolidation import MNGR_ROOT_NAME as CHANGELOG_MNGR_ROOT_NAME
-from trigger_changelog_consolidation import PROVIDER as CHANGELOG_PROVIDER
-from trigger_changelog_consolidation import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
-from trigger_changelog_consolidation import disable_plugin_args as changelog_disable_plugin_args
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT
@@ -98,40 +94,53 @@ def _find_last_release_tag() -> str:
         sys.exit(1)
 
 
-def _get_pypi_version() -> str | None:
-    """Query PyPI for the latest published version of mngr. Returns None if the query fails."""
-    try:
-        response = httpx.get("https://pypi.org/pypi/imbue-mngr/json", timeout=10)
-        response.raise_for_status()
-        return response.json()["info"]["version"]
-    except Exception:
-        return None
+def _get_pypi_version() -> str:
+    """Query PyPI for the latest published version of mngr.
+
+    Any failure -- network/HTTP error or an unexpected payload shape -- propagates rather
+    than being swallowed: release.py needs PyPI access to do its job, so an unreachable or
+    misbehaving PyPI should surface loudly instead of silently disabling the release-state
+    checks below.
+    """
+    response = httpx.get("https://pypi.org/pypi/imbue-mngr/json", timeout=10)
+    response.raise_for_status()
+    return response.json()["info"]["version"]
 
 
 def _detect_changed_packages(since_tag: str) -> set[str]:
     """Return the set of pypi names for packages whose source changed since the given tag."""
     changed: set[str] = set()
     for pkg in PACKAGES:
-        # git diff --quiet exits 1 if there are differences
+        # git diff --quiet exits 0 (no diff), 1 (differences), or >1 on error. Treat only
+        # exit 1 as "changed"; a real git failure (e.g. a bad since_tag) must not be
+        # misread as a change -- which would silently mark every package changed -- so fail
+        # loudly instead.
         result = subprocess.run(
             ["git", "diff", "--quiet", since_tag, "HEAD", "--", f"libs/{pkg.dir_name}/"],
             cwd=REPO_ROOT,
             capture_output=True,
         )
-        if result.returncode != 0:
+        if result.returncode == 1:
             changed.add(pkg.pypi_name)
+        elif result.returncode != 0:
+            print(
+                f"ERROR: git diff failed for libs/{pkg.dir_name}/ (exit {result.returncode}): "
+                f"{result.stderr.decode().strip()}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     return changed
 
 
 def _is_published_on_pypi(pypi_name: str) -> bool:
-    """Check whether a package has ever been published on PyPI."""
-    try:
-        response = httpx.head(f"https://pypi.org/pypi/{pypi_name}/json", timeout=10)
-        return response.status_code == 200
-    except Exception:
-        # If we can't reach PyPI, assume published to avoid accidentally
-        # treating existing packages as new.
-        return True
+    """Check whether a package has ever been published on PyPI.
+
+    Any failure to reach PyPI propagates rather than defaulting to "published": guessing
+    "published" on error would silently let a genuinely-new package skip its
+    first-publication safeguards (see _detect_new_packages).
+    """
+    response = httpx.head(f"https://pypi.org/pypi/{pypi_name}/json", timeout=10)
+    return response.status_code == 200
 
 
 def _detect_new_packages(since_tag: str) -> set[str]:
@@ -596,40 +605,6 @@ def _pluralize_entry(count: int) -> str:
     return "entry" if count == 1 else "entries"
 
 
-def _print_on_demand_consolidation_command(file: TextIO) -> None:
-    """Print the one-liner that triggers an on-demand consolidation run.
-
-    Equivalent to the example invocation in ``setup_changelog_agent.sh``'s
-    header so the user can copy-paste it directly. Uses the shared
-    constants and helper so the disable-plugin list stays in sync with
-    the deploy script. The deploy script's header inlines that list as
-    ``$DISABLE_PLUGIN_ARGS``; this helper expands it onto its own line
-    because the resolved value is long.
-
-    The provider is the shared ``CHANGELOG_PROVIDER`` constant, so the
-    printed command targets the same provider the schedule was deployed
-    against; changing providers requires editing the constant and
-    redeploying the schedule together.
-
-    ``file`` is the stream to write to (forwarded to ``print``). The
-    caller in the gate's error path passes ``sys.stderr`` so the
-    on-demand command lands on the same stream as the surrounding error
-    message.
-    """
-    disable_args = " ".join(changelog_disable_plugin_args())
-    print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\", file=file)
-    # Only emit a continuation + third line when there are disable-plugin
-    # args to print. Otherwise the command would end with a trailing
-    # backslash followed by a whitespace-only line, which makes the
-    # copy-paste form malformed (the empty line terminates the
-    # continuation and the leading spaces become a stray empty command).
-    if disable_args:
-        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER} \\", file=file)
-        print(f"    {disable_args}", file=file)
-    else:
-        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER}", file=file)
-
-
 def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -> bool:
     """Block a release until pending changelog entries are consolidated.
 
@@ -642,8 +617,8 @@ def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -
 
     Returns ``True`` if the release may proceed (no pending entries, or
     ``dry_run`` is set), ``False`` if the caller must abort. After
-    consolidating (waiting for the nightly cron or running the on-demand
-    one-liner this prints), the user re-runs ``release.py``.
+    consolidating (waiting for the nightly cron or running ``just
+    changelog-trigger`` on demand), the user re-runs ``release.py``.
 
     ``dry_run`` swaps the error for a warning so ``release.py --dry-run``
     can still preview what would be released.
@@ -680,7 +655,7 @@ def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -
     print("trigger it on demand instead (opens a PR you can merge before re-running", file=sys.stderr)
     print("this script), run:", file=sys.stderr)
     print(file=sys.stderr)
-    _print_on_demand_consolidation_command(file=sys.stderr)
+    print("  just changelog-trigger", file=sys.stderr)
     print(file=sys.stderr)
     return False
 
@@ -786,15 +761,10 @@ def main() -> None:
     pypi_version = _get_pypi_version()
 
     print(f"Last release tag: {last_tag}")
-    if pypi_version is not None:
-        print(f"Latest on PyPI:   v{pypi_version}")
-    else:
-        print("Latest on PyPI:   (could not check)")
+    print(f"Latest on PyPI:   v{pypi_version}")
 
-    is_unpublished = (
-        pypi_version is not None
-        and tag_version != pypi_version
-        and semver.Version.parse(tag_version) > semver.Version.parse(pypi_version)
+    is_unpublished = tag_version != pypi_version and semver.Version.parse(tag_version) > semver.Version.parse(
+        pypi_version
     )
     if is_unpublished:
         print(f"\nWARNING: {last_tag} appears unpublished (PyPI is at v{pypi_version}).")
@@ -958,9 +928,13 @@ def main() -> None:
     # fresh empty [Unreleased] above it. Covers both bumped packages (use
     # the new version) and confirmed first-time publications (use the
     # current version, since these publish without a bump). apps/<name>/
-    # and dev/ changelogs are not versioned and stay untouched -- their
-    # entries accumulate in [Unreleased] indefinitely (the consolidator
-    # keeps appending there).
+    # and dev/ changelogs are not versioned and stay untouched *here*.
+    # apps/<name>/ entries accumulate in [Unreleased] (the consolidator
+    # keeps appending there). dev/ is also never released, but its
+    # consolidated CHANGELOG.md is date-organized instead: the consolidator
+    # writes one summarized "## <date>" section per landed date, mirroring
+    # dev/UNABRIDGED_CHANGELOG.md (see scripts/changelog_consolidation_prompt.md),
+    # so dev/ carries no [Unreleased] section at all.
     release_date = today_pacific()
     finalized_paths: list[Path] = []
     versions_to_finalize: dict[str, str] = {

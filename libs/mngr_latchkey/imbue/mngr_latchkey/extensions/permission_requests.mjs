@@ -19,9 +19,13 @@
  *       the catalog lists under that scope; otherwise the request is
  *       rejected with HTTP 400.
  *       For ``type=="file-sharing"`` the payload is
- *         ``{path: <absolute_path>}``;
- *       the path must be absolute and must not contain any ``..``
- *       segments (rejected as a path-traversal attempt).
+ *         ``{path: <absolute_or_tilde_path>}``;
+ *       the path must be absolute (start with ``/``) or use ``~`` /
+ *       ``~/...`` to denote the current user's home directory (which is
+ *       expanded to an absolute path before storage), and must not
+ *       contain any ``..`` segments (rejected as a path-traversal
+ *       attempt). ``~user`` notation for another user's home is
+ *       rejected.
  *
  *       The extension also stores, alongside the user-supplied fields:
  *         - ``request_id`` (server-generated, UUIDv4 hex)
@@ -85,7 +89,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -119,6 +123,12 @@ const VALID_REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 const REQUEST_TYPE_PREDEFINED = 'predefined';
 const REQUEST_TYPE_FILE_SHARING = 'file-sharing';
 const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_SHARING]);
+
+// Detent's catch-all permission schema. The ``services.json``
+// catalog never lists it explicitly (every scope implicitly
+// admits it), so it is always a valid permission under any
+// known scope.
+const ALWAYS_AVAILABLE_PERMISSION = 'any';
 
 // Names and constants used when generating the ``effect`` for a
 // ``file-sharing`` request. The agent reaches the Minds API through
@@ -310,31 +320,123 @@ function ensureNoExtraneousFields(parent, allowed, parsed) {
 }
 
 /**
- * Validate an absolute filesystem path for the ``file-sharing`` payload.
+ * The on-disk roots the Minds WebDAV server mounts: the current user's
+ * home directory and the system temp directory. Computed from Node's
+ * ``homedir()`` / ``tmpdir()`` which -- on the desktop host, where the
+ * gateway and the Minds WebDAV server run as the same user in the same
+ * environment -- match the ``Path.home()`` / ``tempfile.gettempdir()``
+ * roots that ``webdav.py`` actually serves.
  *
- * The path must start with ``/`` and must not contain any ``..``
- * segments (under either POSIX or Windows separators). We deliberately
- * do not resolve symlinks or check that the file exists here; that is
- * a job for the Minds API endpoint that ends up serving the file when
- * the request is approved. The goal is just to reject obvious traversal
- * patterns up front so a request like ``/etc/passwd/../shadow`` is
- * refused at creation time.
+ * Trailing slashes are stripped so the prefix test in
+ * ``isPathWithinFileSharingRoot`` is uniform. A falsy root (which
+ * ``homedir()`` / ``tmpdir()`` should never return on a real host) is
+ * dropped rather than collapsed to ``/`` (which would match every
+ * path).
+ */
+function fileSharingMountRoots() {
+  const roots = [];
+  for (const root of [homedir(), tmpdir()]) {
+    if (typeof root !== 'string' || root.length === 0) {
+      continue;
+    }
+    const trimmed = root.replace(/\/+$/, '');
+    roots.push(trimmed.length > 0 ? trimmed : '/');
+  }
+  return roots;
+}
+
+/**
+ * Whether ``filePath`` is at or beneath ``root``. The comparison is
+ * case-insensitive to mirror WsgiDAV's share-prefix matching (it
+ * lowercases both the share keys and the request path), and purely
+ * lexical -- we do not resolve symlinks or require the path to exist,
+ * matching how the WebDAV server mounts by string prefix.
+ */
+function isPathWithinFileSharingRoot(filePath, root) {
+  const lowerPath = filePath.toLowerCase();
+  const lowerRoot = root.toLowerCase();
+  return lowerPath === lowerRoot || lowerPath.startsWith(`${lowerRoot}/`);
+}
+
+/**
+ * Expand a leading ``~`` in a file-sharing path to the current user's
+ * home directory, returning the path unchanged when it has no ``~``
+ * prefix.
+ *
+ * Only the current user's home is supported: a bare ``~`` and a
+ * ``~/...`` prefix both expand against Node's ``homedir()`` -- the same
+ * root ``fileSharingMountRoots`` derives the home WebDAV mount from, so
+ * an expanded path lands inside that mount and the root check below
+ * accepts it. The ``~user`` form (some other user's home) cannot be
+ * resolved here, so it is rejected with a clear error rather than
+ * silently treated as a relative path.
+ *
+ * The expansion is a pure string splice -- we prepend the home
+ * directory to the remainder verbatim rather than going through
+ * ``path.join`` -- so any ``..`` segment in the remainder survives into
+ * the expanded path and is still caught by the traversal checks in
+ * ``validateAbsoluteFileSharingPath``. Joining would silently normalize
+ * ``~/../foo`` into an escape past the home directory.
+ */
+function expandFileSharingHomePrefix(rawPath) {
+  if (rawPath === '~' || rawPath.startsWith('~/')) {
+    // ``slice(1)`` drops the leading ``~`` only: ``~`` -> ``<home>`` and
+    // ``~/foo`` -> ``<home>/foo``.
+    return `${homedir()}${rawPath.slice(1)}`;
+  }
+  if (rawPath.startsWith('~')) {
+    throw new InvalidRequestBodyError(
+      `payload.'path' uses unsupported '~user' notation; only '~' or '~/...' `
+      + `(the current user's home) is accepted. Got ${rawPath}.`,
+    );
+  }
+  return rawPath;
+}
+
+/**
+ * Validate a filesystem path for the ``file-sharing`` payload and
+ * return its canonical absolute form.
+ *
+ * A leading ``~`` / ``~/`` is first expanded to the current user's home
+ * directory. The resulting path must start with ``/``, must not contain
+ * any ``..`` segments (under either POSIX or Windows separators), and
+ * must lie within one of the WebDAV mount roots (the user's home
+ * directory or the system temp directory). We deliberately do not
+ * resolve symlinks or check that the file exists here; that is a job
+ * for the Minds API endpoint that ends up serving the file when the
+ * request is approved. The goals are to reject obvious traversal
+ * patterns (e.g. ``/etc/passwd/../shadow``) and to reject paths the
+ * WebDAV server could never serve (anything outside the two mounts), so
+ * the agent gets a clear error at request time -- or at approve time,
+ * when this also guards a user-edited path override -- rather than an
+ * approve-then-404 dead end.
+ *
+ * The returned value is the expanded path; callers persist it so the
+ * stored payload, the per-file schema name, and the WebDAV pattern all
+ * use a canonical absolute path rather than the ``~`` shorthand.
  */
 function validateAbsoluteFileSharingPath(rawPath) {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
     throw new InvalidRequestBodyError("payload.'path' is required and must be a non-empty string.");
   }
+  // Expand a leading ``~`` / ``~/`` to the current user's home before
+  // any structural validation, so the checks below -- and the schema
+  // name / WebDAV pattern derived downstream -- all operate on a
+  // canonical absolute path.
+  const expandedPath = expandFileSharingHomePrefix(rawPath);
   // POSIX rule -- absolute paths must start with '/'. The Minds host
   // is always POSIX (macOS or Linux), so we do not accept
   // Windows-style ``C:\\...`` paths.
-  if (!rawPath.startsWith('/')) {
-    throw new InvalidRequestBodyError(`payload.'path' must be absolute (start with '/'): got ${rawPath}.`);
+  if (!expandedPath.startsWith('/')) {
+    throw new InvalidRequestBodyError(
+      `payload.'path' must be absolute (start with '/') or use '~' / '~/...': got ${rawPath}.`,
+    );
   }
   // Reject any ``..`` segment regardless of where in the path it
   // appears (start, middle, end, or as the entire suffix). We split on
   // both POSIX and Windows separators so a payload smuggling
   // ``..\\foo`` past the unix check still gets refused.
-  const segments = rawPath.split(/[\\/]+/);
+  const segments = expandedPath.split(/[\\/]+/);
   for (const segment of segments) {
     if (segment === '..') {
       throw new InvalidRequestBodyError(`payload.'path' contains a '..' segment, refusing as a path-traversal attempt: ${rawPath}.`);
@@ -344,10 +446,19 @@ function validateAbsoluteFileSharingPath(rawPath) {
   // multiple slashes. If the result still does not start with ``/`` or
   // changes the meaning (e.g. a hidden ``..`` snuck past the segment
   // scan), refuse.
-  const normalized = posix.normalize(rawPath);
+  const normalized = posix.normalize(expandedPath);
   if (!normalized.startsWith('/') || normalized.includes('/../') || normalized.endsWith('/..')) {
     throw new InvalidRequestBodyError(`payload.'path' normalizes to a traversed path: ${rawPath} -> ${normalized}.`);
   }
+  // Reject anything the Minds WebDAV server could never serve: it mounts
+  // only the home and temp roots, so a grant elsewhere is inert (404).
+  const roots = fileSharingMountRoots();
+  if (!roots.some((root) => isPathWithinFileSharingRoot(normalized, root))) {
+    throw new InvalidRequestBodyError(
+      `payload.'path' must be within a shared root (${roots.join(', ')}); got ${rawPath}.`,
+    );
+  }
+  return expandedPath;
 }
 
 /**
@@ -360,6 +471,9 @@ function validateAbsoluteFileSharingPath(rawPath) {
  * independently and we cannot rely on cross-extension imports. The
  * file is trusted package data, so any structural problem is a
  * deployment bug and surfaces as HTTP 500.
+ *
+ * Each scope's set is seeded with the catch-all ``any`` permission,
+ * which every scope implicitly admits.
  *
  * A service value is an array of scope entries, and each entry's
  * ``permissions`` are ``{name, description}`` objects; only the
@@ -412,7 +526,10 @@ function loadValidPermissionsByScope() {
           `entry ${index} for '${serviceName}': 'permissions' must be an array.`,
         );
       }
-      const existing = permissionsByScope.get(entry.scope) ?? new Set();
+      // Every scope implicitly admits the catch-all ``any`` permission,
+      // even when the catalog enumerates none, so seed each scope's set
+      // with it.
+      const existing = permissionsByScope.get(entry.scope) ?? new Set([ALWAYS_AVAILABLE_PERMISSION]);
       permissions.forEach((permission, permissionIndex) => {
         // Each permission is a ``{name, description}`` object; only the
         // ``name`` matters for validating an incoming request.
@@ -498,7 +615,10 @@ function validateFileSharingPayload(payload) {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'file-sharing'.");
   }
-  validateAbsoluteFileSharingPath(payload.path);
+  // ``validateAbsoluteFileSharingPath`` expands a leading ``~`` and
+  // returns the canonical absolute path, which we persist in place of
+  // the (possibly ``~``-prefixed) input.
+  const path = validateAbsoluteFileSharingPath(payload.path);
   ensureNonEmptyString('payload.', 'access', payload.access);
   if (!VALID_FILE_SHARING_ACCESS_MODES.has(payload.access)) {
     throw new InvalidRequestBodyError(
@@ -508,7 +628,7 @@ function validateFileSharingPayload(payload) {
     );
   }
   ensureNoExtraneousFields('payload ', ['path', 'access'], payload);
-  return { path: payload.path, access: payload.access };
+  return { path, access: payload.access };
 }
 
 /**
@@ -675,13 +795,48 @@ function fileSharingPermissionPathPattern(fileWebdavPath) {
   return `^${escapeForRegex(fileWebdavPath)}(/.*)?$`;
 }
 
+/**
+ * Normalize ``urlPath`` exactly the way the WHATWG URL parser
+ * normalizes an incoming request's ``pathname``, so a per-file
+ * permission pattern built from an on-disk path matches the path
+ * detent actually checks at request time.
+ *
+ * The gateway feeds the permission check a ``Request`` built from a
+ * WHATWG URL, and detent matches the per-file schema's ``pattern``
+ * against ``URL.pathname``. That pathname is percent-encoded by the
+ * URL parser's path-percent-encode set: a space becomes ``%20``, each
+ * non-ASCII byte its UTF-8 ``%XX`` sequence, and characters like
+ * ``#``/``?`` (which would otherwise start the fragment/query) their
+ * encoded forms -- while ``/`` separators, ``+``/``:``/``@`` and
+ * already-encoded ``%XX`` triplets are left untouched. If we embedded
+ * the raw on-disk path (with a literal space, accented letter, etc.)
+ * into the regex, the encoded request pathname (``...%20...``) would
+ * never match it -- which is exactly the bug a path containing a space
+ * (e.g. an agent-requested or user-selected directory) used to hit.
+ *
+ * Assigning to ``URL.pathname`` applies precisely that path-percent-
+ * encode set without truncating on ``#``/``?``, and -- verified against
+ * the full-URL parse detent performs -- reproduces the identical
+ * canonical pathname (including dot-segment collapsing). We use the
+ * same ``placeholder.invalid`` origin the route parser uses for
+ * symmetry.
+ */
+function normalizeWebdavUrlPath(urlPath) {
+  const url = new URL('http://placeholder.invalid');
+  url.pathname = urlPath;
+  return url.pathname;
+}
+
 function computeFileSharingEffect(filePath, access) {
   const permissionSchemaName = fileSharingPermissionSchemaName(filePath, access);
   // WebDAV serves the on-disk path directly under the mount, so the
   // permission's URL path is the prefix + the absolute file path.
   // ``validateAbsoluteFileSharingPath`` has already guaranteed that
-  // ``filePath`` starts with ``/`` and is traversal-free.
-  const fileWebdavPath = `${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`;
+  // ``filePath`` starts with ``/`` and is traversal-free. We normalize
+  // the combined path the same way the WHATWG URL parser normalizes the
+  // incoming request's pathname so the regex matches even when the path
+  // has characters the parser percent-encodes (spaces, non-ASCII, ...).
+  const fileWebdavPath = normalizeWebdavUrlPath(`${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`);
   return {
     schemas: {
       [permissionSchemaName]: {
@@ -1194,7 +1349,79 @@ function mergeSchemas(existingSchemas, effectSchemas) {
   return base;
 }
 
-function handleApproveRequest(response, rawRequestId) {
+/**
+ * Parse the optional JSON body of a ``POST /permission-requests/approve/<id>``
+ * call. The desktop client sends a body only when the user edited the
+ * shared path in the approval dialog before approving; the body then
+ * carries a single ``path`` field with the (possibly new) absolute
+ * filesystem path the grant should target. An empty body (the common
+ * case -- the user approved the request as-is) yields ``null``.
+ *
+ * The override path is validated here with the same traversal-rejection
+ * rules that guard request *creation* (``validateAbsoluteFileSharingPath``),
+ * so a user-edited path is held to exactly the same security bar as an
+ * agent-supplied one. Any field other than ``path`` is rejected so the
+ * server stays the single source of truth on identity, target, and
+ * access mode.
+ */
+async function parseApproveOverrideBody(request) {
+  const raw = await readRequestBody(request);
+  if (raw.trim().length === 0) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidRequestBodyError(`approve body is not valid JSON: ${message}`);
+  }
+  // A literal JSON ``null`` body means "no override", same as an empty
+  // body -- some HTTP clients serialize an absent payload that way.
+  if (parsed === null) {
+    return null;
+  }
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new InvalidRequestBodyError('approve body must be a JSON object.');
+  }
+  ensureNoExtraneousFields('approve body ', ['path'], parsed);
+  if (parsed.path === undefined) {
+    return null;
+  }
+  // Expand ``~`` and canonicalize the user-edited path the same way a
+  // request-creation path is handled, then carry the absolute form.
+  const path = validateAbsoluteFileSharingPath(parsed.path);
+  return { path };
+}
+
+/**
+ * Resolve the effect that approving ``requestRecord`` should splice in.
+ *
+ * With no override this is just the precomputed ``requestRecord.effect``.
+ * When the user edited the shared path in the dialog (``override`` is
+ * non-null), the effect is recomputed for the new path so the grant
+ * targets exactly what the user chose -- but only for ``file-sharing``
+ * requests, which are the only kind whose effect is path-derived. A
+ * path override on any other request type is a programming error in the
+ * caller and is rejected.
+ */
+function resolveEffectForApproval(requestRecord, override) {
+  if (override === null) {
+    return requestRecord.effect;
+  }
+  if (requestRecord.request_type !== REQUEST_TYPE_FILE_SHARING) {
+    throw new InvalidRequestBodyError(
+      `a 'path' override is only valid for '${REQUEST_TYPE_FILE_SHARING}' requests; `
+      + `request ${requestRecord.request_id} is '${requestRecord.request_type}'.`,
+    );
+  }
+  // The access mode is fixed at request-creation time and is not
+  // user-editable: the user may narrow/redirect *where* the grant
+  // applies, but not escalate read-only to read-write.
+  return computeFileSharingEffect(override.path, requestRecord.payload.access);
+}
+
+function handleApproveRequest(response, rawRequestId, override = null) {
   const requestId = validateRequestId(rawRequestId);
   const filePath = requestFilePath(requestId);
   const requestRecord = readRequestFile(filePath);
@@ -1202,7 +1429,7 @@ function handleApproveRequest(response, rawRequestId) {
     throw new RequestNotFoundError(requestId);
   }
   const target = requestRecord.target;
-  const effect = requestRecord.effect;
+  const effect = resolveEffectForApproval(requestRecord, override);
   const permissionsFile = readPermissionsFileOrEmpty(target);
 
   const updatedRules = effect.rules ? mergeRules(permissionsFile.rules, effect.rules) : permissionsFile.rules;
@@ -1253,7 +1480,8 @@ export default async function permissionRequestsExtension(request, response, con
       return true;
     }
     if (route.kind === 'approve' && method === 'POST') {
-      handleApproveRequest(response, route.requestIdFromPath);
+      const override = await parseApproveOverrideBody(request);
+      handleApproveRequest(response, route.requestIdFromPath, override);
       return true;
     }
     if (route.kind === 'item' && method === 'DELETE') {

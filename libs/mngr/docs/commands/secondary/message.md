@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-a] [-m <MESSAGE>] [--message-file <FILE>] [--[no-]start] [--on-error <MODE>]
+mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>] [--[no-]start] [--on-error <MODE>]
 ```
 
 Send a message to one or more agents.
@@ -37,7 +37,6 @@ mngr message [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to send message to (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Send the message to all agents | `False` |
 | `--start`, `--no-start` | boolean | Automatically start offline hosts and stopped agents before sending | `False` |
 
 ## Message Content
@@ -52,7 +51,6 @@ mngr message [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when errors occur: abort (stop immediately) or continue (keep going) | `continue` |
-| `--provider` | text | Message only agents using specified provider (repeatable) | None |
 
 ## Common
 
@@ -88,12 +86,6 @@ $ mngr message my-agent --message "Hello"
 
 ```bash
 $ mngr message agent1 agent2 --message "Hello to all"
-```
-
-**Send to every agent**
-
-```bash
-$ mngr message --all --message "Hello everyone"
 ```
 
 **Send to all agents via stdin**

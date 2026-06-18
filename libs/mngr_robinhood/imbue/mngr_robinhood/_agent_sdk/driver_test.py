@@ -8,7 +8,8 @@ from claude_agent_sdk import Message
 from claude_agent_sdk import StreamEvent
 
 from imbue.mngr.api.events import EventsTarget
-from imbue.mngr.interfaces.volume_test import InMemoryVolume
+from imbue.mngr.hosts.host import Host
+from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 from imbue.mngr_robinhood._agent_sdk.driver import LiveSession
 from imbue.mngr_robinhood._agent_sdk.driver import _TurnDrainTicker
 from imbue.mngr_robinhood._agent_sdk.driver import _build_agent_name
@@ -18,7 +19,6 @@ from imbue.mngr_robinhood._agent_sdk.driver import _system_prompt_args
 from imbue.mngr_robinhood._agent_sdk.driver import map_options_to_agent_args
 from imbue.mngr_robinhood._agent_sdk.driver import resolve_cwd
 from imbue.mngr_robinhood._agent_sdk.stream_events import StreamEventSynthesizer
-from imbue.mngr_robinhood.raw_transcript import RAW_TRANSCRIPT_PATH
 
 
 def test_map_options_minimal_is_empty() -> None:
@@ -155,12 +155,24 @@ def _assistant_transcript_line(text: str, stop_reason: str | None) -> str:
     return json.dumps(event)
 
 
-def _make_ticker(transcript: str, buffer_content: str) -> tuple[_TurnDrainTicker, list[Message]]:
-    """Build a _TurnDrainTicker over an in-memory transcript + stream buffer, capturing every sink call."""
+def _make_ticker(
+    local_host: Host,
+    tmp_path: Path,
+    transcript: str,
+    buffer_content: str,
+) -> tuple[_TurnDrainTicker, list[Message]]:
+    """Build a _TurnDrainTicker over a host-backed transcript + stream buffer, capturing every sink call."""
+    # The raw transcript is read at <events_path>/../logs/claude_transcript/events.jsonl;
+    # mirror that on-disk layout so the host read resolves it (matching production).
+    state_dir = tmp_path / "agent-x"
+    events_path = state_dir / "events"
+    events_path.mkdir(parents=True)
+    transcript_path = state_dir / "logs" / "claude_transcript" / "events.jsonl"
+    transcript_path.parent.mkdir(parents=True)
     # The transcript must end with a newline so the JSONL line is treated as a complete write
     # (split_complete_lines holds back any unterminated trailing partial).
-    volume = InMemoryVolume(files={RAW_TRANSCRIPT_PATH: (transcript + "\n").encode("utf-8")})
-    events_target = EventsTarget(volume=volume, display_name="test-agent")
+    transcript_path.write_text(transcript + "\n")
+    events_target = EventsTarget(host=local_host, events_path=events_path, display_name="test-agent")
     # model_construct bypasses validation so the lightweight in-memory transcript can stand in for a
     # fully built session; tick only reads events_target / seen_bytes / latest_* / options / agent.
     session = LiveSession.model_construct(
@@ -174,7 +186,7 @@ def _make_ticker(transcript: str, buffer_content: str) -> tuple[_TurnDrainTicker
         is_init_emitted=False,
     )
     synthesizer = StreamEventSynthesizer.model_construct(
-        host=_FakeBufferHost(buffer_content), buffer_path=Path("/buffer")
+        host=_FakeBufferHost(buffer_content), buffer_path=Path("/buffer"), reader=SnapshotDeltaReader()
     )
     captured: list[Message] = []
     ticker = _TurnDrainTicker(session=session, sink=captured.append, synthesizer=synthesizer)
@@ -185,9 +197,11 @@ def _event_type(message: Any) -> str | None:
     return message.event["type"] if isinstance(message, StreamEvent) else None
 
 
-def test_tick_emits_all_stream_events_including_close_framing_before_final_assistant_message() -> None:
+def test_tick_emits_all_stream_events_including_close_framing_before_final_assistant_message(
+    local_host: Host, tmp_path: Path
+) -> None:
     transcript = _assistant_transcript_line("Hello world\nstreaming-tail", stop_reason="end_turn")
-    ticker, captured = _make_ticker(transcript, buffer_content="id\nHello world\nstreaming-tail")
+    ticker, captured = _make_ticker(local_host, tmp_path, transcript, buffer_content="id\nHello world\nstreaming-tail")
 
     assert ticker.tick() is True
 
@@ -203,10 +217,10 @@ def test_tick_emits_all_stream_events_including_close_framing_before_final_assis
     assert all(i < assistant_indices[0] for i in stream_event_indices)
 
 
-def test_tick_without_terminal_stop_leaves_partial_stream_unterminated() -> None:
+def test_tick_without_terminal_stop_leaves_partial_stream_unterminated(local_host: Host, tmp_path: Path) -> None:
     # Non-terminal stop: the agent has not cleanly completed, so no closing framing is emitted.
     transcript = _assistant_transcript_line("Hello world\nstreaming-tail", stop_reason=None)
-    ticker, captured = _make_ticker(transcript, buffer_content="id\nHello world\nstreaming-tail")
+    ticker, captured = _make_ticker(local_host, tmp_path, transcript, buffer_content="id\nHello world\nstreaming-tail")
 
     assert ticker.tick() is None
 

@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-15
+
+OVH bare-metal slices support:
+
+- Added two `host_pool` migrations: `008_bare_metal_servers.sql` (a new table tracking rented OVH dedicated servers and their resumable lifecycle) and `009_pool_host_slice_columns.sql` (adds `backend_kind`, `bare_metal_server_id`, `lima_instance_name`, and `lima_disk_name` to `pool_hosts` so a pool host can be either a real OVH VPS or a lima-VM "slice"). Existing rows default to `backend_kind = 'ovh_vps'`; leasing is unchanged.
+
+- The release path (`release_host`) and the cleanup sweep now branch on `backend_kind`: a real VPS is still cancelled in OVH, while a slice has its lima VM (and btrfs data disk) destroyed by SSHing the owning bare-metal box and running `limactl`. A slice whose VM cannot be destroyed keeps its row in `removing` so the slot is only freed once the VM is really gone.
+
+- Added migration 010 (`bare_metal_servers`: `disk_gb`, `memory_per_slice_gb`, `cpu_overcommit_ratio`) so a box's per-slice sizing is stored rather than hardcoded. Admin-only columns; the connector does not read them.
+
+## 2026-06-11
+
+Replaced a direct RuntimeError raise in the app with a dedicated custom exception type.
+
+## 2026-06-10
+
+Raised the stale coverage floor from 45% to 80% to match the coverage CI already measures (~83%).
+
 ## 2026-06-08
 
 Region-aware host leasing.

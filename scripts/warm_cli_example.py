@@ -142,8 +142,12 @@ def _warm_server(entry_module, entry_func_name, socket_path, timeout):
     if "cwd" in payload:
         try:
             os.chdir(payload["cwd"])
-        except OSError:
-            pass
+        except OSError as e:
+            # Don't silently run in the wrong directory: relative paths would
+            # resolve against the warm process's cwd instead of the caller's.
+            # Warn and continue so the CLI still runs (the caller's cwd may have
+            # been deleted), but the discrepancy is visible.
+            print(f"warm_cli: could not chdir to {payload['cwd']!r}: {e}", file=sys.stderr)
 
     # Reattach Python-level stdio to the new FDs
     sys.stdin = open(0, "r", closefd=False)
@@ -162,6 +166,8 @@ def _warm_server(entry_module, entry_func_name, socket_path, timeout):
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else (1 if e.code else 0)
     except Exception:
+        # Deliberate process-entrypoint boundary: this is the top-level CLI runner,
+        # so it mirrors a normal entrypoint (print the traceback, exit non-zero).
         traceback.print_exc()
         exit_code = 1
 
@@ -269,6 +275,8 @@ def warm_cli(func, socket_path=None, timeout=DEFAULT_TIMEOUT):
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else (1 if e.code else 0)
     except Exception:
+        # Deliberate process-entrypoint boundary: this is the top-level CLI runner,
+        # so it mirrors a normal entrypoint (print the traceback, exit non-zero).
         traceback.print_exc()
         exit_code = 1
 

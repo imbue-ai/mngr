@@ -13,6 +13,7 @@ from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.exit_codes import exit_code_for_failures
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -26,6 +27,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -78,15 +81,23 @@ class GcCliOptions(CommonCliOptions):
 @click.pass_context
 def gc(ctx: click.Context, **kwargs) -> None:
     try:
-        _gc_impl(ctx, **kwargs)
+        result = _gc_impl(ctx, **kwargs)
     except AbortError as e:
         # AbortError means we should exit immediately with an error
         logger.error("Aborted: {}", e.message)
         ctx.exit(1)
+        return
+    # Exit with a cause-specific code derived from the structured failures (0 when none),
+    # mirroring `mngr cleanup`/`destroy`/`stop`.
+    ctx.exit(exit_code_for_failures(result.failures))
 
 
-def _gc_impl(ctx: click.Context, **kwargs) -> None:
-    """Implementation of gc command (extracted for exception handling)."""
+def _gc_impl(ctx: click.Context, **kwargs) -> GcResult:
+    """Implementation of gc command (extracted for exception handling).
+
+    Returns the aggregated GcResult so the caller can derive a cause-specific
+    exit code from its structured failures.
+    """
     # Setup command context (config, logging, output options)
     # This loads the config, applies defaults, and creates the final options
     mngr_ctx, output_opts, opts = setup_command_context(
@@ -95,14 +106,20 @@ def _gc_impl(ctx: click.Context, **kwargs) -> None:
         command_class=GcCliOptions,
     )
 
-    _run_gc_iteration(mngr_ctx=mngr_ctx, opts=opts, output_opts=output_opts)
+    return _run_gc_iteration(mngr_ctx=mngr_ctx, opts=opts, output_opts=output_opts)
 
 
-def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: OutputOptions) -> None:
-    """Run a single gc iteration."""
+def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: OutputOptions) -> GcResult:
+    """Run a single gc iteration.
+
+    Returns the aggregated GcResult. Skipped explicitly-requested providers are
+    recorded as PROVIDER_INACCESSIBLE failures, and per-resource cleanup
+    failures are recorded with their cause-specific categories; the caller
+    derives the process exit code from the full set of failures.
+    """
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    providers = _get_selected_providers(mngr_ctx=mngr_ctx, opts=opts)
+    providers, skipped_provider_errors = _get_selected_providers(mngr_ctx=mngr_ctx, opts=opts)
 
     # Always GC all resource types
     resource_types = GcResourceTypes(
@@ -112,6 +129,7 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
         is_work_dirs=True,
         is_logs=True,
         is_build_cache=True,
+        is_provider_resources=True,
     )
 
     # Call the API
@@ -122,6 +140,14 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
         dry_run=opts.dry_run,
         error_behavior=error_behavior,
         on_resource_type_start=lambda rt: _emit_resource_type_start(rt, output_opts.output_format),
+    )
+
+    # Surface explicitly-requested providers that were skipped (empty/unavailable)
+    # as structured failures so the user sees them in the summary and the CLI exits
+    # non-zero (PROVIDER_INACCESSIBLE, exit code 6).
+    result.failures.extend(
+        CleanupFailure(category=CleanupFailureCategory.PROVIDER_INACCESSIBLE, message=message)
+        for message in skipped_provider_errors
     )
 
     # Emit destroyed events for CLI output
@@ -139,9 +165,13 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
         _emit_destroyed("log", log, output_opts.output_format, opts.dry_run)
     for cache in result.build_cache_destroyed:
         _emit_destroyed("build_cache", cache, output_opts.output_format, opts.dry_run)
+    for provider_resource in result.provider_resources_destroyed:
+        _emit_destroyed("provider_resource", provider_resource, output_opts.output_format, opts.dry_run)
 
     # Emit final summary
     _emit_final_summary(result=result, output_format=output_opts.output_format, dry_run=opts.dry_run)
+
+    return result
 
 
 _RESOURCE_TYPE_MESSAGES: dict[str, str] = {
@@ -151,6 +181,7 @@ _RESOURCE_TYPE_MESSAGES: dict[str, str] = {
     "volumes": "Cleaning volumes...",
     "logs": "Cleaning logs...",
     "build_cache": "Cleaning build cache...",
+    "provider_resources": "Cleaning orphaned provider resources...",
 }
 
 
@@ -178,6 +209,8 @@ def _format_destroyed_message(resource_type: str, resource: Any, dry_run: bool) 
         return f"{action} log: {resource.path}"
     if resource_type == "build_cache":
         return f"{action} build cache: {resource.path}"
+    if resource_type == "provider_resource":
+        return f"{action} {resource.kind}: {resource.name} ({resource.provider_name})"
     return f"{action} {resource_type}: {resource}"
 
 
@@ -221,7 +254,9 @@ def _emit_json_summary(result: GcResult, dry_run: bool) -> None:
         "volumes_destroyed": [v.model_dump(mode="json") for v in result.volumes_destroyed],
         "logs_destroyed": [log.model_dump(mode="json") for log in result.logs_destroyed],
         "build_cache_destroyed": [cache.model_dump(mode="json") for cache in result.build_cache_destroyed],
+        "provider_resources_destroyed": [pr.model_dump(mode="json") for pr in result.provider_resources_destroyed],
         "errors": result.errors,
+        "failures": [failure.model_dump(mode="json") for failure in result.failures],
         "dry_run": dry_run,
     }
     write_json_line(output_data)
@@ -276,6 +311,10 @@ def _emit_human_summary(result: GcResult, dry_run: bool) -> None:
         )
         total_count += len(result.build_cache_destroyed)
 
+    if result.provider_resources_destroyed:
+        write_human_line("\nProvider resources: {}", len(result.provider_resources_destroyed))
+        total_count += len(result.provider_resources_destroyed)
+
     if total_count == 0:
         write_human_line("\nNo resources found to destroy")
     else:
@@ -306,6 +345,7 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
         + len(result.volumes_destroyed)
         + len(result.logs_destroyed)
         + len(result.build_cache_destroyed)
+        + len(result.provider_resources_destroyed)
     )
 
     event = {
@@ -319,44 +359,56 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
         "volumes_count": len(result.volumes_destroyed),
         "logs_count": len(result.logs_destroyed),
         "build_cache_count": len(result.build_cache_destroyed),
+        "provider_resources_count": len(result.provider_resources_destroyed),
         "errors_count": len(result.errors),
         "errors": result.errors,
+        "failures": [failure.model_dump(mode="json") for failure in result.failures],
         "dry_run": dry_run,
     }
     emit_event("summary", event, OutputFormat.JSONL)
 
 
-def _get_selected_providers(mngr_ctx: MngrContext, opts: GcCliOptions) -> list[ProviderInstanceInterface]:
-    """Get providers based on CLI options."""
+def _get_selected_providers(
+    mngr_ctx: MngrContext, opts: GcCliOptions
+) -> tuple[list[ProviderInstanceInterface], list[str]]:
+    """Get providers based on CLI options.
+
+    Returns the resolved providers and a list of error messages for any
+    explicitly-requested providers that were skipped (empty or unavailable).
+    Skipping lets gc still run against the providers that did resolve;
+    surfacing the errors lets the caller exit non-zero so the user sees that
+    their explicit request was not fully honored.
+    """
     if opts.all_providers:
-        return list(get_all_provider_instances(mngr_ctx))
+        return list(get_all_provider_instances(mngr_ctx)), []
 
     if opts.provider:
         providers = []
+        skipped_errors: list[str] = []
         for provider_name in opts.provider:
             name = ProviderInstanceName(provider_name)
-            # Skip providers that report themselves empty (e.g. the Modal
-            # per-user environment doesn't exist yet) or unreachable. gc is a
-            # read/cleanup path: an empty provider has nothing to collect, so
-            # erroring out would make `mngr gc --provider modal` fail on a fresh
-            # setup. This mirrors get_all_provider_instances, which skips these
-            # same providers for the unfiltered `mngr gc` case.
+            # An explicitly-requested provider that is empty (e.g. a fresh
+            # Modal per-user environment with nothing to collect) or
+            # unavailable is still recorded as an error: the user asked us to
+            # gc it specifically and we did not. Continue so the remaining
+            # providers' work still happens; the CLI exits non-zero at the end.
             try:
                 providers.append(get_provider_instance(name, mngr_ctx))
             except ProviderEmptyError as e:
                 logger.debug("Skipping provider {} (empty -- nothing to gc): {}", name, e)
             except ProviderUnavailableError as e:
-                logger.debug("Skipping provider {} (unavailable): {}", name, e)
-        return providers
+                logger.error("Skipping provider {} (unavailable): {}", name, e)
+                skipped_errors.append(f"provider {name} is unavailable: {e}")
+        return providers, skipped_errors
 
-    return list(get_all_provider_instances(mngr_ctx))
+    return list(get_all_provider_instances(mngr_ctx)), []
 
 
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="gc",
     one_line_description="Garbage collect unused resources",
-    synopsis="mngr gc [OPTIONS]",
+    synopsis="mngr gc [--all-providers] [--provider <PROVIDER>] [--dry-run] [--on-error <MODE>]",
     description="""Automatically removes containers, old snapshots, unused hosts, cached images,
 and any resources that are associated with destroyed hosts and agents.
 

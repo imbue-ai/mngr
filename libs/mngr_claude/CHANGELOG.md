@@ -6,10 +6,61 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.16] - 2026-06-16
+
+### Changed
+
+- Changed: Common-transcript converter's event-conversion logic moved out of the inline `python3` heredoc in `common_transcript.sh` into a standalone `common_transcript_convert.py` (provisioned alongside the shell script), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, and transcript lines whose `message` is `null` are dropped silently rather than aborting the conversion run.
+- Changed: Common-transcript watcher no longer echoes converter errors to the agent's pane — a genuine conversion error is recorded in the structured log only.
+- Changed: Session-preservation-on-destroy now uses the shared `preserve_agent_state` / `preserve_host_agents_on_destroy` helpers in mngr core instead of an inline copy. The preserved file set, the `preserve_sessions_on_destroy` config option, and the online/offline behavior are unchanged. The offline host-destroy path now also filters discovered agents by agent type.
+
+### Fixed
+
+- Fixed: Synchronous transcript flush at turn end now runs on every turn-end path — not just `wait_for_stop_hook.sh`'s `run_post_completion`, which is skipped on the no-`/proc` fast path (macOS / local agents) and on the SIGTERM/SIGINT handler. The flush moved into `mark_inactive`, which every path calls before clearing the `active` marker, so a WAITING-signal consumer can no longer outrun the converter on those paths. The flush's lock-acquire wait is bounded per call (2s for SIGTERM/SIGINT, 30s for normal turn-end) via the portable `MNGR_CONVERT_LOCK_TIMEOUT` rather than `timeout(1)` (macOS lacks it).
+
+## [v0.2.15] - 2026-06-16
+
+### Changed
+
+- Changed: `wait_for_stop_hook.sh` now flushes the transcript pipeline (synchronous `--single-pass` of the raw streamer and common-transcript converter) before clearing the `active` marker, so consumers reading the common transcript on a WAITING transition cannot outrun the converter. The flush and the convert lock come from the shared `mngr_common_transcript_lib.sh` rather than being duplicated per agent.
+- Changed: `waiting_reason` field in `mngr list` is now gated on the agent's `active` (in-turn) marker — a stranded `permissions_waiting` file that outlived its turn reports `END_OF_TURN` instead of wrongly showing `PERMISSIONS`.
+
+## [v0.2.14] - 2026-06-15
+
 ### Added
 
-- Added: Approximate response streaming for Claude agents, driven by watching the agent's tmux pane. A new `streaming_snapshot_interval_seconds` (float, default `0.0`) on the `claude` agent type config enables a background watcher that writes the in-progress assistant text to `$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer` every N seconds; `<= 0` (the default) leaves existing behavior unchanged. The buffer is written atomically (temp file + `mv`) with line 1 carrying the `uuid` of the last complete assistant message and lines 2+ the in-progress text reverse-mapped from the terminal rendering back into markdown; it is cleared on watcher startup and emptied (body cleared, id line kept) when the agent goes idle.
-- Added: `resources/stream_snapshot.py` watcher script (stdlib-only) that captures the tmux pane via `tmux capture-pane -e -J`, identifies the latest assistant-text block by the `●` marker's color (assistant markers are the achromatic default text color; chromatic tool-call and mid-gray status markers are ignored), and reverse-maps bold/italic, inline code, OSC 8 links, blockquotes, lists, code blocks, and tables (box-drawing back to pipe syntax). Body is strict-append within a message via overlap-stitched snapshots; trailing tables are held back until raw form is stable. The poll interval is provisioned to a per-agent `plugin/claude/stream_interval` file rather than env-var propagated; provisioning fails fast if streaming is enabled but the host lacks `python3`.
+- Added: `imbue.mngr_claude.stream_json`, a shared typed boundary for the Claude partial-message stream-json envelope (defined against the `anthropic` SDK's `RawMessageStreamEvent` union and `anthropic.types.Message`). `mngr ask`'s headless reader now parses partial-message events through it; an event variant newer than the installed `anthropic` package degrades gracefully (skipped, or falls back to a lenient text scan) rather than dropping the response. Adds `anthropic` as a new dependency (unpinned; imported for its typed models only -- mngr still drives the `claude` CLI and makes no API calls).
+
+### Changed
+
+- Changed: `mngr create --adopt-session` now validates the session ID up front (before any host or worktree is created), so an unknown or ambiguous ID fails fast with a clean `Error:` message instead of crashing mid-provisioning with an "Unexpected error" traceback. The "session not found" message no longer enumerates every searched directory.
+
+## [v0.2.13] - 2026-06-13
+
+### Added
+
+- Added: `claude_process_started` marker file (touched by the `SessionStart` hook) whose mtime gives consumers a restart boundary — any transcript event older than it belongs to a turn the current process did not run.
+- Added: `mngr create --adopt-session <session-id>` now also resolves a bare session ID against every live local mngr agent's per-agent config dir and against preserved-session files of destroyed agents (previously only the current / user-scope Claude config dirs). `--adopt-session` is repeatable; every named session is made available, while only the last is resumed on startup. Only the local host dir is scanned.
+- Added: Conformance test asserting claude's emitted common-transcript records validate against the canonical envelope schema (`imbue.mngr.agents.common_transcript_records`).
+
+### Changed
+
+- Changed: Claude session preservation rewritten onto core mngr's shared `preserve_agent_data` machinery, working against either an online host or a volume-backed offline host. Sessions, the raw and common transcripts, and the session-id history are still preserved before the agent state directory is deleted, but preserved files now mirror the agent state directory verbatim under `<local_host_dir>/preserved/<agent-name>--<agent-id>/` instead of the old `preserved_sessions` location — a switch-forward change (previously preserved sessions are left in place).
+- Changed: `ClaudeAgent` now supplies its own "message accepted" probe (a shell command that reads the latest `enqueue` event from the Claude transcript event log and prints its ISO-8601 timestamp) to mngr's shared submission-confirm path. This is the Claude-specific knowledge that previously lived hardcoded in the shared `tui_utils` module; moving it into the plugin keeps `tui_utils` agent-neutral while preserving the fast-confirm-on-enqueue behavior for Claude agents.
+- Changed: A skill-provisioned agent's primary skill (e.g. `code-guardian`, `fixme-fairy`) is now installed into the agent's per-agent config dir (`$CLAUDE_CONFIG_DIR/skills/<name>/SKILL.md`) instead of leaking through global `~/.claude/skills/` into every local agent. `skills/` is now synced via child-level symlinks (mirroring `plugins/`) so the per-agent skill can live as a real file alongside symlinked user skills. The local install is now silent (matching the always-silent remote install).
+- Changed: `.claude/settings.local.json` gitignore preflight/provisioning check delegates to the shared `check_path_gitignore_status` helper in `mngr.api.git`. No user-visible behavior change.
+
+### Fixed
+
+- Fixed: A Claude agent restarted or resumed mid-turn no longer stays stuck at the `RUNNING` lifecycle state. The `active` marker (set on `UserPromptSubmit`, cleared by `Stop` / idle `Notification`) used to outlive a turn abandoned by an abnormal exit (container restart, OOM, crash); the `SessionStart` hook now clears the `active` / `permissions_waiting` markers on `startup`/`resume` (a fresh, not-mid-turn process), so the lifecycle state self-heals on the next (re)start. `compact` is excluded because auto-compaction fires mid-turn while Claude is genuinely active.
+- Fixed: Provisioning a local Claude agent no longer creates self-referential symlink loops inside the user's shared `~/.claude/` (e.g. `~/.claude/skills/skills -> ~/.claude/skills`). `_sync_user_resources` used plain `ln -sf` as idempotent, but the second-and-later provision dereferenced the existing destination symlink and nested a new link inside the shared source; all sync symlinks now use `ln -sfn` (`--no-dereference`), which replaces the destination symlink instead of following it.
+
+## [v0.2.12] - 2026-06-08
+
+### Added
+
+- Added: Approximate response streaming for Claude agents, driven by watching the agent's tmux pane. A new `streaming_snapshot_interval_seconds` (float, default `0.0`) on the `claude` agent type config enables a background watcher that writes the in-progress assistant text to `$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer` every N seconds; `<= 0` (the default) leaves existing behavior unchanged. The buffer carries the id of the last complete assistant message plus the in-progress text reverse-mapped from the terminal rendering back into markdown, and is emptied when the agent goes idle.
+- Added: `resources/stream_snapshot.py` watcher script (stdlib-only) that captures the tmux pane, identifies the latest assistant-text block, and reverse-maps markdown formatting (bold/italic, inline code, links, blockquotes, lists, code blocks, tables) from the rendered pane. Provisioning fails fast if streaming is enabled but the host lacks `python3`.
 - Added: `ClaudeAgent.get_stream_buffer_path()` so other code (e.g. `mngr robinhood`) can locate and read the buffer.
 
 ## [v0.2.11] - 2026-06-05

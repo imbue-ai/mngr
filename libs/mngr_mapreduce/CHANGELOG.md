@@ -12,6 +12,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: `stop_agent_on_host` tolerates the `CleanupFailedGroup` that `Host.stop_agents` now raises when cleanup leaves a resource behind, so a best-effort stop in a `finally` logs and continues instead of masking the real result.
 - Changed: The reducer agent now benefits from the same snapshot-based code-reuse optimization as mappers — when the run uses a snapshot, the reducer's host is pre-created so the agent's source is git-worktreed off the snapshot's `/code` instead of re-uploaded from the laptop.
 
 ### Fixed

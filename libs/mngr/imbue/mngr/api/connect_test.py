@@ -83,8 +83,8 @@ def test_build_ssh_activity_wrapper_script_inserts_attach_args_before_subcommand
     assert "tmux -CC attach -t =mngr-my-agent" in script
 
 
-def test_build_ssh_activity_wrapper_script_silences_resize_stdout_for_control_mode() -> None:
-    """The background resize helper's stdout must be redirected (not just stderr) so a
+def test_build_ssh_activity_wrapper_script_silences_sigwinch_stdout_for_control_mode() -> None:
+    """The background SIGWINCH helper's stdout must be redirected (not just stderr) so a
     control-mode (-CC) attach is not corrupted by stray tmux output on the SSH stdout stream."""
     script = _build_ssh_activity_wrapper_script(
         "mngr-my-agent", Path("/home/user/.mngr"), "agent", attach_args=("-CC",)
@@ -92,21 +92,24 @@ def test_build_ssh_activity_wrapper_script_silences_resize_stdout_for_control_mo
     assert ">/dev/null 2>&1 &" in script
 
 
-def test_build_ssh_activity_wrapper_script_guards_resize_on_manual_window_size() -> None:
-    # The post-attach resize must be skipped for a pinned ("manual") window so the
-    # configured dimensions survive an interactive attach. The check is done on the
-    # remote host at attach time via tmux show-options (-wv, a window option). The
+def test_build_ssh_activity_wrapper_script_guards_sigwinch_on_manual_window_size() -> None:
+    # The post-attach SIGWINCH nudge must be skipped for a pinned ("manual") window:
+    # it never resizes on attach, so there is nothing to redraw. The check is done on
+    # the remote host at attach time via tmux show-options (-wv, a window option). The
     # window is addressed by name (not the literal :0 index) so the guard is
     # independent of the user's tmux base-index.
     script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), "agent")
 
     assert "show-options -t =mngr-my-agent:agent -wv window-size" in script
     assert "!= manual" in script
-    # The resize itself is still present (run only when not manual).
-    assert "resize-window" in script
+    # The SIGWINCH nudge is present (run only when not manual). We must NOT use
+    # tmux resize-window, which would flip window-size to manual and pin the
+    # window, breaking live resize tracking under the default window-size=latest.
+    assert "kill -WINCH" in script
+    assert "resize-window" not in script
 
 
-def test_build_ssh_activity_wrapper_script_resize_guard_targets_named_window() -> None:
+def test_build_ssh_activity_wrapper_script_sigwinch_guard_targets_named_window() -> None:
     """A custom primary_window_name flows into the manual-pin guard's window target,
     so the guard works regardless of the user's tmux base-index (the index :0 is never used)."""
     script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), "primary")

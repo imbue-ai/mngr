@@ -7,11 +7,11 @@
       "permissions": [
         {
           "name": "slack-read-all",
-          "description": "All read operations across the entire Slack API, including messages, users, files, reactions, search, pins, bookmarks, and reminders."
+          "description": "All read operations across the entire Slack API, including messages, users, files, reactions, search, pins, bookmarks, reminders, thread subscriptions, and unread counts."
         },
         {
           "name": "slack-write-all",
-          "description": "All write operations across the entire Slack API, including sending messages, managing conversations, updating profiles, uploading files, and modifying pins, bookmarks, and reminders."
+          "description": "All write operations across the entire Slack API, including sending messages, managing conversations, updating profiles, uploading files, marking thread subscriptions, and modifying pins, bookmarks, and reminders."
         },
         {
           "name": "slack-auth-read",
@@ -411,6 +411,95 @@
         {
           "name": "notion-search",
           "description": "Search across all Notion pages and databases."
+        }
+      ]
+    }
+  ],
+  "notion-mcp": [
+    {
+      "scope": "notion-mcp-api",
+      "display_name": "Notion (MCP)",
+      "description": "Any request to Notion's hosted MCP endpoint (mcp.notion.com).",
+      "permissions": [
+        {
+          "name": "notion-mcp-session",
+          "description": "Open and maintain an MCP session: initialize, list tools/prompts/resources, ping, and send notifications. Required for any MCP client to function; does not read or modify Notion content."
+        },
+        {
+          "name": "notion-mcp-read-all",
+          "description": "Run any read-only Notion MCP tool (search, fetch, queries, list users/teams/comments) plus the MCP session handshake."
+        },
+        {
+          "name": "notion-mcp-write-all",
+          "description": "Run any Notion MCP tool that creates or modifies content (create/update pages, databases, views, data sources, comments; move/duplicate pages) plus the MCP session handshake."
+        },
+        {
+          "name": "notion-mcp-search",
+          "description": "Search across the Notion workspace and connected sources."
+        },
+        {
+          "name": "notion-mcp-fetch",
+          "description": "Retrieve the content of a Notion page, database, or data source by URL or ID."
+        },
+        {
+          "name": "notion-mcp-query-data-sources",
+          "description": "Query across one or more Notion data sources with filters, grouping, and summaries."
+        },
+        {
+          "name": "notion-mcp-query-database-view",
+          "description": "Query a Notion database using a predefined view's filters and sorts."
+        },
+        {
+          "name": "notion-mcp-get-comments",
+          "description": "List comments and discussions on a Notion page."
+        },
+        {
+          "name": "notion-mcp-get-teams",
+          "description": "List the teams (teamspaces) in the current Notion workspace."
+        },
+        {
+          "name": "notion-mcp-get-users",
+          "description": "List all users in the Notion workspace, or retrieve a single user by ID (the notion-get-users and notion-get-user tools)."
+        },
+        {
+          "name": "notion-mcp-get-self",
+          "description": "Retrieve information about the connected bot user and workspace."
+        },
+        {
+          "name": "notion-mcp-create-pages",
+          "description": "Create one or more Notion pages with properties and content."
+        },
+        {
+          "name": "notion-mcp-update-page",
+          "description": "Update a Notion page's properties, content, icon, or cover."
+        },
+        {
+          "name": "notion-mcp-move-pages",
+          "description": "Move one or more Notion pages or databases to a new parent."
+        },
+        {
+          "name": "notion-mcp-duplicate-page",
+          "description": "Duplicate a Notion page within the workspace."
+        },
+        {
+          "name": "notion-mcp-create-database",
+          "description": "Create a new Notion database, data source, and initial view."
+        },
+        {
+          "name": "notion-mcp-update-data-source",
+          "description": "Update a Notion data source's properties, name, or description."
+        },
+        {
+          "name": "notion-mcp-create-view",
+          "description": "Create a new view on a Notion database."
+        },
+        {
+          "name": "notion-mcp-update-view",
+          "description": "Update a Notion view's name, filters, sorts, or display configuration."
+        },
+        {
+          "name": "notion-mcp-create-comment",
+          "description": "Add a comment to a Notion page or specific block."
         }
       ]
     }

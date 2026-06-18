@@ -22,6 +22,7 @@ from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_class_registry import register_agent_class
@@ -40,6 +41,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
@@ -69,14 +71,36 @@ def register_placeholder_agent_type(name: str) -> None:
 
 
 def register_test_placeholder_agent_type() -> None:
-    """Register the canonical placeholder agent type as a BaseAgent fixture."""
-    register_placeholder_agent_type(PLACEHOLDER_AGENT_TYPE)
+    """Register the canonical placeholder agent type as a SendKeysAgent fixture.
+
+    Registered as ``SendKeysAgent`` (an interactive ``BaseAgent`` that accepts
+    messages via tmux send-keys) rather than the bare ``BaseAgent`` that
+    ``register_placeholder_agent_type`` uses, so the canonical "any agent" stand-in
+    is messageable -- the message-API tests send to it, and most real agent types
+    are interactive. ``SendKeysAgent`` IS-A ``BaseAgent``, so tests that use the
+    placeholder as a generic agent are unaffected.
+    """
+    if not is_agent_class_registered(PLACEHOLDER_AGENT_TYPE):
+        register_agent_class(PLACEHOLDER_AGENT_TYPE, SendKeysAgent)
+    if not is_agent_config_registered(PLACEHOLDER_AGENT_TYPE):
+        register_agent_config(PLACEHOLDER_AGENT_TYPE, AgentTypeConfig)
 
 
 @pytest.fixture
 def cli_runner() -> CliRunner:
     """Create a Click CLI runner for testing CLI commands."""
     return CliRunner()
+
+
+@pytest.fixture()
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests.
+
+    Delegates to capture_log_warnings() in testing.py (the single source of
+    truth shared with mngr/conftest.py's identically-named fixture).
+    """
+    with capture_log_warnings() as messages:
+        yield messages
 
 
 @pytest.fixture(autouse=True)
@@ -320,6 +344,7 @@ def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     namespace["cli_runner"] = cli_runner
     namespace["local_host"] = local_host
     namespace["local_provider"] = local_provider
+    namespace["log_warnings"] = log_warnings
     namespace["mngr_test_id"] = mngr_test_id
     namespace["mngr_test_prefix"] = mngr_test_prefix
     namespace["mngr_test_root_name"] = mngr_test_root_name

@@ -64,16 +64,35 @@ def _check_paste_content(pane_content: str, message: str) -> bool:
     return probe in normalized_pane
 
 
-def wait_for_tui_ready(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, indicator: str) -> None:
-    """Wait until the TUI is ready by polling for ``indicator`` in the pane.
+def _pane_matches(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, indicator: str | re.Pattern[str]) -> bool:
+    content = agent._capture_pane_content(tmux_target)
+    if content is None:
+        return False
+    if isinstance(indicator, re.Pattern):
+        return indicator.search(content) is not None
+    return indicator in content
 
-    Raises ``SendMessageError`` on timeout. Without this check, input sent
-    before the TUI finishes rendering may be lost or appear as raw text.
+
+def wait_for_tui_ready(
+    agent: BaseAgent[Any],
+    tmux_target: TmuxWindowTarget,
+    indicator: str | re.Pattern[str],
+    timeout_seconds: float = _TUI_READY_TIMEOUT_SECONDS,
+) -> None:
+    """Wait until the TUI is ready by polling the pane for ``indicator``.
+
+    ``indicator`` is either a plain ``str`` (matched as an exact substring) or a
+    compiled ``re.Pattern`` (matched with ``re.search``) -- the type chooses the
+    matching mode. Raises ``SendMessageError`` on timeout. Without this check,
+    input sent before the TUI finishes rendering -- or while a resumed transcript
+    is still replaying -- may be lost or appear as raw text. Returns immediately
+    when the indicator already matches, so it is a cheap no-op once ready.
     """
-    with log_span("Waiting for TUI to be ready (looking for: {})", indicator):
+    label = indicator.pattern if isinstance(indicator, re.Pattern) else indicator
+    with log_span("Waiting for TUI to be ready (looking for: {})", label):
         if poll_until(
-            lambda: agent._check_pane_contains(tmux_target, indicator),
-            timeout=_TUI_READY_TIMEOUT_SECONDS,
+            lambda: _pane_matches(agent, tmux_target, indicator),
+            timeout=timeout_seconds,
         ):
             return
         pane_content = agent._capture_pane_content(tmux_target)
@@ -83,7 +102,7 @@ def wait_for_tui_ready(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, ind
             logger.error("TUI ready timeout -- failed to capture remote pane content")
         raise SendMessageError(
             str(agent.name),
-            f"Timeout waiting for TUI to be ready (waited {_TUI_READY_TIMEOUT_SECONDS:.1f}s)"
+            f"Timeout waiting for TUI to be ready (waited {timeout_seconds:.1f}s)"
             + (f"\nPane content:\n{pane_content}" if pane_content else ""),
         )
 
@@ -186,17 +205,13 @@ def send_enter_and_poll_for_cleared_indicator(
     )
 
 
-# FIXME: this function could be improved by having a single command that is
-# running on the host, checking *either* condition (eg, whether we've seen a
-# new enqueue event OR we've seen the wait-for signal) since either one is
-# sufficient for us to call it success.
 def send_enter_via_tmux_wait_for_hook(
     agent: BaseAgent[Any],
     tmux_target: TmuxWindowTarget,
     *,
     wait_channel: str,
     timeout_seconds: float,
-    queue_log_path_template: str | None = None,
+    accept_marker_command: str | None = None,
 ) -> None:
     """Strategy 3: send Enter and wait for a tmux wait-for channel fired by a TUI hook.
 
@@ -208,12 +223,21 @@ def send_enter_via_tmux_wait_for_hook(
     waiter has registered (signals wake exactly one waiter; if none exists
     the signal is lost).
 
-    ``queue_log_path_template`` is an agent-specific fallback for cases where
-    the wait-for signal is lost (claude's hook occasionally misfires while
-    another message is being processed). If supplied, on timeout we re-read
-    the agent's transcript event log and accept the submission as long as a
-    new enqueue event has been recorded since the call began. ``None``
-    disables the fallback.
+    ``accept_marker_command`` (when supplied) is an agent-provided shell snippet
+    that prints a lexicographically-monotonic token -- e.g. an ISO-8601
+    timestamp -- for the latest "message accepted" marker its TUI records the
+    instant a message is taken into its queue, or empty output if none has been
+    recorded yet. Supplying it lets the call also confirm submission from that
+    marker, watched *concurrently* with the hook signal. This matters because
+    the hook may only fire once the prompt reaches the model -- for a message
+    sent to a busy agent that is when it is finally dequeued, potentially much
+    later -- whereas the acceptance marker is recorded immediately. We baseline
+    the marker before Enter, poll for a newer value alongside the hook wait, and
+    succeed on whichever lands first, keeping the call fast (well under any
+    front-door HTTP/proxy timeout) for busy agents while the hook still covers
+    submissions that record no marker. ``None`` waits on the hook alone (the
+    original behavior). Keeping the marker command agent-supplied is what lets
+    this module stay agent-neutral.
 
     Raises ``SendMessageError`` on timeout.
     """
@@ -222,7 +246,7 @@ def send_enter_via_tmux_wait_for_hook(
         tmux_target=tmux_target,
         wait_channel=wait_channel,
         timeout_seconds=timeout_seconds,
-        queue_log_path_template=queue_log_path_template,
+        accept_marker_command=accept_marker_command,
     ):
         logger.debug("Message submitted successfully")
         return
@@ -248,29 +272,20 @@ def _send_enter_and_wait_for_signal(
     tmux_target: TmuxWindowTarget,
     wait_channel: str,
     timeout_seconds: float,
-    queue_log_path_template: str | None,
+    accept_marker_command: str | None,
 ) -> bool:
     """Inner helper for send_enter_via_tmux_wait_for_hook; returns True on success."""
     start = time.time()
     full_timeout = timeout_seconds + 1
-    last_queue_timestamp = _get_last_queue_timestamp(agent, queue_log_path_template, full_timeout)
 
-    remaining_time = full_timeout - (time.time() - start)
-    if remaining_time < 0.0:
-        logger.warning(
-            "Negative remaining time for wait-for command: {:.2f}s (command execution took too long)",
-            remaining_time,
-        )
-        remaining_time = 5.0
+    if accept_marker_command is None:
+        cmd = _build_signal_only_command(full_timeout, wait_channel, tmux_target)
+    else:
+        cmd = _build_signal_or_marker_command(full_timeout, wait_channel, tmux_target, accept_marker_command)
 
-    # tmux_target.as_shell_arg() is already shell-quoted -- pass it as the
-    # bash positional $1 directly without a second round of shlex.quote.
-    cmd = (
-        f"bash -c '"
-        f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
-        f'timeout {full_timeout} tmux wait-for "$0"'
-        f"' {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
-    )
+    # Give the remote command a beat past its own internal deadline to return
+    # cleanly before the pyinfra-level timeout fires.
+    remaining_time = full_timeout + 5.0
     try:
         result = agent.host.execute_stateful_command(cmd, timeout_seconds=remaining_time)
     except TimeoutError:
@@ -280,40 +295,72 @@ def _send_enter_and_wait_for_signal(
         return False
     elapsed_ms = (time.time() - start) * 1000
     if result.success:
-        logger.trace("Received submission signal in {:.0f}ms", elapsed_ms)
+        logger.trace("Confirmed message submission in {:.0f}ms", elapsed_ms)
         return True
-
-    # The hook occasionally doesn't fire while another message is being processed;
-    # fall back to checking the agent's transcript log for a fresh enqueue event.
-    logger.debug("Timeout waiting for submission signal on channel {}, checking session log...", wait_channel)
-    remaining_time = full_timeout - (time.time() - start)
-    if remaining_time < 5.0:
-        remaining_time = 5.0
-    current_queue_timestamp = _get_last_queue_timestamp(agent, queue_log_path_template, remaining_time)
-    if current_queue_timestamp is not None and (
-        last_queue_timestamp is None or current_queue_timestamp > last_queue_timestamp
-    ):
-        logger.trace(
-            "Detected new enqueue event in session log with timestamp {}, confirming message submission",
-            current_queue_timestamp,
-        )
-        return True
-
     return False
 
 
-def _get_last_queue_timestamp(
-    agent: BaseAgent[Any],
-    queue_log_path_template: str | None,
-    timeout_seconds: float,
-) -> str | None:
-    if queue_log_path_template is None:
-        return None
-    env_command_prefix = agent.host.build_source_env_prefix(agent)
-    initial_read_queue_ops_result = agent.host.execute_idempotent_command(
-        f"""bash -c '{env_command_prefix} cat {queue_log_path_template} | grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp'""",
-        timeout_seconds=timeout_seconds + 1,
+def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
+    """The original behavior: send Enter, then block on the hook's wait-for channel.
+
+    Used for TUIs with no acceptance-marker command to watch. The waiter is started (in the
+    foreground here) before Enter is sent from a backgrounded subshell, so the
+    signal cannot fire before a waiter is registered (signals wake exactly one
+    waiter; a signal with none registered is lost).
+    """
+    return (
+        f"bash -c '"
+        f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
+        f'timeout {full_timeout} tmux wait-for "$0"'
+        f"' {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
     )
-    if initial_read_queue_ops_result.success:
-        return initial_read_queue_ops_result.stdout
-    return None
+
+
+def _build_signal_or_marker_command(
+    full_timeout: float,
+    wait_channel: str,
+    tmux_target: TmuxWindowTarget,
+    accept_marker_command: str,
+) -> str:
+    """Succeed as soon as EITHER the hook signal fires OR a fresh acceptance marker appears.
+
+    A single remote command so the two conditions are watched concurrently with
+    no dangling process: it registers the (full-timeout) hook waiter in the
+    background -- which writes a sentinel file on success, preserving the
+    register-before-Enter ordering so the signal is never missed (which matters
+    for submissions that only ever fire the signal, never recording a marker)
+    -- sends Enter, then polls both the sentinel and the acceptance marker until
+    either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
+    timeout.
+
+    ``accept_marker_command`` is the agent-supplied shell snippet that prints the
+    agent's latest acceptance-marker token (empty if none yet). A baseline is
+    captured before Enter so only a newer token counts; the comparison is a
+    plain string ``>``, so the token must be lexicographically monotonic (an
+    ISO-8601 timestamp satisfies this, and an empty baseline sorts before any
+    real token). The module stays agent-neutral by treating this command as an
+    opaque probe -- all knowledge of the agent's marker schema lives in the
+    agent that supplies it.
+    """
+    script = (
+        'sig="$(mktemp)"; '
+        # Clean up on every exit path: remove the sentinel file and reap any
+        # still-running background job (notably the hook waiter, which otherwise
+        # outlives a fast marker-win and would recreate "$sig" -- leaking the
+        # temp file -- when the hook finally fires). Runs exactly once on exit.
+        'trap \'p="$(jobs -p)"; [ -n "$p" ] && kill $p 2>/dev/null; rm -f "$sig"\' EXIT; '
+        f'base="$({accept_marker_command})"; '
+        # Register the hook waiter first (full timeout), sentinel on success.
+        f'( timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
+        # Then submit, after a beat so the waiter is registered.
+        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
+        f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
+        'while [ "$(date +%s)" -lt "$end" ]; do '
+        'if [ -s "$sig" ]; then exit 0; fi; '
+        f'cur="$({accept_marker_command})"; '
+        'if [[ -n "$cur" && "$cur" > "$base" ]]; then exit 0; fi; '
+        "sleep 0.25; "
+        "done; "
+        "exit 1"
+    )
+    return f"bash -c {shlex.quote(script)} _ {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"

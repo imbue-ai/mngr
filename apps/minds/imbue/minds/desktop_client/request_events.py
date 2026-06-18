@@ -99,6 +99,15 @@ class LatchkeyPredefinedPermissionRequestEvent(RequestEvent):
         ),
     )
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). Used to recover a host whose canonical permissions file was never "
+            "materialized. ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
 
 
 class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
@@ -126,6 +135,15 @@ class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
         ),
     )
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). Used to recover a host whose canonical permissions file was never "
+            "materialized. ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
 
 
 class RequestResponseEvent(EventEnvelope):

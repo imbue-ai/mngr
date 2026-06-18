@@ -9,6 +9,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.api.create import _create_new_host
 from imbue.mngr.api.create import _generate_unique_host_name
 from imbue.mngr.api.create import _run_post_host_create_commands
+from imbue.mngr.api.create import _validate_session_adoption
 from imbue.mngr.api.create import _write_host_env_vars
 from imbue.mngr.api.create import create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
@@ -18,7 +19,11 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -361,6 +366,41 @@ def test_destroy_new_host_on_create_failure_destroys_failed_new_host(
     assert provider.destroyed_host_ids == [local_host.id]
 
 
+@pytest.mark.allow_warnings(match=r"^Failed to destroy host .* after a failed create")
+def test_destroy_new_host_on_create_failure_leaked_resource_does_not_mask_create_error(
+    local_provider: LocalProviderInstance,
+    local_host: Host,
+) -> None:
+    """A leaked-resource failure during rollback must not mask the original create error.
+
+    The teardown runs in a finally; destroy_host now raises a CleanupFailedGroup when it
+    leaves a resource behind. That group must be swallowed (logged) so the ValueError that
+    actually caused the create to fail is what propagates -- otherwise the user sees a
+    confusing cleanup error instead of the real cause.
+    """
+
+    class _LeakyDestroyProvider(LocalProviderInstance):
+        def destroy_host(self, host: HostInterface | HostId) -> None:
+            raise CleanupFailedGroup.from_failures(
+                [
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message="container could not be removed",
+                        host_id=local_host.id,
+                    )
+                ]
+            )
+
+    provider = _LeakyDestroyProvider(
+        name=local_provider.name,
+        host_dir=local_provider.host_dir,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    with pytest.raises(ValueError, match="provisioning blew up"):
+        with destroy_new_host_on_create_failure(local_host, provider):
+            raise ValueError("provisioning blew up")
+
+
 def test_destroy_new_host_on_create_failure_is_noop_on_success(
     local_provider: LocalProviderInstance,
     local_host: Host,
@@ -492,3 +532,42 @@ def test_create_new_host_retained_on_failure_when_debug_flag_set(
             )
 
     assert provider.destroyed_host_ids == []
+
+
+def test_validate_session_adoption_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
+    # A no-op when --adopt was not passed: no agent-type resolution, no error.
+    _validate_session_adoption(CreateAgentOptions(agent_type=AgentTypeName("claude")), temp_mngr_ctx)
+
+
+def test_validate_session_adoption_passes_for_adoption_capable_agent(temp_mngr_ctx: MngrContext) -> None:
+    # claude supports adoption; the agnostic gate passes (claude's own on_before_create
+    # still fail-fasts on a bad session id).
+    _validate_session_adoption(
+        CreateAgentOptions(agent_type=AgentTypeName("claude"), adopt_session=("some-id",)),
+        temp_mngr_ctx,
+    )
+
+
+def test_validate_session_adoption_rejects_agent_without_adoption_support(temp_mngr_ctx: MngrContext) -> None:
+    with pytest.raises(UserInputError, match="supports session adoption"):
+        _validate_session_adoption(
+            CreateAgentOptions(agent_type=AgentTypeName("command"), adopt_session=("some-id",)),
+            temp_mngr_ctx,
+        )
+
+
+def test_validate_session_adoption_allows_adopt_with_clone_source(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    # --adopt may be combined with --from: every named session plus the clone is made available
+    # and the clone is the one resumed (handled by adopt_sessions), so the gate must not reject it.
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    _validate_session_adoption(
+        CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            adopt_session=("some-id",),
+            source_agent_state_location=HostLocation(host=host, path=tmp_path / "src"),
+        ),
+        temp_mngr_ctx,
+    )

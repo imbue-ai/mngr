@@ -361,8 +361,11 @@ def test_remove_claude_trust_returns_false_when_no_config(tmp_path: Path) -> Non
     assert result is False
 
 
-def test_remove_claude_trust_returns_false_on_error(tmp_path: Path) -> None:
-    """Test that remove_claude_trust_for_path returns False on errors."""
+def test_remove_claude_trust_returns_false_on_invalid_json(tmp_path: Path) -> None:
+    """Test that remove_claude_trust_for_path returns False on invalid JSON.
+
+    The JSON-decode path is the only error the production code catches.
+    """
     config_file = find_user_claude_config()
     worktree_path = tmp_path / "worktree"
     worktree_path.mkdir()
@@ -455,9 +458,13 @@ def test_dismiss_effort_callout_is_noop_when_already_set() -> None:
     backup_file = find_user_claude_config().with_suffix(".json.bak")
     config = {"effortCalloutDismissed": True, "projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
+    content_before = config_file.read_text()
 
     dismiss_effort_callout(config_file)
 
+    # The config file content must be byte-for-byte unchanged across the no-op call.
+    assert config_file.read_text() == content_before
+    # Secondary check: a no-op write would have created a .bak backup; it must not exist.
     assert not backup_file.exists()
 
 
@@ -506,9 +513,13 @@ def test_acknowledge_cost_threshold_is_noop_when_already_set() -> None:
     backup_file = find_user_claude_config().with_suffix(".json.bak")
     config = {"hasAcknowledgedCostThreshold": True, "projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
+    content_before = config_file.read_text()
 
     acknowledge_cost_threshold(config_file)
 
+    # The config file content must be byte-for-byte unchanged across the no-op call.
+    assert config_file.read_text() == content_before
+    # Secondary check: a no-op write would have created a .bak backup; it must not exist.
     assert not backup_file.exists()
 
 
@@ -558,8 +569,12 @@ def test_check_claude_dialogs_dismissed_checks_effort_callout(tmp_path: Path) ->
     source_path = tmp_path / "source"
     source_path.mkdir()
 
-    # Config has trust but NOT effort dismissed
+    # Trust and onboarding are both set, so the effort callout is the ONLY
+    # remaining undismissed dialog. This isolates the effort check: the raised
+    # error type is genuinely attributable to the effort callout rather than
+    # being correct only by the trust -> effort -> onboarding check ordering.
     config = {
+        "hasCompletedOnboarding": True,
         "projects": {
             str(source_path): {"hasTrustDialogAccepted": True},
         },
@@ -907,7 +922,7 @@ def test_encode_claude_project_dir_name(raw: str, expected: str) -> None:
     encoder ever regresses to ``replace("/", "-").replace(".", "-")`` or to a
     pattern that treats ``_`` as a word char (e.g. ``\\W``), several of these
     cases will fail -- which is the point: a divergence here silently breaks
-    ``mngr create --adopt-session``.
+    ``mngr create --adopt``.
     """
     assert encode_claude_project_dir_name(Path(raw)) == expected
 

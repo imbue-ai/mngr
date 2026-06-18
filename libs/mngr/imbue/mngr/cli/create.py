@@ -23,11 +23,12 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.agents.agent_registry import list_available_agent_types
+from imbue.mngr.agents.agent_registry import list_selectable_agent_type_names
 from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
+from imbue.mngr.api.create import bootstrap_backend_for_host_creation
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.data_types import ConnectionOptions
@@ -39,6 +40,7 @@ from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.api.gc import register_generated_source_dir
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import NEW_AGENT_LOCATION
 from imbue.mngr.cli.common_opts import add_common_options
@@ -54,15 +56,17 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -103,7 +107,6 @@ from imbue.mngr.primitives import TmuxHeight
 from imbue.mngr.primitives import TmuxWidth
 from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.primitives import TransferMode
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.git_utils import clone_git_url_to_managed_dir
@@ -124,6 +127,15 @@ class _CachedAgentHostLoader(MutableModel):
     """Lazy loader that caches agents grouped by host on first access."""
 
     mngr_ctx: MngrContext = Field(frozen=True, description="Manager context for loading agents")
+    provider_names: tuple[str, ...] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "When set, narrows discovery to these providers. None means a full scan across "
+            "every configured provider, which is required when at least one consumer (source "
+            "resolution, --reuse lookup, or target host lookup) needs to search across providers."
+        ),
+    )
     cached_result: dict[DiscoveredHost, list[DiscoveredAgent]] | None = Field(
         default=None, description="Cached loading result"
     )
@@ -132,12 +144,62 @@ class _CachedAgentHostLoader(MutableModel):
         if self.cached_result is None:
             self.cached_result = discover_hosts_and_agents(
                 self.mngr_ctx,
-                provider_names=None,
+                provider_names=self.provider_names,
                 agent_identifiers=None,
                 include_destroyed=False,
                 reset_caches=False,
             )[0]
         return self.cached_result
+
+
+def _compute_loader_provider_filter(
+    opts: CreateCliOptions,
+    address: NewAgentLocation,
+) -> tuple[str, ...] | None:
+    """Compute the providers the agent/host loader needs to query, or None for a full scan.
+
+    The loader is consumed by source resolution (``_resolve_source_location``),
+    ``--reuse`` lookup (``_try_reuse_existing_agent``), and existing-host
+    lookup (``_parse_target_host``). When every consumer either skips the
+    loader (e.g. a bare local source path, a new-host target) or pins a
+    provider, we can narrow discovery to just the pinned providers; if any
+    consumer would need to search across providers (e.g. ``--reuse`` with no
+    provider on the target address), we must fall back to a full scan.
+    """
+    needed: set[str] = set()
+
+    # Source side
+    if opts.source is not None and not is_git_url(opts.source):
+        try:
+            parsed_source = parse_host_location_address(opts.source)
+        except UserInputError:
+            # Will surface as a CLI error during resolution; fall back to a full scan.
+            return None
+        if parsed_source.agent is not None or parsed_source.host is not None:
+            if parsed_source.host is not None and parsed_source.host.provider is not None:
+                needed.add(str(parsed_source.host.provider))
+            else:
+                return None
+
+    # Target side: consulted only for an existing host on a real provider.
+    target_uses_loader = address.host_name is not None and not _is_creating_new_host(address, opts.new_host)
+    if target_uses_loader:
+        if address.provider_name is not None:
+            needed.add(str(address.provider_name))
+        else:
+            return None
+
+    # --reuse: searches for an existing agent of the same name; narrowed by the address's provider.
+    if opts.reuse:
+        if address.provider_name is not None:
+            needed.add(str(address.provider_name))
+        else:
+            return None
+
+    if not needed:
+        return None
+
+    return tuple(sorted(needed))
 
 
 @pure
@@ -159,10 +221,10 @@ def _resolve_agent_type_name(
     means nothing was supplied anywhere. ``is_type_explicit`` is True only
     when the user passed ``--type`` on the command line.
 
-    ``available_agent_types`` is the union of plugin-registered agent type
-    names (``list_registered_agent_types()``) and user-config-defined ones
-    (``mngr_ctx.config.agent_types`` keys). Used only to make the error
-    message concrete; never affects which value is returned.
+    ``available_agent_types`` is every name the user may pass for the type:
+    plugin-registered types, user-config-defined types, and registered
+    aliases (i.e. ``list_selectable_agent_type_names(config)``). Used only to
+    make the error message concrete; never affects which value is returned.
 
     Precedence:
       1. an explicitly-set ``--type`` flag (``is_type_explicit`` is True),
@@ -445,6 +507,19 @@ class _CreateCommand(click.Command):
     ),
 )
 @optgroup.option(
+    "--adopt",
+    "--adopt-session",
+    "adopt_session",
+    multiple=True,
+    help=(
+        "Adopt an existing session into this newly created agent so it resumes that conversation. "
+        "Accepts a session id or a path to the session file; a session id is searched across the "
+        "relevant user/config store, every live local mngr agent, and preserved sessions from "
+        "destroyed agents. Repeatable: every named session is copied in, and the last is resumed on "
+        "startup (unless combined with --from, in which case the source agent's session is resumed)."
+    ),
+)
+@optgroup.option(
     "--rsync/--no-rsync",
     default=None,
     help="Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled]",
@@ -663,12 +738,16 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Detect headless agent types and enforce the --foreground flag.
         # --foreground is required for headless types (makes the behavior explicit)
         # and rejected for non-headless types (it doesn't apply).
-        resolved_agent_type = _resolve_agent_type_name(
+        selected_agent_type = _resolve_agent_type_name(
             opts.type,
             is_type_explicit,
             opts.positional_agent_type,
-            list_available_agent_types(mngr_ctx.config),
+            list_selectable_agent_type_names(mngr_ctx.config),
         )
+        # Normalize an alias (e.g. "agy") to its canonical type ("antigravity")
+        # at the single entry point, so headless detection, the persisted
+        # data.json "type", and everything downstream use the canonical name.
+        resolved_agent_type = normalize_agent_type_name(selected_agent_type)
         is_headless = is_streaming_headless_agent_type(resolved_agent_type, mngr_ctx.config)
 
         if is_headless and not opts.foreground:
@@ -780,8 +859,11 @@ def _setup_create(
     else:
         initial_message = initial_message_content
 
-    # Create a lazy loader for agents grouped by host (only loads if needed)
-    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx)
+    # Create a lazy loader for agents grouped by host (only loads if needed).
+    # Narrow discovery to the providers actually needed by the source/target/--reuse
+    # consumers; falls back to a full scan when any of them needs to search across providers.
+    loader_provider_filter = _compute_loader_provider_filter(opts, address)
+    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx, provider_names=loader_provider_filter)
 
     # figure out where the source data is coming from
     resolved_source = _resolve_source_location(opts, agent_and_host_loader, mngr_ctx, is_start_desired=opts.start_host)
@@ -885,6 +967,7 @@ def _create_agent(
             agent_name=agent_opts.name,
             provider_name=address.provider_name,
             target_host_ref=target_host if isinstance(target_host, DiscoveredHost) else None,
+            host_name=address.host_name,
             mngr_ctx=mngr_ctx,
             agent_and_host_loader=setup.agent_and_host_loader,
         )
@@ -926,7 +1009,7 @@ def _create_agent(
                     elif setup.initial_message is not None:
                         # Send initial message directly (from --message or --message-file)
                         logger.info("Sending message to agent")
-                        agent.send_message(setup.initial_message)
+                        require_interactive_agent(agent).send_message(setup.initial_message)
                     else:
                         pass
 
@@ -966,8 +1049,13 @@ def _create_agent(
     # edit-message send (which happens outside api_create's own teardown guard)
     # can still tear the new host down on failure. None when we adopted an
     # existing host -- in that case the guard below is a no-op and never destroys.
+    # Bootstrap first so backends with one-time per-user bootstrap (Modal's
+    # environment) do not raise ProviderEmptyError here on the very first create.
+    # ``api_create`` re-bootstraps the same (cached) instance below; bootstrap is
+    # idempotent, so doing it here too is cheap.
     new_host_provider: ProviderInstanceInterface | None = None
     if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
+        bootstrap_backend_for_host_creation(resolved_target_host.provider, mngr_ctx)
         new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx)
 
     # Call the API create function
@@ -1156,7 +1244,7 @@ def _handle_editor_message(
             return
 
         logger.info("Sending edited message...")
-        agent.send_message(edited_message)
+        require_interactive_agent(agent).send_message(edited_message)
         logger.debug("Message sent successfully")
 
 
@@ -1198,6 +1286,7 @@ def _try_reuse_existing_agent(
     agent_name: AgentName,
     provider_name: ProviderInstanceName | None,
     target_host_ref: DiscoveredHost | None,
+    host_name: HostName | HostId | None,
     mngr_ctx: MngrContext,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
@@ -1206,6 +1295,17 @@ def _try_reuse_existing_agent(
     Searches for an agent matching the name, scoped by provider and host if specified.
     If found, ensures the agent is started and returns it along with its host.
     If not found, returns None so the caller can proceed with creating a new agent.
+
+    ``host_name`` is the host designated by the create address (e.g. ``babatest``
+    in ``system-services@babatest.docker``). When the address names a host, reuse
+    is scoped to that host even if it does not exist yet -- a brand-new host has
+    nothing to reuse, so the lookup returns None and the caller creates a fresh
+    agent. This matters when the agent name is shared across many hosts (minds
+    names every workspace's primary agent the constant ``system-services`` and
+    relies on the host name for identity): without host scoping the lookup would
+    match every same-named agent on the provider and fail to disambiguate.
+    ``target_host_ref`` is the already-resolved host for an existing-host create;
+    it scopes by host id when present and co-occurs with ``host_name``.
     """
     agents_by_host = agent_and_host_loader()
 
@@ -1219,6 +1319,16 @@ def _try_reuse_existing_agent(
         # Skip hosts that don't match the target host filter (if specified)
         if target_host_ref is not None and host_ref.host_id != target_host_ref.host_id:
             continue
+
+        # Skip hosts that don't match the host named in the address (if specified).
+        # The address host may be a HostId (exact id) or a HostName (the host's name).
+        if host_name is not None:
+            if isinstance(host_name, HostId):
+                host_matches_address = host_ref.host_id == host_name
+            else:
+                host_matches_address = host_ref.host_name == host_name
+            if not host_matches_address:
+                continue
 
         for agent_ref in agent_refs:
             if agent_ref.agent_name == agent_name:
@@ -1299,16 +1409,12 @@ def _resolve_source_location(
                 "or specify --from to set the source explicitly."
             )
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
-        provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        online_host = get_local_host(mngr_ctx)
         return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Git URL: clone to a managed directory and treat as a local path
     if is_git_url(opts.source):
-        provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        online_host = get_local_host(mngr_ctx)
         clones_base = online_host.host_dir / "clones"
         positional_hint = (
             str(opts.positional_name.name) if opts.positional_name and opts.positional_name.name else None
@@ -1329,9 +1435,7 @@ def _resolve_source_location(
     if parsed.agent is None and parsed.host is None:
         source_path = str(parsed.path) if parsed.path is not None else os.getcwd()
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
-        provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        online_host = get_local_host(mngr_ctx)
         return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Need full resolution across providers
@@ -1353,9 +1457,7 @@ def _resolve_target_host(
     resolved_target_host: OnlineHostInterface | NewHostOptions
     if target_host is None:
         # No host specified, use the local provider's default host
-        provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        resolved_target_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
+        resolved_target_host = get_local_host(mngr_ctx)
     elif isinstance(target_host, DiscoveredHost):
         provider = get_provider_instance(target_host.provider_name, mngr_ctx)
         host = provider.get_host(target_host.host_id)
@@ -1604,6 +1706,7 @@ def _parse_agent_opts(
         label_options=label_options,
         provisioning=provisioning,
         tmux=tmux_options,
+        adopt_session=opts.adopt_session,
         source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base
@@ -1839,12 +1942,41 @@ def _find_agent_in_host(host: OnlineHostInterface, agent_id: AgentId) -> AgentIn
     raise AgentNotFoundError(str(agent_id))
 
 
+def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
+    """Build the machine-readable create result payload.
+
+    Always includes ``agent_id`` / ``host_id`` / ``host_name``. For a remote
+    host it adds the agent SSH connection (``ssh_user`` / ``ssh_host`` /
+    ``ssh_port`` / ``ssh_key_path``); when the provider exposes a separate
+    outer/management sshd (e.g. a slice's VM-root port reached via a
+    box-forwarded port) it also adds ``outer_ssh_port``. Pool-bake tooling
+    consumes these to build a pool row -- and to reach the host for any
+    post-bake SSH steps -- without a second ``mngr list`` round-trip.
+    """
+    result_data: dict[str, Any] = {
+        "agent_id": str(result.agent.id),
+        "host_id": str(result.host.id),
+        "host_name": str(result.host.get_name()),
+    }
+    ssh_connection = result.host.get_ssh_connection_info()
+    if ssh_connection is not None:
+        ssh_user, ssh_host, ssh_port, key_path = ssh_connection
+        result_data["ssh_user"] = ssh_user
+        result_data["ssh_host"] = ssh_host
+        result_data["ssh_port"] = ssh_port
+        result_data["ssh_key_path"] = str(key_path)
+    outer_ssh_port = result.host.get_outer_ssh_port()
+    if outer_ssh_port is not None:
+        result_data["outer_ssh_port"] = outer_ssh_port
+    return result_data
+
+
 def _output_result(result: CreateAgentResult, opts: OutputOptions) -> None:
     """Output the create result according to output options."""
     if opts.is_quiet:
         return
 
-    result_data = {"agent_id": str(result.agent.id), "host_id": str(result.host.id)}
+    result_data = _build_create_result_data(result)
     match opts.output_format:
         case OutputFormat.JSON:
             write_json_line(result_data)
@@ -1861,7 +1993,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     key="create",
     one_line_description="Create and run an agent",
     synopsis="""mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--adopt <SESSION>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]

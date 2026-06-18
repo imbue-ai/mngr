@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 import tomllib
-import typing
 from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
@@ -43,6 +42,8 @@ from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
+from imbue.mngr.utils.model_schema import render_annotation
+from imbue.mngr.utils.model_schema import walk_model_fields
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
@@ -250,7 +251,10 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
         config_data = _load_config_file(config_path)
         _emit_config_list(config_data, output_opts, scope, config_path)
     else:
-        full_view = mngr_ctx.config.model_dump(mode="json")
+        # serialize_as_any preserves provider-subclass fields (e.g. docker_runtime
+        # on DockerProviderConfig); without it model_dump serializes providers by
+        # the declared base type and silently drops subclass-only keys.
+        full_view = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
         if opts.all:
             config_data = full_view
         else:
@@ -444,7 +448,10 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         return
 
     # Merged mode: extends are already applied; bare key lookup is sufficient.
-    config_data = mngr_ctx.config.model_dump(mode="json")
+    # serialize_as_any preserves provider-subclass fields (e.g. docker_runtime on
+    # DockerProviderConfig); without it model_dump serializes providers by the
+    # declared base type and silently drops subclass-only keys.
+    config_data = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
     try:
         value = _get_nested_value(config_data, key)
         _emit_config_value(key, value, output_opts)
@@ -909,70 +916,39 @@ def _get_config_template() -> str:
 def _collect_schema_rows(model_class: type[BaseModel], current: Any) -> list[dict[str, Any]]:
     """Flatten ``model_class``'s schema into ``[{key, type, value, description}, ...]``.
 
-    Recurses into nested ``BaseModel`` fields. Stops at the dict level for
-    open-ended ``dict[str, Any]`` fields (e.g. ``commands.<cmd>.defaults``);
-    the inner key shape is user-extensible and not part of the schema.
+    Recurses into nested ``BaseModel`` fields (via the shared
+    ``walk_model_fields``). Stops at the dict level for open-ended
+    ``dict[str, Any]`` fields (e.g. ``commands.<cmd>.defaults``); the inner key
+    shape is user-extensible and not part of the schema. Each row's ``value`` is
+    the current effective value resolved from ``current`` by its dotted key.
     """
-    rows: list[dict[str, Any]] = []
-    _walk_schema(model_class, current, prefix=(), rows=rows)
-    return rows
-
-
-def _walk_schema(
-    model_class: type[BaseModel],
-    current: Any,
-    prefix: tuple[str, ...],
-    rows: list[dict[str, Any]],
-) -> None:
-    # Project the current model to a plain dict once so we can look up dynamic
-    # field names via dict-key access (rather than ``getattr``).
-    current_as_dict: dict[str, Any] | None
     if isinstance(current, BaseModel):
-        current_as_dict = current.model_dump(mode="json")
+        current_dump: dict[str, Any] = current.model_dump(mode="json")
     elif isinstance(current, dict):
-        current_as_dict = current
+        current_dump = current
     else:
-        current_as_dict = None
-    for field_name, field_info in model_class.model_fields.items():
-        path = ".".join(prefix + (field_name,))
-        annotation = field_info.annotation
-        description = field_info.description or ""
-        value = None if current_as_dict is None else current_as_dict.get(field_name)
-        # Recurse into nested pydantic models so plugin-defined sub-configs
-        # appear too. Container dicts (agent_types, providers, etc.) and
-        # leaf dicts both stop at this level — their value shape is not part
-        # of the schema enumeration.
-        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            _walk_schema(annotation, value, prefix=prefix + (field_name,), rows=rows)
-            continue
+        current_dump = {}
+    rows: list[dict[str, Any]] = []
+    for key, annotation, description in walk_model_fields(model_class):
         rows.append(
             {
-                "key": path,
-                "type": _render_annotation(annotation),
-                "value": value,
+                "key": key,
+                "type": render_annotation(annotation),
+                "value": _value_at_path(current_dump, key),
                 "description": description,
             }
         )
+    return rows
 
 
-def _render_annotation(annotation: Any) -> str:
-    """Best-effort string for an annotation.
-
-    Parameterised generics like ``list[str]`` carry a useful type parameter
-    that ``__name__`` discards (it would return just ``"list"``), so for any
-    annotation that has generic args or origin we use ``repr`` -- which
-    renders as ``list[str]``, ``dict[str, Path]``, ``str | None``, etc.
-    Plain classes (``str``, ``Path``, ``int``) still use ``__name__`` for the
-    short, familiar form.
-    """
-    if annotation is None:
-        return "None"
-    if typing.get_args(annotation) or typing.get_origin(annotation) is not None:
-        return repr(annotation)
-    name = getattr(annotation, "__name__", None)
-    if name:
-        return name
-    return repr(annotation)
+def _value_at_path(data: dict[str, Any], dotted_key: str) -> Any:
+    """Resolve a dotted ``dotted_key`` against nested ``data``, or None if absent."""
+    current: Any = data
+    for part in dotted_key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
 
 
 def _emit_schema_rows(rows: list[dict[str, Any]], output_opts: OutputOptions) -> None:

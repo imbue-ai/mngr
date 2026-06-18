@@ -39,6 +39,23 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     allow_unknown_host: bool
 
 
+def _check_connect_future_options(opts: ConnectCliOptions) -> None:
+    """Raise NotImplementedError for unimplemented connect options.
+
+    Mirrors the `[future]` suffix carried on each option's `--help` text;
+    pinned by `test_future_flags_raise_not_implemented_error` so removing
+    a raise (i.e. shipping the feature) forces a synopsis update.
+    """
+    # Run this command instead of the default tmux attach.
+    if opts.session_command is not None:
+        raise NotImplementedError("--session-command is not implemented yet")
+
+    # Disable automatic reconnection if the connection is dropped.
+    # Default behavior (--reconnect) should automatically reconnect.
+    if not opts.reconnect:
+        raise NotImplementedError("--no-reconnect is not implemented yet")
+
+
 @click.command()
 @click.argument("agent", type=AGENT_ADDRESS, default=None, required=False)
 @optgroup.group("General")
@@ -80,15 +97,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         command_class=ConnectCliOptions,
     )
 
-    # Run this command instead of the default tmux attach
-    # Useful for running a different shell or command in the agent's environment
-    if opts.session_command is not None:
-        raise NotImplementedError("--session-command is not implemented yet")
-
-    # Disable automatic reconnection if the connection is dropped
-    # Default behavior (--reconnect) should automatically reconnect
-    if not opts.reconnect:
-        raise NotImplementedError("--no-reconnect is not implemented yet")
+    _check_connect_future_options(opts)
 
     logger.info("Finding agent...")
 
@@ -141,7 +150,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="connect",
     one_line_description="Connect to an existing agent via the terminal",
-    synopsis="mngr [connect|conn] [OPTIONS] [AGENT]",
+    synopsis="mngr [connect|conn] [AGENT] [--agent <AGENT>] [--[no-]start] [--connect-command <CMD>] [--[no-]allow-unknown-host]",
     description="""Attaches to the agent's tmux session, roughly equivalent to SSH'ing into
 the agent's machine and attaching to the tmux session.
 

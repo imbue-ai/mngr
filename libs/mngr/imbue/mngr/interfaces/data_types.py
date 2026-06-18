@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -190,6 +191,42 @@ class CommandResult(FrozenModel):
     success: bool = Field(description="True if the command succeeded (had an expected exit code)")
 
 
+class CleanupFailureCategory(UpperCaseStrEnum):
+    """The cause of a real cleanup failure (a resource that was left behind).
+
+    See ``cli.exit_codes.exit_code_for_failures`` for the explicit severity ranking
+    used to pick a process exit code, and ``specs/cleanup-error-aggregation.md``.
+    """
+
+    # A cleanup command timed out; the resource's state is unknown / likely incomplete.
+    TIMEOUT = auto()
+    # Agent PIDs were collected but could not be killed, or could not be enumerated;
+    # processes may still be running.
+    PROCESSES_REMAIN = auto()
+    # A tmux session or the agent's on-host state directory could not be removed though present.
+    LOCAL_STATE_REMAINS = auto()
+    # An infrastructure resource (container, VM, droplet, volume, disk, SSH key) could not be
+    # destroyed though present. May incur ongoing cost.
+    HOST_RESOURCE_REMAINS = auto()
+    # Cleanup could not even be attempted: host record missing, provider unreachable, host not
+    # destroyable / unsupported.
+    PROVIDER_INACCESSIBLE = auto()
+    # Uncategorized real failure (e.g. a plugin hook raised, an unexpected exception).
+    OTHER = auto()
+
+
+class CleanupFailure(FrozenModel):
+    """A single real cleanup failure: a resource that could not be cleaned up.
+
+    Benign "already gone" outcomes are not represented here -- they are not failures.
+    """
+
+    category: CleanupFailureCategory = Field(description="The cause of the failure")
+    message: str = Field(description="Human-readable description of what could not be cleaned up")
+    agent_name: AgentName | None = Field(default=None, description="The agent this failure pertains to, if any")
+    host_id: HostId | None = Field(default=None, description="The host this failure pertains to, if any")
+
+
 class CpuResources(FrozenModel):
     """CPU resource information for a host."""
 
@@ -371,20 +408,75 @@ class SnapshotInfo(FrozenModel):
     )
 
 
-class VolumeFileType(UpperCaseStrEnum):
-    """Type of entry in a volume listing."""
+class FileType(UpperCaseStrEnum):
+    """Type of a filesystem entry in a directory listing.
+
+    The full set of POSIX entry types. Producers populate this to the fidelity
+    their source allows: a host (``OuterHost.list_directory``) classifies the
+    real ``stat`` mode and can report any of these values, while a bare
+    :class:`~imbue.mngr.interfaces.volume.Volume` typically only distinguishes
+    ``FILE`` from ``DIRECTORY`` (e.g. Modal's volume API exposes nothing finer),
+    so a volume-backed listing only ever yields those two.
+    """
 
     FILE = auto()
     DIRECTORY = auto()
+    SYMLINK = auto()
+    PIPE = auto()
+    SOCKET = auto()
+    BLOCK = auto()
+    CHARACTER = auto()
+    OTHER = auto()
+
+    @classmethod
+    def from_stat_mode(cls, mode: int) -> "FileType":
+        """Classify a ``stat``/``lstat`` ``st_mode`` into a :class:`FileType`.
+
+        Matches on the file-type bits (``S_IFMT``) against the seven standard
+        POSIX types. Symlinks are reported as ``SYMLINK`` (callers should
+        ``lstat`` so a symlink is classified by its own mode rather than its
+        target's). ``OTHER`` is reached only for non-standard type bits mngr
+        never creates -- e.g. a Solaris door/event-port or a BSD whiteout -- or
+        a mode with no recognized type bits.
+        """
+        match stat.S_IFMT(mode):
+            case stat.S_IFDIR:
+                return cls.DIRECTORY
+            case stat.S_IFLNK:
+                return cls.SYMLINK
+            case stat.S_IFREG:
+                return cls.FILE
+            case stat.S_IFIFO:
+                return cls.PIPE
+            case stat.S_IFSOCK:
+                return cls.SOCKET
+            case stat.S_IFBLK:
+                return cls.BLOCK
+            case stat.S_IFCHR:
+                return cls.CHARACTER
+            case _:
+                return cls.OTHER
 
 
 class VolumeFile(FrozenModel):
-    """An entry listed from a volume directory."""
+    """An entry from a directory listing (on a volume or a host filesystem).
+
+    Despite the historical name, this is the shared listing-entry type returned
+    by every :class:`~imbue.mngr.interfaces.host.HostFileReadInterface`
+    ``list_directory`` implementation, not just bare volumes.
+    """
 
     path: str = Field(description="Path of the entry within the volume")
-    file_type: VolumeFileType = Field(description="Whether this entry is a file or directory")
+    file_type: FileType = Field(description="The kind of filesystem entry (file, directory, symlink, ...)")
     mtime: int = Field(description="Last modification time as Unix timestamp")
     size: int = Field(description="Size in bytes")
+    permissions: str | None = Field(
+        default=None,
+        description=(
+            "Permissions string (e.g. ``-rw-r--r--``) when the source can report it. "
+            "Hosts populate this from the entry's stat mode; bare volumes leave it None."
+        ),
+    )
 
 
 class VolumeInfo(FrozenModel):
@@ -429,6 +521,20 @@ class BuildCacheInfo(FrozenModel):
     path: Path = Field(description="Path to the build cache directory")
     size_bytes: SizeBytes = Field(default=SizeBytes(0), description="Size in bytes")
     created_at: datetime = Field(description="When the cache entry was created")
+
+
+class ProviderResourceInfo(FrozenModel):
+    """An orphaned provider-level cloud resource reclaimed (or reclaimable) during GC.
+
+    Generic across providers: a provider-managed resource not attached to any live
+    host that is safe to reclaim -- e.g. an Azure NIC or public IP left behind by a
+    VM create that failed after the NIC/IP were provisioned. ``kind`` is a
+    provider-defined, display-only label (e.g. ``"network_interface"``).
+    """
+
+    provider_name: ProviderInstanceName = Field(description="Provider that owns the resource")
+    kind: str = Field(description="Provider-defined resource kind, e.g. 'network_interface' or 'public_ip'")
+    name: str = Field(description="Provider resource name or id")
 
 
 class HostDetails(FrozenModel):

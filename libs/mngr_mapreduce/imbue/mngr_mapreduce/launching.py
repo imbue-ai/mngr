@@ -9,6 +9,7 @@ from loguru import logger
 
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.create import bootstrap_backend_for_host_creation
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
@@ -16,6 +17,8 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.rsync import rsync_to_remote
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.agent import require_interactive_agent
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -322,7 +325,7 @@ def stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name:
     try:
         host.stop_agents([agent_id])
         logger.info("Stopped agent '{}'", agent_name)
-    except MngrError as exc:
+    except (MngrError, CleanupFailedGroup) as exc:
         logger.warning("Failed to stop agent '{}': {}", agent_name, exc)
 
 
@@ -398,13 +401,13 @@ def launch_all_mappers(
 
     launch_config = config
     if config.snapshot is None:
-        # Pass is_for_host_creation=True so a backend with one-time bootstrap
-        # (Modal's per-user environment) creates that resource here. The
-        # snapshotter and every test agent that follows is a host creation,
-        # so this is the moment to allow bootstrap; without it, snapshotting
-        # against a fresh Modal account aborts with ProviderEmptyError before
-        # any host is created.
-        provider = get_provider_instance(config.provider_name, mngr_ctx, is_for_host_creation=True)
+        # Bootstrap any one-time backend resources (Modal's per-user environment)
+        # before building the provider instance. The snapshotter and every test
+        # agent that follows is a host creation, so this is the moment to allow
+        # bootstrap; without it, snapshotting against a fresh Modal account
+        # aborts with ProviderEmptyError before any host is created.
+        bootstrap_backend_for_host_creation(config.provider_name, mngr_ctx)
+        provider = get_provider_instance(config.provider_name, mngr_ctx)
         if provider.supports_snapshots:
             try:
                 snapshot_name = _create_snapshot_host(recipe.name, config, mngr_ctx, run_name)
@@ -574,7 +577,7 @@ def launch_reducer_agent(
         cg=mngr_ctx.concurrency_group,
     )
     logger.info("Sending reducer prompt to '{}'", agent_name)
-    create_result.agent.send_message(prompt)
+    require_interactive_agent(create_result.agent).send_message(prompt)
 
     return (
         ReducerInfo(

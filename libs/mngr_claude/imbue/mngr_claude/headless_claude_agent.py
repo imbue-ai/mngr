@@ -1,203 +1,40 @@
 from __future__ import annotations
 
-import json
 import shlex
 import time
 from collections.abc import Iterable
 from collections.abc import Iterator
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import Never
 
 from loguru import logger
 from pydantic import Field
 
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
-from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
-from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
 from imbue.mngr.agents.base_headless_agent import render_file_diagnostic
 from imbue.mngr.config.data_types import AgentTypeConfig
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
-from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_claude.plugin import ClaudeCoreAgent
+from imbue.mngr_claude.stream_json import assistant_message_id
+from imbue.mngr_claude.stream_json import assistant_text
+from imbue.mngr_claude.stream_json import classify_stream_event
+from imbue.mngr_claude.stream_json import decode_stream_line
+from imbue.mngr_claude.stream_json import validate_stream_event
 
 # Grace period before trusting lifecycle state. Claude can take several seconds
 # to start (especially on first run or via nvm), during which the tmux pane shows
 # bash as the current command, making the agent look DONE/STOPPED.
 _STARTUP_GRACE_SECONDS: float = 10.0
-
-
-@pure
-def _parse_stream_line(line: str) -> dict[str, Any] | None:
-    """Decode a single stream-json line into a dict.
-
-    Returns the parsed dict on success, or None if the line is not valid
-    JSON or does not decode to a JSON object. Non-JSON lines (blank lines,
-    debug output that claude sometimes leaks to stdout) are expected and
-    silently skipped.
-    """
-    try:
-        parsed = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return parsed
-
-
-@pure
-def _extract_text_delta_from_parsed(parsed: dict[str, Any]) -> str | None:
-    """Extract text from an already-parsed stream-json content_block_delta event."""
-    if parsed.get("type") != "stream_event":
-        return None
-
-    event = parsed.get("event")
-    if not isinstance(event, dict):
-        return None
-
-    if event.get("type") != "content_block_delta":
-        return None
-
-    delta = event.get("delta")
-    if not isinstance(delta, dict):
-        return None
-
-    if delta.get("type") != "text_delta":
-        return None
-
-    text = delta.get("text")
-    if isinstance(text, str):
-        return text
-
-    return None
-
-
-@pure
-def extract_text_delta(line: str) -> str | None:
-    """Extract text from a stream-json content_block_delta event.
-
-    Returns the delta text if the line is a content_block_delta with a text_delta,
-    or None otherwise. This handles the partial-message envelope emitted by
-    `claude --output-format stream-json --include-partial-messages`.
-    """
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-    return _extract_text_delta_from_parsed(parsed)
-
-
-@pure
-def _extract_assistant_text_from_parsed(parsed: dict[str, Any]) -> str | None:
-    """Extract concatenated text from an already-parsed top-level `assistant` event."""
-    if parsed.get("type") != "assistant":
-        return None
-
-    message = parsed.get("message")
-    if not isinstance(message, dict):
-        return None
-
-    content_blocks = message.get("content")
-    if not isinstance(content_blocks, list):
-        return None
-
-    text_parts: list[str] = []
-    for block in content_blocks:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") != "text":
-            continue
-        text = block.get("text")
-        if isinstance(text, str):
-            text_parts.append(text)
-
-    if not text_parts:
-        return None
-    return "".join(text_parts)
-
-
-@pure
-def extract_assistant_text(line: str) -> str | None:
-    """Extract concatenated text from a top-level `assistant` event's content blocks.
-
-    Without `--include-partial-messages`, `claude --output-format stream-json`
-    emits one `{"type":"assistant","message":{"content":[{"type":"text","text":...},...]}}`
-    line per assistant turn. Returns the concatenation of all text blocks, or
-    None if the line is not an `assistant` event with at least one text block.
-    """
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-    return _extract_assistant_text_from_parsed(parsed)
-
-
-@pure
-def _extract_assistant_message_id_from_parsed(parsed: dict[str, Any]) -> str | None:
-    """Extract `message.id` from an already-parsed top-level `assistant` event."""
-    if parsed.get("type") != "assistant":
-        return None
-    message = parsed.get("message")
-    if not isinstance(message, dict):
-        return None
-    message_id = message.get("id")
-    if isinstance(message_id, str):
-        return message_id
-    return None
-
-
-@pure
-def extract_assistant_message_id(line: str) -> str | None:
-    """Extract `message.id` from a top-level `assistant` event, if present."""
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-    return _extract_assistant_message_id_from_parsed(parsed)
-
-
-@pure
-def _extract_message_start_id_from_parsed(parsed: dict[str, Any]) -> str | None:
-    """Extract `message.id` from an already-parsed partial-stream `message_start` event."""
-    if parsed.get("type") != "stream_event":
-        return None
-    event = parsed.get("event")
-    if not isinstance(event, dict):
-        return None
-    if event.get("type") != "message_start":
-        return None
-    message = event.get("message")
-    if not isinstance(message, dict):
-        return None
-    message_id = message.get("id")
-    if isinstance(message_id, str):
-        return message_id
-    return None
-
-
-@pure
-def extract_message_start_id(line: str) -> str | None:
-    """Extract `message.id` from a partial-stream `message_start` event, if present.
-
-    With `--include-partial-messages`, claude emits a
-    `{"type":"stream_event","event":{"type":"message_start","message":{"id":"...",...}}}`
-    line at the start of each assistant message. The id lets us correlate
-    subsequent text deltas with a later top-level `assistant` summary that
-    carries the same id.
-    """
-    parsed = _parse_stream_line(line)
-    if parsed is None:
-        return None
-    return _extract_message_start_id_from_parsed(parsed)
 
 
 @pure
@@ -224,29 +61,23 @@ def _extract_result_error(line: str) -> str | None:
 
     Returns the error message if this is an error result, None otherwise.
     """
-    parsed = _parse_stream_line(line)
+    parsed = decode_stream_line(line)
     if parsed is None:
         return None
     return _result_error_from_parsed(parsed)
 
 
-class _StreamTailState(MutableModel):
-    """Encapsulates mutable state for tailing a file via the host interface.
+class StreamJsonReader(LiveOutputReader):
+    """Extracts assistant text deltas from claude ``--print`` stream-json output.
 
-    Separated from HeadlessClaude to avoid lambda-in-loop closure issues (B023)
-    when polling for file changes.
+    The stdout file is append-only NDJSON. :meth:`feed` consumes newly-appended
+    complete lines (holding any partial trailing line until more arrives) and
+    returns the text they carry; :meth:`finalize` flushes a trailing line left
+    at EOF without a newline. A stream-json ``result`` event ends the stream:
+    it sets :attr:`stream_error` (when ``is_error``) and marks the reader
+    :attr:`is_complete`, after which no further lines are consumed.
     """
 
-    stdout_path: Path
-    host: OnlineHostInterface
-    is_finished: Callable[[], bool]
-    # Monotonic deadline before which is_finished() is only trusted if the
-    # stdout file has some content. Guards against the race where tmux still
-    # shows the pre-send-keys idle pane at the moment we first check
-    # lifecycle; without this gate tail_until_done's loop exits immediately
-    # and we raise "no output" seconds before claude's output arrives.
-    startup_deadline: float
-    last_mtime: datetime | None = None
     chars_consumed: int = 0
     line_buffer: str = ""
     result_error: str | None = None
@@ -267,29 +98,46 @@ class _StreamTailState(MutableModel):
     # a turn contains many small deltas.
     yielded_text_chunks: list[str] = Field(default_factory=list)
 
-    def _authoritatively_finished(self) -> bool:
-        if time.monotonic() < self.startup_deadline:
-            try:
-                return self.is_finished() and self.host.read_text_file(self.stdout_path) != ""
-            except FileNotFoundError:
-                return False
-        return self.is_finished()
+    @property
+    def is_complete(self) -> bool:
+        return self.got_result
 
-    def _has_new_data_or_finished(self) -> bool:
-        current_mtime = self.host.get_file_mtime(self.stdout_path)
-        if current_mtime is not None and current_mtime != self.last_mtime:
-            return True
-        return self._authoritatively_finished()
+    @property
+    def stream_error(self) -> str | None:
+        return self.result_error
+
+    def feed(self, content: str) -> list[str]:
+        raw = content[self.chars_consumed :]
+        self.chars_consumed = len(content)
+        if not raw:
+            return []
+        combined = self.line_buffer + raw
+        self.line_buffer = ""
+        lines = combined.split("\n")
+        if not combined.endswith("\n"):
+            self.line_buffer = lines.pop()
+        return list(self._yield_text_from_lines(lines))
+
+    def finalize(self) -> list[str]:
+        # A result event already ended the stream; the trailing partial line (if
+        # any) is past it and not ours to emit, matching the original drain skip.
+        if self.got_result:
+            return []
+        remaining = self.line_buffer
+        self.line_buffer = ""
+        if not remaining:
+            return []
+        return list(self._yield_text_from_lines([remaining]))
 
     def _reset_turn_state(self) -> None:
         self.streaming_message_id = None
         self.yielded_text_chunks = []
 
     def _yield_text_for_parsed(self, parsed: dict[str, Any]) -> Iterator[str]:
-        # Dispatch an already-parsed stream-json line on its `type`, then
-        # delegate to the module-level extract helpers (their dict-accepting
-        # variants) so dict-walking logic lives in one place. The string-
-        # accepting public helpers are thin wrappers around the same dict logic.
+        # Dispatch an already-parsed stream-json line on its (CLI-level) `type`, then
+        # delegate to the shared typed boundary in `stream_json` for the envelope
+        # vocabulary. `stream_event` / `assistant` are claude-CLI wrappers; their inner
+        # payloads are the Anthropic-API shapes that `stream_json` models.
         match parsed.get("type"):
             case "stream_event":
                 yield from self._handle_stream_event(parsed)
@@ -302,30 +150,34 @@ class _StreamTailState(MutableModel):
                 logger.trace("Skipped stream-json event of type {!r} (no text to surface)", other_event_type)
 
     def _handle_stream_event(self, parsed: dict[str, Any]) -> Iterator[str]:
+        event = validate_stream_event(parsed.get("event"))
+        if event is None:
+            # The inner payload was not a JSON object, or it matched no event variant this
+            # `anthropic` package models (e.g. a CLI running ahead of our pinned package).
+            # Nothing to surface; the static exhaustiveness check in `classify_stream_event`
+            # is what flags new variants on a package bump.
+            logger.trace("Skipped stream_event with no modeled inner event to surface")
+            return
+        info = classify_stream_event(event)
+
         # message_start (partial stream): begin a new turn. Any deltas for
         # the previous turn whose summary never arrived have already been
         # yielded directly, so dropping the buffer here is safe.
-        start_id = _extract_message_start_id_from_parsed(parsed)
-        if start_id is not None:
+        if info.message_start_id is not None:
             self._reset_turn_state()
-            self.streaming_message_id = start_id
+            self.streaming_message_id = info.message_start_id
             return
 
         # text_delta (partial stream): yield the delta and record it in the
         # per-turn buffer so we can subtract it from the matching summary.
-        delta_text = _extract_text_delta_from_parsed(parsed)
-        if delta_text is not None:
-            self.yielded_text_chunks.append(delta_text)
-            yield delta_text
+        if info.delta_text is not None:
+            self.yielded_text_chunks.append(info.delta_text)
+            yield info.delta_text
             return
 
-        # Other inner stream_event types (content_block_start, content_block_stop,
-        # message_stop, ping, future event types, etc.) carry no text to surface
-        # and are intentionally skipped. Trace-log for consistency with the
-        # outer dispatcher's handling of unknown top-level types.
-        event = parsed.get("event")
-        inner_event_type = event.get("type") if isinstance(event, dict) else None
-        logger.trace("Skipped stream-json stream_event with inner type {!r} (no text to surface)", inner_event_type)
+        # Other inner event types (content_block_start/stop, message_delta/stop) carry no
+        # text to surface and are intentionally skipped.
+        logger.trace("Skipped stream_event inner type {!r} (no text to surface)", event.type)
 
     def _handle_assistant_event(self, parsed: dict[str, Any]) -> Iterator[str]:
         # Top-level assistant event: reconcile against the per-turn buffer.
@@ -336,9 +188,11 @@ class _StreamTailState(MutableModel):
         # The truthiness check skips the empty-text case for free, matching
         # the `if trailing_text:` guard one branch deeper that prevents
         # yielding an empty string.
-        assistant_text = _extract_assistant_text_from_parsed(parsed)
-        if assistant_text:
-            assistant_id = _extract_assistant_message_id_from_parsed(parsed)
+        raw_message = parsed.get("message")
+        message = raw_message if isinstance(raw_message, dict) else None
+        summary_text = assistant_text(message)
+        if summary_text:
+            assistant_id = assistant_message_id(message)
             is_definitely_different_message = (
                 self.streaming_message_id is not None
                 and assistant_id is not None
@@ -349,15 +203,15 @@ class _StreamTailState(MutableModel):
                 # The streamed deltas belonged to a previous message whose summary
                 # never arrived. Yield the full summary for this new message; the
                 # per-turn buffer is irrelevant here so we don't bother joining it.
-                yield assistant_text
+                yield summary_text
             else:
                 # Materialize the per-turn buffer once, here, instead of after every
                 # delta -- this turns an O(N*M) per-turn cost into O(M).
                 yielded_so_far = "".join(self.yielded_text_chunks)
-                if assistant_text.startswith(yielded_so_far):
+                if summary_text.startswith(yielded_so_far):
                     # Summary continues / matches what we already yielded; emit only
                     # the trailing extra text (empty string when they match exactly).
-                    trailing_text = assistant_text[len(yielded_so_far) :]
+                    trailing_text = summary_text[len(yielded_so_far) :]
                     if trailing_text:
                         yield trailing_text
                 else:
@@ -365,7 +219,7 @@ class _StreamTailState(MutableModel):
                     # the summary or this is a different message we cannot disambiguate
                     # by id. Yield the full summary; better a possible partial double-
                     # emit than dropping the assistant message entirely.
-                    yield assistant_text
+                    yield summary_text
 
         self._reset_turn_state()
 
@@ -381,7 +235,7 @@ class _StreamTailState(MutableModel):
             stripped = line.strip()
             if not stripped:
                 continue
-            parsed = _parse_stream_line(stripped)
+            parsed = decode_stream_line(stripped)
             if parsed is None:
                 # Non-JSON output that claude leaked to stdout (debug, banners,
                 # warnings) or, more rarely, valid JSON that isn't an object.
@@ -393,63 +247,6 @@ class _StreamTailState(MutableModel):
                 self.got_result = True
                 return
             yield from self._yield_text_for_parsed(parsed)
-
-    def tail_until_done(self) -> Iterator[str]:
-        while not self.got_result and not self._authoritatively_finished():
-            poll_until(
-                self._has_new_data_or_finished,
-                timeout=TAIL_POLL_TIMEOUT,
-                poll_interval=TAIL_POLL_INTERVAL,
-            )
-            self.last_mtime = self.host.get_file_mtime(self.stdout_path)
-
-            try:
-                content = self.host.read_text_file(self.stdout_path)
-            except FileNotFoundError:
-                continue
-
-            raw = content[self.chars_consumed :]
-            self.chars_consumed = len(content)
-
-            if raw:
-                combined = self.line_buffer + raw
-                self.line_buffer = ""
-
-                lines = combined.split("\n")
-                if not combined.endswith("\n"):
-                    self.line_buffer = lines.pop()
-
-                yield from self._yield_text_from_lines(lines)
-
-        if not self.got_result:
-            # Final drain after agent exits
-            try:
-                content = self.host.read_text_file(self.stdout_path)
-            except FileNotFoundError:
-                return
-            remaining = self.line_buffer + content[self.chars_consumed :]
-            if remaining:
-                yield from self._yield_text_from_lines(remaining.split("\n"))
-
-
-class NoPermissionsClaudeAgent(ClaudeAgent):
-    """ClaudeAgent with no permissions granted (no tools, no trust needed).
-
-    Skips trust validation and dialog dismissal during provisioning since
-    the agent cannot perform any actions that require permissions. All other
-    provisioning (config dir setup, installation, hooks) runs normally.
-    """
-
-    def on_before_provisioning(
-        self,
-        host: OnlineHostInterface,
-        options: CreateAgentOptions,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """No-op: skip trust/dialog validation for no-permissions agents."""
-
-    def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
-        """No-op: no permissions means no dialogs to check."""
 
 
 class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
@@ -474,7 +271,7 @@ _MNGR_PROMPT_FILE: str = ".mngr-prompt"
 _MNGR_PROMPT_CAT_ARG: str = f'"$(cat "$MNGR_AGENT_STATE_DIR/{_MNGR_PROMPT_FILE}")"'
 
 
-class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
+class HeadlessClaude(ClaudeCoreAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
     """Agent type for non-interactive (headless) Claude usage.
 
     Runs `claude --print` with stdout redirected to a file so callers can
@@ -484,6 +281,14 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
 
     _no_output_error_subject: str = "claude"
     _startup_grace_seconds: float = _STARTUP_GRACE_SECONDS
+
+    def is_unattended_enabled(self) -> bool:
+        # Diamond resolution (HeadlessClaude(ClaudeCoreAgent, BaseHeadlessAgent)): both bases
+        # define this -- ClaudeCoreAgent config-driven (auto_allow_permissions), BaseHeadlessAgent
+        # always True. Keep ClaudeCoreAgent's config-driven behavior so the auto-allow hook is
+        # gated exactly as before the split. The MRO already resolves here; the explicit override
+        # makes the choice deliberate (see test_headless_claude_resolves_all_shared_method_conflicts).
+        return ClaudeCoreAgent.is_unattended_enabled(self)
 
     def stage_initial_message(self, initial_message: str) -> None:
         """Persist ``initial_message`` to ``.mngr-prompt`` inside the agent's state dir.
@@ -496,17 +301,6 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         """
         prompt_path = self._get_agent_dir() / _MNGR_PROMPT_FILE
         self.host.write_text_file(prompt_path, initial_message)
-
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Headless agents do not accept interactive messages.
-
-        Must be defined here because ClaudeAgent overrides BaseAgent's no-op
-        _preflight_send_message with dialog-checking logic. Without this
-        explicit override, the MRO resolves to ClaudeAgent's implementation
-        instead of BaseHeadlessAgent's, since ClaudeAgent appears earlier
-        in HeadlessClaude's MRO.
-        """
-        BaseHeadlessAgent._preflight_send_message(self, tmux_target)
 
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
@@ -636,44 +430,38 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
                 return error
         return None
 
-    def stream_output(self) -> Iterator[str]:
-        """Stream text output as it becomes available.
+    def make_live_output_reader(self) -> LiveOutputReader:
+        """Parse the captured stream-json stdout into assistant text deltas."""
+        return StreamJsonReader()
 
-        Tails $MNGR_AGENT_STATE_DIR/stdout.jsonl via the host interface so it
-        works for both local and remote hosts. Yields text delta chunks parsed
-        from stream-json events.
+    def _make_live_output_finished_predicate(self) -> Callable[[], bool]:
+        """The lifecycle check, gated by a startup grace period.
 
-        Raises MngrError if the stream-json result event has is_error=true
-        (even if some text was yielded before the error), or if the agent exits
-        without producing any output (startup failure, auth error, etc.).
+        Claude can take several seconds to start (first run, nvm resolution),
+        during which the tmux pane shows the shell as the current command and
+        lifecycle reads DONE/STOPPED. Until the grace deadline, treat the agent
+        as finished only once it has *also* produced some stdout; otherwise the
+        tail loop would exit and raise "no output" before claude's output lands.
         """
-        stdout_path = self._get_stdout_path()
         startup_deadline = time.monotonic() + self._startup_grace_seconds
+        return lambda: self._is_finished_after_grace(startup_deadline)
 
-        if not self._wait_for_stdout_file(stdout_path):
-            self._raise_no_output_error()
+    def _is_finished_after_grace(self, startup_deadline: float) -> bool:
+        if time.monotonic() < startup_deadline:
+            try:
+                return self._is_agent_finished() and self.host.read_text_file(self._get_stdout_path()) != ""
+            except FileNotFoundError:
+                return False
+        return self._is_agent_finished()
 
-        state = _StreamTailState(
-            stdout_path=stdout_path,
-            host=self.host,
-            is_finished=self._is_agent_finished,
-            startup_deadline=startup_deadline,
-        )
-        is_any_output_yielded = False
-        for chunk in state.tail_until_done():
-            is_any_output_yielded = True
-            yield chunk
-
-        # After streaming completes, check for errors
-        if state.result_error:
-            parts = [state.result_error]
-            stderr_error = self._get_stderr_error_message()
-            if stderr_error:
-                parts.append(stderr_error)
-            detail = "\n".join(parts)
-            raise MngrError(f"claude returned an error:\n{detail}")
-        if not is_any_output_yielded:
-            self._raise_no_output_error()
+    def _raise_stream_error(self, error: str) -> Never:
+        """Surface a stream-json result error, appending stderr context when present."""
+        parts = [error]
+        stderr_error = self._get_stderr_error_message()
+        if stderr_error:
+            parts.append(stderr_error)
+        detail = "\n".join(parts)
+        raise MngrError(f"claude returned an error:\n{detail}")
 
 
 @hookimpl

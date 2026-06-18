@@ -142,13 +142,27 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # host_id -> provider_name for every genuinely-remote (VPS) host we have
     # provisioned a gateway on. Drives the remote-state sync loop.
     _remote_host_provider_by_id: dict[str, str] = PrivateAttr(default_factory=dict)
+    # host_ids with a provisioning pass currently in flight, so multiple agents
+    # sharing one outer host coalesce onto a single (host-scoped) provisioning
+    # run instead of racing concurrent passes against the same VPS/container.
+    # Guarded by ``_remote_hosts_lock``, held only for the brief check-and-set
+    # (never across the provisioning I/O).
+    _provisioning_hosts: set[str] = PrivateAttr(default_factory=set)
+    # host_ids whose VPS-resident gateway has been provisioned successfully this
+    # supervisor lifetime. Provisioning is expensive (multiple SSH round-trips)
+    # and the discovery stream re-emits the full agent set on every cycle, so we
+    # skip re-provisioning an already-provisioned host rather than re-running it
+    # every cycle. Ongoing credential/permission sync is handled separately by
+    # the remote-state watcher; a supervisor restart clears this and re-provisions.
+    # A failed pass is *not* recorded here, so it retries on the next cycle.
+    _provisioned_hosts: set[str] = PrivateAttr(default_factory=set)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def __call__(self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
         try:
             host_side_port = self.latchkey.start_gateway(self.concurrency_group)
         except LatchkeyError as e:
-            logger.warning("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
+            logger.opt(exception=e).error("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
             return
 
         if ssh_info is None:
@@ -161,7 +175,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         agent_id_str = str(agent_id)
         with self._pending_lock:
             if agent_id_str in self._pending_remote_agents:
-                logger.debug("Latchkey tunnel setup already in flight for agent {}; skipping duplicate fire", agent_id)
+                # Latchkey tunnel setup already in flight; skipping duplicate fire.
                 return
             self._pending_remote_agents.add(agent_id_str)
         try:
@@ -196,56 +210,124 @@ class LatchkeyDiscoveryHandler(MutableModel):
         ``127.0.0.1:INNER_PORT``, so they can reach both gateways at once. That
         heavy provisioning is thrown onto its own fire-and-forget CG thread
         (which then owns clearing the pending flag); local agents clear it here.
+
+        The two paths are independent -- the agent reaches the desktop gateway on
+        ``AGENT_SIDE_LATCHKEY_PORT`` and the VPS gateway on ``INNER_PORT`` at the
+        same time -- so each is attempted with its own error handling and a
+        failure of one never prevents the other.
         """
         is_pending_handed_off = False
         try:
-            # Always: make the desktop-side gateway reachable on the agent's
-            # ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. The ``agent_id`` tag lets the
-            # destruction handler drop this tunnel via
-            # ``remove_reverse_tunnels_for_agent``; without it the registry leaks
-            # across destroyed agents and the 30s health-check loop spins
-            # paramiko transports against ports that no longer exist.
+            self._setup_desktop_gateway_reachability(agent_id, ssh_info, host_side_port)
+            is_pending_handed_off = self._maybe_dispatch_remote_gateway_provisioning(
+                agent_id, host_id, ssh_info, provider_name
+            )
+        finally:
+            # The provisioning thread owns clearing the pending flag once the
+            # heavy work finishes; otherwise (local agents, or provisioning was
+            # not dispatched) clear it here.
+            if not is_pending_handed_off:
+                with self._pending_lock:
+                    self._pending_remote_agents.discard(str(agent_id))
+
+    def _setup_desktop_gateway_reachability(
+        self, agent_id: AgentId, ssh_info: RemoteSSHInfo, host_side_port: int
+    ) -> None:
+        """Reverse-tunnel the desktop-side gateway onto the agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``.
+
+        The ``agent_id`` tag lets the destruction handler drop this tunnel via
+        ``remove_reverse_tunnels_for_agent``; without it the registry leaks
+        across destroyed agents and the 30s health-check loop spins paramiko
+        transports against ports that no longer exist. Failures are logged
+        rather than raised so they never prevent the independent VPS-resident
+        gateway provisioning path.
+        """
+        try:
             self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=ssh_info,
                 local_port=host_side_port,
                 remote_port=AGENT_SIDE_LATCHKEY_PORT,
                 agent_id=str(agent_id),
             )
-            # Additionally, for VPS agents: throw the (potentially minutes-long)
-            # VPS-resident gateway provisioning onto its own CG thread and return
-            # immediately. The CG's ObservableThread logs any uncaught failure at
-            # error level, so a provisioning failure is never silently missed;
-            # the thread is unchecked so a single agent's failure does not tear
-            # down the shared supervisor.
-            if self._host_has_outer_host(host_id, provider_name):
-                self.concurrency_group.start_new_thread(
-                    target=self._run_remote_gateway_provisioning,
-                    args=(agent_id, host_id, ssh_info, provider_name),
-                    name=f"latchkey-provision-{str(agent_id)}",
-                    is_checked=False,
-                )
-                is_pending_handed_off = True
-        except (
-            SSHTunnelError,
-            OSError,
-            paramiko.SSHException,
-            ConcurrencyExceptionGroup,
-            InvalidConcurrencyGroupStateError,
-            RuntimeError,
-        ) as e:
-            logger.warning(
-                "Failed to set up Latchkey reachability for agent {} (host-side port {}): {}",
+        except (SSHTunnelError, OSError, paramiko.SSHException) as e:
+            logger.opt(exception=e).error(
+                "Failed to set up desktop-side Latchkey reachability for agent {} (host-side port {}): {}",
                 agent_id,
                 host_side_port,
                 e,
             )
-        finally:
-            # The provisioning thread owns clearing the pending flag once the
-            # heavy work finishes; otherwise (local agents, or a failure before
-            # the provisioning thread was dispatched) clear it here.
-            if not is_pending_handed_off:
-                with self._pending_lock:
-                    self._pending_remote_agents.discard(str(agent_id))
+
+    def _maybe_dispatch_remote_gateway_provisioning(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+    ) -> bool:
+        """Dispatch VPS-resident gateway provisioning for agents whose host has an outer host.
+
+        Returns ``True`` when the (potentially minutes-long) provisioning was
+        handed off to its own fire-and-forget CG thread -- which then owns
+        clearing the pending flag. Returns ``False`` for non-VPS agents and when
+        the dispatch itself fails (logged so a later discovery fire retries).
+        The thread is unchecked so a single agent's provisioning failure does
+        not tear down the shared supervisor; the CG's ObservableThread logs any
+        uncaught failure at error level so it is never silently missed.
+
+        Independent of the desktop-side reachability tunnel: a failure there
+        does not prevent this provisioning, since the agent can reach the VPS
+        gateway on ``127.0.0.1:INNER_PORT`` even when the desktop gateway tunnel
+        is down.
+        """
+        if not self._host_has_outer_host(host_id, provider_name):
+            return False
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            if host_id_str in self._provisioned_hosts:
+                # Already provisioned this host this supervisor lifetime; skip the
+                # expensive idempotent re-run that every discovery cycle would
+                # otherwise trigger. A supervisor restart re-provisions.
+                logger.trace(
+                    "VPS-resident gateway already provisioned for host {} this session; "
+                    "skipping re-provision for agent {}",
+                    host_id,
+                    agent_id,
+                )
+                return False
+            if host_id_str in self._provisioning_hosts:
+                # A provisioning pass for this host is already in flight. The
+                # work is host-scoped (one container, one gateway, one tunnel),
+                # so a second pass for another agent on the same host would be
+                # redundant and would race the first on the same VPS files;
+                # coalesce it away. A later discovery fire re-runs once the
+                # in-flight pass clears the flag.
+                logger.trace(
+                    "VPS-resident gateway provisioning already in flight for host {}; coalescing agent {}",
+                    host_id,
+                    agent_id,
+                )
+                return False
+            self._provisioning_hosts.add(host_id_str)
+        try:
+            self.concurrency_group.start_new_thread(
+                target=self._run_remote_gateway_provisioning,
+                args=(agent_id, host_id, ssh_info, provider_name),
+                name=f"latchkey-provision-{str(agent_id)}",
+                is_checked=False,
+            )
+        except (ConcurrencyExceptionGroup, InvalidConcurrencyGroupStateError, RuntimeError) as e:
+            # The thread that would clear the in-flight flag never started, so
+            # clear it here -- otherwise this host's provisioning would be
+            # coalesced away forever.
+            with self._remote_hosts_lock:
+                self._provisioning_hosts.discard(host_id_str)
+            logger.opt(exception=e).error(
+                "Failed to dispatch VPS-resident Latchkey gateway provisioning for agent {}: {}",
+                agent_id,
+                e,
+            )
+            return False
+        return True
 
     def _host_has_outer_host(self, host_id: HostId, provider_name: str) -> bool:
         """Cheaply decide whether the agent's host has an accessible outer host (the VPS).
@@ -286,7 +368,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             with provider.outer_host_for(host_id) as outer:
                 if outer is None:
                     # Raced: the outer host vanished between the cheap check and now.
-                    logger.warning(
+                    logger.info(
                         "Outer host for agent {} (host {}) vanished before provisioning; skipping",
                         agent_id,
                         host_id,
@@ -295,7 +377,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 if outer.is_local:
                     # The outer is this very machine (e.g. a local docker daemon),
                     # not a remote VPS -- nothing to provision and nothing to sync.
-                    logger.debug(
+                    logger.trace(
                         "Outer host for agent {} (host {}) is local; skipping VPS gateway provisioning",
                         agent_id,
                         host_id,
@@ -311,13 +393,24 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     container_ssh_user=ssh_info.user,
                     container_ssh_port=ssh_info.port,
                     latchkey_directory=self.latchkey.latchkey_directory,
+                    gateway_password=self.latchkey.derive_gateway_password(),
                 )
                 # Initial sync for the freshly-provisioned host, reusing the
                 # open outer connection: permissions first, then credentials.
                 sync_permissions(outer, self.latchkey.latchkey_directory, host_id)
-                sync_credentials(outer, self.latchkey.latchkey_directory)
+                sync_credentials(outer, self.latchkey, host_id)
             logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
+            # Record success so later discovery cycles skip the expensive re-run.
+            # Only reached when provisioning completed without raising (a failure
+            # propagates past here, leaving the host eligible for retry).
+            with self._remote_hosts_lock:
+                self._provisioned_hosts.add(str(host_id))
         finally:
+            # Release the per-host in-flight guard, and clear the per-agent
+            # pending flag. (A failed pass leaves the host out of
+            # ``_provisioned_hosts``, so a later discovery fire retries it.)
+            with self._remote_hosts_lock:
+                self._provisioning_hosts.discard(str(host_id))
             with self._pending_lock:
                 self._pending_remote_agents.discard(str(agent_id))
 
@@ -444,13 +537,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 if do_permissions:
                     sync_permissions(outer, self.latchkey.latchkey_directory, host_id)
                 if do_credentials:
-                    sync_credentials(outer, self.latchkey.latchkey_directory)
+                    sync_credentials(outer, self.latchkey, host_id)
         except HostNotFoundError:
             with self._remote_hosts_lock:
                 self._remote_host_provider_by_id.pop(host_id_str, None)
             logger.debug("Remote host {} no longer exists; dropped from latchkey sync", host_id_str)
         except (RemoteGatewayError, MngrError, OSError, paramiko.SSHException) as e:
-            logger.warning("Failed to sync latchkey state to remote host {}: {}", host_id_str, e)
+            logger.opt(exception=e).error("Failed to sync latchkey state to remote host {}: {}", host_id_str, e)
 
 
 class LatchkeyDestructionHandler(FrozenModel):

@@ -41,7 +41,6 @@ from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
-from imbue.modal_proxy.errors import ModalProxyPermissionDeniedError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import VolumeInterface
@@ -133,11 +132,7 @@ def _lookup_persistent_app_with_env_retry(
 
 
 @retry(
-    # Retry on PermissionDeniedError as well: after `modal environment create`
-    # returns success, Modal's per-user permission entry is propagated
-    # asynchronously and operations on the new env raise PermissionDeniedError
-    # for ~3-7 seconds before catching up.
-    retry=retry_if_exception_type((ModalProxyNotFoundError, ModalProxyPermissionDeniedError)),
+    retry=retry_if_exception_type(ModalProxyNotFoundError),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
@@ -180,11 +175,7 @@ def _enter_ephemeral_app_context_with_env_retry(
 
 
 @retry(
-    # Retry on PermissionDeniedError as well: after `modal environment create`
-    # returns success, Modal's per-user permission entry is propagated
-    # asynchronously and operations on the new env raise PermissionDeniedError
-    # for ~3-7 seconds before catching up.
-    retry=retry_if_exception_type((ModalProxyNotFoundError, ModalProxyPermissionDeniedError)),
+    retry=retry_if_exception_type(ModalProxyNotFoundError),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
@@ -468,29 +459,20 @@ Supported build arguments for the modal provider:
         return "No start arguments are supported for the modal provider."
 
     @staticmethod
-    def build_provider_instance(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
-    ) -> ProviderInstanceInterface:
-        """Build a Modal provider instance.
+    def _resolve_modal_interface(config: ProviderInstanceConfig) -> ModalInterface:
+        """Validate ``config`` is a ``ModalProviderConfig`` and pick the matching ``ModalInterface``.
 
-        ``is_for_host_creation`` is the single switch that determines whether
-        this construction is allowed to bootstrap a missing Modal environment.
-        Only the ``mngr create`` path passes ``True``; everything else leaves
-        it at the default ``False`` so a brand-new install does not silently
-        create environments from ``mngr list`` / ``mngr gc`` / etc. When the
-        environment is missing and ``is_for_host_creation`` is ``False``, this
-        raises ``ProviderEmptyError`` so the higher-level provider loader can
-        skip the modal provider entirely instead of constructing it.
+        Shared by ``build_provider_instance`` and ``bootstrap_for_host_creation``; both call
+        sites need the same isinstance guard and the same ``match config.mode`` dispatch.
+        Factoring it out keeps the per-mode dispatch in exactly one place so adding a new
+        ``ModalMode`` variant only needs editing here.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
         match config.mode:
             case ModalMode.DIRECT:
-                modal_interface: ModalInterface = DirectModalInterface()
+                return DirectModalInterface()
             case ModalMode.PROXIED:
                 raise NotImplementedError(
                     "ModalMode.PROXIED (routing through imbue_cloud gateway) is not yet implemented.",
@@ -498,8 +480,50 @@ Supported build arguments for the modal provider:
             case _ as unreachable:
                 assert_never(unreachable)
 
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        """Build a Modal provider instance.
+
+        Always treated as a read-or-existing-host construction: if the per-
+        user Modal environment does not yet exist, raise ``ProviderEmptyError``
+        so read paths (``mngr list`` / ``mngr gc`` / discovery) can skip the
+        modal provider entirely rather than silently creating an environment.
+
+        The ``mngr create`` path calls ``bootstrap_for_host_creation`` first,
+        which creates the environment if missing; the subsequent
+        ``build_provider_instance`` call then succeeds normally.
+        """
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
         return ModalProviderBackend._construct_modal_provider(
-            name, config, mngr_ctx, modal_interface, is_for_host_creation=is_for_host_creation
+            name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=False
+        )
+
+    @staticmethod
+    def bootstrap_for_host_creation(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Ensure the per-user Modal environment exists; create it if missing.
+
+        Idempotent. Called by ``mngr create`` exactly once per host-create;
+        all other call paths build the provider via ``build_provider_instance``
+        which never creates an environment.
+
+        Implementation: drive a full ``_construct_modal_provider`` call with
+        environment creation allowed. The constructed provider is intentionally
+        discarded -- this method's job is the side effect of creating the
+        environment (and warming the class-level app registry); the subsequent
+        ``build_provider_instance`` call in the create path reuses the cached
+        app via ``_get_or_create_app``.
+        """
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
+        ModalProviderBackend._construct_modal_provider(
+            name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=True
         )
 
     @staticmethod
@@ -508,22 +532,23 @@ Supported build arguments for the modal provider:
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
         modal_interface: ModalInterface,
-        is_for_host_creation: bool = False,
+        is_environment_creation_allowed: bool = False,
     ) -> ProviderInstanceInterface:
         """Build a ``ModalProviderInstance`` against the given ``ModalInterface``.
 
-        Production calls via ``build_provider_instance`` (which selects a
-        ``DirectModalInterface`` per ``ModalMode.DIRECT``); tests call via
+        Production calls via ``build_provider_instance`` (which passes
+        ``is_environment_creation_allowed=False``) or
+        ``bootstrap_for_host_creation`` (which passes True). Tests call via
         ``mngr_modal.testing.make_testing_provider`` (which passes a
         ``FakeModalInterface``). Output capture is yielded off
         ``modal_interface.enable_output_capture(...)`` so this function has
         no per-implementation branches.
 
-        ``is_for_host_creation`` gates whether a missing Modal environment may
-        be created here. When ``False`` and the environment does not exist,
-        ``ProviderEmptyError`` is raised so that read-only loaders (used by
-        ``mngr list`` / ``mngr gc`` / discovery) can skip the modal provider
-        entirely rather than creating an environment on first use.
+        ``is_environment_creation_allowed`` gates whether a missing Modal
+        environment may be created here. When ``False`` and the environment
+        does not exist, ``ProviderEmptyError`` is raised so that read-only
+        loaders skip the modal provider entirely rather than creating an
+        environment on first use.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
@@ -537,7 +562,7 @@ Supported build arguments for the modal provider:
                 environment_name,
                 config.is_persistent,
                 modal_interface,
-                is_environment_creation_allowed=is_for_host_creation,
+                is_environment_creation_allowed=is_environment_creation_allowed,
             )
             volume = ModalProviderBackend.get_volume_for_app(app_name, modal_interface)
 

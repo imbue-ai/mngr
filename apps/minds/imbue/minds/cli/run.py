@@ -53,13 +53,13 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.laptop_agent_types_seed import seed_laptop_agent_types_for_minds
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -74,18 +74,30 @@ from imbue.minds.desktop_client.system_interface_health import should_enroll_sus
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # How long `minds run` waits for the spawned `mngr forward` plugin to report
 # its bound port via a `listening` envelope before treating startup as failed.
-# The plugin emits this from its FastAPI lifespan startup, so the wait only
-# needs to cover the subprocess's own interpreter start and imports.
-_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 5.0
+# The plugin emits this from its FastAPI lifespan startup, so on a warm
+# install the wait only needs to cover the subprocess's own interpreter
+# start and imports. On a cold install (vanilla Mac, no `~/.minds/.venv`),
+# uv has to download the python toolchain + install the venv + load
+# plugins first; that can take 30-60s on a fresh machine. A 5s budget was
+# tight enough to deterministically fail every first-time-user launch on
+# a clean Mac (proven via Tart VM). Give it 120s to comfortably cover
+# cold-install while still surfacing a real wedge before the user gives up.
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension to
 # decide where to forward inbound proxy requests. Published to the
@@ -240,11 +252,18 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    mngr_message_sender = MngrMessageSender()
+    # Run ``mngr message`` (and, over time, other ``mngr`` CLI calls) in children
+    # forked from a pre-warmed forkserver instead of spawning a fresh subprocess
+    # each time, so UI actions like Approve/Deny don't pay the multi-second
+    # interpreter+import startup cost. ``prewarm`` is non-blocking: it pays the
+    # one-time import cost on a background thread, off the request path.
+    mngr_caller = get_default_mngr_caller()
+    mngr_caller.prewarm(root_concurrency_group)
+    mngr_message_sender = MngrMessageSender(mngr_caller=mngr_caller, concurrency_group=root_concurrency_group)
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
-        services_catalog=ServicesCatalog(gateway_client=gateway_client),
+        services_catalog=ServicesCatalog(),
         mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
     )
@@ -272,6 +291,13 @@ def run(
     # are needed here.
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+    # `mngr forward` and every other laptop-side mngr invocation (including the
+    # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
+    # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
+    # `/code/.mngr/settings.toml` inside the lima VM is invisible to them.
+    # Seed the mapping into user-scope settings.toml here so subsequent mngr
+    # subprocesses resolve `type=main` -> ClaudeAgent without depending on cwd.
+    seed_laptop_agent_types_for_minds(mngr_host_dir)
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
     )
@@ -407,7 +433,7 @@ def run(
     # ``root_concurrency_group``.
     permission_requests_consumer = PermissionRequestsConsumer(
         gateway_client=gateway_client,
-        on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver),
+        on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver, latchkey=latchkey),
     )
     permission_requests_consumer.start(root_concurrency_group)
     # Stash on app.state so the lifespan shutdown can stop() the consumer
@@ -511,9 +537,16 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         frozen=True,
         description="Resolver whose ``notify_change()`` wakes the chrome SSE so the panel updates promptly.",
     )
+    latchkey: Latchkey = Field(
+        frozen=True,
+        description=(
+            "Latchkey instance used to repair a host whose canonical "
+            "``latchkey_permissions.json`` is missing when a fresh request arrives."
+        ),
+    )
 
-    # ``FastAPI`` and ``MngrCliBackendResolver`` are not pydantic
-    # natives; tolerate them with ``arbitrary_types_allowed``.
+    # ``FastAPI``, ``MngrCliBackendResolver`` and ``Latchkey`` are not
+    # pydantic natives; tolerate them with ``arbitrary_types_allowed``.
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
     def __call__(self, event: RequestEvent) -> None:
@@ -529,6 +562,11 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         # wake the SSE for nothing.
         if current.get_request_by_id(str(event.event_id)) is not None:
             return
+        # Repair a host whose canonical permissions file was never
+        # materialized *before* surfacing the request, so the user's
+        # eventual approval actually takes effect. Best-effort: failures
+        # are logged and the request is still surfaced.
+        self._maybe_recover_host_permissions(event)
         self.app.state.request_inbox = current.add_request(event)
         if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
             logger.info(
@@ -552,6 +590,69 @@ class _StreamedPermissionRequestHandler(FrozenModel):
                 event.event_id,
             )
         self.backend_resolver.notify_change()
+
+    def _maybe_recover_host_permissions(self, event: RequestEvent) -> None:
+        """Recreate a missing per-host permissions file for the request's agent.
+
+        The streamed request carries ``permissions_target_path`` -- the
+        agent's opaque permissions handle (what its gateway JWT resolves
+        to). :func:`maybe_recover_host_permissions_for_agent` swings that
+        handle into the canonical host path when the latter is missing (so grants
+        written by the approval flow are visible to the agent) and
+        idempotently re-registers the agent in the host's allowlist. No-op
+        when the target is absent (non-latchkey request) or the host is
+        not yet known to discovery.
+        """
+        if not isinstance(
+            event,
+            (LatchkeyPredefinedPermissionRequestEvent, LatchkeyFileSharingPermissionRequestEvent),
+        ):
+            return
+        target = event.permissions_target_path
+        if target is None:
+            return
+        agent_id = AgentId(event.agent_id)
+        host_id = self._resolve_host_id(agent_id)
+        if host_id is None:
+            return
+        try:
+            did_recover = maybe_recover_host_permissions_for_agent(
+                latchkey=self.latchkey,
+                host_id=host_id,
+                agent_id=agent_id,
+                opaque_permissions_path=Path(target),
+            )
+        except LatchkeyStoreError as e:
+            logger.opt(exception=e).error(
+                "Could not recover missing latchkey permissions file for host {} (agent {}): {}",
+                host_id,
+                event.agent_id,
+                e,
+            )
+            return
+        if did_recover:
+            logger.info(
+                "Recovered missing latchkey permissions file for host {} (agent {}) from opaque handle {}",
+                host_id,
+                event.agent_id,
+                target,
+            )
+
+    def _resolve_host_id(self, agent_id: AgentId) -> HostId | None:
+        """Resolve the host an agent runs on, or ``None`` when discovery hasn't caught up.
+
+        Mirrors the resolution the permission-grant handler does: the
+        backend resolver maps the agent id to its host id, and the
+        placeholder ``"localhost"`` string (used by static / in-memory
+        resolvers) is treated as "unknown host".
+        """
+        info = self.backend_resolver.get_agent_display_info(agent_id)
+        if info is None:
+            return None
+        try:
+            return HostId(info.host_id)
+        except ValueError:
+            return None
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:
