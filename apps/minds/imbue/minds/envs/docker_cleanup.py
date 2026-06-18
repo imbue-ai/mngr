@@ -47,11 +47,14 @@ class DockerCleanupError(MindError):
 
 
 def read_profile_user_id(mngr_host_dir: Path) -> str | None:
-    """Read the active mngr profile's ``user_id``, or None if it can't be resolved.
+    """Read the active mngr profile's ``user_id``, or None if there is no profile yet.
 
     The active profile dir is resolved via
     ``bootstrap.read_active_profile_dir`` and the user id lives at
-    ``<profile_dir>/user_id``.
+    ``<profile_dir>/user_id``. Returns None only for the legitimate
+    "no profile yet" states (no active profile dir, no user_id file, or an
+    empty file). A read failure on a user_id file that *does* exist raises
+    :class:`DockerCleanupError` rather than masquerading as "no profile".
     """
     profile_dir = read_active_profile_dir(mngr_host_dir)
     if profile_dir is None:
@@ -62,8 +65,13 @@ def read_profile_user_id(mngr_host_dir: Path) -> str | None:
     try:
         return user_id_path.read_text().strip() or None
     except OSError as e:
-        logger.warning("Could not read mngr profile user_id {}: {}", user_id_path, e)
-        return None
+        # The legitimate "no profile yet" cases already returned None above
+        # (no active profile dir / no user_id file). An OSError reading a file
+        # that *does* exist is an unexpected permission/IO failure, not an
+        # "absent" state: swallowing it to None would skip the state-container
+        # cleanup entirely, leaking the env's container forever -- the exact
+        # leak this module exists to prevent. Surface it instead.
+        raise DockerCleanupError(f"Could not read mngr profile user_id at {user_id_path}: {e}") from e
 
 
 def state_container_name(mngr_prefix: str, user_id: str) -> str:

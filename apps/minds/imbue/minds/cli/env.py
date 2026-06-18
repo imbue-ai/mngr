@@ -1072,8 +1072,15 @@ def env_list(ctx: click.Context) -> None:
             return
         for s in summaries:
             marker = " (active)" if s.name == active else ""
-            connector = str(s.connector_url) if s.connector_url is not None else "(no client.toml)"
-            if s.client_config_path is None:
+            if s.connector_url is not None:
+                connector = str(s.connector_url)
+            elif s.client_config_source == "in_repo_malformed":
+                connector = "(malformed client.toml)"
+            else:
+                connector = "(no client.toml)"
+            if s.client_config_source == "in_repo_malformed":
+                client_loc = f"{s.client_config_path}  (in-repo, MALFORMED — fix the committed file)"
+            elif s.client_config_path is None:
                 client_loc = "(no client.toml — run `minds env deploy`)"
             elif s.client_config_source == "in_repo":
                 client_loc = f"{s.client_config_path}  (in-repo, committed)"

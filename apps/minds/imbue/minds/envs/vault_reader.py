@@ -263,8 +263,13 @@ def delete_vault_kv(
         raise VaultReadError(f"Failed to invoke {vault_binary}: {exc}") from exc
     if result.returncode == 0:
         return
-    message = (result.stderr + result.stdout).lower()
-    if "not found" in message or "no value found" in message or "404" in message:
+    if result.returncode == _VAULT_NOT_FOUND_EXIT_CODE:
+        # The entry is already absent. `vault kv metadata delete` returns the
+        # same "no value at this path" exit code as `kv get`, so re-running
+        # destroy after a partial failure is safe. Branch on the exit code
+        # (mirroring read_vault_kv) rather than substring-matching the output,
+        # which could mask an unrelated failure whose text happens to contain
+        # "not found" / "404".
         return
     stderr = result.stderr.strip() or result.stdout.strip()
     raise VaultReadError(f"`{vault_binary} kv metadata delete {relative}` failed (exit {result.returncode}): {stderr}")

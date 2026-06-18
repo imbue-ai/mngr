@@ -10,10 +10,28 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.secret_lifecycle import DeployId
 from imbue.minds.envs.secret_lifecycle import InvalidDeployIdError
+from imbue.minds.envs.secret_lifecycle import _extract_secret_names_from_rows
 from imbue.minds.envs.secret_lifecycle import gc_old_per_tier_secrets
 from imbue.minds.envs.secret_lifecycle import make_deploy_id
 from imbue.minds.envs.secret_lifecycle import parse_timestamped_secret_name
 from imbue.minds.envs.secret_lifecycle import timestamped_secret_name
+
+
+def test_extract_secret_names_handles_both_key_casings() -> None:
+    rows = [{"Name": "a-dev-20260101T000000Z"}, {"name": "b-dev-20260101T000000Z"}]
+    assert _extract_secret_names_from_rows(rows) == ("a-dev-20260101T000000Z", "b-dev-20260101T000000Z")
+
+
+def test_extract_secret_names_skips_drift_rows() -> None:
+    # Rows with no usable Name/name field are skipped (warned), not fatal --
+    # so a partial shape shift doesn't abort the whole GC pass.
+    rows = [{"Name": "good-dev-20260101T000000Z"}, {"unexpected": "shape"}, "not-a-dict"]
+    assert _extract_secret_names_from_rows(rows) == ("good-dev-20260101T000000Z",)
+
+
+def test_extract_secret_names_raises_on_non_list_payload() -> None:
+    with pytest.raises(ModalDeployError, match="non-list payload"):
+        _extract_secret_names_from_rows({"unexpected": "object"})
 
 
 def test_deploy_id_round_trip() -> None:

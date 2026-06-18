@@ -1,9 +1,11 @@
 """Unit tests for the recover-target file IO + reversal logic."""
 
+import json
 from pathlib import Path
 
 import pytest
 
+from imbue.minds.envs.recover import NeonRecoverInfo
 from imbue.minds.envs.recover import NotInMonorepoError
 from imbue.minds.envs.recover import RecoverTarget
 from imbue.minds.envs.recover import RecoverTargetAlreadyExistsError
@@ -17,6 +19,7 @@ from imbue.minds.envs.recover import recover_target_exists
 from imbue.minds.envs.recover import recover_target_path
 from imbue.minds.envs.recover import write_recover_target_atomic
 from imbue.minds.envs.secret_lifecycle import DeployId
+from imbue.minds.errors import MindError
 
 _ENV_NAME = "dev-josh-1"
 
@@ -29,9 +32,11 @@ def _sample_target(env_name: str = _ENV_NAME) -> RecoverTarget:
         modal_env=env_name,
         modal_workspace="minds-dev",
         vault_path_prefix="secrets/minds/dev",
-        neon_project_id="proj-fake-123",
-        neon_branch_id="br-main-1",
-        neon_snapshot_branch_id="br-snap-pre-deploy",
+        neon_restore=NeonRecoverInfo(
+            project_id="proj-fake-123",
+            branch_id="br-main-1",
+            snapshot_branch_id="br-snap-pre-deploy",
+        ),
         app_versions_to_restore={"rsc-dev": "v17", "llm-dev": None},
     )
 
@@ -121,3 +126,84 @@ def test_app_versions_to_restore_may_carry_none(tmp_path: Path) -> None:
     parsed = read_recover_target(repo_root=tmp_path, env_name=_ENV_NAME)
     assert parsed.app_versions_to_restore["llm-dev"] is None
     assert parsed.app_versions_to_restore["rsc-dev"] == "v17"
+
+
+def test_neon_restore_round_trips_as_nested_object(tmp_path: Path) -> None:
+    # The three Neon ids are one all-or-nothing sub-object; a partial capture
+    # is unrepresentable. Confirm the nested object survives the JSON round-trip.
+    target = _sample_target()
+    parsed = RecoverTarget.from_json_bytes(target.to_json_bytes())
+    assert parsed.neon_restore is not None
+    assert parsed.neon_restore.project_id == "proj-fake-123"
+    assert parsed.neon_restore.branch_id == "br-main-1"
+    assert parsed.neon_restore.snapshot_branch_id == "br-snap-pre-deploy"
+
+
+def test_from_json_bytes_migrates_legacy_flat_neon_fields() -> None:
+    # A recover-target file written before the NeonRecoverInfo collapse carries
+    # flat neon_project_id / neon_branch_id / neon_snapshot_branch_id keys. The
+    # reader must lift them into neon_restore rather than reject the file
+    # (RecoverTarget is extra="forbid"), so an in-flight pre-upgrade recovery
+    # still works.
+    legacy_json = json.dumps(
+        {
+            "deploy_id": "20260517T143022Z",
+            "env_name": _ENV_NAME,
+            "tier": "dev",
+            "modal_env": _ENV_NAME,
+            "modal_workspace": "minds-dev",
+            "vault_path_prefix": "secrets/minds/dev",
+            "neon_project_id": "proj-legacy",
+            "neon_branch_id": "br-legacy",
+            "neon_snapshot_branch_id": "br-snap-legacy",
+            "app_versions_to_restore": {"rsc-dev": "v9"},
+        }
+    ).encode("utf-8")
+    parsed = RecoverTarget.from_json_bytes(legacy_json)
+    assert parsed.neon_restore is not None
+    assert parsed.neon_restore.project_id == "proj-legacy"
+    assert parsed.neon_restore.branch_id == "br-legacy"
+    assert parsed.neon_restore.snapshot_branch_id == "br-snap-legacy"
+
+
+def test_from_json_bytes_migrates_legacy_no_neon_to_none() -> None:
+    # A legacy file whose flat neon ids were all null maps to neon_restore=None.
+    legacy_json = json.dumps(
+        {
+            "deploy_id": "20260517T143022Z",
+            "env_name": _ENV_NAME,
+            "tier": "dev",
+            "modal_env": _ENV_NAME,
+            "modal_workspace": "minds-dev",
+            "vault_path_prefix": "secrets/minds/dev",
+            "neon_project_id": None,
+            "neon_branch_id": None,
+            "neon_snapshot_branch_id": None,
+            "app_versions_to_restore": {"rsc-dev": "v9"},
+        }
+    ).encode("utf-8")
+    parsed = RecoverTarget.from_json_bytes(legacy_json)
+    assert parsed.neon_restore is None
+
+
+def test_from_json_bytes_reports_shape_mismatch_distinctly() -> None:
+    # Valid JSON but the wrong shape must NOT be reported as "not valid JSON".
+    with pytest.raises(MindError, match="unexpected shape"):
+        RecoverTarget.from_json_bytes(b'{"totally": "wrong"}')
+
+
+def test_neon_restore_may_be_absent(tmp_path: Path) -> None:
+    # A deploy with no Neon-restore configuration carries neon_restore=None
+    # (the field defaults to None); recover skips the Neon step for it.
+    target = RecoverTarget(
+        deploy_id=DeployId("20260517T143022Z"),
+        env_name=_ENV_NAME,
+        tier="dev",
+        modal_env=_ENV_NAME,
+        modal_workspace="minds-dev",
+        vault_path_prefix="secrets/minds/dev",
+        app_versions_to_restore={"rsc-dev": "v17"},
+    )
+    assert target.neon_restore is None
+    parsed = RecoverTarget.from_json_bytes(target.to_json_bytes())
+    assert parsed.neon_restore is None

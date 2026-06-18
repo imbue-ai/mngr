@@ -8,12 +8,114 @@ pool-host queries, the latter for the LiteLLM proxy's Prisma-managed
 backing store). Both DSNs come from the same per-env Neon project.
 """
 
+import stat
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
 from pydantic import SecretStr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.envs.per_env_deploy import ModalDeployError
+from imbue.minds.envs.per_env_deploy import _extract_container_ids_from_rows
+from imbue.minds.envs.per_env_deploy import _parse_deploy_url_from_stdout
+from imbue.minds.envs.per_env_deploy import _select_app_id_from_rows
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
+from imbue.minds.envs.per_env_deploy import ensure_modal_env
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
+
+
+@pytest.fixture
+def _root_cg() -> Iterator[ConcurrencyGroup]:
+    cg = ConcurrencyGroup(name="per-env-deploy-test-root")
+    with cg:
+        yield cg
+
+
+def _make_fake_modal_binary(tmp_path: Path, *, exit_code: int, stderr: str = "") -> Path:
+    stderr_path = tmp_path / "_fake_modal_stderr.txt"
+    stderr_path.write_text(stderr)
+    script = tmp_path / "modal"
+    script.write_text(f"#!/usr/bin/env bash\ncat {stderr_path} >&2\nexit {exit_code}\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return script
+
+
+def test_parse_deploy_url_returns_last_modal_run_url() -> None:
+    # The deployed function URL is the last .modal.run URL (earlier ones may
+    # be dashboard links); wrapped/inline whitespace is collapsed first.
+    stdout = (
+        "View Deployment: https://modal.com/apps/minds-dev/dev-josh\n"
+        "https://minds-dev-dev-josh--rsc-dev-a\npi.modal.run\n"
+    )
+    url = _parse_deploy_url_from_stdout(stdout, app_name="rsc-dev", modal_env="dev-josh")
+    assert str(url).rstrip("/") == "https://minds-dev-dev-josh--rsc-dev-api.modal.run"
+
+
+def test_parse_deploy_url_raises_when_no_url_present() -> None:
+    # A modal deploy with no .modal.run URL is always fatal; the parser
+    # raises rather than returning an optional the caller must re-check.
+    with pytest.raises(ModalDeployError, match="no .modal.run URL"):
+        _parse_deploy_url_from_stdout(
+            "Deployment complete, nothing useful here", app_name="rsc-dev", modal_env="dev-josh"
+        )
+
+
+def test_select_app_id_from_rows_finds_running_app() -> None:
+    # Column-name variants are tolerated; stopped apps + non-matching names
+    # are skipped; the running match's id is returned.
+    rows = [
+        {"Name": "rsc-dev", "State": "stopped", "App ID": "ap-old"},
+        {"name": "other-app", "state": "deployed", "app_id": "ap-other"},
+        {"Name": "rsc-dev", "State": "deployed", "App ID": "ap-live"},
+    ]
+    assert _select_app_id_from_rows(rows, app_name="rsc-dev") == "ap-live"
+
+
+def test_select_app_id_from_rows_returns_none_when_absent() -> None:
+    assert _select_app_id_from_rows([{"Name": "other", "State": "deployed", "ID": "x"}], app_name="rsc-dev") is None
+
+
+def test_select_app_id_from_rows_raises_on_non_list_payload() -> None:
+    # returncode == 0 with non-list JSON is unexpected -> raise, not return None.
+    with pytest.raises(ModalDeployError, match="non-list payload"):
+        _select_app_id_from_rows({"unexpected": "object"}, app_name="rsc-dev")
+
+
+def test_extract_container_ids_collects_ids_across_key_variants() -> None:
+    # The third row has no recognized id key -> warned + skipped, not fatal.
+    rows = [
+        {"Container ID": "ta-1"},
+        {"container_id": "ta-2"},
+        {"unrecognized": "skip-me"},
+    ]
+    assert _extract_container_ids_from_rows(rows) == ("ta-1", "ta-2")
+
+
+def test_extract_container_ids_raises_on_non_list_payload() -> None:
+    with pytest.raises(ModalDeployError, match="non-list payload"):
+        _extract_container_ids_from_rows("not a list")
+
+
+def test_ensure_modal_env_succeeds_on_zero_exit(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    fake = _make_fake_modal_binary(tmp_path, exit_code=0)
+    ensure_modal_env(DevEnvName("dev-josh"), parent_cg=_root_cg, modal_binary=str(fake))
+
+
+def test_ensure_modal_env_tolerates_already_exists(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    fake = _make_fake_modal_binary(tmp_path, exit_code=1, stderr="Environment 'dev-josh' already exists")
+    ensure_modal_env(DevEnvName("dev-josh"), parent_cg=_root_cg, modal_binary=str(fake))
+
+
+def test_ensure_modal_env_raises_on_does_not_exist(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    # The regression: a "does not exist" failure must NOT be swallowed by a
+    # bare "exist" substring match (which would proceed to deploy against an
+    # env that was never created).
+    fake = _make_fake_modal_binary(tmp_path, exit_code=1, stderr="Workspace 'minds-dev' does not exist")
+    with pytest.raises(ModalDeployError, match="does not exist"):
+        ensure_modal_env(DevEnvName("dev-josh"), parent_cg=_root_cg, modal_binary=str(fake))
 
 
 def _fake_neon_record() -> NeonProjectRecord:

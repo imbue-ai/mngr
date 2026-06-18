@@ -18,7 +18,6 @@ handles discovery + destruction.
 from typing import Final
 
 import ovh
-from loguru import logger
 from ovh.exceptions import InvalidConfiguration
 from pydantic import Field
 from pydantic import SecretStr
@@ -131,8 +130,14 @@ def delete_instances(
     client = _build_client(credentials)
     for resource in instances:
         if not resource.name:
-            logger.warning("Skipping OVH IAM resource with empty name: urn={}", resource.urn)
-            continue
+            # The name is the VPS id we terminate by. An IAM resource matched
+            # for termination with an empty name is a data anomaly, not an
+            # expected skip: skipping it leaves the VPS running (and billing).
+            # We cannot build a VpsInstanceId from it, so surface it.
+            raise OvhProviderError(
+                f"OVH IAM resource matched for termination has an empty name (urn={resource.urn}); "
+                "cannot terminate the VPS. Inspect it in the OVH dashboard and re-run `minds env destroy`."
+            )
         try:
             client.destroy_instance(VpsInstanceId(resource.name))
         except VpsApiError as exc:

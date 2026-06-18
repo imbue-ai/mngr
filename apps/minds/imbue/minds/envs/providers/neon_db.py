@@ -76,7 +76,21 @@ LITELLM_COST_DB_NAME: Final[str] = "litellm_cost"
 
 
 class NeonProviderError(MindError):
-    """Raised when the Neon API rejects a request."""
+    """Raised when the Neon API rejects a request.
+
+    ``status_code`` carries the HTTP status of the rejecting response when
+    the error came from a ``>= 400`` reply (``None`` for transport errors,
+    non-JSON bodies, or shape mismatches). Callers branch on it for
+    idempotency (e.g. ``== 409`` "already exists", ``== 404`` "absent")
+    instead of substring-matching the message -- the message embeds up to
+    500 chars of response body, so a different error's body could contain
+    "409"/"404" and silently flip a genuine failure into a treated-as-
+    success no-op.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class NeonBranchSummary(FrozenModel):
@@ -86,6 +100,10 @@ class NeonBranchSummary(FrozenModel):
 
     id: str
     name: str
+    # Neon flags exactly one branch per project as the default. This is the
+    # authoritative "which branch is the root" signal -- far more reliable
+    # than matching on the name "main" (which can be renamed).
+    default: bool = False
 
 
 class NeonProjectRecord(FrozenModel):
@@ -184,7 +202,10 @@ def _neon_request(
             "operation likely never finished."
         )
     if response.status_code >= 400:
-        raise NeonProviderError(f"Neon API returned {response.status_code} for {method} {path}: {response.text[:500]}")
+        raise NeonProviderError(
+            f"Neon API returned {response.status_code} for {method} {path}: {response.text[:500]}",
+            status_code=response.status_code,
+        )
     try:
         return response.json()
     except ValueError as exc:
@@ -319,10 +340,32 @@ def _resolve_default_branch(project_id: str, *, api_token: SecretStr) -> NeonBra
         branches = _BRANCH_LIST_ADAPTER.validate_python(branches_raw)
     except ValidationError as exc:
         raise NeonProviderError(f"Neon /projects/{project_id}/branches returned an unexpected shape: {exc}") from exc
+    return _select_default_branch(branches, project_id=project_id)
+
+
+def _select_default_branch(branches: list[NeonBranchSummary], *, project_id: str) -> NeonBranchSummary:
+    """Pick the default branch from a project's branch list.
+
+    Prefers Neon's authoritative ``default`` flag. Falls back to the
+    conventional name "main" only if (unexpectedly) no branch is flagged,
+    since minds always creates its projects with a default "main" branch.
+    Refuses to guess when neither signal is present: returning an arbitrary
+    branch (the previous ``branches[0]`` behaviour) could silently restore /
+    migrate against a snapshot child branch rather than the true default.
+
+    Pure function -- lives next to its only caller so the selection logic
+    can be unit-tested without standing up a Neon stub.
+    """
+    for branch in branches:
+        if branch.default:
+            return branch
     for branch in branches:
         if branch.name == "main":
             return branch
-    return branches[0]
+    raise NeonProviderError(
+        f"Neon project {project_id} has no branch flagged `default` and none named 'main'; "
+        f"cannot determine the default branch (branches: {[b.name for b in branches]})."
+    )
 
 
 def _ensure_database(
@@ -347,7 +390,8 @@ def _ensure_database(
             json_body={"database": {"name": database_name, "owner_name": "neondb_owner"}},
         )
     except NeonProviderError as exc:
-        if "409" not in str(exc):
+        # 409 == database already exists on this branch -> idempotent success.
+        if exc.status_code != 409:
             raise
 
 
@@ -473,11 +517,17 @@ def create_neon_project(
         if not project_was_pre_existing:
             try:
                 _neon_request("DELETE", f"/projects/{project_id}", api_token=api_token)
-            except NeonProviderError:
-                # Swallow cleanup errors; the original failure is what
-                # the caller needs to see. A leaked project will be
-                # picked up by the next deploy via the by-name lookup.
-                pass
+            except NeonProviderError as cleanup_exc:
+                # Swallow cleanup errors; the original failure is what the
+                # caller needs to see. But log it -- a project we could not
+                # delete is leaked until the next deploy's by-name lookup
+                # surfaces it, which an operator should be able to see.
+                logger.warning(
+                    "Failed to delete Neon project {} during rollback; it may be leaked "
+                    "(the next deploy's by-name lookup will surface it): {}",
+                    project_id,
+                    cleanup_exc,
+                )
         raise
 
     return NeonProjectRecord(
@@ -515,7 +565,8 @@ def delete_neon_project(
     try:
         _neon_request("DELETE", f"/projects/{existing.id}", api_token=api_token)
     except NeonProviderError as exc:
-        if "404" in str(exc):
+        # 404 == project already gone -> idempotent success.
+        if exc.status_code == 404:
             return
         raise
 
@@ -590,8 +641,10 @@ def restore_branch_from_snapshot(
             },
         )
     except NeonProviderError as exc:
-        message = str(exc)
-        if "409" in message and "already exists" in message:
+        # 409 + "already exists" == the preserve branch was already created by
+        # a prior run -> the restore already happened. The body-text check
+        # stays as a secondary guard so an *unrelated* 409 still surfaces.
+        if exc.status_code == 409 and "already exists" in str(exc).lower():
             logger.info(
                 "Skipped Neon restore of branch {!r}: preserve branch {!r} already exists "
                 "(restore was already applied by a prior run).",
@@ -615,7 +668,8 @@ def delete_neon_branch(project_id: str, branch_id: str, *, api_token: SecretStr)
     try:
         _neon_request("DELETE", f"/projects/{project_id}/branches/{branch_id}", api_token=api_token)
     except NeonProviderError as exc:
-        if "404" in str(exc):
+        # 404 == branch already gone -> idempotent success.
+        if exc.status_code == 404:
             return
         raise
 

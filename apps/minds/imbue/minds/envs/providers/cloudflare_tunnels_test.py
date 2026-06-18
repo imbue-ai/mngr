@@ -94,6 +94,22 @@ def test_list_tunnels_for_env_returns_empty_when_no_match() -> None:
     )
 
 
+def test_list_tunnels_for_env_raises_on_matched_tunnel_with_bad_id() -> None:
+    # A tunnel positively identified as ours (metadata.env matches) but with a
+    # missing / non-string id is an anomaly, not an expected skip: silently
+    # dropping it would leak the tunnel. It must surface.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok_list_response([{"id": None, "metadata": {"env": "dev-josh"}}])
+
+    with pytest.raises(CloudflareTunnelProviderError, match="non-string `id`"):
+        list_tunnels_for_env(
+            DevEnvName("dev-josh"),
+            account_id="acct",
+            api_token=SecretStr("t"),
+            transport=httpx.MockTransport(handler),
+        )
+
+
 def test_list_tunnels_for_env_raises_on_http_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="server boom")

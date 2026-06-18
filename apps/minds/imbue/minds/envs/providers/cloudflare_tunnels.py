@@ -90,8 +90,17 @@ def list_tunnels_for_env(
                 continue
             if metadata.get("env") == expected_env:
                 tunnel_id = tunnel.get("id")
-                if isinstance(tunnel_id, str):
-                    matches.append(tunnel_id)
+                if not isinstance(tunnel_id, str) or not tunnel_id:
+                    # The earlier `continue`s filter out tunnels that aren't
+                    # ours. This one IS ours (metadata.env matched) but has no
+                    # usable id -- an anomaly, not an expected skip. Silently
+                    # dropping it would leak the tunnel (the caller would never
+                    # delete it). Surface it instead.
+                    raise CloudflareTunnelProviderError(
+                        f"Cloudflare tunnel matched env {expected_env!r} but has a missing / "
+                        f"non-string `id`: {tunnel.get('id')!r}"
+                    )
+                matches.append(tunnel_id)
         result_info = payload.get("result_info")
         total_pages = result_info.get("total_pages", 1) if isinstance(result_info, dict) else 1
         has_more_pages = page < total_pages

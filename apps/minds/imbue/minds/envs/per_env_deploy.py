@@ -274,13 +274,16 @@ def push_per_env_modal_secret(
         raise ModalDeployError(f"`modal secret create {secret_name}` failed (exit {result.returncode}): {stderr}")
 
 
-def ensure_modal_env(name: DevEnvName, *, parent_cg: ConcurrencyGroup) -> None:
+def ensure_modal_env(name: DevEnvName, *, parent_cg: ConcurrencyGroup, modal_binary: str = "modal") -> None:
     """Create the Modal env if it doesn't already exist; otherwise no-op.
 
-    Modal's "already exists" failure has shifted wording across
-    versions; both known variants contain the substring ``exist``.
+    Matches the specific "already exists" phrase (as
+    :func:`providers.modal_env.create_modal_env` does). The bare substring
+    ``exist`` would also match "does not exist" / "nonexistent", silently
+    treating e.g. a "workspace does not exist" failure as success and
+    proceeding to deploy against an env that was never created.
     """
-    command = ["modal", "environment", "create", str(name)]
+    command = [modal_binary, "environment", "create", str(name)]
     cg = parent_cg.make_concurrency_group(name=f"modal-env-create-{name}")
     with cg:
         result = cg.run_process_to_completion(
@@ -292,7 +295,7 @@ def ensure_modal_env(name: DevEnvName, *, parent_cg: ConcurrencyGroup) -> None:
     if result.returncode == 0:
         return
     message = (result.stderr + result.stdout).lower()
-    if "exist" in message:
+    if "already exists" in message:
         return
     stderr = result.stderr.strip() or result.stdout.strip()
     raise ModalDeployError(f"`modal environment create {name}` failed (exit {result.returncode}): {stderr}")
@@ -483,20 +486,27 @@ def deploy_remote_service_connector(
         )
 
 
-def _parse_deploy_url_from_stdout(stdout: str) -> AnyUrl | None:
+def _parse_deploy_url_from_stdout(stdout: str, *, app_name: str, modal_env: str) -> AnyUrl:
     """Extract the deployed function URL from ``modal deploy`` stdout.
 
     Modal wraps long URLs across lines in TTY-style output; collapsing
     whitespace before matching catches both wrapped and inline forms.
     Returns the last ``.modal.run`` URL seen (the deployed function);
     earlier matches may be Modal dashboard URLs that aren't useful here.
-    Returns ``None`` if no URL is present (the caller decides whether
-    that's fatal).
+
+    Raises :class:`ModalDeployError` if no URL is present. A successful
+    ``modal deploy`` that emits no ``.modal.run`` URL is always fatal --
+    the sole caller cannot proceed without the deployed URL -- so the
+    failure is raised here rather than handed back as an optional the
+    caller is forced to re-check.
     """
     collapsed = re.sub(r"\s+", "", stdout)
     matches = _MODAL_DEPLOY_URL_PATTERN.findall(collapsed)
     if not matches:
-        return None
+        raise ModalDeployError(
+            f"`modal deploy --name {app_name} --env {modal_env}` succeeded but no .modal.run URL "
+            f"appeared in its stdout. Captured tail: {stdout[-500:]}"
+        )
     return AnyUrl(matches[-1])
 
 
@@ -556,13 +566,7 @@ def _deploy_modal_app(
         raise ModalDeployError(
             f"`modal deploy --name {app_name} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
         )
-    url = _parse_deploy_url_from_stdout(result.stdout)
-    if url is None:
-        raise ModalDeployError(
-            f"`modal deploy --name {app_name} --env {modal_env}` succeeded but no .modal.run URL "
-            f"appeared in its stdout. Captured tail: {result.stdout[-500:]}"
-        )
-    return url
+    return _parse_deploy_url_from_stdout(result.stdout, app_name=app_name, modal_env=modal_env)
 
 
 def _modal_subprocess_env() -> dict[str, str]:
@@ -796,22 +800,57 @@ def _find_modal_app_id(*, app_name: str, modal_env: str, parent_cg: ConcurrencyG
         rows = json.loads(result.stdout)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ModalDeployError(f"`modal app list --json` returned non-JSON: {exc}") from exc
-    if not isinstance(rows, list):
+    return _select_app_id_from_rows(rows, app_name=app_name)
+
+
+def first_str_value(row: object, keys: tuple[str, ...]) -> str | None:
+    """Return the first non-empty string value at any of ``keys`` in dict ``row``.
+
+    Tolerates Modal's shifting column names (callers pass every known alias)
+    and untyped JSON: ``row`` is whatever ``json.loads`` produced, so anything
+    that isn't a dict -- or a dict with no matching string value -- yields
+    ``None``. Iterating ``items()`` (rather than ``row.get(key)``) keeps the
+    type checker happy on a dict narrowed from ``object``.
+    """
+    if not isinstance(row, dict):
         return None
-    # Modal's column names have shifted across versions; check the common shapes
-    # for both name and id. Skip stopped apps so we don't try to stop containers
-    # for an already-terminated app.
+    for key, value in row.items():
+        if key in keys and isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _select_app_id_from_rows(rows: object, *, app_name: str) -> str | None:
+    """Find the running app id for ``app_name`` in ``modal app list --json`` rows.
+
+    Raises :class:`ModalDeployError` on a non-list payload (genuinely
+    unexpected given ``returncode == 0``; consistent with the other Modal-
+    list parsers). Modal's column names have shifted across versions, so the
+    common shapes for both name and id are checked; stopped apps are skipped
+    so we don't try to stop containers for an already-terminated app. A row
+    that matches our app but carries no recognized id key is a shape shift
+    that would otherwise look like "app not found" -- it warns rather than
+    silently returning None. Pure function so the parsing is unit-testable.
+    """
+    if not isinstance(rows, list):
+        raise ModalDeployError(f"`modal app list --json` returned a non-list payload: {rows!r}")
     for row in rows:
         if not isinstance(row, dict):
+            logger.warning("`modal app list --json` returned a non-dict row; skipping it: {!r}", row)
             continue
-        name_value = row.get("Name") or row.get("name") or row.get("App")
-        state_value = (row.get("State") or row.get("state") or "").lower()
+        name_value = first_str_value(row, ("Name", "name", "App"))
+        state_value = (first_str_value(row, ("State", "state")) or "").lower()
         if name_value != app_name or "stop" in state_value:
             continue
-        for id_key in ("App ID", "app_id", "AppID", "ID", "id"):
-            id_value = row.get(id_key)
-            if isinstance(id_value, str) and id_value:
-                return id_value
+        app_id_value = first_str_value(row, ("App ID", "app_id", "AppID", "ID", "id"))
+        if app_id_value is not None:
+            return app_id_value
+        logger.warning(
+            "`modal app list --json` row matched app {!r} but carried no recognized id key "
+            "(Modal output shape may have shifted): {!r}",
+            app_name,
+            row,
+        )
     return None
 
 
@@ -835,17 +874,35 @@ def _list_modal_app_container_ids(*, app_id: str, modal_env: str, parent_cg: Con
         rows = json.loads(result.stdout)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ModalDeployError(f"`modal container list --json` returned non-JSON: {exc}") from exc
+    return _extract_container_ids_from_rows(rows)
+
+
+def _extract_container_ids_from_rows(rows: object) -> tuple[str, ...]:
+    """Pull the container ids out of ``modal container list --json`` rows.
+
+    Raises :class:`ModalDeployError` on a non-list payload (genuinely
+    unexpected given ``returncode == 0``; consistent with the other Modal-
+    list parsers), so a silently-empty container list never masks a shape
+    shift that would leave containers running. Warns about -- and skips --
+    non-dict rows and rows with no recognized id key. Pure function so the
+    parsing is unit-testable.
+    """
     if not isinstance(rows, list):
-        return ()
+        raise ModalDeployError(f"`modal container list --json` returned a non-list payload: {rows!r}")
     ids: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
+            logger.warning("`modal container list --json` returned a non-dict row; skipping it: {!r}", row)
             continue
-        for id_key in ("Container ID", "container_id", "ID", "id"):
-            value = row.get(id_key)
-            if isinstance(value, str) and value:
-                ids.append(value)
-                break
+        container_id = first_str_value(row, ("Container ID", "container_id", "ID", "id"))
+        if container_id is not None:
+            ids.append(container_id)
+        else:
+            logger.warning(
+                "`modal container list --json` row carried no recognized id key "
+                "(Modal output shape may have shifted); skipping it: {!r}",
+                row,
+            )
     return tuple(ids)
 
 
