@@ -159,10 +159,11 @@ class S3StateBucket(BaseStateBucket):
         with _translate_s3_errors(self.bucket_name):
             for start in range(0, len(keys), 1000):
                 batch = keys[start : start + 1000]
-                self._s3().delete_objects(
+                response = self._s3().delete_objects(
                     Bucket=self.bucket_name,
                     Delete={"Objects": [{"Key": key} for key in batch]},
                 )
+                _raise_on_delete_errors(response, self.bucket_name)
 
 
 class S3Volume(BaseVolume):
@@ -257,9 +258,10 @@ class S3Volume(BaseVolume):
             for start in range(0, len(keys), 1000):
                 batch = keys[start : start + 1000]
                 if batch:
-                    self._s3().delete_objects(
+                    response = self._s3().delete_objects(
                         Bucket=self.bucket_name, Delete={"Objects": [{"Key": key} for key in batch]}
                     )
+                    _raise_on_delete_errors(response, self.bucket_name)
 
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
         with _translate_s3_errors(self.bucket_name):
@@ -280,3 +282,17 @@ def _translate_s3_errors(bucket_name: str) -> Iterator[None]:
         yield
     except ClientError as e:
         raise S3StateBucketError(f"S3 operation on bucket {bucket_name!r} failed: {e}") from e
+
+
+def _raise_on_delete_errors(response: Mapping[str, Any], bucket_name: str) -> None:
+    """Raise if a ``DeleteObjects`` response reports per-key failures.
+
+    S3 ``DeleteObjects`` returns HTTP 200 (no ``ClientError``) even when some keys
+    fail to delete; those failures live only in the response's ``Errors`` array. A
+    swallowed partial delete would leave orphaned state behind (e.g. a destroyed
+    host's records lingering), so surface it instead.
+    """
+    errors = response.get("Errors", [])
+    if errors:
+        detail = ", ".join(f"{e.get('Key')!r} ({e.get('Code')}: {e.get('Message')})" for e in errors)
+        raise S3StateBucketError(f"S3 failed to delete {len(errors)} object(s) in bucket {bucket_name!r}: {detail}")
