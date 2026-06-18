@@ -74,6 +74,11 @@ class _FakeBucket:
         # The fake's stand-in for ``Bucket.iam_configuration`` -- only the one
         # attribute production touches.
         self.iam_configuration = _FakeIamConfiguration()
+        # Set by ``_FakeStorageClient.create_bucket`` (and refreshed by
+        # ``bucket()`` on lookup) so ``delete()`` can faithfully remove the
+        # bucket from its parent registry. None for detached handles that were
+        # never registered, in which case ``delete()`` only clears blobs.
+        self.parent_client: "_FakeStorageClient | None" = None
 
     def blob(self, name: str) -> _FakeBlob:
         existing = self.blobs.get(name)
@@ -87,6 +92,14 @@ class _FakeBucket:
     def delete(self, force: bool = False) -> None:
         del force
         self.blobs.clear()
+        # Mirror real GCS: after ``bucket.delete(...)`` the bucket no longer
+        # exists, so a subsequent ``lookup_bucket`` returns None. Without this
+        # the fake's ``bucket_exists()`` would keep returning True after a
+        # production ``delete_bucket()`` and the idempotency contract could
+        # only be verified by external test scaffolding (which would be
+        # tautological).
+        if self.parent_client is not None:
+            self.parent_client.buckets.pop(self.name, None)
 
 
 class _FakeIamConfiguration:
@@ -116,7 +129,10 @@ class _FakeStorageClient:
         # The real SDK returns a handle without creating the bucket -- the bucket
         # itself only materializes via ``create_bucket``. Mirror that: an existing
         # handle is returned if present, else a fresh detached one.
-        return self.buckets.get(name) or _FakeBucket(name)
+        existing = self.buckets.get(name)
+        if existing is not None:
+            return existing
+        return _FakeBucket(name)
 
     def lookup_bucket(self, name: str) -> _FakeBucket | None:
         return self.buckets.get(name)
@@ -131,6 +147,9 @@ class _FakeStorageClient:
         del location
         if bucket.name in self.buckets:
             raise google_api_exceptions.Conflict(f"Bucket already exists: {bucket.name}")
+        # Bind the bucket to this client so ``bucket.delete(...)`` can remove
+        # itself from the registry (mirrors the real GCS lifecycle).
+        bucket.parent_client = self
         self.buckets[bucket.name] = bucket
         return bucket
 
@@ -296,8 +315,9 @@ def test_delete_bucket_is_idempotent(fake_gcs: _FakeStorageClient) -> None:
     bucket = _make_bucket(fake_gcs)
     bucket.ensure_bucket()
     bucket.delete_bucket()
-    # Removing an already-absent bucket is idempotent: short-circuits the existence probe.
-    fake_gcs.buckets.pop(bucket.bucket_name, None)
+    # Mirrors real GCS: the first delete removes the bucket; the second is a
+    # no-op short-circuited by the existence probe in ``delete_bucket``.
+    assert bucket.bucket_exists() is False
     bucket.delete_bucket()
 
 
