@@ -27,7 +27,15 @@ def register_agent_class(
 
 
 def get_agent_class(agent_type: str) -> type:
-    """Get the agent class for an agent type.
+    """Get the agent class registered directly for an agent type.
+
+    This is a low-level primitive: it does a flat registry lookup and does NOT
+    resolve aliases or config-defined subtypes (those with a ``parent_type``).
+    Passing such a name raises UnknownAgentTypeError even though it is a valid
+    type. Use ``resolve_agent_type`` whenever the input may be an alias or a
+    subtype and you want the resolved class -- it walks the parent chain. Prefer
+    it by default; reach for ``get_agent_class`` only when you specifically need
+    the class registered for an exact, canonical type name.
 
     Raises UnknownAgentTypeError if no class is registered for this type.
     """

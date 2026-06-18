@@ -3606,11 +3606,11 @@ def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ct
 
 def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should accept a config-defined subtype whose parent_type
-    chain reaches claude (e.g. a ``write-plus`` template), not just the literal
+    chain reaches claude (e.g. a custom ``coder`` template), not just the literal
     ``claude`` type name. This is the centralized "is a claude agent" check via
     resolve_agent_type, rather than a string comparison against "claude".
     """
-    subtype = AgentTypeName("write-plus")
+    subtype = AgentTypeName("coder")
     config_with_subtype = temp_mngr_ctx.config.model_copy_update(
         to_update(
             temp_mngr_ctx.config.field_ref().agent_types,
