@@ -1078,6 +1078,10 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     assert cli.create_calls == []
 
 
+# Carries the same 30s pytest-timeout as the other creation tests so that
+# _wait_until_finished's 25s default poll deadline stays just under it (the global
+# --timeout=10 would otherwise pre-empt the poll under heavy parallel load).
+@pytest.mark.timeout(30)
 def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""
