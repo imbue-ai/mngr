@@ -939,6 +939,52 @@ def build_ssh_transport_for_outer(outer: OuterHostInterface) -> tuple[str, str, 
     return ssh_cmd, user, hostname, port, str(key_path)
 
 
+def _run_rsync_with_retry(
+    cg: ConcurrencyGroup,
+    cmd: Sequence[str],
+    hostname: str,
+    operation: str,
+    timeout_seconds: float,
+) -> None:
+    """Run an rsync transfer ``cmd``, retrying connection-class failures with backoff.
+
+    Shared by ``upload_directory_to_outer`` / ``download_directory_from_outer``:
+    retries up to ``_UPLOAD_MAX_ATTEMPTS`` with backoff, since fresh Vultr VPSes
+    routinely drop the first SSH connection in their first minute of life. A
+    whole-process timeout is not retried (the next attempt would just time out
+    again, tripling the time to surface a wedged VPS). Non-retryable rsync errors
+    fail fast on the first attempt. ``operation`` (e.g. "Upload"/"Download") only
+    labels the log/error messages.
+    """
+    last_stderr = ""
+    for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
+        finished = cg.run_process_to_completion(
+            command=list(cmd),
+            is_checked_after=False,
+            timeout=timeout_seconds,
+        )
+        if finished.is_timed_out:
+            raise MngrError(f"{operation} timed out after {timeout_seconds}s")
+        if finished.returncode == 0:
+            return
+        last_stderr = finished.stderr.strip()
+        is_last_attempt = attempt == _UPLOAD_MAX_ATTEMPTS
+        if is_last_attempt or not is_retryable_rsync_error(last_stderr):
+            break
+        backoff_seconds = _UPLOAD_RETRY_BACKOFF_SECONDS[attempt - 1]
+        logger.warning(
+            "{} ({}) attempt {}/{} failed; retrying in {:.0f}s. stderr={!r}",
+            operation,
+            hostname,
+            attempt,
+            _UPLOAD_MAX_ATTEMPTS,
+            backoff_seconds,
+            last_stderr,
+        )
+        time.sleep(backoff_seconds)
+    raise MngrError(f"{operation} failed: {last_stderr}")
+
+
 def upload_directory_to_outer(
     outer: OuterHostInterface,
     cg: ConcurrencyGroup,
@@ -949,13 +995,10 @@ def upload_directory_to_outer(
     """Upload a local directory to outer via rsync over SSH.
 
     Mirrors the behavior of the legacy ``DockerOverSsh.upload_directory``:
-    retries connection-class failures (broken pipe, RST, ssh-disconnect) up
-    to ``_UPLOAD_MAX_ATTEMPTS`` with backoff, since fresh Vultr VPSes
-    routinely drop the first SSH connection in their first minute of life.
-    ``--partial-dir`` lets retries resume rather than re-upload from
-    scratch; that path lives outside the build context so partial files
-    never end up baked into the docker image. Non-retryable rsync errors
-    fail fast on the first attempt.
+    retries connection-class failures (broken pipe, RST, ssh-disconnect) with
+    backoff (see ``_run_rsync_with_retry``). ``--partial-dir`` lets retries resume
+    rather than re-upload from scratch; that path lives outside the build context
+    so partial files never end up baked into the docker image.
     """
     ssh_cmd, user, hostname, _port, _key_path = build_ssh_transport_for_outer(outer)
     local_str = str(local_path).rstrip("/") + "/"
@@ -979,36 +1022,40 @@ def upload_directory_to_outer(
         f"{user}@{hostname}:{remote_path}/",
     ]
     logger.debug("Uploading {} to {}@{}:{}", local_path, user, hostname, remote_path)
+    _run_rsync_with_retry(cg, cmd, hostname, "Upload", timeout_seconds)
 
-    last_stderr = ""
-    for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
-        finished = cg.run_process_to_completion(
-            command=cmd,
-            is_checked_after=False,
-            timeout=timeout_seconds,
-        )
-        if finished.is_timed_out:
-            # Whole-process timeout: don't retry (the next attempt would
-            # just hit the same timeout again, and we'd take 3x longer
-            # to surface a real "VPS is wedged" diagnosis).
-            raise MngrError(f"Upload timed out after {timeout_seconds}s")
-        if finished.returncode == 0:
-            return
-        last_stderr = finished.stderr.strip()
-        is_last_attempt = attempt == _UPLOAD_MAX_ATTEMPTS
-        if is_last_attempt or not is_retryable_rsync_error(last_stderr):
-            break
-        backoff_seconds = _UPLOAD_RETRY_BACKOFF_SECONDS[attempt - 1]
-        logger.warning(
-            "Upload to {} attempt {}/{} failed; retrying in {:.0f}s. stderr={!r}",
-            hostname,
-            attempt,
-            _UPLOAD_MAX_ATTEMPTS,
-            backoff_seconds,
-            last_stderr,
-        )
-        time.sleep(backoff_seconds)
-    raise MngrError(f"Upload failed: {last_stderr}")
+
+def download_directory_from_outer(
+    outer: OuterHostInterface,
+    cg: ConcurrencyGroup,
+    remote_path: str,
+    local_path: Path,
+    timeout_seconds: float = 900.0,
+) -> None:
+    """Download a directory from outer to ``local_path`` via rsync over SSH (the pull twin of upload).
+
+    Same connection-class retry/backoff as ``upload_directory_to_outer`` (see
+    ``_run_rsync_with_retry``). rsync copies the regular-file tree (and symlinks,
+    with ``-l``) and -- crucially for offline host_dir capture --
+    ``--no-specials --no-devices`` makes it skip sockets/FIFOs/device nodes
+    entirely rather than failing on them, so a live tmux socket in ``host_dir``
+    can't sink the copy. ``local_path`` must already exist; rsync populates it in place.
+    """
+    ssh_cmd, user, hostname, _port, _key_path = build_ssh_transport_for_outer(outer)
+    remote_str = remote_path.rstrip("/") + "/"
+    cmd = [
+        "rsync",
+        "-az",
+        "--no-specials",
+        "--no-devices",
+        f"--partial-dir={_RSYNC_PARTIAL_DIR_REMOTE}",
+        "-e",
+        ssh_cmd,
+        f"{user}@{hostname}:{remote_str}",
+        str(local_path).rstrip("/") + "/",
+    ]
+    logger.debug("Downloading {}@{}:{} to {}", user, hostname, remote_path, local_path)
+    _run_rsync_with_retry(cg, cmd, hostname, "Download", timeout_seconds)
 
 
 def noop_line_sink(_line: str) -> None:
