@@ -234,11 +234,14 @@ def _wait_for_cloud_init_marker(
 
 
 class VpsProvider(BaseProviderInstance):
-    """Provider that runs agents in Docker containers on VPS instances.
+    """Provider that places one agent on each VPS instance (1:1 host:VPS).
 
-    Each host maps to exactly one VPS running exactly one Docker container.
-    The VPS stays running at all times; stop/start operates on the container.
-    Destroying the host destroys both the container and the VPS.
+    The substrate owns the machine (provisioning, boot, destroy); a selected
+    ``HostRealizer`` (``config.isolation``) owns how the agent sits on it. The
+    container realizer (the default) runs the agent in a Docker container on a
+    VPS that stays running, so stop/start acts on the container; the bare
+    realizer runs the agent directly on the VM OS, so stop/start acts on the
+    machine. Destroying the host removes both the placement and the VPS.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -1448,12 +1451,12 @@ class VpsProvider(BaseProviderInstance):
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts and agent references from each VPS, reading agents live.
 
-        For each VPS, reads the host record directly from the docker volume's
-        bind-source path (the per-host btrfs subvolume the volume's
-        ``Options.device`` points at) and reads agent data **live** from the
-        container (so in-container-created agents are discovered). The same
-        live read reports the container's running state, so no separate
-        inspect round-trip is needed.
+        For each VPS the realizer reads the host record and reads agent data
+        **live** from the placement (container realizer: from the docker
+        volume's bind-source path + the running container, so
+        in-container-created agents are discovered; bare realizer: from the
+        plain ``host_dir`` on the VM). The same live read reports the
+        placement's running state, so no separate inspect round-trip is needed.
         """
         with log_span("VPS discover_hosts_and_agents for provider={}", self.name):
             discovery = self._discover_host_records_with_agents()
@@ -1578,22 +1581,22 @@ class VpsProvider(BaseProviderInstance):
     ) -> _VpsDiscoveryData:
         """Read the (single) host record + live agent data from one VPS.
 
-        Each VPS hosts exactly one mngr container (1:1 invariant). We find
-        that container by its host-id label, derive its unified volume name,
-        and read host_state.json from the volume's bind-source path (the
-        per-host btrfs subvolume the volume's ``Options.device`` points at,
-        resolved via ``docker volume inspect --format '{{.Options.device}}'``;
-        the docker-managed ``Mountpoint`` placeholder is never consulted).
+        Each VPS hosts exactly one mngr placement (1:1 invariant). The realizer
+        locates and reads the host record (container realizer: finds the
+        container by its host-id label, derives its unified volume name, and
+        reads host_state.json from the volume's bind-source path -- the per-host
+        btrfs subvolume the volume's ``Options.device`` points at; bare
+        realizer: reads the record straight from the fixed store path).
 
-        Agent data is read **live** from the container's ``host_dir`` via the
-        outer listing script -- not from the persisted ``agents/*.json`` outer
-        store. The outer store is only written by the host-side mngr at
-        agent-create time, so it misses agents created *inside* the container
-        (e.g. by an in-container ``mngr create``); reading live ensures those
-        agents are discoverable by ``mngr message`` and friends. The same call
-        reports the container's running state, avoiding a separate inspect.
+        Agent data is read **live** from the placement's ``host_dir`` -- not
+        from the persisted ``agents/*.json`` outer store. The outer store is
+        only written by the host-side mngr at agent-create time, so it misses
+        agents created *inside* the placement (e.g. by an in-placement ``mngr
+        create``); reading live ensures those agents are discoverable by ``mngr
+        message`` and friends. The same call reports the placement's running
+        state, avoiding a separate inspect.
 
-        If the container does not exist yet (e.g., the VPS is still being set
+        If the placement does not exist yet (e.g., the VPS is still being set
         up by a concurrent ``mngr create``), returns empty results. If outer
         SSH to the VPS fails, fall back to any in-process cached records for
         that VPS so the hosts still appear in the listing (with an offline
