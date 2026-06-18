@@ -11,7 +11,7 @@
 {% endif %}
 {% endset %}
 <Base :title="title"
-      body_class="bg-white text-primary font-sans antialiased"
+      body_class="bg-surface-primary text-primary font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>
     <h1 id="page-heading" class="text-2xl font-semibold text-primary leading-tight">
@@ -36,7 +36,7 @@
             <span>Provisioning share&hellip;</span>
           </div>
           <div id="url-ready" class="hidden">
-            <div class="flex gap-2 items-center bg-zinc-100 border border-default rounded-md px-3 py-2 my-2">
+            <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 my-2">
               <input type="text" id="share-url" readonly
                      class="flex-1 bg-transparent border-0 text-sm text-primary font-mono outline-none"
                      onclick="this.select()">

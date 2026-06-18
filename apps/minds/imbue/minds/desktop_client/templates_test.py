@@ -808,8 +808,8 @@ def test_button_link_renders_anchor_with_href() -> None:
 def test_button_renders_each_variant_class_set() -> None:
     # The five variants should each contribute their own background class.
     variants_to_class = {
-        "primary": "bg-zinc-900",
-        "secondary": "bg-zinc-100",
+        "primary": "bg-surface-inverse",
+        "secondary": "bg-fill-subtle",
         "danger": "bg-red-50",
         "success": "bg-emerald-800",
         "ghost": "bg-transparent",
@@ -1280,7 +1280,7 @@ def test_oauth_button_github_uses_github_label_and_glyph() -> None:
 def test_card_page_default_padding_and_max_width() -> None:
     html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
     # Card surface: bg/border/rounded/shadow + p-10 + max-w-[420px] + w-full.
-    assert "bg-white" in html
+    assert "bg-surface-primary" in html
     assert "rounded-xl" in html
     assert "shadow-sm" in html
     assert "p-10" in html
@@ -1526,7 +1526,7 @@ def test_modal_renders_hidden_overlay_with_default_card() -> None:
     html = CATALOG.render("Modal", id="my-dialog", _content="<p>body</p>")
     assert 'id="my-dialog"' in html
     assert "hidden fixed inset-0 z-50" in html
-    assert "bg-black/30" in html
+    assert "bg-surface-overlay" in html
     assert "<p>body</p>" in html
 
 
@@ -1538,7 +1538,7 @@ def test_modal_card_extra_appends_to_inner_card_classes() -> None:
 
 def test_status_badge_renders_each_variant_class_set() -> None:
     variants_to_class = {
-        "neutral": "bg-zinc-100",
+        "neutral": "bg-fill-subtle",
         "success": "bg-emerald-100",
         "error": "bg-red-100",
         "warn": "bg-amber-100",

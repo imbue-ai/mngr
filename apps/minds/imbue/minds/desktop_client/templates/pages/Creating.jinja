@@ -10,9 +10,9 @@
 {% set _scripts %}
 <script src="/_static/creating.js" defer></script>
 {% endset %}
-{% set _card = "screen mx-auto w-full max-w-[640px] bg-white border border-default rounded-xl shadow-sm p-6" %}
+{% set _card = "screen mx-auto w-full max-w-[640px] bg-surface-primary border border-default rounded-xl shadow-sm p-6" %}
 <Base title="Creating your project..."
-      body_class="bg-white text-primary font-sans antialiased flex items-center justify-center min-h-screen p-6"
+      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-6"
       scripts={{ _scripts }}>
   <main id="onboarding"
         class="w-full"
@@ -94,7 +94,7 @@
           <div class="text-lg font-semibold mb-1.5">Setting up your workspace</div>
           <p id="tip" class="text-[13px] text-secondary min-h-[34px] leading-snug transition-opacity"></p>
         </div>
-        <div class="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+        <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
           <div id="bar-fill" class="h-full w-0 rounded-full bg-blue-600 transition-[width] duration-300 ease-out"></div>
         </div>
       </div>

@@ -23,9 +23,9 @@
 #}
 {%- set _padding_cls = "p-10" if padding == "default" else "p-6" -%}
 <Base title={{ title }}
-      body_class="bg-white text-primary font-sans antialiased flex items-center justify-center min-h-screen p-5"
+      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-5"
       scripts={{ scripts }}>
-  <div class="bg-white border border-default rounded-xl shadow-sm {{ _padding_cls }} {{ max_width }} w-full">
+  <div class="bg-surface-primary border border-default rounded-xl shadow-sm {{ _padding_cls }} {{ max_width }} w-full">
     {{ content }}
   </div>
 </Base>

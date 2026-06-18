@@ -70,7 +70,7 @@
 </script>
 {% endset %}
 <Base title={{ "Settings: " ~ ws_name }}
-      body_class="bg-white text-primary font-sans antialiased"
+      body_class="bg-surface-primary text-primary font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>
     <div id="workspace-settings" data-agent-id="{{ agent_id }}" data-is-stale="{{ 'true' if is_stale else 'false' }}">
@@ -81,7 +81,7 @@
          the title's vertical axis; ``leading-none`` + fixed badge height
          keeps the line box from growing when the badge un-hides (which
          would push the swatches down a couple px). #}
-      <SectionHeader extra="flex items-center gap-2">Workspace Color <span id="color-saving-badge" class="hidden leading-none text-[10px] uppercase tracking-wider font-semibold text-primary bg-white rounded-sm px-1.5 py-1">Saving</span></SectionHeader>
+      <SectionHeader extra="flex items-center gap-2">Workspace Color <span id="color-saving-badge" class="hidden leading-none text-[10px] uppercase tracking-wider font-semibold text-primary bg-surface-primary rounded-sm px-1.5 py-1">Saving</span></SectionHeader>
       <div id="color-section">
         {% if is_stale %}
           <Notice variant="warn">

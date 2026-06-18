@@ -48,6 +48,9 @@
  * mode-locked islands like the styleguide's side-by-side panels. */
 :root,
 .light {
+  /* Tell the UA to render native controls (form fields, scrollbars, autofill,
+     caret) in the matching scheme; without this they stay light in dark mode. */
+  color-scheme: light;
   /* regular text (on the default surface) -- black in light mode */
   --c-text-primary: #000000;
   --c-text-secondary: rgb(0 0 0 / 0.65);
@@ -71,6 +74,7 @@
   --c-fill-active: rgb(0 0 0 / 0.10);
 }
 .dark {
+  color-scheme: dark;
   /* regular text -- white in dark mode */
   --c-text-primary: #ffffff;
   --c-text-secondary: rgb(255 255 255 / 0.70);
@@ -240,7 +244,7 @@ html {
  * rounded-xl.
  */
 .minds-card {
-  background: #ffffff;
+  background: var(--c-surface-primary);
   border: 1px solid var(--c-border-default);
   border-radius: 0.75rem;
 }

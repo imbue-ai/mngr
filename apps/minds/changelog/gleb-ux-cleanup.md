@@ -26,4 +26,10 @@ Added themeable border tokens (next design-system category): `border-subtle` / `
 
 - Retired the v4 border-compat shim: the global default border color now resolves to the `border-default` token, so every bare `border` is themeable without naming a color. Standard borders are now slightly more defined and inputs noticeably so, matching Figma.
 
-Added themeable surface + fill tokens (next category): surfaces `bg-surface-primary` (solid base; white in light, pure black in dark), `bg-surface-inverse` (its mirror -- the neutral accent, pairs with `text-inverse-*` for primary buttons), and `bg-surface-overlay` (the inverse color at 20%, for backdrops); fills `bg-fill-subtle` / `-hover` / `-active` (translucent tints; Figma's `selected` dropped as redundant). Stood up in the styleguide (both modes); call-site migration off `bg-white` / `bg-zinc-*` follows.
+Added themeable surface + fill tokens (next category): surfaces `bg-surface-primary` (solid base; white in light, pure black in dark), `bg-surface-inverse` (its mirror -- the neutral accent, pairs with `text-inverse-*` for primary buttons), and `bg-surface-overlay` (the inverse color at 20%, for backdrops); fills `bg-fill-subtle` / `-hover` / `-active` (translucent tints; Figma's `selected` dropped as redundant).
+
+- Migrated the background call sites: `bg-white` → `bg-surface-primary` (page, cards, inputs), `bg-zinc-100` / `bg-zinc-50` → `bg-fill-subtle`, `hover:bg-zinc-*` → `hover:bg-fill-hover`, modal/drawer scrims (`bg-black/20-30`) → `bg-surface-overlay`. The primary button is now `bg-surface-inverse text-inverse-primary` with an `opacity-90` hover (it flips: black button/white text in light, white/black in dark). On-dark fixed islands (the bg-black floating menus, bg-zinc-900 log boxes, on-dark white tints) are left for the chrome stage.
+
+- Added `color-scheme: light` / `dark` to the theme roots so native controls (form fields, scrollbars, autofill, caret) render in the right scheme.
+
+With surfaces tokenized, dark mode now renders correctly across page/cards/text/borders/buttons. (Light mode is unchanged.)
