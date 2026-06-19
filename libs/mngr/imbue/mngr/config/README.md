@@ -119,13 +119,12 @@ for you (bare value + a `__mngr_merge` entry) on a `settings_overrides` path.
 
 The provision-time fold (`apply_settings_patch`, shared by both plugins) strips a stray
 `__mngr_merge` from the base (a no-op on the floor) and, on a narrowing, reports the exact
-`__mngr_merge` patch to add. That remediation recurses *past* the dict-level short-circuit
-of `narrowing_paths`: a dict that drops a sibling key is suggested as `extend` (so the
-sibling survives) and a replaced list/value as `assign` (so your exact value is kept, not
-silently broadened) -- the full nested patch in one error. Because `__mngr_merge` keys are
-dotted paths, a settings key that contains a *literal* dot (e.g. an MCP server name like
-`my.server`) cannot be targeted: such a directive errors as dangling, and the
-auto-remediation skips it rather than mis-advising.
+`__mngr_merge` patch to add. The remediation reports the full nested patch even where
+`narrowing_paths` stops at the dict level: a dict that drops a sibling key is suggested as
+`extend` (so the sibling survives) and a replaced list/value as `assign`. Because
+`__mngr_merge` keys are dotted paths, a settings key that contains a *literal* dot (e.g. an
+MCP server name like `my.server`) cannot be targeted: such a directive errors as dangling,
+and the auto-remediation skips it rather than mis-advising.
 
 ## Registries (`RegistryField`)
 

@@ -130,7 +130,7 @@ def test_strips_mngr_merge_key_from_base() -> None:
 
 def test_bare_override_narrows_raises() -> None:
     base = {"permissions": {"allow": ["A"]}}
-    with pytest.raises(ConfigParseError, match="narrowing"):
+    with pytest.raises(ConfigParseError, match="Settings narrowing detected"):
         apply_settings_patch(base, {"permissions": {"allow": ["B"]}}, allow_narrowing=False, base_description="home")
 
 
@@ -170,7 +170,7 @@ def test_remediation_skips_keys_containing_a_literal_dot() -> None:
     with pytest.raises(ConfigParseError) as exc_info:
         apply_settings_patch(base, override, allow_narrowing=False, base_description="home")
     message = str(exc_info.value)
-    # The dotted key still shows in the diagnostic, but no __mngr_merge *directive* is emitted
-    # for it (it can't be targeted by a dotted path), so the remediation falls back to generic.
-    assert '"mcpServers' not in message
+    # No directive is emitted for the dotted key (it can't be targeted by a dotted path), so
+    # the remediation falls back to its generic guidance rather than naming the key.
     assert "Declare the affected keys in a top-level" in message
+    assert '"mcpServers.my.server"' not in message

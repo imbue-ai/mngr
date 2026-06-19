@@ -150,15 +150,15 @@ def test_build_isolated_settings_mngr_merge_extends_onto_base() -> None:
 
 
 def test_build_isolated_settings_bare_override_narrows_raises_with_mngr_merge_remediation() -> None:
-    """A bare override replacing a non-empty base list raises the narrowing error, and the
-    remediation is the Claude-compatible ``__mngr_merge`` patch (not the internal suffix). A
-    replaced leaf list is suggested as ``assign`` (keep the user's exact list)."""
+    """A bare override that narrows raises, surfacing the Claude-compatible ``__mngr_merge``
+    remediation through antigravity's fold, never the internal suffix form. (The exact
+    recursive patch is pinned in external_settings_test.)"""
     base = {"permissions": {"allow": ["command(git)"]}}
     overrides = {"permissions": {"allow": ["command(npm)"]}}
     with pytest.raises(ConfigParseError) as exc_info:
         build_isolated_settings(base, overrides, [])
     message = str(exc_info.value)
-    assert '__mngr_merge = {"permissions.allow" = "assign"}' in message
+    assert "__mngr_merge" in message
     assert "allow__extend" not in message
 
 

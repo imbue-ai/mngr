@@ -92,7 +92,7 @@ def _reject_internal_keys(subtree: Any, rel: tuple[str, ...], location: str) -> 
         _reject_internal_keys(value, rel + (key,), location)
 
 
-def _record_settings_mark(marks: dict[tuple[str, ...], str], at: tuple[str, ...], wanted: str, location: str) -> None:
+def _record_mark(marks: dict[tuple[str, ...], str], at: tuple[str, ...], wanted: str, location: str) -> None:
     """Set ``marks[at] = wanted``, raising if it already holds a conflicting suffix."""
     existing = marks.get(at)
     if existing is not None and existing != wanted:
@@ -113,8 +113,8 @@ def _mark_path(marks: dict[tuple[str, ...], str], segments: tuple[str, ...], suf
     ``permissions`` dict replaced, the second needs it merged).
     """
     for index in range(1, len(segments)):
-        _record_settings_mark(marks, segments[:index], EXTEND_SUFFIX, location)
-    _record_settings_mark(marks, segments, suffix, location)
+        _record_mark(marks, segments[:index], EXTEND_SUFFIX, location)
+    _record_mark(marks, segments, suffix, location)
 
 
 def _apply_marks(clean: dict[str, Any], marks: dict[tuple[str, ...], str], rel: tuple[str, ...]) -> dict[str, Any]:
@@ -127,14 +127,14 @@ def _apply_marks(clean: dict[str, Any], marks: dict[tuple[str, ...], str], rel: 
     return result
 
 
-def _path_exists(data: dict[str, Any], segments: tuple[str, ...]) -> bool:
-    """Return True if every segment of ``segments`` is a key reachable through dicts in ``data``."""
+def _walk(data: Any, segments: tuple[str, ...]) -> Any:
+    """Walk ``data`` along ``segments`` through dicts; return ``_MISSING`` if any step is absent."""
     current: Any = data
     for segment in segments:
         if not isinstance(current, dict) or segment not in current:
-            return False
+            return _MISSING
         current = current[segment]
-    return True
+    return current
 
 
 def desugar_settings_overrides(override: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
@@ -171,7 +171,7 @@ def desugar_settings_overrides(override: dict[str, Any], path: tuple[str, ...]) 
         segments = tuple(dotted.split("."))
         if "" in segments:
             raise ConfigParseError(f'`{MNGR_MERGE_KEY}` in {location} has a malformed key path "{dotted}".')
-        if not _path_exists(clean, segments):
+        if _walk(clean, segments) is _MISSING:
             raise ConfigParseError(
                 f'`{MNGR_MERGE_KEY}` in {location} targets "{dotted}", but that key is not set there. '
                 f"Set the value under `settings_overrides` (the `__mngr_merge` map only annotates how "
@@ -184,16 +184,6 @@ def desugar_settings_overrides(override: dict[str, Any], path: tuple[str, ...]) 
 # =============================================================================
 # Provision-time fold + the __mngr_merge narrowing remediation
 # =============================================================================
-
-
-def _walk(data: Any, segments: tuple[str, ...]) -> Any:
-    """Walk ``data`` along ``segments`` through dicts; return ``_MISSING`` if any step is absent."""
-    current: Any = data
-    for segment in segments:
-        if not isinstance(current, dict) or segment not in current:
-            return _MISSING
-        current = current[segment]
-    return current
 
 
 def _remediation_directives(base: Any, override: Any, prefix: str) -> dict[str, str]:

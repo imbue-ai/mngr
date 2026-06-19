@@ -47,6 +47,8 @@ from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
 from imbue.overlay.operators import ASSIGN_SUFFIX
 from imbue.overlay.operators import EXTEND_SUFFIX
+from imbue.overlay.operators import assign_bare_key
+from imbue.overlay.operators import bare_key
 from imbue.overlay.operators import is_assign_key
 from imbue.overlay.operators import is_extend_key
 from imbue.overlay.operators import parse_scalar_value
@@ -551,11 +553,11 @@ def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) ->
     last_segment = key.split(".")[-1]
     if is_extend_key(last_segment):
         # ``... .field__extend`` is the same operation as ``mngr config extend``.
-        _config_merge_op_impl(ctx, key[: -len(EXTEND_SUFFIX)], value, op="extend", **kwargs)
+        _config_merge_op_impl(ctx, bare_key(key), value, op="extend", **kwargs)
         return
     if is_assign_key(last_segment):
         # ``... .field__assign`` is the same operation as ``mngr config assign``.
-        _config_merge_op_impl(ctx, key[: -len(ASSIGN_SUFFIX)], value, op="assign", **kwargs)
+        _config_merge_op_impl(ctx, assign_bare_key(key), value, op="assign", **kwargs)
         return
 
     mngr_ctx, output_opts, opts = setup_command_context(
@@ -622,6 +624,7 @@ def _config_merge_op_impl(ctx: click.Context, key: str, value: str, *, op: str, 
     doc = load_config_file_tomlkit(config_path)
     parsed_value = parse_scalar_value(value)
     key_segments = tuple(key.split("."))
+    # len > 3: there is a sub-key under settings_overrides for the __mngr_merge map to target.
     if is_settings_overrides_path(key_segments) and len(key_segments) > 3:
         set_nested_value(doc, key, parsed_value)
         merge_path = f"{'.'.join(key_segments[:3])}.{MNGR_MERGE_KEY}"

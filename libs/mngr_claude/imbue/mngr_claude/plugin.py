@@ -558,25 +558,14 @@ def _build_settings_json(
 ) -> str:
     """Build settings.json content for per-agent config dirs.
 
-    Builds the provision base ``B`` (home settings.json or generated defaults +
-    context flags + mngr's own hooks), normalizes it (so a stray ``__extend`` in
-    a user's home settings.json degrades to a plain key), then folds the user's
-    ``settings_overrides`` patch onto ``B`` with config-consistent semantics:
+    Builds the provision base ``B`` (home settings.json or generated defaults + context
+    flags + mngr's own hooks), then folds the user's ``settings_overrides`` patch onto it
+    via ``apply_settings_patch`` (see that function for the fold semantics and the narrowing
+    guard, gated by ``allow_narrowing``).
 
-    - a bare key assigns (replacing the base value), and the narrowing guard
-      hard-errors when the assignment would drop a non-empty aggregate sibling
-      from the base unless ``allow_narrowing`` is set (or the override is a
-      ``key__assign`` key or a ``Static*`` value, both of which suppress it);
-    - a ``key__extend`` merges onto the base value (list concat / set union /
-      recursive dict merge), with nested ``__extend`` markers merging deeper.
-
-    The hooks land in the config-dir ``settings.json`` (the "user" layer Claude
-    reads from ``$CLAUDE_CONFIG_DIR``) rather than a managed ``--settings`` file,
-    so a user's own ``--settings`` passes through and Claude layers it natively.
-
-    The fold runs on the typed-node algebra, whose ``finalize`` is total -- it
-    collapses every node into a plain value, so no marker can survive the fold by
-    construction (no post-hoc marker assertion is needed).
+    The hooks land in the config-dir ``settings.json`` (the "user" layer Claude reads from
+    ``$CLAUDE_CONFIG_DIR``) rather than a managed ``--settings`` file, so a user's own
+    ``--settings`` passes through and Claude layers it natively.
     """
     source = source_claude_dir / "settings.json"
     if sync_local and source.exists():

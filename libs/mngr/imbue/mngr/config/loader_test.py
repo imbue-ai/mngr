@@ -2393,7 +2393,7 @@ def test_load_config_narrowing_raises_on_settings_overrides_bare_drop(
     with pytest.raises(ConfigParseError) as exc_info:
         load_config(pm=pm, concurrency_group=cg)
     message = str(exc_info.value)
-    assert "narrowing" in message
+    assert "Settings narrowing detected" in message
     assert "agent_types.my_claude.settings_overrides.permissions" in message
 
 
