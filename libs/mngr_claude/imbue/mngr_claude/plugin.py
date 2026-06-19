@@ -333,11 +333,6 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "ignored for remote agents. When False (and local), other sync/override/auto-dismiss fields on this "
         "config are silently ignored.",
     )
-    # TODO: remove `use_env_config_dir` (and resolve_isolate_local_config_dir's
-    # reconciliation, the deprecation warning in on_before_provisioning, and the
-    # fallback in _claude_items_to_preserve_for_discovered_agent) once all configs
-    # that still set it -- notably the forever-claude-template's .mngr/settings.toml
-    # -- have migrated to `isolate_local_config_dir`.
     use_env_config_dir: bool | None = Field(
         default=None,
         description="DEPRECATED: the old name for the inverse of isolate_local_config_dir; set "
@@ -365,8 +360,6 @@ class ClaudeAgentConfig(AgentTypeConfig):
         contradictory and raises. The deprecation warning is emitted separately (once,
         at provisioning time) rather than here, since this is called on every access.
         """
-        # TODO: once `use_env_config_dir` is removed, delete this method and read
-        # `self.isolate_local_config_dir` directly at the call sites.
         if self.use_env_config_dir is None:
             return self.isolate_local_config_dir
         if "isolate_local_config_dir" in self.model_fields_set and (
@@ -2401,8 +2394,6 @@ class ClaudeAgent(
         """
         config = self.agent_config
 
-        # TODO: remove this deprecation warning + the resolve() call below once
-        # `use_env_config_dir` is removed from ClaudeAgentConfig.
         if config.use_env_config_dir is not None:
             logger.warning(
                 "The claude `use_env_config_dir` config option is deprecated; set `isolate_local_config_dir` "
@@ -2751,8 +2742,6 @@ def _claude_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list
     # ``isolate_local_config_dir`` (default True -> isolated). An agent record
     # that set neither key -- or one created before either existed -- is treated
     # as isolated, so its per-agent ``projects/`` is preserved.
-    # TODO: drop the use_env_config_dir branch once the deprecated key is removed
-    # (agent records will then only ever carry isolate_local_config_dir).
     legacy_use_env = agent_config.get("use_env_config_dir")
     if legacy_use_env is not None:
         is_shared_config = bool(legacy_use_env)
