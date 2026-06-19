@@ -76,9 +76,9 @@ in sync:
 
 | Class | Role |
 |---|---|
-| `.minds-card` | Card surface (bg-white, border-zinc-200, rounded-xl). Match `Card.jinja`. |
-| `.spinner` / `.spinner-accent` | Animated circular spinner. Match `Spinner.jinja`. |
-| `.code-pill` | Inline `<code>` pill (zinc-100 bg, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
+| `.minds-card` | Card surface (bg-surface-primary, border-default, rounded-xl). Match `Card.jinja`. |
+| `.spinner` / `.spinner-accent` | Animated circular spinner (token-driven ring/top; `-accent` uses the accent token). Match `Spinner.jinja`. |
+| `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing project rows + Destroying. |
 | `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by `sidebar.js` / `chrome.js`. Not an app.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a JS selector hook + `is-current` / `is-stale` state marker; it has no app.css styling.) |
 | `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger` | Accent-aware titlebar foreground utilities. Read `--titlebar-fg` with varying alpha for the title / nav-icon / hover-tint hierarchy; `-danger` keeps the destructive red hover regardless of accent. |
