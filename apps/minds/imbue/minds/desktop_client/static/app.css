@@ -198,53 +198,31 @@ html {
 }
 
 /*
- * Titlebar foreground tokens. ``--titlebar-bg`` and ``--titlebar-fg`` are
- * set by chrome.js on the document root whenever a workspace is active
- * (or cleared back to defaults when none is): ``--titlebar-bg`` is the
- * full-width chrome bar color (a ``#rrggbb`` from the workspace's
- * stored ``color`` label, served via the SSE workspaces payload) and
- * ``--titlebar-fg`` is the contrasting foreground as a space-separated
- * RGB triple ("0 0 0" for dark text on light bars, "255 255 255" for
- * white text on dark bars), computed server-side via WCAG luminance.
- * Consumers use the ``.titlebar-*`` utility classes below rather than
- * referencing the variables directly so the alpha levels stay
- * consistent across the chrome.
+ * Titlebar self-theming. The bar is painted with the per-workspace color
+ * (--titlebar-bg, set on the document root by chrome.js). The
+ * ``.titlebar-surface`` class -- toggled onto #minds-titlebar by chrome.js only
+ * while a workspace accent is active -- derives a black-or-white contrast base
+ * from that color entirely in CSS (relative color: lch lightness clamped to
+ * 0/100 via the ``* infinity`` trick) and re-bases the foreground token VALUES
+ * (--c-*) on it. Every titlebar element that uses normal tokens (text-secondary,
+ * hover:bg-fill-hover, ...) then reads correctly on any workspace color -- no JS
+ * luminance, no server calc. Neutral chrome (no accent, hence no class) just
+ * inherits the app's own tokens.
  *
- * The fallbacks below are the *neutral* (workspace-less) chrome: a pure
- * white bar (set in Chrome.jinja) with dark "0 0 0" foreground. They
- * take over whenever chrome.js clears the variables -- i.e. on any
- * non-workspace minds screen (Home, Create, accounts, ...). A workspace
- * (or a workspace-scoped settings / sharing screen) overrides both.
- *
- * Why an RGB triple, not a full color: ``rgb(var(--titlebar-fg) / 0.55)``
- * lets every consumer dial in its own alpha for the visual hierarchy
- * (title bold, icons mid, hover tints low) off a single source of truth.
+ * Requires relative-color syntax (Chromium 119+, which the Electron shell far
+ * exceeds). The fixed-dark close-button hover stays red regardless of accent.
  */
-.titlebar-title {
-  color: rgb(var(--titlebar-fg, 0 0 0) / 0.9);
+.titlebar-surface {
+  --_contrast: lch(from var(--titlebar-bg) calc((49.44 - l) * infinity) 0 0);
+  --c-text-primary: rgb(from var(--_contrast) r g b / 0.95);
+  --c-text-secondary: rgb(from var(--_contrast) r g b / 0.6);
+  --c-text-tertiary: rgb(from var(--_contrast) r g b / 0.42);
+  --c-fill-hover: rgb(from var(--_contrast) r g b / 0.08);
+  --c-fill-active: rgb(from var(--_contrast) r g b / 0.14);
 }
-.titlebar-btn {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: rgb(var(--titlebar-fg, 0 0 0) / 0.55);
-  transition: color 100ms, background-color 100ms;
-}
-.titlebar-btn:hover {
-  color: rgb(var(--titlebar-fg, 0 0 0) / 0.95);
-  background-color: rgb(var(--titlebar-fg, 0 0 0) / 0.06);
-}
-.titlebar-btn:active {
-  background-color: rgb(var(--titlebar-fg, 0 0 0) / 0.10);
-}
-/* Close-button hover overrides the accent-aware tint with a destructive
- * red regardless of the active workspace color. */
 .titlebar-btn-danger:hover {
   color: #ffffff;
-  background-color: #dc2626; /* red-600 */
+  background-color: var(--c-important);
 }
 
 /*

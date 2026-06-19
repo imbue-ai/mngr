@@ -163,9 +163,17 @@
       if (!w || !w.id) return;
       accentByAgentId[w.id] = {
         accent: typeof w.accent === 'string' ? w.accent : null,
-        fg: typeof w.accent_fg === 'string' ? w.accent_fg : null,
       };
     });
+  }
+
+  // Toggle the titlebar's self-theming scope. ``.titlebar-surface`` re-bases the
+  // foreground tokens off --titlebar-bg in pure CSS (see app.css); it must be
+  // present only while a workspace accent is set, so neutral chrome falls back
+  // to the app's own tokens (correct in both light and dark).
+  function setTitlebarSurface(on) {
+    var tb = document.getElementById('minds-titlebar');
+    if (tb) tb.classList.toggle('titlebar-surface', !!on);
   }
 
   function applyTitleAccent(agentId) {
@@ -173,7 +181,7 @@
     if (!agentId) {
       document.documentElement.style.removeProperty('--workspace-accent');
       document.documentElement.style.removeProperty('--titlebar-bg');
-      document.documentElement.style.removeProperty('--titlebar-fg');
+      setTitlebarSurface(false);
       return;
     }
     var cached = accentByAgentId[agentId];
@@ -186,9 +194,7 @@
     }
     document.documentElement.style.setProperty('--workspace-accent', cached.accent);
     document.documentElement.style.setProperty('--titlebar-bg', cached.accent);
-    if (cached.fg) {
-      document.documentElement.style.setProperty('--titlebar-fg', cached.fg);
-    }
+    setTitlebarSurface(true);
   }
   // Update the "displayed workspace" tracker and trigger the recovery
   // redirect when warranted. Called from the displayed-workspace sources
@@ -487,9 +493,7 @@
           lastRequestedAccentAgentId = null;
           document.documentElement.style.setProperty('--workspace-accent', data.accent);
           document.documentElement.style.setProperty('--titlebar-bg', data.accent);
-          if (data.accent_fg) {
-            document.documentElement.style.setProperty('--titlebar-fg', data.accent_fg);
-          }
+          setTitlebarSurface(true);
         }
         return;
       }
@@ -517,7 +521,6 @@
         if (data.agent_id && data.accent) {
           accentByAgentId[data.agent_id] = {
             accent: data.accent,
-            fg: typeof data.accent_fg === 'string' ? data.accent_fg : null,
           };
           applyTitleAccent(data.agent_id);
         }

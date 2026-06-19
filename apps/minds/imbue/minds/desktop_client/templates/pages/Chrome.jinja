@@ -35,17 +35,17 @@
 {% endset %}
 {# Body background tracks --titlebar-bg so the iframe's rounded top corners
    (browser mode) and the chromeView's extension strip (Electron mode) both
-   reveal accent color through the curve. Falls back to pure white -- the
-   neutral, workspace-less chrome -- when no workspace is active (the
-   light-mode default; dark-mode pure black is a deferred follow-up). #}
+   reveal accent color through the curve. Falls back to the neutral app
+   surface (surface-primary -- white in light, black in dark) when no
+   workspace is active. #}
 <Base title="Minds"
       body_class="font-sans antialiased"
-      body_style="background-color: var(--titlebar-bg, #ffffff);"
+      body_style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
       head={{ _head }}
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
   <div id="minds-titlebar"
-       style="background-color: var(--titlebar-bg, #ffffff);"
+       style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
        class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1 {% if is_mac %}pl-[76px]{% endif %}">
     <div class="flex gap-0.5">
       <TitlebarButton id="sidebar-toggle" title="Projects"><Icon24 name="menu" /></TitlebarButton>
@@ -54,7 +54,7 @@
       <TitlebarButton id="forward-btn" title="Forward"><Icon24 name="forward" /></TitlebarButton>
     </div>
     <div class="flex-1 flex items-center justify-center px-2 min-w-0">
-      <span id="page-title" class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
+      <span id="page-title" class="text-primary text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
     </div>
     <TitlebarButton id="requests-toggle" title="Requests" extra="relative">
       <Icon24 name="messages" />

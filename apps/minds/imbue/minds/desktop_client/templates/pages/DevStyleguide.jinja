@@ -525,19 +525,17 @@
         each example.
       </p>
 
-      {# Titlebar buttons. Demo container paints the full-width accent
-         bar with the default workspace color (#0b292b, the palette's
-         "confusion" entry) and sets --titlebar-fg to the WCAG-luminance
-         contrast pick pick_workspace_foreground makes for that hex
-         ("255 255 255" -- white text on the dark bar), so the page
-         title + nav-button glyphs render against the bar exactly as
-         they do in Chrome.jinja. #}
+      {# Titlebar buttons (self-theming). Each bar sets only --titlebar-bg (a
+         workspace color); the .titlebar-surface scope derives the black/white
+         foreground from it in pure CSS (lch relative color), so the same
+         TitlebarButton glyphs + page title read correctly on a dark workspace
+         color and a light one alike -- exactly as chrome.js paints them. #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons</div>
-        <div class="rounded-lg overflow-hidden border border-zinc-200"
-             style="--titlebar-bg: #0b292b; --titlebar-fg: 255 255 255;">
-          <div class="h-[38px] flex items-center select-none px-1"
-               style="background-color: var(--titlebar-bg);">
+        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons (self-theming)</div>
+        <div class="flex flex-col gap-2">
+          {% for _bg in ['#0b292b', '#cecd0c'] %}
+          <div class="titlebar-surface rounded-lg overflow-hidden border border-zinc-200 h-[38px] flex items-center select-none px-1"
+               style="--titlebar-bg: {{ _bg }}; background-color: var(--titlebar-bg);">
             <div class="flex gap-0.5">
               <TitlebarButton title="Projects"><Icon24 name="menu" /></TitlebarButton>
               <TitlebarButton title="Home"><Icon24 name="home" /></TitlebarButton>
@@ -545,22 +543,24 @@
               <TitlebarButton title="Forward"><Icon24 name="forward" /></TitlebarButton>
             </div>
             <div class="flex-1 flex items-center justify-center px-2 min-w-0">
-              <span class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
+              <span class="text-primary text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
             </div>
             <TitlebarButton title="Requests" extra="relative"><Icon24 name="messages" /></TitlebarButton>
           </div>
+          {% endfor %}
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav") + .titlebar-title (app.css)</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- contrast derived from --titlebar-bg via lch</div>
       </div>
 
       {# Notification badge #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Notification badge</div>
-        <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
+        <div class="titlebar-surface rounded-lg overflow-hidden border border-zinc-200"
+             style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
           <div class="h-[38px] flex items-center justify-end px-1">
             <TitlebarButton title="Requests" extra="relative">
               <Icon24 name="messages" />
-              <span class="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500"></span>
+              <span class="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-important"></span>
             </TitlebarButton>
           </div>
         </div>
@@ -570,7 +570,8 @@
       {# Window controls (only rendered on non-mac in real chrome) #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Window controls</div>
-        <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
+        <div class="titlebar-surface rounded-lg overflow-hidden border border-zinc-200"
+             style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
           <div class="h-[38px] flex items-center justify-end">
             <TitlebarButton variant="control" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
             <TitlebarButton variant="control" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>

@@ -414,11 +414,12 @@ def test_render_chrome_page_titlebar_background_follows_titlebar_bg_var() -> Non
     assert "var(--titlebar-bg" in html
 
 
-def test_render_chrome_page_page_title_uses_titlebar_title_class() -> None:
-    # ``.titlebar-title`` reads ``--titlebar-fg`` so the page-title text
-    # flips between dark and light depending on the accent's lightness.
+def test_render_chrome_page_page_title_uses_text_primary_token() -> None:
+    # The page title is a plain ``text-primary`` token; the ``.titlebar-surface``
+    # scope re-bases that token off --titlebar-bg, so the title flips
+    # black/white with the accent's lightness (in pure CSS).
     html = render_chrome_page()
-    assert 'id="page-title" class="titlebar-title' in html
+    assert 'id="page-title" class="text-primary' in html
 
 
 def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
@@ -902,13 +903,14 @@ def test_color_swatch_unselected_and_small_and_disabled() -> None:
 
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
-    # nav variant => w-8 h-7 rounded-md, default tone => the .titlebar-btn
-    # class (defined in app.css) carries the accent-aware color +
-    # hover + active rules.
+    # nav variant => w-8 h-7 rounded-md, default tone => plain foreground
+    # tokens (text-secondary + hover:text-primary + hover:bg-fill-hover),
+    # re-based per-workspace by the .titlebar-surface scope in app.css.
     assert "w-8" in html
     assert "h-7" in html
     assert "rounded-md" in html
-    assert "titlebar-btn" in html
+    assert "text-secondary" in html
+    assert "hover:bg-fill-hover" in html
     # The danger tone modifier should NOT be present on the default tone.
     assert "titlebar-btn-danger" not in html
     # Window-control geometry should NOT bleed into nav
@@ -927,8 +929,8 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
     html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
     # ``.titlebar-btn-danger`` (in app.css) supplies the red hover.
     assert "titlebar-btn-danger" in html
-    # Base ``.titlebar-btn`` still applies (geometry + base colors).
-    assert "titlebar-btn " in html
+    # The shared foreground tokens still apply (base colors + geometry).
+    assert "text-secondary" in html
 
 
 # -- Workspace palette + WCAG contrast picker ----------------------------
@@ -1113,15 +1115,15 @@ def test_pick_unused_create_color_is_case_insensitive() -> None:
     assert pick_unused_create_color(used) == WORKSPACE_PALETTE["courage"]
 
 
-def test_tokens_css_defines_titlebar_utility_classes() -> None:
-    """Drift guard: the chrome HTML emits these class names; app.css must
-    define them, otherwise the bar paints with no foreground hierarchy."""
+def test_app_css_defines_titlebar_self_theming() -> None:
+    """Drift guard: the titlebar self-themes via the ``.titlebar-surface``
+    scope, which re-bases the foreground tokens off --titlebar-bg in pure CSS
+    (lch relative color). app.css must define it (+ the red close hover)."""
     css = _TOKENS_CSS_PATH.read_text()
-    assert ".titlebar-title" in css
-    assert ".titlebar-btn" in css
+    assert ".titlebar-surface" in css
     assert ".titlebar-btn-danger" in css
-    # All of them read --titlebar-fg with an alpha for hierarchy.
-    assert "var(--titlebar-fg" in css
+    # The contrast base is derived from --titlebar-bg via relative color.
+    assert "lch(from var(--titlebar-bg)" in css
 
 
 def test_tokens_css_drops_page_workspace_top_stripe() -> None:
