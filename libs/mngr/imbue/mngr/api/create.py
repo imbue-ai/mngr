@@ -7,6 +7,7 @@ from typing import cast
 
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
@@ -353,7 +354,18 @@ def create(
                 with log_span("Calling on_before_provisioning hooks"):
                     mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
                 with log_span("Provisioning agent {}", agent.name):
-                    host.provision_agent(agent, agent_options, mngr_ctx)
+                    try:
+                        host.provision_agent(agent, agent_options, mngr_ctx)
+                    except ConcurrencyExceptionGroup as group:
+                        # provision_agent runs its body inside a concurrency group, which
+                        # re-raises any body exception wrapped in a ConcurrencyExceptionGroup
+                        # (and flattens a nested group's single leaf up to this level). Surface
+                        # a single expected error -- e.g. a settings-narrowing ConfigParseError
+                        # raised while building settings.json -- cleanly rather than as an
+                        # "Unexpected error" with a full traceback.
+                        if group.only_exception_is_instance_of(MngrError):
+                            raise group.get_only_exception() from group
+                        raise
                 with log_span("Calling on_after_provisioning hooks"):
                     mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 

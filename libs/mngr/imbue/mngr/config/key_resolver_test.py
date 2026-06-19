@@ -1,4 +1,12 @@
-"""Unit tests for the shared assign-vs-extend resolver."""
+"""Unit tests for the model-aware ``resolve_extends`` resolver.
+
+The pure, model-free merge algebra (operator helpers, the typed-node ``lift`` /
+``merge`` / ``finalize`` engine, ``apply_extend`` / ``would_assignment_narrow``, and
+the ``Static*`` markers) is tested in ``imbue.overlay``. These tests cover what stays
+in mngr: resolving
+``__extend`` against a parsed ``MngrConfig`` (walking pydantic models,
+``CommandDefaults`` / ``CreateTemplate`` wrappers) and the deferred-path carveouts.
+"""
 
 from typing import Any
 
@@ -10,62 +18,9 @@ from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
-from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
-from imbue.mngr.config.key_resolver import bare_key
-from imbue.mngr.config.key_resolver import is_extend_key
-from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
-
-# =============================================================================
-# is_extend_key / bare_key
-# =============================================================================
-
-
-def test_is_extend_key_recognises_suffix() -> None:
-    assert is_extend_key("cli_args__extend")
-    assert is_extend_key("a__extend")
-
-
-def test_is_extend_key_rejects_bare_suffix() -> None:
-    """A bare ``__extend`` (no preceding field name) is not a valid extend key."""
-    assert not is_extend_key(EXTEND_SUFFIX)
-
-
-def test_is_extend_key_rejects_plain_field() -> None:
-    assert not is_extend_key("cli_args")
-    assert not is_extend_key("")
-
-
-def test_bare_key_strips_suffix() -> None:
-    assert bare_key("cli_args__extend") == "cli_args"
-    assert bare_key("a__extend") == "a"
-
-
-# =============================================================================
-# parse_scalar_value
-# =============================================================================
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("true", True),
-        ("false", False),
-        ("42", 42),
-        ("3.14", 3.14),
-        ('"quoted"', "quoted"),
-        ("[1, 2, 3]", [1, 2, 3]),
-        ('{"k": "v"}', {"k": "v"}),
-        ("not_json", "not_json"),
-        ("", ""),
-    ],
-)
-def test_parse_scalar_value(raw: str, expected: Any) -> None:
-    """JSON-parses first, falls back to the raw string when not valid JSON."""
-    assert parse_scalar_value(raw) == expected
-
 
 # =============================================================================
 # resolve_extends -- list/tuple aggregate
@@ -121,6 +76,100 @@ def test_resolve_extends_shallow_merges_dict_field() -> None:
 
 
 # =============================================================================
+# resolve_extends -- recursive __extend (nested markers)
+# =============================================================================
+
+
+def test_apply_extend_recurses_into_nested_extend_marker() -> None:
+    """A nested ``key__extend`` inside an ``__extend`` value extends the
+    corresponding sub-value of the base rather than replacing it.
+
+    Against a base ``{permissions: {defaultMode: D, allow: [old]}}``, the patch
+    ``permissions__extend = {allow__extend: [X]}`` must preserve ``defaultMode``
+    and concatenate ``allow`` -> ``{defaultMode: D, allow: [old, X]}``.
+    """
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    resolved = resolve_extends(
+        base,
+        {"permissions__extend": {"allow__extend": ["X"]}},
+    )
+    assert resolved == {"permissions": {"defaultMode": "acceptEdits", "allow": ["old", "X"]}}
+
+
+def test_apply_extend_nested_bare_key_replaces_sub_value_preserving_siblings() -> None:
+    """A nested *bare* key inside an ``__extend`` value assigns (replaces) that
+    sub-value while preserving sibling keys of the extended dict.
+
+    Against a base ``{permissions: {defaultMode: D, allow: [old]}}``, the patch
+    ``permissions__extend = {allow: [X]}`` replaces ``allow`` (bare = assign)
+    but keeps ``defaultMode`` -> ``{defaultMode: D, allow: [X]}``.
+    """
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    resolved = resolve_extends(
+        base,
+        {"permissions__extend": {"allow": ["X"]}},
+    )
+    assert resolved == {"permissions": {"defaultMode": "acceptEdits", "allow": ["X"]}}
+
+
+def test_apply_extend_backcompat_no_nested_extend_unchanged() -> None:
+    """Back-compat invariant: an ``__extend`` value with NO nested ``__extend``
+    markers produces the same result as the old shallow ``{**current, **value}``.
+
+    The recursive change must only add meaning for nested ``__extend`` markers;
+    a value of only bare nested keys merges shallowly (bare = replace at that
+    level, siblings preserved), identical to the pre-recursion operator.
+    """
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    patch = {"permissions__extend": {"allow": ["X"], "deny": ["Y"]}}
+    resolved = resolve_extends(base, patch)
+    # Old shallow behavior: {**{defaultMode, allow:[old]}, **{allow:[X], deny:[Y]}}
+    expected = {"permissions": {"defaultMode": "acceptEdits", "allow": ["X"], "deny": ["Y"]}}
+    assert resolved == expected
+
+
+def test_apply_extend_recurses_three_levels_deep() -> None:
+    """A three-level nest of ``__extend`` markers extends at the deepest level
+    while preserving siblings at every intermediate level."""
+    base: dict[str, Any] = {
+        "a": {
+            "keepA": 1,
+            "b": {
+                "keepB": 2,
+                "c": [1],
+            },
+        }
+    }
+    resolved = resolve_extends(
+        base,
+        {"a__extend": {"b__extend": {"c__extend": [2, 3]}}},
+    )
+    assert resolved == {
+        "a": {
+            "keepA": 1,
+            "b": {
+                "keepB": 2,
+                "c": [1, 2, 3],
+            },
+        }
+    }
+
+
+def test_apply_extend_nested_bare_dict_resolves_markers_against_empty() -> None:
+    """A nested *bare* dict value that itself contains an ``__extend`` marker is
+    resolved against an empty base (extend-against-nothing = assign), so no
+    marker survives in the assigned sub-value."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits"}}
+    resolved = resolve_extends(
+        base,
+        # ``permissions`` is bare (assign), so it replaces the whole sub-dict;
+        # its nested ``allow__extend`` resolves against nothing -> bare ``allow``.
+        {"permissions": {"allow__extend": ["X"]}},
+    )
+    assert resolved == {"permissions": {"allow": ["X"]}}
+
+
+# =============================================================================
 # resolve_extends -- error cases
 # =============================================================================
 
@@ -143,11 +192,32 @@ def test_resolve_extends_rejects_scalar_for_unset_list_field() -> None:
     """__extend with a scalar value on an unset field still raises (must be aggregate).
 
     Use a raw dict base where the target path is absent so that the resolver
-    reaches the ``current_value is None`` branch in _apply_extend.
+    reaches the ``current_value is None`` branch in apply_extend.
     """
     base: dict[str, Any] = {}
     with pytest.raises(ConfigParseError, match="requires a list, tuple, dict, or set value"):
         resolve_extends(base, {"new_field__extend": "not-a-list"})
+
+
+def test_resolve_extends_rejects_bare_plus_assign_conflict() -> None:
+    """A field with both a bare key and its ``__assign`` twin in the same layer
+    raises ConfigParseError (translated from the overlay conflict check)."""
+    base = MngrConfig(prefix="base-")
+    with pytest.raises(ConfigParseError, match="Conflicting assignment"):
+        resolve_extends(base, {"prefix": "a", "prefix__assign": "b"})
+
+
+def test_resolve_extends_translates_overlay_error_to_config_parse_error() -> None:
+    """A structural error from the overlay algebra surfaces as ``ConfigParseError``,
+    not a bare ``OverlayError``.
+
+    ``ConfigParseError`` is a ``ClickException`` (via ``MngrError``), so the top-level
+    CLI handler renders it as a clean ``Error: ...`` message; a bare ``OverlayError``
+    would escape as an unexpected-error traceback.
+    """
+    base = MngrConfig(prefix="base-")
+    with pytest.raises(ConfigParseError):
+        resolve_extends(base, {"prefix__extend": "oops"})
 
 
 # =============================================================================
@@ -255,7 +325,7 @@ def test_resolve_extends_does_not_preserve_extend_outside_create_templates() -> 
     only. An ``<opt>__extend`` against a ``None`` base elsewhere
     (``commands.<name>.<opt>__extend`` here) still flows through ``_apply_extend``,
     which treats ``current_value=None`` as assign-via-extend and collapses to a
-    bare key. Locks in the depth/scope guard in ``_is_create_template_option_path``.
+    bare key. Locks in the depth/scope guard in ``is_deferred_extend_path``.
     """
     base = MngrConfig()
     resolved = resolve_extends(
@@ -263,3 +333,100 @@ def test_resolve_extends_does_not_preserve_extend_outside_create_templates() -> 
         {"commands": {"create": {"env__extend": ["X=1"]}}},
     )
     assert resolved == {"commands": {"create": {"env": ["X=1"]}}}
+
+
+def test_resolve_extends_preserves_extend_inside_settings_overrides() -> None:
+    """An ``<key>__extend`` anywhere under ``agent_types.<name>.settings_overrides``
+    whose base lookup yields ``None`` is preserved verbatim through config-load,
+    destined for the provision-time fold against the concrete settings base ``B``.
+
+    ``settings_overrides`` is schemaless, so the base lookup is ``None``; without
+    the deferred-path carveout the marker would collapse to a bare assign at
+    config-load instead of merging onto the home settings.json at provision.
+    """
+    base = MngrConfig()
+    resolved = resolve_extends(
+        base,
+        {
+            "agent_types": {
+                "my_claude": {"settings_overrides": {"permissions__extend": {"allow__extend": ["Bash(npm *)"]}}}
+            }
+        },
+    )
+    assert resolved == {
+        "agent_types": {
+            "my_claude": {"settings_overrides": {"permissions__extend": {"allow__extend": ["Bash(npm *)"]}}}
+        }
+    }
+
+
+def test_resolve_extends_preserves_deep_extend_inside_settings_overrides() -> None:
+    """The settings_overrides carveout is a *prefix* match: a marker nested several
+    levels deep under settings_overrides is also preserved, not just a top-level one.
+    """
+    base = MngrConfig()
+    override = {"agent_types": {"my_claude": {"settings_overrides": {"hooks": {"SessionStart__extend": [{"x": 1}]}}}}}
+    resolved = resolve_extends(base, override)
+    assert resolved == override
+
+
+def test_resolve_extends_preserves_assign_inside_settings_overrides() -> None:
+    """A ``<key>__assign`` under ``settings_overrides`` whose base lookup yields
+    ``None`` is preserved verbatim (not collapsed to bare), so the no-warn intent
+    survives to the provision-time fold, where it suppresses the narrowing guard.
+    Contrast ``create_templates`` (below), whose consumer reads only ``__extend``.
+    """
+    base = MngrConfig()
+    override = {"agent_types": {"my_claude": {"settings_overrides": {"permissions__assign": {"allow": ["X"]}}}}}
+    resolved = resolve_extends(base, override)
+    assert resolved == override
+
+
+def test_resolve_extends_preserves_assign_inside_settings_overrides_when_base_set() -> None:
+    """A deferred ``__assign`` is preserved verbatim even when the base *already* has a
+    value at that key -- which is exactly when a cross-scope narrowing could fire. If the
+    suffix collapsed to bare here, a higher scope's ``permissions__assign`` over a lower
+    scope's ``permissions`` would be flagged as narrowing despite the explicit opt-out.
+    """
+    base = {
+        "agent_types": {
+            "my_claude": {"settings_overrides": {"permissions": {"allow": ["A"], "defaultMode": "acceptEdits"}}}
+        }
+    }
+    override = {"agent_types": {"my_claude": {"settings_overrides": {"permissions__assign": {"allow": ["B"]}}}}}
+    resolved = resolve_extends(base, override)
+    assert resolved == override
+
+
+def test_resolve_extends_collapses_assign_inside_create_templates() -> None:
+    """``create_templates`` is excluded from deferred-``__assign`` preservation: its
+    consumer (``apply_create_template``) reads only ``__extend``, so a ``__assign``
+    there collapses to a bare key at config-load as before."""
+    base = MngrConfig()
+    override = {"create_templates": {"tmpl": {"env__assign": {"A": "1"}}}}
+    resolved = resolve_extends(base, override)
+    assert resolved == {"create_templates": {"tmpl": {"env": {"A": "1"}}}}
+
+
+# =============================================================================
+# resolve_extends -- __assign operator (collapses to bare; no narrowing tracking)
+# =============================================================================
+
+
+def test_resolve_extends_assign_key_assigns_like_bare() -> None:
+    """``resolve_extends`` collapses ``key__assign`` to the bare field name (it does
+    no narrowing tracking, so the suffix has no other effect there)."""
+    base = MngrConfig(unset_vars=["OLD"])
+    resolved = resolve_extends(base, {"unset_vars__assign": ["NEW"]})
+    assert resolved == {"unset_vars": ["NEW"]}
+
+
+def test_resolve_extends_assign_then_extend_resets_then_adds() -> None:
+    base = MngrConfig(unset_vars=["OLD"])
+    resolved = resolve_extends(base, {"unset_vars__assign": [], "unset_vars__extend": ["A"]})
+    assert resolved == {"unset_vars": ["A"]}
+
+
+def test_resolve_extends_bare_plus_assign_same_key_raises() -> None:
+    with pytest.raises(ConfigParseError, match="Conflicting assignment"):
+        resolve_extends(MngrConfig(), {"unset_vars": [], "unset_vars__assign": []})

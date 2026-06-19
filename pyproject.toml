@@ -21,6 +21,7 @@ exclude-newer = "2026-06-04T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
+overlay = { workspace = true }
 
 [tool.uv.workspace]
 members = ["libs/*", "apps/*"]
@@ -71,6 +72,7 @@ addopts = [
   "--cov=imbue.mngr",
   "--cov=imbue.imbue_common",
   "--cov=imbue.resource_guards",
+  "--cov=imbue.overlay",
   "--cov=imbue.mngr_claude",
   "--cov=imbue.mngr_claude_subagent_proxy",
   "--cov=imbue.mngr_opencode",

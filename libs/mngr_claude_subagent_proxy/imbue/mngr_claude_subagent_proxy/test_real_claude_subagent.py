@@ -439,6 +439,31 @@ def _agent_settings_local_json(agent_name: str, work_dir: Path) -> str:
         return f"<read failed for {settings}: {e}>"
 
 
+def _agent_managed_settings_json(agent_id: str, host_dir: Path) -> str:
+    """Return the contents of the agent's mngr-managed settings file or '<missing>'.
+
+    In normal mode mngr's own hooks (readiness + subagent-proxy) live in the
+    per-agent config-dir ``settings.json`` (the "user" layer Claude reads from
+    $CLAUDE_CONFIG_DIR), not in the project's settings.local.json. That file is
+    what the rest of this module calls the "mngr-managed settings file".
+    """
+    settings = host_dir / "agents" / agent_id / "plugin" / "claude" / "anthropic" / "settings.json"
+    if not settings.is_file():
+        return f"<config-dir settings.json missing for {agent_id} at {settings}>"
+    try:
+        return settings.read_text(errors="replace")
+    except OSError as e:
+        return f"<read failed for {settings}: {e}>"
+
+
+def _resolve_agent_id(mngr: _MngrSubprocess, agent_name: str) -> str | None:
+    """Return the agent id for ``agent_name`` from ``mngr list``, or None if absent."""
+    return next(
+        (a.get("id") for a in mngr.list_agents() if a.get("name") == agent_name and isinstance(a.get("id"), str)),
+        None,
+    )
+
+
 def _diagnose_subagent_proxy_failure(
     mngr: _MngrSubprocess,
     parent_name: str,
@@ -451,7 +476,7 @@ def _diagnose_subagent_proxy_failure(
     the parent agent failed to reach WAITING/END_OF_TURN after the
     subagent finished. Captures:
     - whether ``mngr list`` itself works (and its stderr if it doesn't).
-    - the parent's settings.local.json (does it have PreToolUse:Agent?).
+    - the parent's mngr-managed settings file (does it have PreToolUse:Agent?).
     - the tail of the parent's transcript (did Claude actually call Task?).
 
     Best-effort: this helper is only ever invoked on the failure path, so
@@ -470,13 +495,24 @@ def _diagnose_subagent_proxy_failure(
     except (subprocess.TimeoutExpired, OSError) as e:
         parts.append(f"mngr list failed to run: {e!r}")
 
-    settings_text = _agent_settings_local_json(parent_name, parent_work_dir)
-    has_pretooluse_agent = '"matcher": "Agent"' in settings_text or '"matcher":"Agent"' in settings_text
-    parts.append(f"settings.local.json has PreToolUse:Agent matcher: {has_pretooluse_agent}")
-    parts.append("settings.local.json (truncated to 4000 chars):")
-    parts.append(settings_text[:4000])
-
     parent = next((a for a in mngr.list_agents() if a.get("name") == parent_name), None)
+
+    # mngr's proxy hooks live in the per-agent config-dir settings.json (the
+    # "user" layer Claude reads from $CLAUDE_CONFIG_DIR), not the project's
+    # settings.local.json.
+    parent_id = parent.get("id") if isinstance(parent, dict) else None
+    if isinstance(parent_id, str):
+        managed_text = _agent_managed_settings_json(parent_id, host_dir)
+    else:
+        managed_text = f"<parent {parent_name} not found in mngr list; cannot locate config-dir settings.json>"
+    has_pretooluse_agent = '"matcher": "Agent"' in managed_text or '"matcher":"Agent"' in managed_text
+    parts.append(f"config-dir settings.json has PreToolUse:Agent matcher: {has_pretooluse_agent}")
+    parts.append("config-dir settings.json (truncated to 4000 chars):")
+    parts.append(managed_text[:4000])
+    # settings.local.json should now contain only user hooks (if any).
+    parts.append("settings.local.json (truncated to 2000 chars):")
+    parts.append(_agent_settings_local_json(parent_name, parent_work_dir)[:2000])
+
     if parent is not None:
         transcript = _agent_transcript_text(parent, host_dir)
         has_task = '"name":"Task"' in transcript or '"name": "Task"' in transcript
@@ -957,8 +993,9 @@ def test_deny_mode_intercepts_task_with_deny_reason(
 
     End-to-end verification that:
     1. With ``[plugins.claude_subagent_proxy] mode = "DENY"`` in the user's
-       settings.toml, the provisioned parent agent's
-       ``.claude/settings.local.json`` has the PreToolUse:Agent deny
+       settings.toml, the provisioned parent agent's mngr-managed settings
+       file (the per-agent config-dir ``settings.json`` Claude reads from
+       ``$CLAUDE_CONFIG_DIR``) has the PreToolUse:Agent deny
        hook plus the shared SessionStart reaper (the same label-driven
        ``hooks/reap.py`` PROXY uses), and crucially does NOT have the
        PROXY-only spawn / cleanup hooks.
@@ -994,28 +1031,33 @@ def test_deny_mode_intercepts_task_with_deny_reason(
             f"stderr:\n{create_result.stderr}\nstdout:\n{create_result.stdout}"
         )
 
-        # Provisioning checks: settings.local.json must have the deny hook
-        # plus the shared SessionStart reaper, and crucially must NOT have
-        # the PROXY-only spawn / cleanup hooks. We check immediately after
-        # create so the state is not racing with anything Claude does.
-        settings_text = _agent_settings_local_json(parent_name, _source_repo)
+        # Provisioning checks: the mngr-managed settings file must have the deny
+        # hook plus the shared SessionStart reaper, and crucially must NOT
+        # have the PROXY-only spawn / cleanup hooks. mngr's hooks live in the
+        # per-agent config-dir settings.json (the "user" layer Claude reads from
+        # $CLAUDE_CONFIG_DIR), not the project settings.local.json. We check
+        # immediately after create so the state is not racing with anything
+        # Claude does.
+        parent_id = _resolve_agent_id(mngr, parent_name)
+        assert parent_id is not None, f"Parent agent {parent_name} not found in `mngr list` after create."
+        settings_text = _agent_managed_settings_json(parent_id, temp_host_dir)
         assert "imbue.mngr_claude_subagent_proxy.hooks.deny" in settings_text, (
-            f"Parent's settings.local.json does NOT contain the deny hook command. "
+            f"Parent's mngr-managed settings file does NOT contain the deny hook command. "
             f"This means deny mode did not take effect at provisioning time. "
-            f"settings.local.json:\n{settings_text}"
+            f"mngr-managed settings:\n{settings_text}"
         )
         assert "imbue.mngr_claude_subagent_proxy.hooks.reap" in settings_text, (
-            f"Parent's settings.local.json does NOT contain the shared SessionStart "
+            f"Parent's mngr-managed settings file does NOT contain the shared SessionStart "
             f"reaper command. DENY mode installs the same label-driven hooks/reap.py "
             f"PROXY uses (commit 97d04090a); its absence means deny-mode provisioning "
-            f"is not picking up the shared reaper. settings.local.json:\n{settings_text}"
+            f"is not picking up the shared reaper. mngr-managed settings:\n{settings_text}"
         )
         assert "imbue.mngr_claude_subagent_proxy.hooks.spawn" not in settings_text, (
-            f"Parent's settings.local.json STILL contains the spawn hook -- "
-            f"deny mode should replace, not add. settings.local.json:\n{settings_text}"
+            f"Parent's mngr-managed settings file STILL contains the spawn hook -- "
+            f"deny mode should replace, not add. mngr-managed settings:\n{settings_text}"
         )
         assert "imbue.mngr_claude_subagent_proxy.hooks.cleanup" not in settings_text, (
-            "Parent's settings.local.json STILL contains the cleanup hook in deny mode."
+            "Parent's mngr-managed settings file STILL contains the cleanup hook in deny mode."
         )
 
         # mngr-proxy/proxy.md is the Haiku dispatcher; deny mode does not need it.
@@ -1127,8 +1169,9 @@ def test_deny_mode_settings_file_is_minimal_compared_to_proxy_mode(
     _skip_if_no_real_claude: None,
     _mngr_subprocess_env_deny_mode: _MngrSubprocess,
     _source_repo: Path,
+    temp_host_dir: Path,
 ) -> None:
-    """The settings.local.json hooks dict in deny mode is strictly smaller than in proxy mode.
+    """The mngr-managed settings hooks dict in deny mode is strictly smaller than in proxy mode.
 
     Specifically: deny mode installs exactly two subagent_proxy hook
     commands -- the PreToolUse:Agent deny hook and the shared
@@ -1151,9 +1194,13 @@ def test_deny_mode_settings_file_is_minimal_compared_to_proxy_mode(
         )
         assert create_result.returncode == 0
 
-        settings_path = _source_repo / ".claude" / "settings.local.json"
-        assert settings_path.is_file(), f"Provisioning did not write {settings_path}"
-        settings = json.loads(settings_path.read_text())
+        parent_id = _resolve_agent_id(mngr, parent_name)
+        assert parent_id is not None, f"Parent agent {parent_name} not found in `mngr list` after create."
+        managed_text = _agent_managed_settings_json(parent_id, temp_host_dir)
+        assert not managed_text.startswith("<"), (
+            f"Provisioning did not write the mngr-managed settings file: {managed_text}"
+        )
+        settings = json.loads(managed_text)
         hooks = settings.get("hooks", {})
         assert isinstance(hooks, dict)
 

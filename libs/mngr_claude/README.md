@@ -19,9 +19,26 @@ When enabled:
 
 - `$CLAUDE_CONFIG_DIR` must be set in the parent shell; mngr errors out otherwise.
 - Only local hosts are supported.
-- mngr uses your config dir as-is and does not modify it; you just need to be
-  logged in to Claude.
-- Other sync/override/auto-dismiss fields are ignored in this mode.
+- mngr never writes to the user's Claude config (no trust additions, no dialog
+  dismissal, no per-agent settings.json, no keychain provisioning). The user is
+  responsible for one-time interactive `claude` setup (trust the work_dir,
+  complete onboarding, log in).
+- The repo-settings sync and auto-dismiss fields (`sync_repo_settings`,
+  `override_settings_folder`, `auto_dismiss_dialogs`) are silently ignored since
+  shared mode has no per-agent dir to write into.
+- Reduced settings support (a scoped, documented limitation of this mode). In
+  normal mode mngr bakes its hooks and `settings_overrides` into the per-agent
+  config-dir `settings.json`, and a user `--settings` passes through so Claude
+  layers it natively. With no per-agent config dir here, instead:
+  - mngr writes its hooks **and** the resolved `settings_overrides` patch into the
+    managed `claude --settings` file, which Claude layers (highest precedence) over
+    the user's shared config. The fold's base is mngr's hooks, not the shared config
+    (Claude layers that itself), so narrowing here only guards against an override
+    dropping mngr's hooks.
+  - a user-supplied `--settings` (in `cli_args`/`agent_args`) is **rejected** at
+    provision: mngr already uses `--settings` here and can't reliably merge a second
+    one (its value may be inline JSON, not a file). Put those settings in
+    `settings_overrides`, or set `use_env_config_dir=False`.
 
 ## Version pinning and auto-updates
 

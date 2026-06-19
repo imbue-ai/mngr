@@ -27,9 +27,6 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
-from imbue.mngr.config.key_resolver import is_extend_key
-from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.pre_readers import get_local_config_path
@@ -47,6 +44,10 @@ from imbue.mngr.utils.model_schema import walk_model_fields
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
+from imbue.overlay.errors import OverlayError
+from imbue.overlay.operators import EXTEND_SUFFIX
+from imbue.overlay.operators import is_extend_key
+from imbue.overlay.operators import parse_scalar_value
 
 
 class ConfigCliOptions(CommonCliOptions):
@@ -532,7 +533,7 @@ def _emit_key_not_found(key: str, output_opts: OutputOptions) -> None:
 def config_set(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
     try:
         _config_set_impl(ctx, key, value, **kwargs)
-    except ConfigParseError as e:
+    except (OverlayError, ConfigParseError) as e:
         logger.error("Invalid configuration: {}", e)
         ctx.exit(1)
     except AbortError as e:
@@ -638,7 +639,7 @@ def config_extend(ctx: click.Context, key: str, value: str, **kwargs: Any) -> No
     """Write a ``key__extend`` entry that appends to / merges with the base."""
     try:
         _config_extend_impl(ctx, key, value, **kwargs)
-    except ConfigParseError as e:
+    except (OverlayError, ConfigParseError) as e:
         logger.error("Invalid configuration: {}", e)
         ctx.exit(1)
     except AbortError as e:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import shlex
-from collections.abc import Mapping
 from enum import auto
 from pathlib import Path
 from typing import Annotated
@@ -14,7 +13,6 @@ from uuid import uuid4
 
 import pluggy
 from pydantic import AfterValidator
-from pydantic import BaseModel
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
 from pydantic import field_validator
@@ -25,6 +23,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.field_markers import RegistryField
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -38,6 +38,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.overlay.markers import ScalarTuple
 
 USER_ID_FILENAME: Final[str] = "user_id"
 
@@ -54,46 +55,6 @@ _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 # === Helper Functions ===
 
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
-
-
-class ScalarTuple(tuple):
-    """Marker tuple subclass for a tuple-typed field whose value is semantically a
-    single scalar: replacing it from a higher-precedence settings layer is scalar
-    replacement, not aggregate narrowing.
-
-    The settings-narrowing guard (``_check_narrowing`` / ``would_assignment_narrow``)
-    normally flags a higher-precedence layer that drops entries from a non-empty
-    list/tuple set by a lower layer. For some fields that additive intent never
-    applies -- the value is a coherent whole a higher layer means to *replace*.
-    Marking such a field's parsed value ``ScalarTuple`` exempts it from that check.
-
-    Two cases produce the marker: a tuple field written as a single string in TOML
-    (``StringDerivedTuple``, a subclass), and a field declared with ``ScalarStrTuple``
-    that is always replace-by-default regardless of how it is written (e.g. an AWS
-    provider's ``allowed_ssh_cidrs`` -- combining CIDRs across config layers is never
-    the intent).
-
-    The marker is applied by ``model_validate`` (via the ``ScalarStrTuple``
-    after-validator) or by the loader's string-splitting path. It survives
-    ``model_construct`` (which bypasses validation) but is intentionally not
-    preserved through ``model_dump`` / merges. That is enough because narrowing
-    detection always compares a freshly-parsed layer (which retains the marker)
-    against the already-merged base.
-    """
-
-
-class StringDerivedTuple(ScalarTuple):
-    """Marker for a tuple value originally provided as a single string in user
-    settings.
-
-    Some tuple-typed fields (most notably ``cli_args``) accept either a list/tuple
-    or a single string in TOML. When the user writes a string, the natural unit is
-    the whole string -- so a higher-precedence layer that replaces one string with
-    another is scalar replacement, not aggregate narrowing. A specialization of
-    ``ScalarTuple`` (it inherits the narrowing exemption); this subclass exists so
-    the loader can mark *only* the string-shaped writes of fields that otherwise
-    merge additively.
-    """
 
 
 def _coerce_to_scalar_tuple(value: tuple[str, ...]) -> ScalarTuple:
@@ -129,215 +90,6 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     lexer.whitespace_split = True
     lexer.commenters = ""
     return tuple(lexer)
-
-
-def _assign_scalar(base_value: Any, override_value: Any) -> Any:
-    """Return ``override_value`` when it is not None; otherwise fall back to ``base_value``.
-
-    Used inside ``MngrConfig.merge_with`` to express the "override wins if
-    explicitly set" rule for scalar fields without duplicating the conditional
-    at every call site.
-    """
-    return override_value if override_value is not None else base_value
-
-
-def _merge_container_dict(
-    base: dict[Any, Any],
-    override: dict[Any, Any],
-) -> dict[Any, Any]:
-    """Per-key additive merge for the top-level container dicts on ``MngrConfig``.
-
-    Keys present in only one side are preserved. Keys present in both are
-    merged via the value's ``merge_with`` method. This is the explicit
-    carveout from the otherwise assign-by-default rule.
-    """
-    merged: dict[Any, Any] = {}
-    for key in set(base.keys()) | set(override.keys()):
-        if key in base and key in override:
-            merged[key] = base[key].merge_with(override[key])
-        elif key in override:
-            merged[key] = override[key]
-        else:
-            merged[key] = base[key]
-    return merged
-
-
-# The top-level container dicts on ``MngrConfig`` whose merge is per-key
-# (instead of assign-by-default). Listed here in one place so narrowing
-# detection can recurse into each entry rather than treating the dict as a
-# single aggregate to flag.
-_CONTAINER_DICT_FIELDS: Final[frozenset[str]] = frozenset(
-    {"agent_types", "providers", "plugins", "commands", "create_templates"}
-)
-
-
-def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
-    """Return True if assigning ``override_value`` over ``base_value`` would
-    drop at least one base entry (a missing list/set element, a missing dict
-    key, or an explicit empty aggregate over a non-empty base).
-
-    Mirrors the leaf-level rule used by ``detect_settings_narrowing`` so the
-    settings-layer merge guard and the template-application guard agree on what
-    counts as narrowing. Same exemptions: no-ops (override equals base) and
-    supersets (every base entry survives, e.g. the materialised result of an
-    ``__extend`` operation) return ``False``. Against a list/tuple base, a
-    ``ScalarTuple`` override is also exempt -- it represents scalar replacement
-    of the whole value (a string-shaped TOML value, or a field declared
-    replace-by-default like ``allowed_ssh_cidrs``), not aggregate narrowing.
-    Scalars and empty/non-aggregate bases never narrow.
-    """
-    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
-        return False
-    if isinstance(base_value, (list, tuple)):
-        # Mirror the ScalarTuple exemption in ``_check_narrowing`` so the
-        # template-application guard agrees with the settings-layer guard.
-        if isinstance(override_value, ScalarTuple):
-            return False
-        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
-            return False
-        return True
-    if isinstance(base_value, (set, frozenset)):
-        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
-            return False
-        return True
-    # base_value is a non-empty dict
-    if not isinstance(override_value, dict):
-        return True
-    if any(key not in override_value for key in base_value):
-        return True
-    return any(would_assignment_narrow(sub_base, override_value[key]) for key, sub_base in base_value.items())
-
-
-def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
-    """Return dotted paths where ``override`` would silently drop entries from
-    a non-empty aggregate value in ``base`` (``list``, ``tuple``, ``dict``,
-    ``set``, ``frozenset``).
-
-    Used by the loader to surface accidental data loss when the new
-    assign-by-default merge semantics replace a previous additive merge. The
-    check is recursive: container dicts (``agent_types``, ``providers``,
-    ``plugins``, ``commands``, ``create_templates``) traverse per key so only
-    the actually-narrowing sub-fields are flagged. Sub-models recurse by
-    their own ``model_fields_set`` so untouched fields are ignored.
-
-    "Narrowing" is defined as the override losing at least one base entry --
-    a missing list/set element, a missing dict key, or an explicit empty
-    aggregate over a non-empty base. No-ops (override equals base) and
-    supersets (every base entry survives, e.g. an ``__extend`` result) pass
-    without flagging. Against a list/tuple base, a ``ScalarTuple`` override is
-    also exempt: a string-shaped TOML value (e.g. ``cli_args = "..."``) or a
-    field declared replace-by-default (e.g. ``allowed_ssh_cidrs``) is a coherent
-    single value, so a higher-precedence layer that replaces it expresses scalar
-    replacement rather than aggregate narrowing. Value mutations at a shared dict
-    key recurse instead of flagging at the parent.
-
-    Layers that didn't write the field (override value is ``None``, since
-    ``parse_config`` defaults missing fields to ``None``) are skipped by
-    ``_walk_for_narrowing`` so an unrelated layer's omission never counts
-    as a narrowing assignment.
-
-    Returns dotted paths like ``commands.create.defaults.env``. The list is
-    empty when there are no narrowing assignments.
-    """
-    violations: list[str] = []
-    _walk_for_narrowing(base, override, path=(), violations=violations)
-    return violations
-
-
-def _walk_for_narrowing(
-    base: Any,
-    override: Any,
-    path: tuple[str, ...],
-    violations: list[str],
-) -> None:
-    if isinstance(override, BaseModel):
-        explicitly_set = override.model_fields_set
-        for field_name in override.__class__.model_fields:
-            if field_name not in explicitly_set:
-                continue
-            override_value = getattr(override, field_name)
-            # ``None`` mirrors the ``if override.<field> is not None`` test used
-            # throughout MngrConfig.merge_with: parse_config sets every kwarg
-            # (often to ``None``) so model_fields_set alone over-reports which
-            # fields the layer actually touched. A ``None`` value means the
-            # layer did not write the field, so it cannot narrow anything.
-            if override_value is None:
-                continue
-            base_value = getattr(base, field_name, None) if isinstance(base, BaseModel) else None
-            sub_path = path + (field_name,)
-            if field_name in _CONTAINER_DICT_FIELDS:
-                # Per-key recurse for container dicts (agent_types, etc.)
-                _walk_for_narrowing(base_value, override_value, sub_path, violations)
-                continue
-            _check_narrowing(base_value, override_value, sub_path, violations)
-        return
-    if isinstance(override, Mapping):
-        # Container dict (e.g. ``commands``) -- recurse per key against
-        # whatever the base has at that key. Keys present only in override
-        # are pure additions and never narrow.
-        for key, sub_override in override.items():
-            sub_base = base.get(key) if isinstance(base, Mapping) else None
-            if sub_base is None:
-                continue
-            _walk_for_narrowing(sub_base, sub_override, path + (str(key),), violations)
-
-
-def _check_narrowing(
-    base_value: Any,
-    override_value: Any,
-    path: tuple[str, ...],
-    violations: list[str],
-) -> None:
-    """Check a single field for narrowing, recursing into nested aggregates.
-
-    Sub-models recurse into their explicitly-set fields; aggregates check
-    whether every base entry survives in the override. For dicts the check
-    is two-pass: missing keys are flagged at this level (the dict has been
-    truncated), while shared keys recurse so a value mutation inside a
-    nested aggregate surfaces at the deeper path rather than at the parent.
-
-    Clearing a non-empty aggregate (``env = []`` over ``env = ["X=5"]``) is
-    treated as narrowing too: it drops every prior entry, which is the most
-    extreme form of data loss the safety net is meant to catch. To clear,
-    the user must set ``allow_settings_key_assignment_narrowing = true``.
-    Against a non-empty list/tuple base, three forms of override pass without
-    warning: no-ops (override equals base), supersets (every base entry
-    survives, e.g. ``__extend`` results or additive assigns that happen to
-    include every prior value), and ``ScalarTuple`` overrides (a string-shaped
-    TOML value such as ``cli_args = "..."``, or a replace-by-default field such
-    as ``allowed_ssh_cidrs``, is a coherent single value, so replacing it is
-    scalar replacement rather than aggregate narrowing).
-    """
-    if isinstance(base_value, BaseModel) and isinstance(override_value, BaseModel):
-        _walk_for_narrowing(base_value, override_value, path, violations)
-        return
-    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
-        return
-    if isinstance(base_value, (list, tuple)):
-        # Scalar replacement intent: the override is either a string-derived value
-        # (e.g. ``cli_args = "..."`` in TOML) or a replace-by-default field (e.g.
-        # ``allowed_ssh_cidrs``); either way the whole value is replaced as a
-        # coherent unit, not narrowed as a list.
-        if isinstance(override_value, ScalarTuple):
-            return
-        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
-            return
-        violations.append(".".join(path))
-        return
-    if isinstance(base_value, (set, frozenset)):
-        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
-            return
-        violations.append(".".join(path))
-        return
-    # base_value is a non-empty dict
-    if not isinstance(override_value, dict):
-        violations.append(".".join(path))
-        return
-    if any(key not in override_value for key in base_value):
-        violations.append(".".join(path))
-        return
-    for key, sub_base in base_value.items():
-        _check_narrowing(sub_base, override_value[key], path + (str(key),), violations)
 
 
 # === Enums ===
@@ -454,33 +206,6 @@ class AgentTypeConfig(FrozenModel):
             return split_cli_args_string(value) if value else ()
         return tuple(value)
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
-
-        Uses model_fields_set to determine which fields were explicitly set in
-        the override config, so that subclass-specific fields (e.g., ClaudeAgentConfig's
-        auto_dismiss_dialogs) are correctly preserved during merges.
-
-        All aggregate fields flip to assign-by-default: a list/tuple/dict/set
-        value in the override replaces the base value entirely. Use the
-        ``field__extend`` operator in TOML / ``--setting`` / env vars to get
-        additive behavior.
-        """
-        # Allow override to be the same class or a base class of self (e.g., when
-        # a secondary config file defines the same custom type without repeating
-        # parent_type, it gets parsed as the base AgentTypeConfig). Reject
-        # sibling subclasses (e.g., ClaudeAgentConfig vs CodexAgentConfig).
-        if not isinstance(self, type(override)):
-            raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with {type(override).__name__}")
-
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-
-        override_values = override.model_dump()
-        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
-        return self.model_copy_update(*updates)
-
 
 class ProviderInstanceConfig(FrozenModel):
     """Defines a custom provider instance."""
@@ -508,37 +233,6 @@ class ProviderInstanceConfig(FrozenModel):
         "Overrides the global default_min_online_host_age_seconds when set.",
     )
 
-    def merge_with(self, override: "ProviderInstanceConfig") -> "ProviderInstanceConfig":
-        """Merge this config with an override config.
-
-        Uses ``model_fields_set`` so an override only replaces the fields it
-        actually set; fields the override left untouched keep the base value.
-        This matches ``AgentTypeConfig`` / ``PluginConfig`` and is what keeps a
-        higher-precedence layer that touches a single field (e.g. a create
-        template's ``--setting providers.<name>.is_enabled=true``) from
-        silently resetting every other provider field -- like
-        ``is_run_as_root`` -- back to its model default. Relying on
-        "override wins unless its value is None" was wrong here: a field whose
-        default is a non-None value (a ``bool`` default of ``False``, an empty
-        tuple, ...) would clobber the base even when the override never set it.
-
-        Aggregate fields still flip to assign-by-default: a list / dict / set
-        the override explicitly sets replaces the base value rather than
-        appending. Use the ``field__extend`` operator for additive behavior.
-        """
-        if not isinstance(override, self.__class__):
-            raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with different provider config type")
-
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-        base_values = self.model_dump()
-        override_values = override.model_dump()
-        merged_values: dict[str, Any] = dict(base_values)
-        for field_name in explicitly_set:
-            merged_values[field_name] = override_values[field_name]
-        return self.__class__(**merged_values)
-
 
 class PluginConfig(FrozenModel):
     """Base configuration for a plugin."""
@@ -547,19 +241,6 @@ class PluginConfig(FrozenModel):
         default=True,
         description="Whether this plugin is enabled",
     )
-
-    def merge_with(self, override: "PluginConfig") -> "PluginConfig":
-        """Merge this config with an override config.
-
-        Uses ``model_fields_set`` so plugin subclasses that add extra fields
-        get correct assign-by-default semantics on those fields too.
-        """
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-        override_values = override.model_dump()
-        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
-        return self.model_copy_update(*updates)
 
 
 class CommandDefaults(FrozenModel):
@@ -580,24 +261,6 @@ class CommandDefaults(FrozenModel):
         description="Default subcommand when this group is invoked with no recognized command. "
         "Empty string disables defaulting (shows help instead).",
     )
-
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
-
-        Uses ``model_fields_set`` so a layer that touches only
-        ``default_subcommand`` (without writing any per-param defaults) leaves
-        the base's ``defaults`` intact. When the override does touch
-        ``defaults``, assign-by-default applies — the whole map replaces. Use
-        ``defaults__extend = { ... }`` to opt into key-merge.
-        """
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-        merged_defaults = override.defaults if "defaults" in explicitly_set else self.defaults
-        merged_default_subcommand = (
-            override.default_subcommand if "default_subcommand" in explicitly_set else self.default_subcommand
-        )
-        return self.__class__(defaults=merged_defaults, default_subcommand=merged_default_subcommand)
 
 
 class CreateTemplateName(str):
@@ -638,20 +301,6 @@ class CreateTemplate(FrozenModel):
         description="Map of parameter name to value for create command options",
     )
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this template with an override template.
-
-        Uses ``model_fields_set`` so a layer that doesn't touch ``options``
-        leaves the base intact. When the override does touch ``options``,
-        assign-by-default applies — the whole map replaces. Use
-        ``options__extend`` to opt into key-merge.
-        """
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-        merged_options = override.options if "options" in explicitly_set else self.options
-        return self.__class__(options=merged_options)
-
 
 class RetryConfig(FrozenModel):
     """Configuration for connection retry behavior.
@@ -669,22 +318,6 @@ class RetryConfig(FrozenModel):
         default="5s",
         description="Delay between connection retries (e.g., '5s', '1m')",
     )
-
-    def merge_with(self, override: "RetryConfig") -> "RetryConfig":
-        """Merge this config with an override config.
-
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
-        """
-        return RetryConfig(
-            connect_retry_times=override.connect_retry_times
-            if override.connect_retry_times is not None
-            else self.connect_retry_times,
-            connect_retry_delay=override.connect_retry_delay
-            if override.connect_retry_delay is not None
-            else self.connect_retry_delay,
-        )
 
 
 class TmuxConfig(FrozenModel):
@@ -768,15 +401,15 @@ class MngrConfig(FrozenModel):
         default_factory=list,
         description="List of enabled provider backends. If empty, all backends are enabled. If non-empty, only the listed backends are enabled.",
     )
-    agent_types: dict[AgentTypeName, AgentTypeConfig] = Field(
+    agent_types: Annotated[dict[AgentTypeName, AgentTypeConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Custom agent type definitions",
     )
-    providers: dict[ProviderInstanceName, ProviderInstanceConfig] = Field(
+    providers: Annotated[dict[ProviderInstanceName, ProviderInstanceConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Custom provider instance definitions",
     )
-    plugins: dict[PluginName, PluginConfig] = Field(
+    plugins: Annotated[dict[PluginName, PluginConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Plugin configurations",
     )
@@ -784,11 +417,11 @@ class MngrConfig(FrozenModel):
         default_factory=frozenset,
         description="Set of plugin names that were explicitly disabled (used to filter backends)",
     )
-    commands: dict[str, CommandDefaults] = Field(
+    commands: Annotated[dict[str, CommandDefaults], RegistryField()] = Field(
         default_factory=dict,
         description="Default values for CLI command parameters (e.g., 'commands.create')",
     )
-    create_templates: dict[CreateTemplateName, CreateTemplate] = Field(
+    create_templates: Annotated[dict[CreateTemplateName, CreateTemplate], RegistryField()] = Field(
         default_factory=dict,
         description="Named templates for the create command (e.g., 'create_templates.modal-dev')",
     )
@@ -857,17 +490,19 @@ class MngrConfig(FrozenModel):
         description="Max seconds to wait for an agent to signal readiness before sending messages. "
         "Hook-based polling returns early; this is an upper bound, not an unconditional delay.",
     )
+    # Consider removing this global flag entirely: the per-key `__assign` suffix now gives a
+    # targeted opt-out from the narrowing guard, which may make a blanket escape hatch
+    # unnecessary. (The once-planned flip of this default to True is no longer planned.)
     allow_settings_key_assignment_narrowing: bool = Field(
         default=False,
         description=(
             "When False (the default), it is an error for a higher-precedence settings layer "
             "(project local, env vars, --setting, etc.) to assign over a non-empty list/tuple/"
             "dict/set value coming from a lower-precedence layer. This guards against silently "
-            "losing entries when a settings file is loaded with the new assign-by-default merge "
-            "behavior; the user is told to either use the __extend suffix to opt into the prior "
-            "additive behavior or to set this field to True. The default for this field is "
-            "expected to change to True in a future version, and support for False may be "
-            "removed entirely once the migration is complete."
+            "losing entries when a settings file is loaded with the assign-by-default merge "
+            "behavior; the user is told to use the __extend suffix to keep the additive behavior, "
+            "the __assign suffix to replace a specific key without this error, or to set this "
+            "field to True to allow assign-by-default narrowing globally."
         ),
     )
 
@@ -879,89 +514,30 @@ class MngrConfig(FrozenModel):
         """
         return f"{self.prefix}{agent_name}"
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
+    def merge_with(self, override: Self) -> tuple[Self, list[str]]:
+        """Merge this config with an override config (the loader's whole-config merge),
+        returning the merged config and every narrowing path the overlay merge surfaced.
 
-        Assign-by-default for every aggregate field (list, tuple, dict,
-        frozenset). The override's value replaces the base value entirely
-        when explicitly set (non-None / non-empty). Use the ``__extend``
-        suffix on the override's TOML key (or ``--setting`` / env var) to
-        get additive behavior — that resolution happens before merge_with
-        is invoked.
+        Assign-by-default for aggregate fields; the top-level container dicts
+        (``agent_types``, ``providers``, ``plugins``, ``commands``, ``create_templates``)
+        merge per-key, and ``SettingsPatchField`` fields accumulate. Computed via the
+        overlay pipeline, behavior-identical to the old field-by-field merge; see
+        ``config/README.md`` for the scheme.
 
-        Carveout: the top-level *container* dicts (``agent_types``,
-        ``providers``, ``plugins``, ``commands``, ``create_templates``)
-        keep their per-key additive merge — adding ``[agent_types.foo]``
-        at one scope does not drop another scope's ``[agent_types.bar]``.
-        For keys that appear in both, the sub-class's ``merge_with`` is
-        invoked, where leaf fields again use assign-by-default.
+        The narrowings are the single config-load narrowing detector: cross-scope
+        bare-drops of a non-empty aggregate by a higher-precedence layer -- both ordinary
+        assign-by-default field drops (e.g. ``agent_types.<name>.cli_args``,
+        ``commands.create.defaults.env``) and ``SettingsPatchField`` drops *inside* an
+        accumulating settings patch (e.g. ``agent_types.<name>.settings_overrides.<key>...``).
+        ``Static*`` atomic aggregates are exempt via the override-side re-marking. The loader
+        routes the whole list into its flag-gated narrowing aggregation; callers that only
+        need the merged value drop the second element explicitly.
         """
-        merged_agent_types = _merge_container_dict(self.agent_types, override.agent_types)
-        merged_providers = _merge_container_dict(self.providers, override.providers)
-        merged_plugins = _merge_container_dict(self.plugins, override.plugins)
-        merged_commands = _merge_container_dict(self.commands, override.commands)
-        merged_create_templates = _merge_container_dict(self.create_templates, override.create_templates)
-
-        merged_retry = self.retry.merge_with(override.retry) if override.retry is not None else self.retry
-        merged_logging = self.logging.merge_with(override.logging) if override.logging is not None else self.logging
-        merged_tmux = self.tmux.merge_with(override.tmux) if override.tmux is not None else self.tmux
-
-        return self.__class__(
-            prefix=_assign_scalar(self.prefix, override.prefix),
-            default_host_dir=_assign_scalar(self.default_host_dir, override.default_host_dir),
-            pager=_assign_scalar(self.pager, override.pager),
-            unset_vars=override.unset_vars if override.unset_vars is not None else self.unset_vars,
-            work_dir_extra_paths=override.work_dir_extra_paths
-            if override.work_dir_extra_paths is not None
-            else self.work_dir_extra_paths,
-            enabled_backends=override.enabled_backends
-            if override.enabled_backends is not None
-            else self.enabled_backends,
-            agent_types=merged_agent_types,
-            providers=merged_providers,
-            plugins=merged_plugins,
-            # disabled_plugins is a deliberate carveout from the assign-by-default
-            # rule: it is populated by CLI ``--disable-plugin`` flags via
-            # ``_apply_plugin_overrides`` *after* layers have been merged, and
-            # individual TOML layers do not normally write to it. An override
-            # with an empty frozenset is indistinguishable from "not set", so we
-            # preserve the base value instead of wiping it. Users wanting to
-            # disable a specific plugin per-scope should use
-            # ``[plugins.<name>] enabled = false`` rather than this field.
-            disabled_plugins=override.disabled_plugins if override.disabled_plugins else self.disabled_plugins,
-            commands=merged_commands,
-            create_templates=merged_create_templates,
-            pre_command_scripts=override.pre_command_scripts
-            if override.pre_command_scripts is not None
-            else self.pre_command_scripts,
-            is_remote_agent_installation_allowed=_assign_scalar(
-                self.is_remote_agent_installation_allowed,
-                override.is_remote_agent_installation_allowed,
-            ),
-            connect_command=_assign_scalar(self.connect_command, override.connect_command),
-            retry=merged_retry,
-            logging=merged_logging,
-            is_nested_tmux_allowed=_assign_scalar(self.is_nested_tmux_allowed, override.is_nested_tmux_allowed),
-            tmux=merged_tmux,
-            headless=_assign_scalar(self.headless, override.headless),
-            is_error_reporting_enabled=_assign_scalar(
-                self.is_error_reporting_enabled,
-                override.is_error_reporting_enabled,
-            ),
-            is_allowed_in_pytest=_assign_scalar(self.is_allowed_in_pytest, override.is_allowed_in_pytest),
-            default_destroyed_host_persisted_seconds=_assign_scalar(
-                self.default_destroyed_host_persisted_seconds,
-                override.default_destroyed_host_persisted_seconds,
-            ),
-            default_min_online_host_age_seconds=_assign_scalar(
-                self.default_min_online_host_age_seconds,
-                override.default_min_online_host_age_seconds,
-            ),
-            agent_ready_timeout=_assign_scalar(self.agent_ready_timeout, override.agent_ready_timeout),
-            allow_settings_key_assignment_narrowing=_assign_scalar(
-                self.allow_settings_key_assignment_narrowing,
-                override.allow_settings_key_assignment_narrowing,
-            ),
+        return merge_models_via_overlay(
+            self,
+            override,
+            serialize_as_any=True,
+            drop_none_values=True,
         )
 
 
