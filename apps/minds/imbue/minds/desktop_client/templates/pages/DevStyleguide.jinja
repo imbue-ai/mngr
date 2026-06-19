@@ -31,26 +31,6 @@
       </button>
     </header>
 
-    {# Tokens #}
-    <section class="mb-12">
-      <h2 class="type-heading text-primary mb-1">Tokens</h2>
-      <p class="type-helper text-secondary mb-4">
-        CSS custom properties declared on <code>:root</code> in
-        <code>static/app.css</code>.
-      </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        <div data-token="--shadow-seam"
-             class="flex items-center gap-3 bg-surface-primary border border-default rounded-lg p-3 shadow-sm">
-          <div class="w-10 h-10 rounded-md bg-surface-primary shrink-0"
-               style="box-shadow: var(--shadow-seam);"></div>
-          <div class="min-w-0 flex-1">
-            <div class="type-helper font-mono text-primary truncate">--shadow-seam</div>
-            <div class="type-helper font-mono text-secondary truncate">0 4px 10px -6px rgba(0, 0, 0, 0.35)</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
     {# Type ramp (Figma). Six semantic roles defined as type-* utilities in
        app.css; each bundles font-size + weight + line-height (+ caps / tracking
        for the section eyebrow), so a text element's role is one class. Colour is
@@ -656,17 +636,6 @@
         <div class="mt-1 type-helper text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-accent focus:ring-2 focus:ring-accent/40)</div>
       </div>
 
-      {# Shadow seam #}
-      <div class="mb-6">
-        <div class="type-section text-secondary mb-2">Shadow seam</div>
-        <div class="bg-fill-subtle p-6 rounded-lg">
-          <div class="bg-surface-primary rounded-md p-4 type-body text-primary"
-               style="box-shadow: var(--shadow-seam);">
-            Below the titlebar, separating chrome from workspace content.
-          </div>
-        </div>
-        <div class="mt-1 type-helper text-secondary font-mono">app.css :: --shadow-seam</div>
-      </div>
 
       {# Spinner #}
       <div class="mb-6">

@@ -218,24 +218,21 @@
 /*
  * ---------------------------------------------------------------------------
  * Hand-written CSS that Tailwind doesn't cover (migrated verbatim from the
- * former tokens.css): per-workspace accent spine, spinner keyframes, titlebar
- * drop shadow, the .titlebar-surface self-theming recipe, shared card / pill /
- * option / color-picker recipes. These stay UNLAYERED so they keep the same
- * precedence over Tailwind utilities they had when tokens.css was a separate
- * stylesheet.
+ * former tokens.css): per-workspace accent spine, spinner keyframes, the
+ * .titlebar-surface self-theming recipe, shared card / pill / option /
+ * color-picker recipes. These stay UNLAYERED so they keep the same precedence
+ * over Tailwind utilities they had when tokens.css was a separate stylesheet.
  *
  * The titlebar takes only --titlebar-bg (the workspace accent, set per-
  * workspace via inline style by chrome.js); .titlebar-surface derives the
  * contrasting foreground text tokens from it in pure CSS (lch relative color),
- * so there is no JS contrast math and no --titlebar-fg. --shadow-seam (the
- * titlebar drop shadow, templates/pages/Chrome.jinja) is the other token
- * consumed by non-styleguide code; --workspace-accent / --titlebar-bg feed the
- * .accent-spine / .accent-swatch / .titlebar-* rules below.
+ * so there is no JS contrast math and no --titlebar-fg. --workspace-accent /
+ * --titlebar-bg feed the .accent-spine / .accent-swatch / .titlebar-* rules
+ * below.
  * ---------------------------------------------------------------------------
  */
 
 :root {
-  --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
   /* Status / feedback (Figma). Single hue per semantic, mode-independent --
      they read on both light and dark surfaces; tints for notice/badge
      backgrounds are derived with an opacity modifier (e.g. bg-success/10).

@@ -71,3 +71,5 @@ Added the type ramp (Figma): six semantic roles defined as `@utility` in `app.cs
 - Migrated every content-text site to a role (strict four sizes): 20px headings collapse to `type-heading` (18), the Welcome 30px splash to `type-heading-lg` (24), and 10/11/13px captions to `type-helper` (12) / `type-body` (14). `font-medium` is dropped app-wide (the ramp is 400/600) -- block roles bundle their weight and inline emphasis is now `font-semibold`. Components (FormLabel, SectionHeader, StatusBadge, Button + inputs, ...), pages, and JS-built DOM all use the roles; the ghost-Button "link" recipe uses `!type-helper`.
 
 - The styleguide gains a "Type ramp" section demoing the six roles. A guard test keeps content text on the roles: no raw font-size utilities or `font-medium` in the authored source (SVG path data skipped); inline `font-normal` / `font-semibold` / `font-bold` stay allowed.
+
+Dropped the unused `--shadow-seam` token. It was only ever demoed in the styleguide (no real surface applied it -- the titlebar drop shadow it once named is gone), so the definition, both styleguide demos, and its drift-guard entry were removed.

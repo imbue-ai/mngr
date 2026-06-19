@@ -737,7 +737,6 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
     each catalog widget through its real JinjaX component (so the catalog
     can't drift silently from the components it documents)."""
     html = render_dev_styleguide_page()
-    assert "--shadow-seam" in html
     # The accent picker section is a separate runtime variable, not a :root token.
     assert "--workspace-accent" in html
     # Each pattern block should be present.
@@ -767,18 +766,15 @@ def test_dev_styleguide_token_swatches_enumerate_design_tokens() -> None:
     means the catalog is out of sync with the live tokens.
 
     Design tokens are the Tailwind color tokens registered in ``@theme``
-    (``--color-*``) plus the standalone ``--shadow-seam``. The raw value layer
-    (``--c-*``) and the runtime-set chrome variables (``--workspace-accent`` /
-    ``--titlebar-*``) are implementation detail behind the tokens and are
-    intentionally NOT surfaced.
+    (``--color-*``). The raw value layer (``--c-*``) and the runtime-set chrome
+    variables (``--workspace-accent`` / ``--titlebar-*``) are implementation
+    detail behind the tokens and are intentionally NOT surfaced.
     """
     css = _TOKENS_CSS_PATH.read_text()
     # ``--color-*: ...`` declarations only (the @theme token layer); the
     # border-compat shim's ``var(--color-gray-200, ...)`` is a reference, not a
     # declaration, so it is not matched.
     declared = set(re.findall(r"(--color-[a-z0-9-]+)\s*:", css))
-    # Standalone :root design tokens that aren't part of the @theme color set.
-    declared |= {tok for tok in ("--shadow-seam",) if re.search(rf"{tok}\s*:", css)}
 
     html = render_dev_styleguide_page()
     surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', html))
