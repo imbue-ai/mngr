@@ -87,8 +87,11 @@ from imbue.minds.desktop_client.onboarding import OnboardingAnswers
 from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
+from imbue.minds.desktop_client.recovery_probe import ProviderProbeError
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.recovery_probe import extract_provider_error
+from imbue.minds.desktop_client.recovery_probe import provider_unavailable_error
 from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
@@ -147,6 +150,7 @@ from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -2649,6 +2653,13 @@ _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 # Generous: a host stop/start bounces a container and can legitimately take
 # tens of seconds, so this is a "definitely wedged" ceiling, not an estimate.
 _RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
+# Hard timeout for the recovery host-health probe's ``mngr list``. Far shorter
+# than the restart ceiling: this is a *diagnostic* that gates the recovery UI,
+# so a healthy-but-slow network has ample room while a dead network resolves to
+# "can't reach the provider" in tens of seconds instead of stranding the user on
+# the "Loading workspace" loader for the full restart timeout. A timeout here is
+# itself classified as provider-unavailable (see _run_host_health_probe).
+_HOST_HEALTH_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 # How long we wait for the system interface to answer again after a restart,
 # split by tier. A surgical (in-place) restart leaves the container running, so
 # the interface should answer again quickly. A host restart cold-boots the
@@ -2821,37 +2832,57 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
 
     Raises ``MngrCommandError`` for every non-clean outcome, like the rest of
     minds' mngr calls (``run_mngr_create``, the destroy cleanup) -- one domain
-    error the caller catches once. The non-clean outcomes are:
+    error the caller catches once. Delegates the launch/timeout handling to
+    ``_run_mngr_capturing`` and layers the raise-on-nonzero policy on top, so the
+    subprocess plumbing lives in one place. A timeout therefore surfaces as
+    ``MngrCommandTimeoutError`` (a ``MngrCommandError`` subclass, so existing
+    ``except MngrCommandError`` callers are unaffected), a nonzero exit as a bare
+    ``MngrCommandError`` (discarding stdout, unlike ``_run_mngr_capturing``), and
+    a launch failure as a bare ``MngrCommandError``.
+    """
+    stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env)
+    if returncode != 0:
+        raise MngrCommandError(f"exited {returncode}: {stderr.strip()}")
+    return stdout
 
-    * a timeout (with ``is_checked_after=False`` a timeout comes back as a
-      finished process flagged ``is_timed_out`` rather than raising);
-    * a nonzero exit;
-    * a failure to launch at all -- ``OSError`` for fork/exec failures, and
-      ``ConcurrencyGroupError`` for the group's own setup / shutdown / strand
-      failures (``ProcessSetupError``, ``StrandTimedOutError``,
-      ``EnvironmentStoppedError``, ``InvalidConcurrencyGroupStateError``).
+
+def _run_mngr_capturing(
+    concurrency_group: ConcurrencyGroup,
+    argv: list[str],
+    env: dict[str, str],
+    timeout_seconds: float = _RESTART_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[str, int, str]:
+    """Run an ``mngr`` subprocess, returning ``(stdout, returncode, stderr)`` without raising on a nonzero exit.
+
+    A nonzero exit is reported through the returned ``returncode`` rather than
+    raised, so stdout is preserved for the caller to inspect. A failure to launch
+    the process raises ``MngrCommandError``; a timeout raises the more specific
+    ``MngrCommandTimeoutError``.
     """
     try:
         finished = concurrency_group.run_process_to_completion(
             argv,
-            timeout=_RESTART_COMMAND_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             is_checked_after=False,
             env=env,
         )
     except (OSError, ConcurrencyGroupError) as exc:
         # The command never ran (a fork/exec failure, or a concurrency-group
-        # setup/strand/shutdown failure). create/destroy let these propagate to
-        # one outer handler because a launch failure is fatal to the operation;
-        # our callers instead handle failure locally and must keep going (the
-        # host-health probe composes a partial response and cannot 500), so we
-        # wrap it as the single MngrCommandError they already catch rather than
-        # leaving them to also catch this infra-exception tuple.
+        # setup/strand/shutdown failure -- ``ProcessSetupError``,
+        # ``StrandTimedOutError``, ``EnvironmentStoppedError``,
+        # ``InvalidConcurrencyGroupStateError``). Our callers handle failure
+        # locally and must keep going (the host-health probe composes a partial
+        # response and cannot 500), so we wrap it as the single MngrCommandError
+        # they already catch rather than leaving them to also catch this
+        # infra-exception tuple.
         raise MngrCommandError(str(exc)) from exc
     if finished.is_timed_out:
-        raise MngrCommandError(f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s")
-    if finished.returncode != 0:
-        raise MngrCommandError(f"exited {finished.returncode}: {finished.stderr.strip()}")
-    return finished.stdout
+        raise MngrCommandTimeoutError(f"timed out after {int(timeout_seconds)}s")
+    # A finished, non-timed-out process always carries a returncode; the Optional
+    # is for the not-yet-finished case, which this branch has ruled out. Coerce a
+    # surprise None to a nonzero so the caller treats it as a failed listing.
+    returncode = finished.returncode if finished.returncode is not None else 1
+    return finished.stdout, returncode, finished.stderr
 
 
 def _await_system_interface_ready(
@@ -3364,21 +3395,55 @@ def _run_host_health_probe(
     provider_name = display_info.provider_name if display_info is not None else None
     list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id, provider_name)
     list_command = shlex.join(list_argv)
+    # Friendly provider name for the "Can't connect to ..." page title; reuse the
+    # workspace-listing label map (docker -> "Docker", imbue_cloud_* -> "Imbue
+    # Cloud", ...), falling back to a generic label for an unknown/None provider.
+    provider_label = friendly_provider_label(provider_name) or "the workspace backend"
     list_error: str | None = None
     list_stdout = ""
+    list_timed_out = False
+    provider_error: ProviderProbeError | None = None
     try:
-        list_stdout = _run_mngr(concurrency_group, list_argv, env)
-    except MngrCommandError as exc:
-        # The listing is scoped to this workspace's own provider (see
-        # _build_mngr_host_state_argv), so a non-clean exit reflects a problem
-        # with *this* provider/host rather than an unrelated sibling, and there
-        # is no trustworthy listing to keep. Record the reason and continue with
-        # an empty listing; it is logged here and threaded into the response so
-        # the recovery page can surface it on the host-state rows in place of a
-        # bare "no row".
+        # Capture stdout even on a nonzero exit: with ``--on-error continue`` the
+        # listing still emits its JSON body (including the ``errors[]`` array that
+        # carries the provider-reachability signal) and then exits 1 when a
+        # provider failed. The listing is scoped to this workspace's own provider
+        # (see _build_mngr_host_state_argv), so a nonzero exit reflects a problem
+        # with *this* provider/host. Record the reason for the host-state rows,
+        # but keep the body so ``extract_provider_error`` can classify it.
+        list_stdout, returncode, list_stderr = _run_mngr_capturing(
+            concurrency_group, list_argv, env, timeout_seconds=_HOST_HEALTH_PROBE_TIMEOUT_SECONDS
+        )
+        if returncode != 0:
+            list_error = f"exited {returncode}: {list_stderr.strip()}"
+            logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
+    except MngrCommandTimeoutError as exc:
+        # The listing never completed within the probe window. There is no body to
+        # parse and -- crucially -- no positive evidence the host is reachable but
+        # wedged, so we must not offer a destructive restart. Classify the provider
+        # as unreachable (retry, not restart): the same tier a connector-raised
+        # ProviderUnavailableError lands in. Without this, an unreachable provider
+        # produces UNKNOWN host state and falls through to HOST_UNRESPONSIVE, which
+        # is exactly what handed users a destructive button during a full outage.
         list_error = str(exc)
-        logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
+        list_timed_out = True
+        provider_error = provider_unavailable_error(
+            f"Could not reach {provider_label}: the workspace listing timed out after "
+            f"{int(_HOST_HEALTH_PROBE_TIMEOUT_SECONDS)}s."
+        )
+        logger.warning(
+            "`mngr list` for host-health probe of {} timed out; classifying provider as unreachable: {}",
+            agent_id,
+            list_error,
+        )
+    except MngrCommandError as exc:
+        # Failed to launch the process at all (no body); continue with an empty
+        # listing and surface the reason on the host-state rows.
+        list_error = str(exc)
+        logger.warning("`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error)
     list_json: str | None = list_stdout or None
+    if provider_error is None:
+        provider_error = extract_provider_error(list_json, provider_name)
     # The in-container probe stays quiet at warning level: its argv embeds a
     # long base64 inner script that adds nothing to diagnostics, and the
     # dispatch_tier INFO line already records the outcome. Trust the stdout only
@@ -3387,7 +3452,13 @@ def _run_host_health_probe(
     # failure) raises and leaves ``in_container_stdout`` None, which parses to a
     # "no" on the can-we-run-commands probe, and is recorded only at debug.
     in_container_stdout: str | None = None
-    if services_agent_id is not None:
+    # Skip the in-container exec probe when the listing timed out: the exec SSHes
+    # to the container over the same network that just failed to even enumerate
+    # the provider, so it would only add another doomed round-trip -- and the tier
+    # is already PROVIDER_UNAVAILABLE regardless of what it answers. A provider
+    # error *with* a body is different (the connector can be down while the host's
+    # own SSH path is fine), so we still probe in that case.
+    if services_agent_id is not None and not list_timed_out:
         try:
             in_container_stdout = _run_mngr(concurrency_group, build_probe_argv(mngr_binary, services_agent_id), env)
         except MngrCommandError as exc:
@@ -3410,6 +3481,8 @@ def _run_host_health_probe(
         mngr_list_error=list_error,
         mngr_exec_command=exec_command,
         mngr_binary=mngr_binary,
+        provider_error=provider_error,
+        provider_label=provider_label,
     )
 
 
