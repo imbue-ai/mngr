@@ -96,7 +96,7 @@ def gcp_release_test_project() -> str:
     return project
 
 
-def _write_release_settings(settings_dir: Path, project: str) -> None:
+def _write_release_settings(settings_dir: Path, project: str, *, isolation: str | None = None) -> None:
     """Write the release-test ``settings.toml`` into ``settings_dir``.
 
     Shared by the prepare fixture and the per-test settings fixture so both the
@@ -105,11 +105,17 @@ def _write_release_settings(settings_dir: Path, project: str) -> None:
     inherit ``PYTEST_CURRENT_TEST`` and mngr refuses to load any config that does
     not opt in -- without it, a developer machine with a real mngr profile would
     fail before any GCP call.
+
+    ``isolation`` selects the placement shape: ``None`` leaves the default
+    (Docker container); ``"NONE"`` writes ``isolation = "NONE"`` so the bare
+    (no-container) realizer runs the agent directly on the GCE instance's OS.
     """
+    isolation_line = f'isolation = "{isolation}"\n' if isolation is not None else ""
     (settings_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n"
         "\n[providers.gcp]\n"
         'backend = "gcp"\n'
+        f"{isolation_line}"
         f'project_id = "{project}"\n'
         f'default_region = "{GCP_DEFAULT_REGION}"\n'
         f'default_zone = "{GCP_DEFAULT_ZONE}"\n'
@@ -198,6 +204,21 @@ def gcp_test_settings_dir(
     file keeps the test-only TTL out of production code paths.
     """
     _write_release_settings(tmp_path, gcp_release_test_project)
+    yield tmp_path
+
+
+@pytest.fixture()
+def gcp_bare_test_settings_dir(
+    tmp_path: Path,
+    gcp_release_test_project: str,
+    _gcp_release_test_firewall_prepared: None,
+) -> Iterator[Path]:
+    """Like ``gcp_test_settings_dir`` but with ``isolation = "NONE"`` (bare placement).
+
+    Exercises the no-Docker shape: the agent runs directly on the GCE instance's
+    OS, reached at ``<ip>:22`` as root, with no container.
+    """
+    _write_release_settings(tmp_path, gcp_release_test_project, isolation="NONE")
     yield tmp_path
 
 
@@ -340,6 +361,72 @@ def test_provider_lifecycle_create_stop_start_destroy(
         assert "alive-after-restart" in result.stdout
     finally:
         _run_mngr(gcp_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
+
+
+# =============================================================================
+# Bare placement (isolation=NONE): the agent runs on the GCE instance's OS,
+# no Docker container. Mirrors the container lifecycle tests above.
+# =============================================================================
+
+
+@pytest.mark.rsync
+def test_bare_provider_lifecycle_create_exec_and_destroy(
+    gcp_bare_test_settings_dir: Path,
+    temp_git_repo: Path,
+) -> None:
+    """A bare GCE host comes up reachable, with the agent on the VM's OS (no container).
+
+    The bare-specific assertions prove the no-Docker shape end to end: the agent
+    shell is the GCE instance's root (``/var/lib/mngr-host`` -- the bare host
+    store -- exists, and there is no ``/.dockerenv``), and the mngr host_dir
+    symlink (``/mngr``) still works.
+    """
+    agent_name = f"{GCP_TEST_NAME_PREFIX}bare-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        gcp_bare_test_settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "gcp",
+        "--no-connect",
+        "--",
+        "sleep",
+        "99999",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
+
+    try:
+        result = _run_mngr(gcp_bare_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-bare-gcp")
+        assert result.returncode == 0, f"Exec failed: {result.stderr}"
+        assert "hello-from-bare-gcp" in result.stdout
+
+        result = _run_mngr(
+            gcp_bare_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists"
+        )
+        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
+        assert "exists" in result.stdout
+
+        # Bare-specific: the agent shell is the VM's root, not a container.
+        result = _run_mngr(
+            gcp_bare_test_settings_dir,
+            temp_git_repo,
+            "exec",
+            agent_name,
+            "test -d /var/lib/mngr-host && test ! -e /.dockerenv && echo bare-confirmed",
+        )
+        assert result.returncode == 0, f"bare-shape check failed: {result.stderr}\n{result.stdout}"
+        assert "bare-confirmed" in result.stdout, f"expected a bare (non-container) host: {result.stdout}"
+
+        result = _run_mngr(gcp_bare_test_settings_dir, temp_git_repo, "list")
+        assert result.returncode == 0, f"List failed: {result.stderr}"
+        assert agent_name in result.stdout
+        assert "gcp" in result.stdout
+    finally:
+        _run_mngr(gcp_bare_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
 
 
 # =============================================================================

@@ -22,7 +22,6 @@ from typing import Any
 import click
 from click_option_group import optgroup
 from google.auth import exceptions as google_auth_exceptions
-from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import add_common_options
@@ -32,14 +31,14 @@ from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.errors import GcpCredentialsError
-from imbue.mngr_gcp.errors import GcpError
 from imbue.mngr_gcp.errors import GcpProjectError
+from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
+from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
 
 class _GcpOperatorCliOptions(CommonCliOptions):
@@ -69,34 +68,20 @@ def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> GcpPr
 
     The operator commands need to land their firewall rule in the same project,
     network, and zone the runtime ``mngr create --provider <provider_name>`` path
-    will later use. Class defaults (``GcpProviderConfig()``) are a fallback for
-    the first-run case where the user has not yet pinned a provider block; if
-    their settings.toml *does* configure the named provider, we honor it.
-
-    When the looked-up config is not a ``GcpProviderConfig`` (e.g. the user
-    pointed ``[providers.gcp]`` at a non-GCP backend), fall back to class
-    defaults rather than erroring -- the operator command's CLI options
-    (``--project`` / ``--zone`` / ``--network`` / ``--firewall-name``) can still
-    drive a GCP-targeted run. A warning is emitted in this case so the user
-    notices their ``--provider`` selection did not have the intended effect (a
-    silent fallback to class defaults would otherwise land the rule in the
-    default zone / network with no visible signal). The missing-block case is
-    silent because that is the expected first-run shape. Mirrors
-    ``mngr_aws.cli._resolve_provider_config``.
+    will later use. Thin wrapper over the shared ``resolve_provider_config`` (see
+    it for the {configured / wrong-backend / missing} contract).
     """
-    config = mngr_ctx.config.providers.get(ProviderInstanceName(provider_name))
-    if isinstance(config, GcpProviderConfig):
-        return config
-    if config is not None:
-        logger.warning(
-            "Provider {!r} is configured but is not a GCP backend (got {}); "
-            "falling back to GcpProviderConfig class defaults. Pass "
-            "--project / --zone / --network / --firewall-name to override, or point "
-            "--provider at a GCP-backed block.",
-            provider_name,
-            type(config).__name__,
-        )
-    return GcpProviderConfig()
+    return resolve_provider_config(
+        mngr_ctx,
+        provider_name,
+        config_cls=GcpProviderConfig,
+        default_factory=GcpProviderConfig,
+        cloud_label="a GCP backend",
+        override_hint=(
+            "Pass --project / --zone / --network / --firewall-name to override, or "
+            "point --provider at a GCP-backed block."
+        ),
+    )
 
 
 def _build_operator_client(
@@ -164,19 +149,20 @@ def _perform_cleanup(client: GcpVpsClient) -> str | None:
     """Core of ``mngr gcp cleanup``: refuse if instances exist, else delete the rule.
 
     Returns the deleted firewall rule name, or ``None`` when there was nothing to
-    delete. Raises ``GcpError`` when any mngr-managed instance still exists in the
-    project, so cleanup never strands a running agent's SSH access. Split from the
-    click callback so the refuse/delete decision is unit-testable against a
-    stubbed client, without the click runtime or real credentials.
+    delete. Raises ``ManagedResourcesExistError`` (a ``MngrError``) when any
+    mngr-managed instance still exists in the project, so cleanup never strands a
+    running agent's SSH access. Split from the click callback so the refuse/delete
+    decision is unit-testable against a stubbed client, without the click runtime
+    or real credentials.
     """
     instances = client.list_mngr_managed_instances()
-    if instances:
-        summary = ", ".join(f"{i['id']} ({i['state']} in {i['zone']})" for i in instances)
-        raise GcpError(
-            f"Refusing to clean up project {client.project_id}: {len(instances)} mngr-managed "
-            f"instance(s) still exist: {summary}. Destroy them first with `mngr destroy <agent>` "
-            "(or delete them), then re-run `mngr gcp cleanup`."
-        )
+    refuse_if_managed_resources_exist(
+        [str(i["id"]) for i in instances],
+        summary=", ".join(f"{i['id']} ({i['state']} in {i['zone']})" for i in instances),
+        resource_noun="instance",
+        scope_description=f"project {client.project_id}",
+        cleanup_command="mngr gcp cleanup",
+    )
     return client.delete_firewall()
 
 

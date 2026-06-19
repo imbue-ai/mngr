@@ -18,9 +18,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import DiscoveredHost
-from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws import hookimpl
@@ -28,34 +26,34 @@ from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.state_bucket import S3StateBucket
-from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
-from imbue.mngr_vps_docker.host_state_store import HostDirBackend
-from imbue.mngr_vps_docker.host_state_store import HostStateStore
-from imbue.mngr_vps_docker.host_state_store import NullHostDirBackend
-from imbue.mngr_vps_docker.host_state_store import missing_state_bucket_error
-from imbue.mngr_vps_docker.instance import BucketHostDirBackend
-from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import extract_presence_flag
-from imbue.mngr_vps_docker.instance import extract_single_value_arg
-from imbue.mngr_vps_docker.instance import host_name_from_tags
-from imbue.mngr_vps_docker.instance import normalized_tags_to_dict
-from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_single_value_arg
+from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
+from imbue.mngr_vps.host_state_store import HostDirBackend
+from imbue.mngr_vps.host_state_store import HostStateStore
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
 # EC2 states in which the host OS is down (so the SSH-based sweep can't see the
-# host) but the instance still exists and must be surfaced offline from the state
-# bucket. ``stopping`` is included so a host doesn't vanish from discovery during
-# the (seconds-long) stop transition before it reaches the terminal ``stopped``.
+# host) but the instance still exists and must be reconstructed offline.
+# ``stopping`` is included so a host doesn't vanish from discovery during the
+# (seconds-long) stop transition before it reaches the terminal ``stopped``.
 _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
-# The host name is stamped into the EC2 ``Name`` tag (as ``mngr-<host_name>``) at
-# create, so a stopped instance can be labelled in discovery without the bucket.
+# The host name is mirrored into the EC2 ``Name`` tag (as ``mngr-<host_name>``).
 _HOST_NAME_TAG_KEY: Final[str] = "Name"
+
+# The self-stopping idle watcher (in-container sentinel + host-side systemd
+# ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
+# The AWS oneshot ``.service`` powers the instance off (``shutdown -P now``); EC2
+# then applies the instance's ``InstanceInitiatedShutdownBehavior`` -- ``stop``
+# (resumable idle-pause, the default) or ``terminate`` -- so no IAM role or awscli
+# is needed on the box. See the README "Implementation details".
 
 
 class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
@@ -90,7 +88,7 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AwsProvider(OfflineCapableVpsDockerProvider):
+class AwsProvider(OfflineCapableVpsProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -136,30 +134,26 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
     def _state_store(self) -> HostStateStore:
         """The external host/agent-record mirror: the S3 bucket, or raise when it is absent.
 
-        Selecting one store here lets the persist / remove / list / read paths stop
-        branching on bucket presence. The bucket is required: when it does not
-        exist, accessing this property raises an actionable error pointing at
-        ``mngr aws prepare`` (so create / label / offline reads all fail loudly and
-        uniformly). Offline ``host_dir`` reads are a separate, bucket-only feature
-        keyed off ``_state_bucket``.
+        Delegates to the shared ``_select_bucket_store``, supplying only the resolved
+        S3 bucket, its label, and the ``mngr aws prepare`` remediation command. The
+        bucket is required: when it does not exist, the helper raises an actionable
+        error pointing at ``mngr aws prepare``. Offline ``host_dir`` reads are a
+        separate, bucket-only feature keyed off ``_state_bucket``.
         """
-        bucket = self._state_bucket
-        if bucket is None:
-            raise missing_state_bucket_error("S3 state bucket", "mngr aws prepare")
-        return BucketHostStateStore(bucket=bucket, bucket_label="S3 state bucket")
+        return self._select_bucket_store(
+            self._state_bucket, store_label="S3 state bucket", prepare_command="mngr aws prepare"
+        )
 
     @cached_property
     def _host_dir_backend(self) -> HostDirBackend:
         """Select the offline host_dir backend once: bucket-backed when enabled + present, else no-op.
 
-        The only place ``is_offline_host_dir_enabled`` and ``_state_bucket``
-        presence are tested together; every host_dir call site dispatches through
-        the selected backend instead of re-deriving the condition.
+        Delegates to the shared ``_select_bucket_host_dir_backend``, supplying the
+        resolved S3 bucket and the config's ``is_offline_host_dir_enabled`` flag.
         """
-        bucket = self._state_bucket
-        if self.aws_config.is_offline_host_dir_enabled and bucket is not None:
-            return BucketHostDirBackend(provider=self, bucket=bucket)
-        return NullHostDirBackend()
+        return self._select_bucket_host_dir_backend(
+            self._state_bucket, enabled=self.aws_config.is_offline_host_dir_enabled
+        )
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List EC2 instances tagged with this provider's name."""
@@ -266,15 +260,9 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
         except handler reverses any SSH key upload that may have happened
         before this raise, so the missing-AMI failure leaves no leaked state.
         """
-        match parsed:
-            case ParsedAwsBuildOptions(ami_id_override=ami_id_override, spot=spot):
-                pass
-            case _:
-                raise MngrError(
-                    f"AwsProvider._create_vps_instance expected ParsedAwsBuildOptions, "
-                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
-                    "non-AWS shape; _parse_build_args must return ParsedAwsBuildOptions."
-                )
+        aws_parsed = self._require_parsed(parsed, ParsedAwsBuildOptions)
+        ami_id_override = aws_parsed.ami_id_override
+        spot = aws_parsed.spot
         if ami_id_override:
             effective_ami_id = ami_id_override
         else:
@@ -293,61 +281,58 @@ class AwsProvider(OfflineCapableVpsDockerProvider):
             spot=spot,
         )
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return public IPs of EC2 instances tagged with this provider's name.
-
-        Credentials are guaranteed to be resolvable here: ``build_provider_instance``
-        raises ``ProviderUnavailableError`` when ``config.get_session()`` fails, so any
-        AwsProvider that reaches this point has working credentials. The shared
-        ``VpsClientInterface`` base method that calls this is invoked for both
-        listing and create-host flows, so AWS does not need a separate
-        ``_credentials_configured`` override.
-        """
-        instances = self._list_instances_cached()
-        vps_ips: list[str] = []
-        for instance in instances:
-            main_ip = instance.get("main_ip", "")
-            if main_ip:
-                vps_ips.append(main_ip)
-        return vps_ips
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
+    # (cached listing -> non-empty main_ip) covers AWS unchanged: a stopped EC2
+    # instance loses its ephemeral IP and is excluded by the non-empty IP check.
 
     # =========================================================================
-    # Native EC2 stop/start + idle-watcher hooks (for OfflineCapableVpsDockerProvider)
+    # Native EC2 stop/start (idle-pause + resume) -- the base
+    # OfflineCapableVpsProvider owns the orchestration; here we supply only the
+    # EC2-specific cloud-API hooks.
     # =========================================================================
 
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
-        """Stop the EC2 instance; the EBS root volume and all on-disk state survive."""
         with log_span("Stopping EC2 instance"):
             self.aws_client.stop_instance(instance_id)
 
     def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
-        """Start the EC2 instance and return its fresh public IP (a stop/start reassigns it)."""
         with log_span("Starting EC2 instance"):
             return self.aws_client.start_instance(instance_id)
 
-    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
-        """Idle action: power the host off; EC2 then applies InstanceInitiatedShutdownBehavior."""
-        return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
+    # =========================================================================
+    # Self-stopping idle watcher (in-container sentinel + host-side systemd)
+    # =========================================================================
+
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        # EC2 supports stop/start, and the bare idle path self-stops the instance
+        # via InstanceInitiatedShutdownBehavior, so bare placement is supported.
+        return True
+
+    def _provider_instance_kind(self) -> str:
+        return "EC2 instance"
+
+    # The base ``OfflineCapableVpsProvider`` owns the idle-watcher install (the
+    # in-container sentinel ``shutdown.sh``, the host-side systemd ``.path``/
+    # ``.service`` pair, and the bare poweroff). AWS's ``.service`` body is the
+    # default ``shutdown -P now`` (EC2 then applies its
+    # ``InstanceInitiatedShutdownBehavior``), so AWS overrides none of those hooks.
 
     # =========================================================================
     # Offline discovery (so STOPPED hosts list + resolve by name from the bucket)
     # =========================================================================
 
-    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from a stopped instance's ``mngr-*`` EC2 tags, or None.
+    def _host_name_tag_key(self) -> str:
+        # The host name is mirrored into the EC2 ``Name`` tag (as ``mngr-<host_name>``);
+        # the shared ``_offline_discovered_host_from_instance`` reads it through here.
+        return _HOST_NAME_TAG_KEY
 
-        Reads only the cheap identity tags stamped at create (host id + ``Name``),
-        never the bucket -- the full record is read from the state store on demand.
-        """
-        tags = normalized_tags_to_dict(instance)
-        host_id_str = tags.get("mngr-host-id")
-        if host_id_str is None:
-            return None
-        return DiscoveredHost(
-            host_id=HostId(host_id_str),
-            host_name=host_name_from_tags(tags, _HOST_NAME_TAG_KEY),
-            provider_name=self.name,
-            host_state=HostState.STOPPED,
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        """Re-stamp the EC2 ``Name`` tag (read by offline discovery) after a rename."""
+        if host_record.config is None:
+            return
+        self.aws_client.set_instance_tags(
+            host_record.config.vps_instance_id, {self._host_name_tag_key(): f"mngr-{name}"}
         )
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:

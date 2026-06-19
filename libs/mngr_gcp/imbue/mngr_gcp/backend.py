@@ -31,30 +31,30 @@ from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import HOST_ID_METADATA_KEY
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
-from imbue.mngr_gcp.client import to_gce_label_value
+from imbue.mngr_gcp.client import ISOLATION_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
-from imbue.mngr_vps_docker.host_state_store import HostStateStore
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import build_poweroff_idle_watcher_service_unit
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import extract_presence_flag
-from imbue.mngr_vps_docker.instance import extract_single_value_arg
-from imbue.mngr_vps_docker.instance import normalized_tags_to_dict
-from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_single_value_arg
+from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
+from imbue.mngr_vps.host_state_store import HostStateStore
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.instance_offline import host_name_from_prefixed_value
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
 # GCP has no object-storage state bucket; the offline mirror lives in the
 # instance's own GCE *metadata*, which is large and permissive (256 KB per value,
 # 512 KB total) -- unlike GCE labels, which lowercase and restrict to
-# ``[a-z0-9_-]``, 63 chars. The full ``VpsDockerHostRecord`` JSON lives under
+# ``[a-z0-9_-]``, 63 chars. The full ``VpsHostRecord`` JSON lives under
 # ``mngr-host-state`` and one JSON value per agent under ``mngr-agent-<agent_id>``,
 # so a STOPPED instance (no external IP, SSH unreachable) still surfaces its host
 # and agents in discovery and resolves by name. This is the GCP analog of the
@@ -70,6 +70,15 @@ _HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"STOPPING", "TERMINATED"})
 # ``mngr-host-name`` metadata holds ``mngr-<host_name>``; strip the prefix to
 # recover the host name when labelling a stopped host in discovery.
 _HOST_NAME_PREFIX: Final[str] = "mngr-"
+
+# The self-stopping idle watcher (in-container sentinel + host-side systemd
+# ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
+# Identical mechanism to AWS: the GCP oneshot ``.service`` runs ``shutdown -P now``,
+# which on GCE lands the instance in ``TERMINATED`` (stopped, disk preserved, no
+# compute billing) -- there is no GCE analog to AWS's
+# ``InstanceInitiatedShutdownBehavior`` and none is needed (and no IAM/API call).
+# GCP does not sync host_dir to an object store, so it inherits the base no-op
+# ``NullHostDirBackend`` (the default ``_host_dir_backend``) and installs no sync daemon.
 
 
 def _resolve_credentials_project_and_zone_or_unavailable(
@@ -131,7 +140,7 @@ class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class GcpProvider(OfflineCapableVpsDockerProvider):
+class GcpProvider(OfflineCapableVpsProvider):
     """GCP-specific provider that discovers hosts via the GCE instances.list API."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -249,15 +258,9 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
         ``image`` kwargs are statically visible, mirroring
         ``AwsProvider._create_vps_instance``.
         """
-        match parsed:
-            case ParsedGcpBuildOptions(spot=spot, image=image):
-                pass
-            case _:
-                raise MngrError(
-                    f"GcpProvider._create_vps_instance expected ParsedGcpBuildOptions, "
-                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
-                    "non-GCP shape; _parse_build_args must return ParsedGcpBuildOptions."
-                )
+        gcp_parsed = self._require_parsed(parsed, ParsedGcpBuildOptions)
+        spot = gcp_parsed.spot
+        image = gcp_parsed.image
         return self.gcp_client.create_instance(
             label=label,
             region=parsed.region,
@@ -304,43 +307,51 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
             timeout_seconds=timeout_seconds,
         )
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return external IPs of GCE instances labeled with this provider's name.
-
-        Credentials are guaranteed to be resolvable here: ``build_provider_instance``
-        raises ``ProviderUnavailableError`` when ``config.get_credentials_and_resolved_project()``
-        fails, so any GcpProvider that reaches this point has working credentials.
-        """
-        instances = self._list_instances_cached()
-        vps_ips: list[str] = []
-        for instance in instances:
-            main_ip = instance.get("main_ip", "")
-            if main_ip:
-                vps_ips.append(main_ip)
-        return vps_ips
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
+    # (cached listing -> non-empty main_ip) covers GCP unchanged: a stopped GCE
+    # instance loses its external IP and is excluded by the non-empty IP check.
 
     # =========================================================================
-    # Native GCE stop/start + idle-watcher hooks (for OfflineCapableVpsDockerProvider)
+    # Native GCE stop/start (idle-pause + resume) -- the base
+    # OfflineCapableVpsProvider owns the orchestration; here we supply only the
+    # GCE-specific cloud-API hooks.
     # =========================================================================
 
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
-        """Stop the GCE instance; the boot disk and all on-disk state survive."""
         with log_span("Stopping GCE instance"):
             self.gcp_client.stop_instance(instance_id)
 
     def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
-        """Start the GCE instance and return its fresh external IP (an ephemeral IP changes on resume)."""
         with log_span("Starting GCE instance"):
             return self.gcp_client.start_instance(instance_id)
 
-    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
-        """Match on the GCE-label-encoded host id (GCE labels cannot hold a raw mngr host id)."""
-        wanted = f"mngr-host-id={to_gce_label_value(str(host_id))}"
-        return [instance for instance in self._list_instances_cached() if wanted in instance.get("tags", ())]
+    # =========================================================================
+    # Self-stopping idle watcher (in-container sentinel + host-side systemd)
+    # =========================================================================
 
-    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
-        """Idle action: power the host off; on GCE a guest poweroff stops the instance (TERMINATED)."""
-        return build_poweroff_idle_watcher_service_unit(sentinel_on_outer)
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        # GCE supports stop/start, and the bare idle path powers the instance off
+        # (which on GCE stops it), so bare placement is supported.
+        return True
+
+    def _provider_instance_kind(self) -> str:
+        return "GCE instance"
+
+    # The base ``OfflineCapableVpsProvider`` owns the idle-watcher install and the
+    # shutdown-script write. GCP's ``.service`` body is the default
+    # ``shutdown -P now`` (a GCE guest poweroff stops the instance), so GCP
+    # overrides none of those hooks. GCP does not sync host_dir to an object store,
+    # so ``_host_dir_backend`` stays the base ``NullHostDirBackend`` and nothing is installed.
+
+    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
+        """Match on the host id stored verbatim in instance metadata (GCE labels cannot hold a raw mngr host id)."""
+        wanted = str(host_id)
+        return [
+            instance
+            for instance in self._list_instances_cached()
+            if self._metadata_dict(instance).get(HOST_ID_METADATA_KEY) == wanted
+        ]
 
     # =========================================================================
     # Offline discovery + the metadata-backed state store (so STOPPED hosts list
@@ -351,11 +362,10 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
     def _state_store(self) -> HostStateStore:
         """The external host/agent-record mirror, backed by GCE instance metadata.
 
-        GCP has no object-storage state bucket; its metadata store is the GCP
-        analog (see ``_GceMetadataHostStateStore``), so the offline read/write
-        paths are uniform with the AWS/Azure ``BucketHostStateStore``. GCE metadata
-        is always available (no ``prepare`` step), so there is no missing-store
-        case here.
+        GCP has no object-storage state bucket; its metadata store is the GCP analog
+        (see ``_GceMetadataHostStateStore``), so the offline read/write paths are
+        uniform with the AWS/Azure ``BucketHostStateStore``. GCE metadata is always
+        available (no ``prepare`` step), so there is no missing-store case here.
         """
         return _GceMetadataHostStateStore(provider=self)
 
@@ -373,23 +383,29 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
         metadata = instance.get("metadata", {})
         return dict(metadata) if isinstance(metadata, Mapping) else {}
 
+    def _isolation_marker_for_instance(self, instance: Mapping[str, Any]) -> str | None:
+        """Read the ``mngr-isolation`` placement marker from GCE instance metadata (no SSH), or None.
+
+        GCP stores mngr identity in metadata (GCE labels are too restricted), so
+        the marker is read from metadata here rather than the normalized tag list.
+        """
+        return self._metadata_dict(instance).get(ISOLATION_METADATA_KEY)
+
     def _host_name_from_instance(self, instance: Mapping[str, Any]) -> HostName:
-        """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id label)."""
-        name = self._metadata_dict(instance).get(HOST_NAME_METADATA_KEY, "")
-        if name.startswith(_HOST_NAME_PREFIX):
-            return HostName(name[len(_HOST_NAME_PREFIX) :])
-        if name:
-            return HostName(name)
-        return HostName(normalized_tags_to_dict(instance).get("mngr-host-id", "unknown"))
+        """Recover the host name from the ``mngr-host-name`` metadata (fallback: host-id metadata)."""
+        metadata = self._metadata_dict(instance)
+        return host_name_from_prefixed_value(
+            metadata.get(HOST_NAME_METADATA_KEY, ""), metadata.get(HOST_ID_METADATA_KEY, "")
+        )
 
     def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from an instance's labels + metadata, or None.
+        """Build a STOPPED-state DiscoveredHost from an instance's metadata, or None.
 
-        Reads only the cheap identity label/metadata stamped at create (host id +
+        Reads only the cheap identity metadata stamped at create (host id +
         host name), never the metadata state record -- the full record is read from
         the state store on demand.
         """
-        host_id_str = normalized_tags_to_dict(instance).get("mngr-host-id")
+        host_id_str = self._metadata_dict(instance).get(HOST_ID_METADATA_KEY)
         if host_id_str is None:
             return None
         return DiscoveredHost(
@@ -399,12 +415,25 @@ class GcpProvider(OfflineCapableVpsDockerProvider):
             host_state=HostState.STOPPED,
         )
 
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        """Re-stamp the ``mngr-host-name`` identity metadata (read by offline discovery) after a rename.
+
+        Matches create's value (``f"{_HOST_NAME_PREFIX}{name}"``), which
+        ``_host_name_from_instance`` strips back off, so a renamed-then-stopped
+        host lists under its new name.
+        """
+        if host_record.config is None:
+            return
+        self.gcp_client.set_instance_metadata(
+            host_record.config.vps_instance_id, {HOST_NAME_METADATA_KEY: f"{_HOST_NAME_PREFIX}{name}"}
+        )
+
 
 class _GceMetadataHostStateStore(HostStateStore):
     """Instance-metadata-backed mirror: full host + agent records live in GCE metadata.
 
     The GCP analog of the AWS/Azure ``BucketHostStateStore``. GCP has no
-    object-storage state bucket; instead the full ``VpsDockerHostRecord`` JSON (key
+    object-storage state bucket; instead the full ``VpsHostRecord`` JSON (key
     ``mngr-host-state``) and one JSON value per agent (key ``mngr-agent-<id>``)
     live in the instance's own GCE metadata, which is large and permissive enough
     (256 KB per value, 512 KB total) to hold them -- unlike GCE labels. Exposing it
@@ -418,9 +447,9 @@ class _GceMetadataHostStateStore(HostStateStore):
     listing's metadata with no extra GET.
     """
 
-    provider: GcpProvider
+    provider: "GcpProvider"
 
-    def persist_host_record(self, record: VpsDockerHostRecord) -> None:
+    def persist_host_record(self, record: VpsHostRecord) -> None:
         host_id = HostId(record.certified_host_data.host_id)
         instance = self.provider._find_instance_for_host(host_id)
         if instance is None:
@@ -475,7 +504,7 @@ class _GceMetadataHostStateStore(HostStateStore):
                 logger.warning("Skipping agent metadata {!r}: value is not a JSON object", key)
         return records
 
-    def read_host_record(self, host_id: HostId) -> VpsDockerHostRecord | None:
+    def read_host_record(self, host_id: HostId) -> VpsHostRecord | None:
         instance = self.provider._find_instance_for_host(host_id)
         if instance is None:
             return None
@@ -483,7 +512,7 @@ class _GceMetadataHostStateStore(HostStateStore):
         if record_json is None:
             return None
         try:
-            return VpsDockerHostRecord.model_validate_json(record_json)
+            return VpsHostRecord.model_validate_json(record_json)
         except ValueError as e:
             # A malformed record raises rather than returning None (matching
             # BucketHostStateStore.read_host_record): silently dropping it would

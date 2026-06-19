@@ -2,6 +2,7 @@ import base64
 import json
 from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from contextlib import contextmanager
 from typing import Any
 from typing import Final
@@ -24,13 +25,12 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.data_types import FileType
-from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr_vps_docker import state_keys
-from imbue.mngr_vps_docker.state_bucket_base import BaseStateBucket
+from imbue.mngr_vps import state_keys
+from imbue.mngr_vps.state_bucket_base import BaseObjectStoreVolume
+from imbue.mngr_vps.state_bucket_base import BaseStateBucket
+from imbue.mngr_vps.state_bucket_base import ObjectStoreEntry
 
 # The Azure analog of an S3 bucket is a Blob *container* inside a *storage
 # account*. The container name is fixed (container names allow hyphens, 3-63
@@ -279,6 +279,16 @@ class BlobStateBucket(BaseStateBucket):
     def _store_label(self) -> str:
         return f"Azure container {self.container_name}"
 
+    def _translate_errors(self) -> AbstractContextManager[None]:
+        return _translate_blob_errors(self.account_name)
+
+    def _is_not_found(self, error: MngrError) -> bool:
+        return isinstance(error.__cause__, ResourceNotFoundError)
+
+    @property
+    def _bucket_error_type(self) -> type[MngrError]:
+        return BlobStateBucketError
+
     def _make_host_dir_volume(self) -> Volume:
         return BlobVolume(
             credential=self.credential,
@@ -286,10 +296,9 @@ class BlobStateBucket(BaseStateBucket):
             container_name=self.container_name,
         )
 
-    def _prefix_has_objects(self, prefix: str) -> bool:
-        with _translate_blob_errors(self.account_name):
-            for _ in self._container().list_blobs(name_starts_with=prefix):
-                return True
+    def _prefix_has_any_object(self, prefix: str) -> bool:
+        for _ in self._container().list_blobs(name_starts_with=prefix):
+            return True
         return False
 
     def account_exists(self) -> bool:
@@ -409,25 +418,11 @@ class BlobStateBucket(BaseStateBucket):
         with _translate_blob_errors(self.account_name):
             self._container().upload_blob(name=key, data=body.encode("utf-8"), overwrite=True)
 
-    def _get_object(self, key: str) -> str | None:
-        try:
-            with _translate_blob_errors(self.account_name):
-                downloader = self._container().download_blob(key)
-                return downloader.readall().decode("utf-8")
-        except BlobStateBucketError as e:
-            if isinstance(e.__cause__, ResourceNotFoundError):
-                return None
-            raise
+    def _read_object_bytes(self, key: str) -> bytes:
+        return self._container().download_blob(key).readall()
 
-    def _delete_object(self, key: str) -> None:
-        try:
-            with _translate_blob_errors(self.account_name):
-                self._container().delete_blob(key)
-        except BlobStateBucketError as e:
-            # A missing blob is a no-op (idempotent delete); anything else propagates.
-            if isinstance(e.__cause__, ResourceNotFoundError):
-                return
-            raise
+    def _delete_single_object(self, key: str) -> None:
+        self._container().delete_blob(key)
 
     def _delete_keys(self, keys: list[str]) -> None:
         # Blob storage has no batch delete, so remove one at a time (each idempotent).
@@ -439,14 +434,14 @@ class BlobStateBucket(BaseStateBucket):
             return [blob.name for blob in self._container().list_blobs(name_starts_with=prefix)]
 
 
-class BlobVolume(BaseVolume):
+class BlobVolume(BaseObjectStoreVolume):
     """A ``Volume`` backed by an Azure Blob container, for reading a host's offline host_dir.
 
     Maps volume-relative paths to blob names under whatever prefix it is
     ``scoped()`` to. Reads use the operator's credentials (the same data-plane
-    auth as ``BlobStateBucket``). Blob storage has no real directories, so a
-    "directory" is the set of blobs sharing a prefix; ``listdir`` synthesizes
-    directory entries from the common prefixes a delimited walk returns. Mirrors
+    auth as ``BlobStateBucket``). The shared object-store logic (listing /
+    existence / read / write / delete) lives on ``BaseObjectStoreVolume``; this
+    class supplies only the Blob client + SDK primitives + error seam. Mirrors
     ``S3Volume``.
     """
 
@@ -468,86 +463,57 @@ class BlobVolume(BaseVolume):
     def _container(self) -> Any:
         return self._blob_service().get_container_client(self.container_name)
 
-    def listdir(self, path: str) -> list[VolumeFile]:
-        prefix = _as_dir_prefix(path)
-        entries: list[VolumeFile] = []
-        with _translate_blob_errors(self.account_name):
-            for item in self._container().walk_blobs(name_starts_with=prefix, delimiter="/"):
-                name = item.name
-                # A delimited walk yields BlobPrefix entries (name ends with "/")
-                # for immediate sub-"directories" and BlobProperties for files
-                # directly under the prefix.
-                if name.endswith("/"):
-                    child = name[len(prefix) :].rstrip("/")
-                    if child:
-                        entries.append(VolumeFile(path=child, file_type=FileType.DIRECTORY, mtime=0, size=0))
-                    continue
-                child = name[len(prefix) :]
-                if not child or "/" in child:
-                    continue
-                # A file entry is a BlobProperties with typed last_modified / size.
-                last_modified = item.last_modified
-                entries.append(
-                    VolumeFile(
-                        path=child,
-                        file_type=FileType.FILE,
-                        mtime=int(last_modified.timestamp()) if last_modified is not None else 0,
-                        size=item.size or 0,
-                    )
-                )
-        return entries
+    def _translate_errors(self) -> AbstractContextManager[None]:
+        return _translate_blob_errors(self.account_name)
 
-    def path_exists(self, path: str) -> bool:
-        key = path.lstrip("/")
-        # A file exists if the exact blob exists; a directory exists if any blob
-        # shares its prefix. One prefix list covers both.
-        dir_prefix = _as_dir_prefix(path)
-        with _translate_blob_errors(self.account_name):
-            for blob in self._container().list_blobs(name_starts_with=key):
-                if blob.name == key or blob.name.startswith(dir_prefix):
-                    return True
+    def _is_not_found(self, error: MngrError) -> bool:
+        return isinstance(error.__cause__, ResourceNotFoundError)
+
+    @property
+    def _bucket_error_type(self) -> type[MngrError]:
+        return BlobStateBucketError
+
+    def _make_missing_file_error(self, path: str) -> MngrError:
+        return BlobStateBucketError(f"File {path!r} does not exist in container {self.container_name!r}")
+
+    def _iter_delimited_entries(self, prefix: str) -> Iterator[ObjectStoreEntry]:
+        for item in self._container().walk_blobs(name_starts_with=prefix, delimiter="/"):
+            name = item.name
+            # A delimited walk yields BlobPrefix entries (name ends with "/") for
+            # immediate sub-"directories" and BlobProperties for files directly
+            # under the prefix.
+            if name.endswith("/"):
+                yield ObjectStoreEntry(name=name.rstrip("/"), is_directory=True, mtime=0, size=0)
+                continue
+            last_modified = item.last_modified
+            yield ObjectStoreEntry(
+                name=name,
+                is_directory=False,
+                mtime=int(last_modified.timestamp()) if last_modified is not None else 0,
+                size=item.size or 0,
+            )
+
+    def _prefix_has_any_object(self, prefix: str) -> bool:
+        for _ in self._container().list_blobs(name_starts_with=prefix):
+            return True
         return False
 
-    def read_file(self, path: str) -> bytes:
-        key = path.lstrip("/")
-        try:
-            with _translate_blob_errors(self.account_name):
-                return self._container().download_blob(key).readall()
-        except BlobStateBucketError as e:
-            if isinstance(e.__cause__, ResourceNotFoundError):
-                raise BlobStateBucketError(f"File {path!r} does not exist in container {self.container_name!r}") from e
-            raise
+    def _has_object_at_key(self, key: str) -> bool:
+        return any(blob.name == key for blob in self._container().list_blobs(name_starts_with=key))
 
-    def remove_file(self, path: str, *, recursive: bool = False) -> None:
-        if recursive:
-            self.remove_directory(path)
-            return
-        try:
-            with _translate_blob_errors(self.account_name):
-                self._container().delete_blob(path.lstrip("/"))
-        except BlobStateBucketError as e:
-            if isinstance(e.__cause__, ResourceNotFoundError):
-                return
-            raise
+    def _read_object_bytes(self, key: str) -> bytes:
+        return self._container().download_blob(key).readall()
 
-    def remove_directory(self, path: str) -> None:
-        prefix = _as_dir_prefix(path)
-        with _translate_blob_errors(self.account_name):
-            container = self._container()
-            for blob in list(container.list_blobs(name_starts_with=prefix)):
-                container.delete_blob(blob.name)
+    def _delete_single_object(self, key: str) -> None:
+        self._container().delete_blob(key)
 
-    def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
-        with _translate_blob_errors(self.account_name):
-            container = self._container()
-            for path, content in file_contents_by_path.items():
-                container.upload_blob(name=path.lstrip("/"), data=content, overwrite=True)
+    def _delete_prefix(self, prefix: str) -> None:
+        container = self._container()
+        for blob in list(container.list_blobs(name_starts_with=prefix)):
+            container.delete_blob(blob.name)
 
-
-def _as_dir_prefix(path: str) -> str:
-    """Normalize a volume path to a blob directory prefix (no leading slash, trailing slash)."""
-    cleaned = path.strip("/")
-    return f"{cleaned}/" if cleaned else ""
+    def _write_object(self, key: str, content: bytes) -> None:
+        self._container().upload_blob(name=key, data=content, overwrite=True)
 
 
 @contextmanager

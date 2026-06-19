@@ -24,6 +24,7 @@ from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import FakeTokenCredential
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
+from imbue.mngr_vps.errors import ManagedResourcesExistError
 
 
 def _stubbed_bucket(
@@ -134,7 +135,7 @@ def test_cleanup_logic_refuses_when_vms_exist() -> None:
         SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure"}, instance_view=None)
     ]
     client = _operator_client(compute=compute)
-    with pytest.raises(AzureProviderError, match="Refusing to clean up"):
+    with pytest.raises(ManagedResourcesExistError, match="Refusing to clean up"):
         _perform_cleanup(client)
 
 
@@ -159,7 +160,7 @@ def test_refuse_cleanup_if_vms_exist_aborts_before_teardown() -> None:
     bucket = _stubbed_bucket(backend)
     bucket.ensure_bucket()
     bucket.write_host_record_json(HostId.generate(), "{}")
-    with pytest.raises(AzureProviderError, match="Refusing to clean up"):
+    with pytest.raises(ManagedResourcesExistError, match="Refusing to clean up"):
         _refuse_cleanup_if_vms_exist(client)
     # The guard raised before any teardown, so the account and its state survive.
     assert backend.deleted_account is False

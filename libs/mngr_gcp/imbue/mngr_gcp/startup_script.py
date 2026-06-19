@@ -1,9 +1,9 @@
 import shlex
 
-from imbue.mngr_vps_docker.host_setup import HostSetupStep
-from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
-from imbue.mngr_vps_docker.host_setup import build_auto_shutdown_command
-from imbue.mngr_vps_docker.host_setup import build_host_setup_steps
+from imbue.mngr_vps.host_setup import HostSetupStep
+from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps.host_setup import build_auto_shutdown_command
+from imbue.mngr_vps.host_setup import build_host_setup_steps
 
 
 def generate_gce_startup_script(

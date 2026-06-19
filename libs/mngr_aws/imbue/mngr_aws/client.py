@@ -22,11 +22,11 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Tag that ``create_instance`` adds to every EC2 instance launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses
@@ -539,6 +539,20 @@ class AwsVpsClient(VpsClientInterface):
             effective_ami_id,
         )
         return VpsInstanceId(instance_id)
+
+    def set_instance_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
+        """Upsert tags on an existing instance (EC2 ``create_tags`` is an upsert).
+
+        Used to re-stamp the cheap identity tags offline discovery reads (e.g.
+        the ``Name`` tag after a rename) without touching the rest of the
+        instance's tag set. AWS-only, like ``stop_instance`` -- reached via
+        ``self.aws_client``, not the shared ``VpsClientInterface``.
+        """
+        with self._translate_aws_errors():
+            self._ec2().create_tags(
+                Resources=[str(instance_id)],
+                Tags=[{"Key": key, "Value": value} for key, value in tags.items()],
+            )
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
         with self._translate_aws_errors():

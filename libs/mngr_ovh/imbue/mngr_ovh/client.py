@@ -25,11 +25,11 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_ovh._tag_keys import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.config import OvhProviderConfig
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 _DEFAULT_VPS_TASK_POLL_INTERVAL: Final[float] = 5.0
 
@@ -207,7 +207,7 @@ class OvhVpsClient(VpsClientInterface):
         """Record an in-flight ``RecycleHandle``.
 
         Used by ``recycle.try_recycle_cancelled_vps`` so that if the
-        base ``VpsDockerProvider.create_host`` cleanup calls
+        base ``VpsProvider.create_host`` cleanup calls
         ``destroy_instance`` on a VPS that's mid-recycle,
         ``destroy_instance`` releases the recycle lock instead of
         terminating an already-cancelled VPS.

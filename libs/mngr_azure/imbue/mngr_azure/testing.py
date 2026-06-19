@@ -167,6 +167,9 @@ class FakeVirtualMachinesOperations:
         self.get_error: Exception | None = None
         self.list_result: list[Any] = []
         self.list_error: Exception | None = None
+        # Records ``(vm_name, parameters)`` for each begin_update call (tag upserts).
+        self.updated: list[tuple[str, Any]] = []
+        self.update_error: Exception | None = None
         # Records the ``expand`` value the production code passes to ``list`` so a
         # test can assert it is NOT ``instanceView`` (Azure 400s that on a
         # resource-group list; power state is fetched per-VM via instance_view).
@@ -193,6 +196,12 @@ class FakeVirtualMachinesOperations:
             return FakePoller(error=self.start_error)
         self.started.append(vm_name)
         return FakePoller(completes=self.start_completes)
+
+    def begin_update(self, resource_group: str, vm_name: str, parameters: Any) -> FakePoller:
+        if self.update_error is not None:
+            return FakePoller(error=self.update_error)
+        self.updated.append((vm_name, parameters))
+        return FakePoller()
 
     def instance_view(self, resource_group: str, vm_name: str) -> Any:
         if self.instance_view_error is not None:
