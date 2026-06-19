@@ -23,7 +23,7 @@ backend = "aws"
 
 default_region = "us-east-1"
 default_instance_type = "t3.small"  # EC2 instance type
-default_ami_id = ""                # leave empty to use default_ami_by_region
+# default_ami_id = "ami-..."        # optional; falls back to the pinned per-region default when unset
 
 # Optional networking
 # security_group defaults to auto-create with name 'mngr-aws'. To override:
@@ -87,8 +87,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 |-------|---------|-------------|
 | `default_region` | `us-east-1` | AWS region for new instances. |
 | `default_instance_type` | `t3.small` | EC2 instance type. Surfaced to users as `--aws-instance-type=` build arg (not `--aws-plan=`) to match AWS's native terminology. |
-| `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
-| `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. |
+| `default_ami_id` | `None` | Explicit AMI override. When unset, the pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) for the chosen region is used. |
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |
 | `subnet_id` | `None` | Optional explicit subnet. |
 | `vpc_id` | `None` | Scopes auto-SG lookup. |

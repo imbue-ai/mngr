@@ -79,7 +79,7 @@ def get_default_project() -> str | None:
     here we translate that to ``None`` so the release tests and the session-end
     scanner can skip cleanly instead of erroring.
     """
-    config = GcpProviderConfig(project_id=os.environ.get("MNGR_GCP_PROJECT", ""))
+    config = GcpProviderConfig(project_id=os.environ.get("MNGR_GCP_PROJECT"))
     try:
         _credentials, adc_project = config.get_credentials_and_resolved_project()
         return config.resolve_project_id(adc_project)

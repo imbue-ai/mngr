@@ -108,13 +108,12 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
             "because that's what the AWS docs and console call it."
         ),
     )
-    default_ami_id: str = Field(
-        default="",
-        description="Default AMI ID. When empty, default_ami_by_region is consulted for the chosen region.",
-    )
-    default_ami_by_region: dict[str, str] = Field(
-        default_factory=lambda: dict(DEFAULT_AMI_BY_REGION),
-        description="Per-region default AMI IDs. Used when default_ami_id is empty.",
+    default_ami_id: str | None = Field(
+        default=None,
+        description=(
+            "Default AMI ID. When None, the pinned per-region default (DEFAULT_AMI_BY_REGION) "
+            "is consulted for the chosen region."
+        ),
     )
     security_group: SecurityGroupSpec = Field(
         default_factory=AutoCreateSecurityGroup,
@@ -193,18 +192,19 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
     def get_ami_id_for_region(self, region: str) -> str:
         """Return the AMI ID to use for the given region.
 
-        Priority: ``default_ami_id`` (explicit override) > per-region map. Raises
-        ``AwsConfigError`` (a ``ValueError``) when neither is set.
+        Priority: ``default_ami_id`` (explicit override) > pinned per-region
+        default (``DEFAULT_AMI_BY_REGION``). Raises ``AwsConfigError`` (a
+        ``ValueError``) when neither yields an AMI.
         """
         if self.default_ami_id:
             return self.default_ami_id
-        ami = self.default_ami_by_region.get(region)
+        ami = DEFAULT_AMI_BY_REGION.get(region)
         if ami:
             return ami
         raise AwsConfigError(
-            f"No AMI configured for region {region!r}. Set default_ami_id or add an entry to "
-            "default_ami_by_region (Debian 12 amd64 AMIs are typically what you want; see the "
-            "Debian AMI finder at https://wiki.debian.org/Cloud/AmazonEC2Image)."
+            f"No AMI configured for region {region!r}. Set default_ami_id (Debian 12 amd64 AMIs "
+            "are typically what you want; see the Debian AMI finder at "
+            "https://wiki.debian.org/Cloud/AmazonEC2Image)."
         )
 
     def resolve_state_bucket_name(self, session: boto3.Session, region: str | None = None) -> str | None:

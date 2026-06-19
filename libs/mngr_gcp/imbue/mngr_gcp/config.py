@@ -94,11 +94,11 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
         default=ProviderBackendName("gcp"),
         description="Provider backend (always 'gcp' for this type)",
     )
-    project_id: str = Field(
-        default="",
+    project_id: str | None = Field(
+        default=None,
         description=(
             "GCP project ID for new instances. A plain identifier, not a credential (ADC supplies "
-            "the actual credentials). When left empty, the project is taken from Application Default "
+            "the actual credentials). When unset, the project is taken from Application Default "
             "Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env "
             "var); set it explicitly to pin a specific project."
         ),
