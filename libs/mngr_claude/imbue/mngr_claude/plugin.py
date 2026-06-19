@@ -290,7 +290,8 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "in the agent environment so the binary stays on the installed version; AUTO leaves the auto-updater "
         "enabled. ASK has no interactive flow for claude and behaves like AUTO. When unset (the default), "
         "resolves to NEVER (auto-update disabled) so a managed agent stays on its installed version -- set "
-        "AUTO to opt back into Claude Code's auto-updater. Ignored in use_env_config_dir (shared) mode.",
+        "AUTO to opt back into Claude Code's auto-updater. Ignored when isolate_local_config_dir=False "
+        "(shared) mode.",
     )
     auto_dismiss_dialogs: bool = Field(
         default=False,
@@ -319,13 +320,16 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="When destroying this agent, first copy its transcripts and resumable session "
         "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
-    use_env_config_dir: bool = Field(
-        default=False,
-        description="When True, share the user's $CLAUDE_CONFIG_DIR across all claude agents instead of "
-        "provisioning a per-agent config dir. Local hosts only; $CLAUDE_CONFIG_DIR must be set. "
-        "When set, mngr never writes to the user's Claude config; the user is responsible for "
-        "interactive `claude` setup (trust dialogs, onboarding, credentials) ahead of time. "
-        "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode.",
+    isolate_local_config_dir: bool = Field(
+        default=True,
+        description="When True (the default), provision a per-agent Claude config dir so each local agent is "
+        "isolated and mngr never has to touch your default Claude config. When False, share the user's "
+        "$CLAUDE_CONFIG_DIR across all claude agents instead of provisioning a per-agent config dir; mngr then "
+        "leaves your Claude config alone and you are responsible for interactive `claude` setup (trust dialogs, "
+        "onboarding, credentials) ahead of time, but credentials stay in sync (which is what Claude "
+        "subscriptions on macOS need). Only meaningful for local hosts: a non-local agent always uses an "
+        "isolated config dir, so setting this to False on a remote agent is rejected. When False, other "
+        "sync/override/auto-dismiss fields on this config are silently ignored.",
     )
     streaming_snapshot_interval_seconds: float = Field(
         default=0.0,
@@ -821,6 +825,34 @@ def _read_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGr
         logger.debug("No keychain credential found for label {!r}", label)
         return None
     return result.stdout.strip()
+
+
+def _is_using_claude_oauth_subscription(source_claude_dir: Path, concurrency_group: ConcurrencyGroup) -> bool:
+    """Detect whether the user authenticates Claude Code with subscription OAuth credentials.
+
+    Claude Code stores claude.ai subscription tokens under the ``claudeAiOauth``
+    key, either in ``<config_dir>/.credentials.json`` or -- on macOS -- in the
+    login keychain under the "Claude Code-credentials" label. API-key auth uses a
+    separate store ("Claude Code" / primaryApiKey), so the presence of OAuth
+    credentials is a reliable signal that the user is on a subscription.
+    """
+    credentials_path = source_claude_dir / ".credentials.json"
+    if credentials_path.exists():
+        try:
+            file_data = json.loads(credentials_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            file_data = None
+        if isinstance(file_data, dict) and "claudeAiOauth" in file_data:
+            return True
+
+    raw_keychain = _read_macos_keychain_credential("Claude Code-credentials", concurrency_group)
+    if raw_keychain is None:
+        return False
+    try:
+        keychain_data = json.loads(raw_keychain)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(keychain_data, dict) and "claudeAiOauth" in keychain_data
 
 
 def _delete_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGroup) -> bool:
@@ -1490,21 +1522,31 @@ class ClaudeCoreAgent(
         ``$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/`` that replaces
         ``~/.claude/`` for this agent.
 
-        When ``use_env_config_dir=True``: resolve to the value of
+        When ``isolate_local_config_dir=False``: resolve to the value of
         ``$CLAUDE_CONFIG_DIR`` (the user's shared config dir), so multiple
         agents share a single directory. When the env var is unset, falls
         back to ``~/.claude/`` so the agent uses claude's own default.
         """
-        if self.agent_config.use_env_config_dir:
+        if not self.agent_config.isolate_local_config_dir:
             return resolve_shared_claude_config_dir()
         return self._get_agent_dir() / _AGENT_CLAUDE_CONFIG_RELPATH
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
 
-        In ``use_env_config_dir`` mode, leave CLAUDE_CONFIG_DIR alone (the agent
-        inherits the parent shell's value) and don't set ORIGINAL_CLAUDE_CONFIG_DIR
-        at all, since there's no per-agent dir to distinguish from the user's.
+        CLAUDE_CONFIG_DIR is always set, even when ``isolate_local_config_dir=False``
+        (shared mode): the launch command in ``assemble_command`` references
+        ``$CLAUDE_CONFIG_DIR`` to locate session files, and the tmux session the
+        agent runs in does not reliably inherit the value from the shell that
+        invoked mngr. In shared mode it resolves to the user's shared config dir
+        (``$CLAUDE_CONFIG_DIR`` or ``~/.claude``) via ``get_claude_config_dir`` ->
+        ``resolve_shared_claude_config_dir``, so claude reads the user's real
+        config rather than an empty path.
+
+        In shared mode we do not set ORIGINAL_CLAUDE_CONFIG_DIR (there is no
+        per-agent dir to distinguish from the user's) and do not force
+        DISABLE_AUTOUPDATER, leaving the user's claude environment otherwise
+        alone.
 
         The common-transcript opt-in/out is gated at provisioning time -- when
         disabled, the converter script is not written to commands/, so the
@@ -1513,12 +1555,11 @@ class ClaudeCoreAgent(
         When the resolved update policy is NEVER, sets DISABLE_AUTOUPDATER=1 so
         Claude Code's background auto-updater does not move the binary off its
         installed (possibly pinned) version. setdefault leaves an explicit
-        user-provided value untouched. Skipped in ``use_env_config_dir`` (shared)
-        mode, where mngr leaves the user's claude environment entirely alone.
+        user-provided value untouched.
         """
         config = self.agent_config
-        if not config.use_env_config_dir:
-            env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
+        env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
+        if config.isolate_local_config_dir:
             env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
             if is_self_update_disabled(config.update_policy, is_unattended=not host.is_local):
                 env_vars.setdefault("DISABLE_AUTOUPDATER", "1")
@@ -1797,6 +1838,32 @@ class ClaudeCoreAgent(
         # 3. Write generated files to config_dir
         _write_generated_files(host, config_dir, generated_files)
 
+    def _maybe_warn_subscription_credentials(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        """Warn macOS subscription users that config-dir isolation breaks credentials.
+
+        Claude Code hashes ``CLAUDE_CONFIG_DIR`` into the macOS keychain label, so
+        an isolated (per-agent) config dir gets its own credential entry. mngr
+        seeds a copy of the user's OAuth tokens there at provision time, but
+        claude.ai subscription tokens are refreshed periodically and the per-agent
+        copy goes stale, so the agent eventually fails to authenticate. Sharing
+        the user's config dir (``isolate_local_config_dir=False``) avoids this by
+        reusing the same keychain entry as the user's own claude. This is only a
+        warning -- the user may have reasons to keep isolation on -- and prints
+        the exact command to turn it off.
+        """
+        config = self.agent_config
+        if not (host.is_local and is_macos() and config.isolate_local_config_dir):
+            return
+        if not _is_using_claude_oauth_subscription(get_user_claude_config_dir(), mngr_ctx.concurrency_group):
+            return
+        logger.warning(
+            "Detected Claude.ai subscription (OAuth) credentials on macOS while Claude config-dir "
+            "isolation is enabled. Isolated agents use a separate keychain entry whose copy of your "
+            "subscription credentials goes stale as the tokens refresh, so this agent will likely hit "
+            "authentication errors later. To share your default Claude config (and credentials) instead, run:\n"
+            "    mngr config set agent_types.claude.isolate_local_config_dir false --scope user"
+        )
+
     def provision(
         self,
         host: OnlineHostInterface,
@@ -1812,12 +1879,18 @@ class ClaudeCoreAgent(
         - rsync/none: trust is prompted for the work_dir
         - auto_dismiss_dialogs=True: trust is auto-added for work_dir
 
-        In ``use_env_config_dir`` mode: skip all writes to the user's Claude
-        config -- no plugin path sentinel resolution, no dialog dismissal, no
-        cost-threshold acknowledgement, and no per-agent config dir setup. The
-        user takes responsibility for their own config.
+        In shared mode (``isolate_local_config_dir=False``): skip all writes to
+        the user's Claude config -- no plugin path sentinel resolution, no dialog
+        dismissal, no cost-threshold acknowledgement, and no per-agent config dir
+        setup. The user takes responsibility for their own config.
         """
         config = self.agent_config
+
+        # macOS subscription users hit credential trouble with per-agent config
+        # isolation (the per-agent keychain copy of their OAuth tokens goes stale
+        # as the subscription refreshes them). Warn before doing any work, with
+        # the exact command to switch to the shared config dir.
+        self._maybe_warn_subscription_credentials(host, mngr_ctx)
 
         # Resolve sentinel-prefixed installPaths in ~/.claude/ if present.
         # Deploy images have paths rewritten to a sentinel at build time
@@ -1825,7 +1898,7 @@ class ClaudeCoreAgent(
         # them to the actual ~/.claude/ path now, so all downstream code
         # can assume paths use ~/.claude/ as the prefix. Skipped in shared
         # mode because we don't want to rewrite the user's persistent config.
-        if not config.use_env_config_dir:
+        if config.isolate_local_config_dir:
             _resolve_plugins_dir_sentinel(host)
 
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
@@ -1868,7 +1941,7 @@ class ClaudeCoreAgent(
 
             # no matter what, *always* dismiss the cost popup, it's pointless.
             # Skipped in shared mode -- mngr never writes to the user's config.
-            if not config.use_env_config_dir:
+            if config.isolate_local_config_dir:
                 acknowledge_cost_threshold(find_user_claude_config())
 
             # Transfer plugin data from source agent before config setup (if cloning via --from).
@@ -1879,7 +1952,7 @@ class ClaudeCoreAgent(
 
             # Set up per-agent config directory (skipped in shared mode -- the
             # shared $CLAUDE_CONFIG_DIR is the user's responsibility to populate).
-            if not config.use_env_config_dir:
+            if config.isolate_local_config_dir:
                 self._setup_per_agent_config_dir(host, options, mngr_ctx)
 
             # Configure readiness hooks (for both local and remote hosts)
@@ -1929,7 +2002,9 @@ class ClaudeCoreAgent(
         return self.work_dir
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
-        preserve_agent_state(_claude_preserved_items(self.agent_config.use_env_config_dir), self, host)
+        preserve_agent_state(
+            _claude_preserved_items(is_shared_config=not self.agent_config.isolate_local_config_dir), self, host
+        )
 
     def is_unattended_enabled(self) -> bool:
         return self.agent_config.auto_allow_permissions
@@ -1973,7 +2048,8 @@ class ClaudeCoreAgent(
         For legacy agents without per-agent config dirs: cleans up the global
         ~/.claude.json trust entry.
 
-        In ``use_env_config_dir`` mode: skip keychain / trust cleanup entirely.
+        In shared mode (``isolate_local_config_dir=False``): skip keychain / trust
+        cleanup entirely.
         ``get_claude_config_dir()`` resolves to the user's shared $CLAUDE_CONFIG_DIR,
         which exists, so the per-agent-keychain branch would otherwise compute the
         same label hash Claude Code itself uses and delete the user's real
@@ -1988,7 +2064,7 @@ class ClaudeCoreAgent(
         if self.agent_config.preserve_sessions_on_destroy:
             self.preserve_session_state(host)
 
-        if self.agent_config.use_env_config_dir:
+        if not self.agent_config.isolate_local_config_dir:
             # Shared-config mode: mngr never wrote per-agent keychain entries or
             # ~/.claude.json trust markers, so there is nothing to clean up. Any
             # keychain delete here would target the user's own credentials.
@@ -2261,18 +2337,18 @@ class ClaudeAgent(
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
 
-        In ``use_env_config_dir`` mode: enforce local-only, and skip the
-        dialog-dismissal validation entirely (user is responsible for their
-        own config; mngr makes no writes to it).
+        In shared mode (``isolate_local_config_dir=False``): enforce local-only,
+        and skip the dialog-dismissal validation entirely (user is responsible
+        for their own config; mngr makes no writes to it).
         """
         config = self.agent_config
 
-        if config.use_env_config_dir:
+        if not config.isolate_local_config_dir:
             if not host.is_local:
                 raise UserInputError(
-                    "use_env_config_dir=True is only supported for local hosts; "
-                    "this agent targets a non-local host. Disable use_env_config_dir "
-                    "or move the agent to a local host."
+                    "isolate_local_config_dir=False is only supported for local hosts; "
+                    "this agent targets a non-local host. Set isolate_local_config_dir=True "
+                    "(the default) or move the agent to a local host."
                 )
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip when auto_dismiss_dialogs is True because
@@ -2311,12 +2387,13 @@ class ClaudeAgent(
         self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext
     ) -> None:
         """Dismiss blocking Claude startup dialogs before the agent starts so they don't
-        intercept tmux input. Only acts on local, non-``use_env_config_dir`` hosts;
-        ``auto_dismiss_dialogs`` silently approves, otherwise routes through
-        ``interactively_dismiss_claude_dialogs`` (prompt/validate per mode).
+        intercept tmux input. Only acts on local hosts running in isolated
+        (per-agent) config mode; ``auto_dismiss_dialogs`` silently approves,
+        otherwise routes through ``interactively_dismiss_claude_dialogs``
+        (prompt/validate per mode).
         """
         config = self.agent_config
-        if not (host.is_local and not config.use_env_config_dir):
+        if not (host.is_local and config.isolate_local_config_dir):
             return
         # Determine the source path for trust extension.
         source_path: Path | None = None
@@ -2399,10 +2476,10 @@ class ClaudeAgent(
         destination's encoded project dir, deduplicating by source project dir name across
         calls (multiple named sessions may share one project dir).
 
-        Destination resolution depends on ``use_env_config_dir``:
-        - Default (``False``): copies into the per-agent config dir at
+        Destination resolution depends on ``isolate_local_config_dir``:
+        - Default (``True``): copies into the per-agent config dir at
           ``$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/projects/<encoded>/``.
-        - Shared (``True``): copies into the user's shared
+        - Shared (``False``): copies into the user's shared
           ``$CLAUDE_CONFIG_DIR/projects/<encoded-work_dir>/``. Per spec decision
           4c this is the only sanctioned mngr write to the user's config dir
           in shared mode, and it only adds new project subdirs -- it never
@@ -2575,7 +2652,7 @@ def _claude_preserved_items(is_shared_config: bool) -> list[PreservedItem]:
     online and offline preservation paths:
 
     - ``plugin/claude/anthropic/projects`` -- the per-agent Claude config dir's
-      session JSONLs. Skipped in ``use_env_config_dir`` mode, where projects
+      session JSONLs. Skipped in shared (``isolate_local_config_dir=False``) mode, where projects
       live in the user's persistent ``$CLAUDE_CONFIG_DIR`` (not under the agent
       state dir, and shared across all of the user's projects); they survive
       destruction already and must not be duplicated per-agent.
@@ -2606,8 +2683,11 @@ def _claude_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list
     """Return the items to preserve for a discovered (offline) Claude agent, or None to skip it."""
     if not _should_preserve_sessions(ref):
         return None
-    is_shared_config = bool(ref.certified_data.get("agent_config", {}).get("use_env_config_dir"))
-    return _claude_preserved_items(is_shared_config)
+    # Default True (isolated): an agent record that never set the field -- or one
+    # created before this field existed -- is treated as having an isolated
+    # per-agent config dir, so its ``projects/`` is preserved.
+    is_shared_config = not ref.certified_data.get("agent_config", {}).get("isolate_local_config_dir", True)
+    return _claude_preserved_items(is_shared_config=is_shared_config)
 
 
 def _generate_claude_home_settings() -> dict[str, Any]:

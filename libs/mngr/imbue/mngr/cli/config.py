@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tomllib
+from collections.abc import Callable
 from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -23,6 +25,8 @@ from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.cli.urwid_picker import run_single_select_picker
+from imbue.mngr.cli.urwid_utils import has_interactive_terminal
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
@@ -1089,6 +1093,122 @@ def _emit_all_paths(paths: list[dict[str, Any]], output_opts: OutputOptions) -> 
             assert_never(unreachable)
 
 
+@config.command(name="wizard")
+@add_common_options
+@click.pass_context
+def config_wizard(ctx: click.Context, **kwargs: Any) -> None:
+    try:
+        _config_wizard_impl(ctx, **kwargs)
+    except AbortError as e:
+        logger.error("Aborted: {}", e.message)
+        ctx.exit(1)
+
+
+def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
+    """Walk through common one-time user-scope configuration steps.
+
+    Each step short-circuits when its setting is already configured, so
+    re-running the wizard (e.g. on a repeated install) only prompts for gaps.
+    Run from ``scripts/install.sh`` after the extras step.
+    """
+    mngr_ctx, _, _ = setup_command_context(
+        ctx=ctx,
+        command_name="config",
+        command_class=ConfigCliOptions,
+    )
+
+    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    config_path = get_config_path(ConfigScope.USER, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
+
+    write_human_line("mngr config wizard")
+    write_human_line("")
+    _wizard_claude_config_isolation(config_path)
+
+
+def _is_claude_agent_type_registered() -> bool:
+    """Return True when the ``claude`` agent type is registered (mngr Claude plugin installed)."""
+    return "claude" in list_registered_agent_types()
+
+
+def _get_existing_isolation_setting(raw: dict[str, Any]) -> bool | None:
+    """Return the user-config value of agent_types.claude.isolate_local_config_dir, or None."""
+    agent_types = raw.get("agent_types")
+    if not isinstance(agent_types, dict):
+        return None
+    claude = agent_types.get("claude")
+    if not isinstance(claude, dict):
+        return None
+    value = claude.get("isolate_local_config_dir")
+    return value if isinstance(value, bool) else None
+
+
+def _prompt_claude_isolation_choice() -> bool | None:
+    """Show a 2-option picker. Returns True to isolate, False to share, None if cancelled.
+
+    Caller must check ``has_interactive_terminal()`` first.
+    """
+    options = [
+        "Yes -- give each agent its own Claude config (mngr won't touch your default Claude config)",
+        "No -- share your default Claude config "
+        "(mngr may write to it, but this is needed for Claude subscriptions on macOS to keep credentials working)",
+    ]
+    idx = run_single_select_picker(
+        options=options,
+        title="mngr config wizard",
+        header_text="Enable config dir isolation for local Claude agents?",
+    )
+    if idx is None:
+        return None
+    return idx == 0
+
+
+def _wizard_claude_config_isolation(
+    config_path: Path,
+    *,
+    # Dependencies are exposed as keyword arguments so tests can substitute
+    # in-memory fakes without monkeypatching module-level callables (mirrors
+    # the ``_install_*`` seams in extras.py).
+    is_claude_registered_fn: Callable[[], bool] = _is_claude_agent_type_registered,
+    is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    prompt_fn: Callable[[], bool | None] = _prompt_claude_isolation_choice,
+) -> None:
+    """Prompt whether to isolate the Claude config dir for local agents.
+
+    Only runs when the ``claude`` agent type is registered (the mngr Claude
+    plugin is installed); config-dir isolation is meaningless otherwise. Writes
+    ``agent_types.claude.isolate_local_config_dir`` to the user-scope config.
+    Skips silently if the setting is already present in that file.
+    """
+    if not is_claude_registered_fn():
+        return
+
+    existing = _load_config_file(config_path)
+    current = _get_existing_isolation_setting(existing)
+    if current is not None:
+        write_human_line(
+            "Claude config dir isolation is already set to {} in {}; skipping.",
+            str(current).lower(),
+            config_path,
+        )
+        return
+
+    if not is_interactive_fn():
+        write_human_line("No interactive terminal; skipping Claude config dir isolation setup.")
+        write_human_line("To set it later, run:")
+        write_human_line("    mngr config set agent_types.claude.isolate_local_config_dir <true|false> --scope user")
+        return
+
+    choice = prompt_fn()
+    if choice is None:
+        write_human_line("Skipping Claude config dir isolation.")
+        return
+
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, "agent_types.claude.isolate_local_config_dir", choice)
+    save_config_file(config_path, doc)
+    write_human_line("Set agent_types.claude.isolate_local_config_dir = {} in {}", str(choice).lower(), config_path)
+
+
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="config",
@@ -1269,3 +1389,22 @@ only that scope's path. Otherwise shows all paths and whether they exist.""",
     ),
 ).register()
 add_pager_help_option(config_path)
+
+CommandHelpMetadata(
+    key="config.wizard",
+    one_line_description="Interactively set up common user-scope configuration",
+    synopsis="mngr config wizard [OPTIONS]",
+    description="""Walks through common one-time configuration steps, writing to the
+user-scope config. Each step short-circuits when its setting is already
+configured, so re-running only prompts for what is still unset. Run
+automatically by the installer.
+
+Steps:
+  Claude config dir isolation  Whether each local Claude agent gets its own
+                               config dir (mngr leaves your default Claude
+                               config untouched) or shares your default config
+                               (needed for Claude subscriptions on macOS).""",
+    examples=(("Run the configuration wizard", "mngr config wizard"),),
+    see_also=(("config set", "Set a configuration value directly"),),
+).register()
+add_pager_help_option(config_wizard)

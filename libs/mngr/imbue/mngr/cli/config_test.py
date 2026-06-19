@@ -17,7 +17,9 @@ from imbue.mngr.cli.config import _emit_key_not_found
 from imbue.mngr.cli.config import _emit_single_path
 from imbue.mngr.cli.config import _flatten_config
 from imbue.mngr.cli.config import _format_value_for_display
+from imbue.mngr.cli.config import _get_existing_isolation_setting
 from imbue.mngr.cli.config import _get_nested_value
+from imbue.mngr.cli.config import _wizard_claude_config_isolation
 from imbue.mngr.cli.config import _unset_nested_value
 from imbue.mngr.cli.config import config
 from imbue.mngr.config.data_types import ConfigScope
@@ -709,3 +711,110 @@ def test_emit_all_paths_human_with_error(capsys: pytest.CaptureFixture[str]) -> 
     output = captured.out
     assert "user" in output
     assert "permission denied" in output
+
+
+# =============================================================================
+# config wizard: Claude config dir isolation step
+# =============================================================================
+
+
+def _read_isolation_value(config_path: Path) -> object:
+    """Read agent_types.claude.isolate_local_config_dir back from a TOML file."""
+    return _get_existing_isolation_setting(load_config_file_tomlkit(config_path).unwrap())
+
+
+def test_get_existing_isolation_setting_reads_value() -> None:
+    raw = {"agent_types": {"claude": {"isolate_local_config_dir": False}}}
+    assert _get_existing_isolation_setting(raw) is False
+
+
+def test_get_existing_isolation_setting_returns_none_when_absent() -> None:
+    assert _get_existing_isolation_setting({}) is None
+    assert _get_existing_isolation_setting({"agent_types": {"claude": {}}}) is None
+
+
+def test_wizard_isolation_writes_false_when_user_picks_share(tmp_path: Path) -> None:
+    """Picking "share" (prompt returns False) writes isolate_local_config_dir = false."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_claude_config_isolation(
+        config_path,
+        is_claude_registered_fn=lambda: True,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: False,
+    )
+
+    assert _read_isolation_value(config_path) is False
+
+
+def test_wizard_isolation_writes_true_when_user_picks_isolate(tmp_path: Path) -> None:
+    """Picking "isolate" (prompt returns True) writes isolate_local_config_dir = true."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_claude_config_isolation(
+        config_path,
+        is_claude_registered_fn=lambda: True,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: True,
+    )
+
+    assert _read_isolation_value(config_path) is True
+
+
+def test_wizard_isolation_skips_when_claude_not_registered(tmp_path: Path) -> None:
+    """When the claude agent type is not registered, the step writes nothing."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_claude_config_isolation(
+        config_path,
+        is_claude_registered_fn=lambda: False,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: pytest.fail("prompt must not be called when claude is unregistered"),
+    )
+
+    assert not config_path.exists()
+
+
+def test_wizard_isolation_skips_when_already_set(tmp_path: Path) -> None:
+    """An already-configured value is left untouched and the prompt is not shown."""
+    config_path = tmp_path / "settings.toml"
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, "agent_types.claude.isolate_local_config_dir", True)
+    save_config_file(config_path, doc)
+
+    _wizard_claude_config_isolation(
+        config_path,
+        is_claude_registered_fn=lambda: True,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: pytest.fail("prompt must not be called when the setting already exists"),
+    )
+
+    assert _read_isolation_value(config_path) is True
+
+
+def test_wizard_isolation_writes_nothing_when_cancelled(tmp_path: Path) -> None:
+    """Cancelling the picker (prompt returns None) leaves the setting unset."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_claude_config_isolation(
+        config_path,
+        is_claude_registered_fn=lambda: True,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: None,
+    )
+
+    assert _read_isolation_value(config_path) is None
+
+
+def test_wizard_isolation_non_interactive_prints_hint_without_writing(tmp_path: Path) -> None:
+    """With no interactive terminal, the step prints guidance but writes nothing."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_claude_config_isolation(
+        config_path,
+        is_claude_registered_fn=lambda: True,
+        is_interactive_fn=lambda: False,
+        prompt_fn=lambda: pytest.fail("prompt must not be called without an interactive terminal"),
+    )
+
+    assert _read_isolation_value(config_path) is None
