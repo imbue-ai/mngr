@@ -28,6 +28,7 @@ from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.external_settings import MNGR_MERGE_KEY
+from imbue.mngr.config.external_settings import OP_SUFFIXES
 from imbue.mngr.config.key_resolver import is_settings_overrides_path
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
@@ -447,7 +448,7 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
                 suffixed_value = _get_nested_value(config_data, f"{key}{suffix}")
             except KeyError:
                 continue
-            _emit_config_extend_value(key, f"{key}{suffix}", suffixed_value, output_opts)
+            _emit_config_merge_op_value(key, f"{key}{suffix}", suffixed_value, output_opts)
             return
         _emit_key_not_found(key, output_opts)
         ctx.exit(1)
@@ -495,15 +496,15 @@ def _format_extend_sentinel(value: Any) -> str:
     return _format_value_for_display(value)
 
 
-def _emit_config_extend_value(key: str, extend_key: str, value: Any, output_opts: OutputOptions) -> None:
-    """Emit a scope-file extend-key value. Human prints the ellipsis sentinel;
-    JSON/JSONL emit the literal TOML key so downstream tooling can round-trip.
+def _emit_config_merge_op_value(key: str, written_key: str, value: Any, output_opts: OutputOptions) -> None:
+    """Emit a scope-file ``__extend`` / ``__assign`` key value. Human prints the ellipsis
+    sentinel; JSON/JSONL emit the literal TOML key so downstream tooling can round-trip.
     """
     match output_opts.output_format:
         case OutputFormat.JSON:
-            write_json_line({"key": extend_key, "value": value})
+            write_json_line({"key": written_key, "value": value})
         case OutputFormat.JSONL:
-            write_json_line({"event": "config_value", "key": extend_key, "value": value})
+            write_json_line({"event": "config_value", "key": written_key, "value": value})
         case OutputFormat.HUMAN:
             write_human_line("{}", _format_extend_sentinel(value))
         case _ as unreachable:
@@ -637,7 +638,7 @@ def _config_merge_op_impl(ctx: click.Context, key: str, value: str, *, op: str, 
         set_nested_value(doc, merge_path, directives)
         written_key = f"{merge_path}.{relative}"
     else:
-        written_key = f"{key}{EXTEND_SUFFIX if op == 'extend' else ASSIGN_SUFFIX}"
+        written_key = f"{key}{OP_SUFFIXES[op]}"
         set_nested_value(doc, written_key, parsed_value)
 
     # Validate by resolving the new operator against the current merged config.

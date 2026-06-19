@@ -336,14 +336,10 @@ def test_resolve_extends_does_not_preserve_extend_outside_create_templates() -> 
 
 
 def test_resolve_extends_preserves_extend_inside_settings_overrides() -> None:
-    """A ``__mngr_merge`` ``extend`` directive under ``agent_types.<name>.settings_overrides``
-    desugars to the internal suffix form (ancestors ``__extend``, leaf ``__extend``) and,
-    because the base lookup yields ``None``, is preserved verbatim through config-load --
-    destined for the provision-time fold against the concrete settings base ``B``.
-
-    ``settings_overrides`` is schemaless, so the base lookup is ``None``; without the
-    deferred-path carveout the marker would collapse to a bare assign at config-load instead
-    of merging onto the home settings.json at provision.
+    """A ``__mngr_merge`` directive under ``settings_overrides`` is desugared and, because the
+    base lookup yields ``None``, preserved verbatim for the provision-time fold (the
+    deferred-path carveout) rather than collapsed to a bare assign. (Desugar mechanics are
+    pinned in external_settings_test.)
     """
     base = MngrConfig()
     resolved = resolve_extends(
@@ -367,8 +363,8 @@ def test_resolve_extends_preserves_extend_inside_settings_overrides() -> None:
 
 
 def test_resolve_extends_preserves_deep_extend_inside_settings_overrides() -> None:
-    """The settings_overrides carveout is a *prefix* match: a directive targeting a key
-    nested several levels deep is also desugared and preserved, not just a top-level one.
+    """A directive targeting a key nested under ``settings_overrides`` is desugared and
+    preserved through the resolver, the same as a top-level one.
     """
     base = MngrConfig()
     override = {

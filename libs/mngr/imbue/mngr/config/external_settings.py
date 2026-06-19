@@ -44,7 +44,7 @@ MNGR_MERGE_KEY: Final[str] = "__mngr_merge"
 # each desugars to. ``extend`` merges onto the base (what the external CLI does natively
 # across layers); ``assign`` replaces without the narrowing guard. A bare key (absent from
 # the map) stays a narrowing-checked assign.
-_OP_SUFFIXES: Final[dict[str, str]] = {"extend": EXTEND_SUFFIX, "assign": ASSIGN_SUFFIX}
+OP_SUFFIXES: Final[dict[str, str]] = {"extend": EXTEND_SUFFIX, "assign": ASSIGN_SUFFIX}
 
 # Sentinel distinguishing "key absent" from a real ``None`` value when walking a patch.
 _MISSING: Final = object()
@@ -162,8 +162,8 @@ def desugar_settings_overrides(override: dict[str, Any], path: tuple[str, ...]) 
         )
     marks: dict[tuple[str, ...], str] = {}
     for dotted, op in directives.items():
-        if op not in _OP_SUFFIXES:
-            valid = " | ".join(sorted(_OP_SUFFIXES))
+        if op not in OP_SUFFIXES:
+            valid = " | ".join(sorted(OP_SUFFIXES))
             raise ConfigParseError(
                 f'`{MNGR_MERGE_KEY}` in {location}: entry "{dotted}" = "{op}" is not a valid '
                 f"operator (expected {valid})."
@@ -177,7 +177,7 @@ def desugar_settings_overrides(override: dict[str, Any], path: tuple[str, ...]) 
                 f"Set the value under `settings_overrides` (the `__mngr_merge` map only annotates how "
                 f"existing keys merge)."
             )
-        _mark_path(marks, segments, _OP_SUFFIXES[op], location)
+        _mark_path(marks, segments, OP_SUFFIXES[op], location)
     return _apply_marks(clean, marks, ())
 
 

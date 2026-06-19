@@ -152,8 +152,8 @@ def test_remediation_assigns_replaced_leaf_list() -> None:
 
 def test_remediation_recurses_past_dict_drop_to_nested_leaf() -> None:
     """The full nested patch in one error: a dict that drops a sibling key is ``extend`` (keep
-    the sibling) and the replaced nested list is ``assign`` (keep the exact list). Pins the fix
-    for the dict-level short-circuit that previously hid the nested narrowing."""
+    the sibling) and the replaced nested list is ``assign`` (keep the exact list) -- the
+    remediation recurses past the dict level rather than reporting only the dict."""
     base = {"permissions": {"allow": ["A"], "deny": ["D"]}}
     # The override drops deny and replaces allow.
     override = {"permissions": {"allow": ["B"]}}
