@@ -127,6 +127,21 @@
 }
 
 /*
+ * Corner-radius scale -- four steps (px), held by a ratchet alongside the
+ * built-in rounded-full / rounded-none. Round-down snap from the old values:
+ * sm 4->2, md 6->4, lg stays 8, and the old 12px (cards / modals / xl) folds
+ * down into lg, leaving xl as the reserved 16px top step. The one exception is
+ * the chrome content frame, which keeps a structural rounded-[12px] to match
+ * Electron's CONTENT_CORNER_RADIUS and the OS window's outer rounding.
+ */
+@theme {
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-xl: 16px;
+}
+
+/*
  * Default border color. Tailwind v4 defaults un-colored borders / dividers to
  * ``currentColor``; we instead default them to the themeable ``border-default``
  * token so every bare ``border`` / ``border-t`` / ... utility is both legible
@@ -241,13 +256,13 @@ html {
  * surfaces that can't call the Jinja component -- e.g. the providers
  * list in templates/pages/Landing.jinja -- reference the same class
  * string so one edit here re-styles every card. Values mirror the
- * Tailwind utilities they replace: bg-white, border border-zinc-200,
- * rounded-xl.
+ * Tailwind utilities they replace: bg-surface-primary, border
+ * border-default, rounded-lg.
  */
 .minds-card {
   background: var(--c-surface-primary);
   border: 1px solid var(--c-border-default);
-  border-radius: 0.75rem;
+  border-radius: var(--radius-lg);
 }
 
 /*
@@ -261,7 +276,7 @@ html {
  */
 .code-pill {
   background: var(--c-fill-subtle);
-  border-radius: 0.375rem;
+  border-radius: var(--radius-md);
   padding: 0.125rem 0.375rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.95em;
@@ -278,7 +293,7 @@ html {
   gap: 12px;
   padding: 13px 14px;
   border: 1px solid var(--c-border-subtle);
-  border-radius: 11px;
+  border-radius: var(--radius-lg);
   cursor: pointer;
   background: var(--c-fill-subtle);
   transition: border-color 150ms, background 150ms;

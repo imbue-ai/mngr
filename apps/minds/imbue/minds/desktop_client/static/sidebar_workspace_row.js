@@ -31,7 +31,7 @@
     btn.type = 'button';
     // 24x24 hit area for easy clicking; the glyph keeps its own (smaller)
     // size via sizeClass and is centered inside the button.
-    btn.className = 'sidebar-row-icon flex items-center justify-center w-6 h-6 bg-transparent border-none cursor-pointer text-secondary rounded hover:text-primary hover:bg-fill-hover';
+    btn.className = 'sidebar-row-icon flex items-center justify-center w-6 h-6 bg-transparent border-none cursor-pointer text-secondary rounded-md hover:text-primary hover:bg-fill-hover';
     btn.title = title;
     btn.tabIndex = -1;
     btn.setAttribute(dataAttr, agentId);

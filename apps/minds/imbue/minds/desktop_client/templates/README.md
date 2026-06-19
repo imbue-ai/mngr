@@ -76,7 +76,7 @@ in sync:
 
 | Class | Role |
 |---|---|
-| `.minds-card` | Card surface (bg-surface-primary, border-default, rounded-xl). Match `Card.jinja`. |
+| `.minds-card` | Card surface (bg-surface-primary, border-default, rounded-lg). Match `Card.jinja`. |
 | `.spinner` / `.spinner-accent` | Animated circular spinner (token-driven ring/top; `-accent` uses the accent token). Match `Spinner.jinja`. |
 | `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing project rows + Destroying. |

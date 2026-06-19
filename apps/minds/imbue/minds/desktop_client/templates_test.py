@@ -434,15 +434,17 @@ def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
 
 
 def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
-    # 12px radius (``rounded-xl``) matches Electron-side
+    # 12px radius (``rounded-[12px]``) matches Electron-side
     # ``contentView.setBorderRadius(12)`` (= ``CONTENT_CORNER_RADIUS`` in
     # electron/main.js) so both modes render the same tucked-under shape
-    # against the OS's outer window rounding.
+    # against the OS's outer window rounding. It is a structural exception to
+    # the 4-step radius scale (2/4/8/16) -- pinned as an arbitrary value so it
+    # stays locked to the Electron constant rather than tracking ``rounded-xl``.
     html = render_chrome_page()
     iframe_open = html.index('id="content-frame"')
     iframe_close = html.index(">", iframe_open)
     iframe_tag = html[iframe_open:iframe_close]
-    assert "rounded-xl" in iframe_tag
+    assert "rounded-[12px]" in iframe_tag
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
@@ -1253,7 +1255,7 @@ def test_card_page_default_padding_and_max_width() -> None:
     html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
     # Card surface: bg/border/rounded/shadow + p-10 + max-w-[420px] + w-full.
     assert "bg-surface-primary" in html
-    assert "rounded-xl" in html
+    assert "rounded-lg" in html
     assert "shadow-sm" in html
     assert "p-10" in html
     assert "max-w-[420px]" in html

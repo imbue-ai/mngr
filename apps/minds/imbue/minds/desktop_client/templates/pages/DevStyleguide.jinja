@@ -433,24 +433,26 @@
       <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-accent (links, selection, focus rings, progress)</div>
     </section>
 
-    {# Corner-radius ramp. Bare ``rounded`` (Tailwind v3 default = 4px,
-       == rounded-md) was banished in favor of explicit ``rounded-md``
-       everywhere for grep-ability. ``rounded-xl`` (12px) is shared by
-       cards, modal/dialog chrome, and the chrome content surface that
-       tucks under the colored titlebar (Chrome.jinja's #content-frame)
-       -- the 12px radius matches Electron's ``CONTENT_CORNER_RADIUS``
-       so both browser-mode iframe and Electron WebContentsView render
-       the same shape. ``rounded-2xl`` (16px) has no active site today;
-       it stays on the ramp so future heavier surfaces can reach for it
-       without re-deriving the step. #}
+    {# Corner-radius scale. Four steps (2/4/8/16 px) defined in app.css
+       (@theme --radius-*) plus the built-in rounded-full / rounded-none; a
+       ratchet holds the set. The one exception is the chrome content surface
+       that tucks under the colored titlebar (Chrome.jinja's #content-frame),
+       which keeps a structural ``rounded-[12px]`` -- that 12px matches
+       Electron's ``CONTENT_CORNER_RADIUS`` and the OS window's outer rounding,
+       so both browser-mode iframe and Electron WebContentsView nest the same. #}
     <section class="mb-12">
       <h2 class="text-lg font-semibold text-primary mb-1">Corner radius</h2>
       <p class="text-xs text-secondary mb-4">
-        Five steps; each plays one role. Prefer the explicit ``rounded-md``
-        over bare ``rounded`` so call sites are grep-able for radius
-        rather than for the no-suffix shorthand.
+        Four steps (2 / 4 / 8 / 16 px) plus <code>rounded-full</code>; each
+        plays one role. <code>rounded-xl</code> (16px) is reserved for the
+        largest surfaces.
       </p>
       <div class="bg-surface-primary border border-default rounded-lg p-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active border border-strong rounded-sm"></div>
+          <code class="text-[11px] font-mono text-secondary mt-1">rounded-sm (2px)</code>
+          <span class="text-[11px] text-secondary">subtle accents, tiny badges</span>
+        </div>
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-fill-active border border-strong rounded-md"></div>
           <code class="text-[11px] font-mono text-secondary mt-1">rounded-md (4px)</code>
@@ -459,17 +461,12 @@
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-fill-active border border-strong rounded-lg"></div>
           <code class="text-[11px] font-mono text-secondary mt-1">rounded-lg (8px)</code>
-          <span class="text-[11px] text-secondary">inputs (lg radius), large-CTA buttons</span>
+          <span class="text-[11px] text-secondary">inputs, cards, modals, panels, log boxes</span>
         </div>
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-fill-active border border-strong rounded-xl"></div>
-          <code class="text-[11px] font-mono text-secondary mt-1">rounded-xl (12px)</code>
-          <span class="text-[11px] text-secondary">cards, modal / dialog chrome, chrome content tuck-under (Chrome.jinja)</span>
-        </div>
-        <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-2xl"></div>
-          <code class="text-[11px] font-mono text-secondary mt-1">rounded-2xl (16px)</code>
-          <span class="text-[11px] text-secondary">unused (reserved on ramp)</span>
+          <code class="text-[11px] font-mono text-secondary mt-1">rounded-xl (16px)</code>
+          <span class="text-[11px] text-secondary">reserved -- largest surfaces</span>
         </div>
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-fill-active border border-strong rounded-full"></div>
@@ -606,7 +603,7 @@
       {# Accent spine #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-secondary mb-2">Accent spine</div>
-        <div class="accent-spine relative flex items-center gap-3 bg-surface-primary border border-default rounded-xl px-4 py-3.5 overflow-hidden">
+        <div class="accent-spine relative flex items-center gap-3 bg-surface-primary border border-default rounded-lg px-4 py-3.5 overflow-hidden">
           <div class="text-sm text-primary">Card with workspace accent stripe on the left edge.</div>
         </div>
         <div class="mt-1 text-[11px] text-secondary font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from app.css</div>
@@ -917,7 +914,7 @@
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-secondary mb-2">Modal (inner card preview)</div>
         <div class="bg-fill-subtle border border-default rounded-lg p-6 flex items-center justify-center">
-          <div class="bg-surface-primary rounded-xl shadow-lg border border-default max-w-sm w-full p-6">
+          <div class="bg-surface-primary rounded-lg shadow-lg border border-default max-w-sm w-full p-6">
             <h2 class="text-lg font-semibold text-primary mb-3">Confirm action?</h2>
             <p class="text-sm text-primary mb-4">This is what the inner card of a Modal looks like.</p>
             <div class="flex justify-end gap-3">
