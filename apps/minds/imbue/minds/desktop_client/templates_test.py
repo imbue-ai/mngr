@@ -1265,8 +1265,7 @@ def test_elevation_uses_shadow_roles_not_raw_steps() -> None:
         for match in banned.finditer(path.read_text()):
             offenders.append(f"{path.name}: {match.group(0)}")
     assert offenders == [], (
-        "Raw box-shadow utilities found. Use shadow-raised / shadow-overlay "
-        f"(or shadow-none): {offenders}"
+        f"Raw box-shadow utilities found. Use shadow-raised / shadow-overlay (or shadow-none): {offenders}"
     )
 
 
