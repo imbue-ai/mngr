@@ -44,7 +44,7 @@ Reworked the titlebar to self-theme from the workspace color in pure CSS. The ba
 
 Made the always-dark surfaces (the floating workspace menu and the log / terminal / credential boxes) `.dark`-scoped islands styled with tokens (`bg-surface-primary`, `border-subtle`, `text-primary` / `text-secondary`, `hover:bg-fill-hover`, `bg-fill-active` for the selected row) instead of raw `bg-black` / `text-white/NN`. They stay dark regardless of the app theme but now derive their colors from the design tokens.
 
-Added the accent / interactive token (last color family): a single mode-independent `accent` (Apple blue `#0a84ff`) behind links, selected states, focus rings, and progress. Solid for selection / progress (`bg-accent`, `border-accent`); lighter rings and tints derive via an opacity modifier (`ring-accent/40`, `bg-accent/15`).
+Added the accent / interactive token (last color family): a single mode-independent `accent` (a blue, `#0069d9`, chosen to clear WCAG AA as link text on both the white and pure-black surfaces) behind links, selected states, focus rings, and progress. Solid for selection / progress (`bg-accent`, `border-accent`); lighter rings and tints derive via an opacity modifier (`ring-accent/40`, `bg-accent/15`).
 
 - Unified the two blues that had coexisted: the form focus ring (previously a separate Apple-blue `focus-ring` token) and the raw Tailwind `blue-600` used for links / selection / progress now both resolve to the one `accent` token. The standalone `focus-ring` token is gone.
 

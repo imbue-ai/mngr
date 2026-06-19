@@ -173,10 +173,11 @@
   --c-warning: #d49a2c;
   --c-info: #527ea3;
   /* Accent / interactive (links, selected states, focus rings, progress).
-     One mode-independent blue -- the system accent -- reading on both light
-     and dark surfaces. Lighter rings / tints derive from it via an opacity
-     modifier (e.g. ring-accent/40, bg-accent/15). */
-  --c-accent: #0a84ff;
+     One mode-independent blue -- the system accent. Chosen to clear WCAG AA
+     (4.5:1) as link text on both the white and pure-black surfaces (5.2:1 /
+     4.0:1). Lighter rings / tints derive from it via an opacity modifier
+     (e.g. ring-accent/40, bg-accent/15). */
+  --c-accent: #0069d9;
 }
 
 /*
