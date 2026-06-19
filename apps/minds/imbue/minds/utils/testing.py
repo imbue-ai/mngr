@@ -18,7 +18,7 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 class RecordingMngrCaller(MngrCaller):
     """In-process :class:`MngrCaller` double: records argv and returns a canned result.
 
-    Avoids forking a real forkserver child (which would import the full ``mngr``
+    Avoids spawning a real warm process (which would import the full ``mngr``
     CLI), so tests stay fast and deterministic while still being able to assert
     on the argv the caller was invoked with.
     """

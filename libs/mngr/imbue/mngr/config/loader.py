@@ -35,6 +35,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import StringDerivedTuple
+from imbue.mngr.config.data_types import TmuxConfig
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
@@ -195,6 +196,7 @@ def load_config(
         providers={},
         plugins={},
         logging=LoggingConfig(),
+        tmux=TmuxConfig(),
         commands={},
     )
 
@@ -273,15 +275,32 @@ def load_config(
     config_dict["create_templates"] = config.create_templates
 
     # Apply CLI plugin overrides
-    config_dict["plugins"], config_dict["disabled_plugins"] = _apply_plugin_overrides(
+    config_dict["plugins"], cli_disabled_plugins = _apply_plugin_overrides(
         config_dict["plugins"],
         enabled_plugins,
         disabled_plugins,
     )
 
-    # Block disabled plugins so their hooks don't fire. This covers
-    # CLI-level --disable-plugin flags that weren't known at startup.
-    block_disabled_plugins(pm, config_dict["disabled_plugins"], is_strict=True)
+    # Block the CLI/[plugins.*] disabled set so their hooks don't fire. This covers
+    # CLI-level --disable-plugin flags that weren't known at startup; is_strict
+    # catches --disable-plugin typos (a name that is neither registered nor already
+    # blocked). Opt-in plugins are intentionally excluded here: create_plugin_manager
+    # already blocked them, so re-blocking would add nothing in production while
+    # tripping the strict check in the bare-pm path.
+    block_disabled_plugins(pm, cli_disabled_plugins, is_strict=True)
+
+    # Record disabled_plugins as the faithful union with the opt-in-derived set
+    # (OPT_IN_PLUGINS not explicitly enabled). _apply_plugin_overrides only sees
+    # [plugins.*] enabled flags, so on its own the field drops opt-in plugins (e.g.
+    # claude_subagent_proxy) that create_plugin_manager blocks -- which made
+    # `mngr plugin list` mislabel them enabled. Gated on MNGR_LOAD_ALL_PLUGINS
+    # exactly like create_plugin_manager, so tooling that loads every plugin keeps
+    # them enabled here too. Blocking is one-way (there is no unblock), so the union
+    # also stays truthful under --enable-plugin, which cannot un-block an opt-in plugin.
+    if parse_bool_env(os.environ.get("MNGR_LOAD_ALL_PLUGINS", "")):
+        config_dict["disabled_plugins"] = cli_disabled_plugins
+    else:
+        config_dict["disabled_plugins"] = cli_disabled_plugins | config_disabled_plugins
 
     # Include retry if not None
     if config.retry is not None:
@@ -290,6 +309,10 @@ def load_config(
     # Include logging if not None
     if config.logging is not None:
         config_dict["logging"] = config.logging
+
+    # Include tmux if not None
+    if config.tmux is not None:
+        config_dict["tmux"] = config.tmux
 
     config_dict["unset_vars"] = config.unset_vars
     config_dict["pager"] = config.pager
@@ -923,6 +946,33 @@ def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, s
     return LoggingConfig.model_construct(**cleaned_logging)
 
 
+def _parse_tmux_config(raw_tmux: dict[str, Any], *, strict: bool = True, silent: bool = False) -> TmuxConfig:
+    """Parse tmux config.
+
+    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    ``attach_args`` is coerced to a tuple here (accepting either a single string or a
+    list) because model_construct skips the field validator that would otherwise do so.
+    A string value is wrapped in ``StringDerivedTuple`` (mirroring how ``cli_args`` is
+    handled in ``_normalize_tuple_fields_for_construct``) so narrowing detection treats
+    a higher-precedence string replacement as scalar replacement rather than aggregate
+    narrowing.
+    """
+    raw_tmux = _normalize_field_keys(raw_tmux, "tmux")
+    cleaned_tmux = _drop_unknown_fields(raw_tmux, TmuxConfig, "tmux", strict=strict, silent=silent)
+    if "attach_args" in cleaned_tmux:
+        attach_args = cleaned_tmux["attach_args"]
+        if isinstance(attach_args, str):
+            tokens = split_cli_args_string(attach_args) if attach_args else ()
+            cleaned_tmux["attach_args"] = StringDerivedTuple(tokens)
+        else:
+            cleaned_tmux["attach_args"] = tuple(attach_args)
+    # Coerce the path to Path here: model_construct bypasses field validation, so
+    # without this the field would hold a bare str despite its Path | None type.
+    if cleaned_tmux.get("additional_config_path") is not None:
+        cleaned_tmux["additional_config_path"] = Path(cleaned_tmux["additional_config_path"])
+    return TmuxConfig.model_construct(**cleaned_tmux)
+
+
 def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, CommandDefaults]:
     """Parse command defaults from config.
 
@@ -1043,6 +1093,7 @@ def parse_config(
     kwargs["logging"] = (
         _parse_logging_config(raw.pop("logging", {}), strict=strict, silent=silent) if "logging" in raw else None
     )
+    kwargs["tmux"] = _parse_tmux_config(raw.pop("tmux", {}), strict=strict, silent=silent) if "tmux" in raw else None
     kwargs["is_nested_tmux_allowed"] = raw.pop("is_nested_tmux_allowed", None)
     kwargs["headless"] = raw.pop("headless", None)
     kwargs["is_error_reporting_enabled"] = raw.pop("is_error_reporting_enabled", None)

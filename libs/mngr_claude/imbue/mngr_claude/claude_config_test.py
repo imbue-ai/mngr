@@ -922,7 +922,7 @@ def test_encode_claude_project_dir_name(raw: str, expected: str) -> None:
     encoder ever regresses to ``replace("/", "-").replace(".", "-")`` or to a
     pattern that treats ``_`` as a word char (e.g. ``\\W``), several of these
     cases will fail -- which is the point: a divergence here silently breaks
-    ``mngr create --adopt-session``.
+    ``mngr create --adopt``.
     """
     assert encode_claude_project_dir_name(Path(raw)) == expected
 

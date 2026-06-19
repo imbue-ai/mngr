@@ -49,7 +49,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(7))
+    rc.check_broad_exception_catch(_DIR, snapshot(3))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -173,7 +173,7 @@ def test_prevent_short_uuid_ids() -> None:
 
 
 def test_prevent_model_copy() -> None:
-    rc.check_model_copy(_DIR, snapshot(8))
+    rc.check_model_copy(_DIR, snapshot(1))
 
 
 # --- Logging ---

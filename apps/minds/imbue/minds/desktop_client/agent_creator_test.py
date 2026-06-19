@@ -990,8 +990,14 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
     )
 
 
-def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 10.0) -> None:
-    """Poll ``get_creation_info`` until status is DONE or FAILED, then return."""
+def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 30.0) -> None:
+    """Poll ``get_creation_info`` until status is DONE or FAILED, then return.
+
+    The deadline is only a ceiling -- the loop returns the instant the status is
+    terminal, so a passing test never waits for it. It is set to 30s (matching the
+    ``@pytest.mark.timeout(30)`` on the litellm-key tests) so heavy setup under
+    offload CI contention does not trip a spurious timeout at the old 10s.
+    """
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
         info = creator.get_creation_info(creation_id)
@@ -1051,7 +1057,8 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
 
 
 # Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout.
+# occasionally exceeds the default 10s pytest-timeout (so these carry a 30s
+# timeout, matched by _wait_until_finished's poll deadline).
 @pytest.mark.timeout(30)
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
@@ -1073,6 +1080,10 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     assert cli.create_calls == []
 
 
+# Carries the same 30s pytest-timeout as the other creation tests: this caller
+# also uses _wait_until_finished's 30s default poll deadline, which without this
+# marker would be pre-empted by the global --timeout=10 under heavy parallel load.
+@pytest.mark.timeout(30)
 def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""

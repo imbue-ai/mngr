@@ -22,7 +22,9 @@ def _eco_options() -> list[dict]:
 
 
 def test_select_eco_option_codes_picks_requested_memory_storage_plus_single_offer_families() -> None:
-    codes = select_eco_option_codes(_eco_options(), memory_gb=64, storage_short="softraid-2x512nvme")
+    codes = select_eco_option_codes(
+        _eco_options(), memory_gb=64, storage_short="softraid-2x512nvme", explicit_option_codes=()
+    )
     assert set(codes) == {
         "ram-64g-ecc-3200-24rise01-v1-us",
         "softraid-2x512nvme-24rise01-v1-us",
@@ -33,20 +35,114 @@ def test_select_eco_option_codes_picks_requested_memory_storage_plus_single_offe
 
 def test_select_eco_option_codes_raises_for_unavailable_memory() -> None:
     with pytest.raises(BareMetalConfigError):
-        select_eco_option_codes(_eco_options(), memory_gb=256, storage_short="softraid-2x512nvme")
+        select_eco_option_codes(
+            _eco_options(), memory_gb=256, storage_short="softraid-2x512nvme", explicit_option_codes=()
+        )
 
 
 def test_select_eco_option_codes_raises_for_unavailable_storage() -> None:
     with pytest.raises(BareMetalConfigError):
-        select_eco_option_codes(_eco_options(), memory_gb=64, storage_short="softraid-4x3840nvme")
+        select_eco_option_codes(
+            _eco_options(), memory_gb=64, storage_short="softraid-4x3840nvme", explicit_option_codes=()
+        )
 
 
-def test_select_eco_option_codes_raises_when_mandatory_family_is_ambiguous() -> None:
+def test_select_eco_option_codes_raises_when_multi_offer_family_has_no_explicit_choice() -> None:
+    # Two bandwidth offers and no --option: refuse rather than pick one on the operator's behalf.
     options = _eco_options() + [
         {"family": "bandwidth", "planCode": "bandwidth-3000-unguaranteed-rise-gen2-us", "mandatory": True}
     ]
     with pytest.raises(BareMetalConfigError):
-        select_eco_option_codes(options, memory_gb=64, storage_short="softraid-2x512nvme")
+        select_eco_option_codes(options, memory_gb=64, storage_short="softraid-2x512nvme", explicit_option_codes=())
+
+
+def _priced_option(family: str, plan_code: str, monthly_usd: str) -> dict:
+    # Shape mirrors the OVH `GET /order/cart/{id}/eco/options` payload: each offer carries a `prices`
+    # list keyed by pricingMode + duration. We only price the month-to-month (default / P1M) entry.
+    return {
+        "family": family,
+        "planCode": plan_code,
+        "mandatory": True,
+        "prices": [{"pricingMode": "default", "duration": "P1M", "price": {"value": float(monthly_usd)}}],
+    }
+
+
+def _multi_offer_options() -> list[dict]:
+    # Models the 24sys032-us plan: bandwidth + vrack are each mandatory with a free baseline + a paid upgrade.
+    return [
+        _priced_option("memory", "ram-128g-ecc-2666-24sys-us", "40.00"),
+        _priced_option("storage", "softraid-2x960nvme-24sys-us", "0.00"),
+        _priced_option("bandwidth", "bandwidth-1000-24sys-us", "0.00"),
+        _priced_option("bandwidth", "bandwidth-2000-24sys-us", "120.00"),
+        _priced_option("vrack", "vrack-bandwidth-500-24sys-us", "0.00"),
+        _priced_option("vrack", "vrack-bandwidth-1000-24sys-us", "23.00"),
+    ]
+
+
+def test_select_eco_option_codes_uses_explicit_choices_for_multi_offer_families() -> None:
+    codes = select_eco_option_codes(
+        _multi_offer_options(),
+        memory_gb=128,
+        storage_short="softraid-2x960nvme",
+        explicit_option_codes=("bandwidth-1000-24sys-us", "vrack-bandwidth-500-24sys-us"),
+    )
+    assert set(codes) == {
+        "ram-128g-ecc-2666-24sys-us",
+        "softraid-2x960nvme-24sys-us",
+        "bandwidth-1000-24sys-us",
+        "vrack-bandwidth-500-24sys-us",
+    }
+
+
+def test_select_eco_option_codes_can_pick_the_paid_upgrade_when_named() -> None:
+    # Explicit selection is honored verbatim -- the operator can choose the paid tier, not just the free one.
+    codes = select_eco_option_codes(
+        _multi_offer_options(),
+        memory_gb=128,
+        storage_short="softraid-2x960nvme",
+        explicit_option_codes=("bandwidth-2000-24sys-us", "vrack-bandwidth-500-24sys-us"),
+    )
+    assert "bandwidth-2000-24sys-us" in codes
+    assert "bandwidth-1000-24sys-us" not in codes
+
+
+def test_select_eco_option_codes_raises_when_multi_offer_family_left_unspecified() -> None:
+    # vrack still ambiguous (no --option for it): refuse even though bandwidth was specified.
+    with pytest.raises(BareMetalConfigError):
+        select_eco_option_codes(
+            _multi_offer_options(),
+            memory_gb=128,
+            storage_short="softraid-2x960nvme",
+            explicit_option_codes=("bandwidth-1000-24sys-us",),
+        )
+
+
+def test_select_eco_option_codes_raises_when_two_offers_named_for_one_family() -> None:
+    with pytest.raises(BareMetalConfigError):
+        select_eco_option_codes(
+            _multi_offer_options(),
+            memory_gb=128,
+            storage_short="softraid-2x960nvme",
+            explicit_option_codes=(
+                "bandwidth-1000-24sys-us",
+                "bandwidth-2000-24sys-us",
+                "vrack-bandwidth-500-24sys-us",
+            ),
+        )
+
+
+def test_select_eco_option_codes_raises_for_unknown_explicit_option() -> None:
+    with pytest.raises(BareMetalConfigError):
+        select_eco_option_codes(
+            _multi_offer_options(),
+            memory_gb=128,
+            storage_short="softraid-2x960nvme",
+            explicit_option_codes=(
+                "bandwidth-1000-24sys-us",
+                "vrack-bandwidth-500-24sys-us",
+                "bogus-addon-24sys-us",
+            ),
+        )
 
 
 def test_select_eco_option_codes_handles_plan_without_vrack() -> None:
@@ -57,7 +153,9 @@ def test_select_eco_option_codes_handles_plan_without_vrack() -> None:
         {"family": "memory", "planCode": "ram-256g-ecc-2400-24sk60-us", "mandatory": True},
         {"family": "storage", "planCode": "softraid-2x8000sa-24sk60-us", "mandatory": True},
     ]
-    codes = select_eco_option_codes(options, memory_gb=256, storage_short="softraid-2x8000sa")
+    codes = select_eco_option_codes(
+        options, memory_gb=256, storage_short="softraid-2x8000sa", explicit_option_codes=()
+    )
     assert set(codes) == {
         "ram-256g-ecc-2400-24sk60-us",
         "softraid-2x8000sa-24sk60-us",
@@ -68,7 +166,9 @@ def test_select_eco_option_codes_handles_plan_without_vrack() -> None:
 def test_select_eco_option_codes_skips_optional_addon_families() -> None:
     # An optional (mandatory=False) single-offer add-on family must never be auto-picked into the cart.
     options = _eco_options() + [{"family": "backup", "planCode": "backup-storage-500-us", "mandatory": False}]
-    codes = select_eco_option_codes(options, memory_gb=64, storage_short="softraid-2x512nvme")
+    codes = select_eco_option_codes(
+        options, memory_gb=64, storage_short="softraid-2x512nvme", explicit_option_codes=()
+    )
     assert "backup-storage-500-us" not in codes
 
 

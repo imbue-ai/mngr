@@ -211,6 +211,30 @@ def test_agent_script_honors_target_agent_name_arg(tmp_path: Path) -> None:
     assert "display-message -p '#{session_name}'" in script
 
 
+def test_agent_script_targets_primary_window_by_name_not_index(tmp_path: Path) -> None:
+    """The attach must target the agent's named primary window, never the literal :0 index.
+
+    mngr names the primary window (tmux.primary_window_name, default "agent") and
+    targets it by name everywhere so it works regardless of the user's tmux base-index;
+    the ttyd attach must do the same. The window name is read from
+    MNGR_PRIMARY_WINDOW_NAME (exported into the agent env) with an "agent" default.
+    """
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    host = _FakeTtydHost(host_dir)
+
+    on_after_provisioning(
+        agent=cast(Any, SimpleNamespace(id="a1")), host=cast(Any, host), mngr_ctx=cast(Any, SimpleNamespace())
+    )
+
+    _, content, _ = host.written_files[0]
+    script = content.decode()
+    assert '_WINDOW="${MNGR_PRIMARY_WINDOW_NAME:-agent}"' in script
+    assert 'attach -t "=$_SESSION:$_WINDOW"' in script
+    # The attach must not target the literal :0 window index.
+    assert ':0"' not in script
+
+
 def test_on_after_provisioning_creates_ttyd_directory(tmp_path: Path) -> None:
     """Verify that on_after_provisioning creates the commands/ttyd/ directory."""
     host_dir = tmp_path / "host"

@@ -23,6 +23,9 @@ from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
+from imbue.mngr.config.data_types import StringDerivedTuple
+from imbue.mngr.config.data_types import TmuxConfig
+from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _FileSettingsSource
 from imbue.mngr.config.loader import _NarrowingViolation
@@ -38,12 +41,14 @@ from imbue.mngr.config.loader import _parse_logging_config
 from imbue.mngr.config.loader import _parse_mngr_env_overrides
 from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
+from imbue.mngr.config.loader import _parse_tmux_config
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.plugin_registry import _plugin_config_registry
 from imbue.mngr.config.plugin_registry import register_plugin_config
+from imbue.mngr.config.pre_readers import OPT_IN_PLUGINS
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
@@ -690,6 +695,41 @@ def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnin
 
 
 # =============================================================================
+# Tests for _parse_tmux_config
+# =============================================================================
+
+
+def test_parse_tmux_config_marks_string_attach_args_as_string_derived() -> None:
+    """A string attach_args is shell-split and tagged StringDerivedTuple so narrowing
+    detection treats a higher-precedence string replacement as scalar replacement."""
+    result = _parse_tmux_config({"attach_args": "-CC -u"})
+    assert result.attach_args == ("-CC", "-u")
+    assert isinstance(result.attach_args, StringDerivedTuple)
+
+
+def test_parse_tmux_config_keeps_list_attach_args_as_plain_tuple() -> None:
+    """An explicit list attach_args is genuine aggregate intent, not a scalar string."""
+    result = _parse_tmux_config({"attach_args": ["-CC", "-u"]})
+    assert result.attach_args == ("-CC", "-u")
+    assert not isinstance(result.attach_args, StringDerivedTuple)
+
+
+def test_string_attach_args_replacement_is_not_flagged_as_narrowing() -> None:
+    """Replacing one string attach_args with another (e.g. '-CC -u' then '-2') is scalar
+    replacement, mirroring cli_args, so it must not trip the narrowing safety net."""
+    base = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": "-CC -u"}))
+    override = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": "-2"}))
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_list_attach_args_replacement_is_flagged_as_narrowing() -> None:
+    """A list override that drops base entries is aggregate narrowing and is flagged."""
+    base = MngrConfig(prefix="mngr-", tmux=TmuxConfig(attach_args=("-CC", "-u")))
+    override = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": ["-2"]}))
+    assert detect_settings_narrowing(base, override) == ["tmux.attach_args"]
+
+
+# =============================================================================
 # Tests for _parse_commands
 # =============================================================================
 
@@ -936,11 +976,86 @@ def test_load_config_threads_every_field_from_toml(
     assert config.default_destroyed_host_persisted_seconds == 12345.0
     assert config.retry.connect_retry_times == 5
     assert config.retry.connect_retry_delay == "10s"
+    assert config.tmux.primary_window_name == "main"
+    assert config.tmux.attach_args == ("-CC",)
+    assert config.tmux.additional_config_path == Path("~/.mngr/tmux.user.conf")
     assert "TEST_VAR" in config.unset_vars
     assert ProviderBackendName("local") in config.enabled_backends
     assert ".venv" in config.work_dir_extra_paths
     assert ".test_output" in config.work_dir_extra_paths
     assert config.allow_settings_key_assignment_narrowing is True
+
+
+def test_load_config_disabled_plugins_includes_opt_in_plugin(
+    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """config.disabled_plugins must include opt-in plugins blocked by default.
+
+    Opt-in plugins (OPT_IN_PLUGINS) are blocked in create_plugin_manager but are
+    not [plugins.*] config entries, so _apply_plugin_overrides alone drops them.
+    load_config folds the opt-in-derived set back in so the field matches the
+    actual block state.
+    """
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+    # Mirror create_plugin_manager, which blocks opt-in plugins before load_config
+    # (and lets load_config's strict block pass re-affirm the block as a no-op).
+    pm.set_blocked(opt_in_name)
+
+    _isolate_load_config_env(monkeypatch)
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    assert opt_in_name in mngr_ctx.config.disabled_plugins
+
+
+def test_load_config_disabled_plugins_excludes_explicitly_enabled_opt_in_plugin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """An opt-in plugin explicitly enabled in config is not in disabled_plugins.
+
+    Mirrors the runtime: read_disabled_plugins() omits an opt-in plugin whose
+    config sets enabled = true, so create_plugin_manager does not block it and
+    the union must not add it back.
+    """
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mngr_dir)
+    (profile_dir / "settings.toml").write_text(
+        f"is_allowed_in_pytest = true\n[plugins.{opt_in_name}]\nenabled = true\n"
+    )
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    assert opt_in_name not in mngr_ctx.config.disabled_plugins
+
+
+def test_load_config_disabled_plugins_omits_opt_in_plugin_when_loading_all(
+    monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNGR_LOAD_ALL_PLUGINS keeps opt-in plugins out of disabled_plugins.
+
+    Doc/tooling runs set MNGR_LOAD_ALL_PLUGINS so create_plugin_manager blocks
+    nothing; the union must be gated the same way or it would mark opt-in plugins
+    disabled even though they are loaded.
+    """
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+    monkeypatch.setenv("MNGR_LOAD_ALL_PLUGINS", "1")
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    assert opt_in_name not in mngr_ctx.config.disabled_plugins
 
 
 # Sample values used by the regression tests above. When adding a new field to
@@ -960,6 +1075,11 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "work_dir_extra_paths": {".venv": "SHARE", ".test_output": "COPY"},
     "retry": {"connect_retry_times": 5, "connect_retry_delay": "10s"},
     "logging": {"file_level": "DEBUG"},
+    "tmux": {
+        "primary_window_name": "main",
+        "attach_args": ["-CC"],
+        "additional_config_path": "~/.mngr/tmux.user.conf",
+    },
     "is_remote_agent_installation_allowed": False,
     "connect_command": "my-connect",
     "is_nested_tmux_allowed": True,
@@ -1005,6 +1125,11 @@ connect_retry_delay = "10s"
 
 [logging]
 file_level = "DEBUG"
+
+[tmux]
+primary_window_name = "main"
+attach_args = ["-CC"]
+additional_config_path = "~/.mngr/tmux.user.conf"
 """
 
 

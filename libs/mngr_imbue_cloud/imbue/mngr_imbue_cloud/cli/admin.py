@@ -23,9 +23,11 @@ is not involved in pool provisioning at all.
 import json as _json
 import os
 import shlex
+from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import assert_never
 from uuid import uuid4
 
 import click
@@ -34,6 +36,8 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.bake.bake_source import BakeSourceError
 from imbue.mngr_imbue_cloud.bake.bake_source import DEFAULT_FCT_REPO_URL
 from imbue.mngr_imbue_cloud.bake.bake_source import merge_bake_identity_attributes
@@ -51,7 +55,10 @@ from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.cli.server import DEFAULT_SLICE_BAKE_CONCURRENCY
 from imbue.mngr_imbue_cloud.cli.server import allocate_slices
+from imbue.mngr_imbue_cloud.cli.server import destroy_slice_vm
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
+from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
@@ -500,6 +507,16 @@ def _create_single_pool_host(
     ),
 )
 @click.option(
+    "--server-id",
+    "server_id",
+    default=None,
+    help=(
+        "[slice only, required] The bare_metal_servers row id to bake the slices onto (from "
+        "`admin server list`). Slice baking targets an explicitly-chosen, ready box -- it never "
+        "auto-selects one."
+    ),
+)
+@click.option(
     "--dry-run",
     "is_dry_run",
     is_flag=True,
@@ -543,6 +560,7 @@ def pool_create(
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    server_id: str | None,
     is_dry_run: bool,
     max_concurrency: int,
     is_deferred_install_wait_skipped: bool,
@@ -569,9 +587,17 @@ def pool_create(
             )
         if not is_recycle_enabled:
             fail_with_json("--no-recycle is not applicable to --backend slice", error_class="UsageError")
+        if not server_id:
+            fail_with_json(
+                "--server-id is required for --backend slice (the bare-metal box to bake onto; "
+                "see `mngr imbue_cloud admin server list`)",
+                error_class="UsageError",
+            )
     elif backend == "ovh_vps":
         if is_dry_run:
             fail_with_json("--dry-run is only supported for --backend slice", error_class="UsageError")
+        if server_id is not None:
+            fail_with_json("--server-id is only supported for --backend slice", error_class="UsageError")
         if not management_public_key_file:
             fail_with_json("--management-public-key-file is required for --backend ovh_vps", error_class="UsageError")
         # Validate ``--tag`` shapes up front so we don't bake the first host and
@@ -596,8 +622,11 @@ def pool_create(
         ) as bake_source:
             attributes = merge_bake_identity_attributes(parsed_attributes, bake_source)
             if backend == "slice":
+                # ``server_id`` presence is enforced above for the slice backend.
+                assert server_id is not None
                 allocate_slices(
                     count=count,
+                    server_id=server_id,
                     lease_attributes=attributes,
                     region=region,
                     workspace_dir=bake_source.workspace_dir,
@@ -705,6 +734,37 @@ def _create_ovh_vps_pool_hosts(
         raise SystemExit(1)
 
 
+# Every pool_hosts column, in a stable display order, used to build BOTH the
+# `pool list` SELECT and the keys of each emitted JSON row -- so the two can
+# never drift. Hand-maintaining a subset is what silently dropped region,
+# backend_kind, and the slice identifiers (bare_metal_server_id /
+# lima_instance_name / lima_disk_name) from the output, making every slice row
+# look like an OVH VPS with no region. emit_json serialises the UUID and
+# datetime values via its default=str, so no per-column coercion is needed.
+_POOL_HOST_LIST_COLUMNS: Final[tuple[str, ...]] = (
+    "id",
+    "host_name",
+    "status",
+    "region",
+    "backend_kind",
+    "attributes",
+    "vps_address",
+    "vps_instance_id",
+    "agent_id",
+    "host_id",
+    "ssh_user",
+    "ssh_port",
+    "container_ssh_port",
+    "bare_metal_server_id",
+    "lima_instance_name",
+    "lima_disk_name",
+    "leased_to_user",
+    "leased_at",
+    "released_at",
+    "created_at",
+)
+
+
 @pool.command(name="list")
 @click.option(
     "--database-url",
@@ -724,31 +784,41 @@ def pool_list(database_url: str | None) -> None:
     conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, vps_address, agent_id, host_id, status, attributes, "
-                "leased_to_user, leased_at, released_at, created_at "
-                "FROM pool_hosts ORDER BY created_at DESC"
-            )
+            cur.execute(f"SELECT {', '.join(_POOL_HOST_LIST_COLUMNS)} FROM pool_hosts ORDER BY created_at DESC")
             rows = cur.fetchall()
     finally:
         conn.close()
-    emit_json(
-        [
-            {
-                "id": str(row[0]),
-                "vps_address": row[1],
-                "agent_id": row[2],
-                "host_id": row[3],
-                "status": row[4],
-                "attributes": row[5],
-                "leased_to_user": row[6],
-                "leased_at": str(row[7]) if row[7] else None,
-                "released_at": str(row[8]) if row[8] else None,
-                "created_at": str(row[9]) if row[9] else None,
-            }
-            for row in rows
-        ]
-    )
+    emit_json([dict(zip(_POOL_HOST_LIST_COLUMNS, row, strict=True)) for row in rows])
+
+
+# ``pool_hosts.backend_kind`` value for bare-metal slices (lima VMs). OVH-VPS rows
+# carry the column's 'ovh_vps' default, so destroy treats anything that is not
+# 'slice' (including legacy/None rows written before the column existed) as the OVH
+# teardown path.
+_SLICE_BACKEND_KIND: Final[str] = "slice"
+
+
+class PoolHostUnderlyingTeardown(UpperCaseStrEnum):
+    """Which underlying machine a ``pool destroy`` tears down before dropping the row."""
+
+    OVH_VPS = auto()
+    SLICE_VM = auto()
+    NONE = auto()
+
+
+@pure
+def resolve_underlying_teardown(*, backend_kind: str | None, is_skip_requested: bool) -> PoolHostUnderlyingTeardown:
+    """Decide what underlying teardown a pool host destroy performs, from the row's backend.
+
+    ``--skip-vps-cancel`` always wins (drop the row only). Otherwise a slice tears down
+    its lima VM and an OVH-VPS row (including legacy/None backends) cancels its VPS --
+    mirroring the backend branch in ``pool create`` so a slice is never left stranded.
+    """
+    if is_skip_requested:
+        return PoolHostUnderlyingTeardown.NONE
+    if backend_kind == _SLICE_BACKEND_KIND:
+        return PoolHostUnderlyingTeardown.SLICE_VM
+    return PoolHostUnderlyingTeardown.OVH_VPS
 
 
 def _cancel_pool_host_vps(service_name: str) -> None:
@@ -773,6 +843,36 @@ def _cancel_pool_host_vps(service_name: str) -> None:
     client.destroy_instance(VpsInstanceId(service_name))
 
 
+def _destroy_slice_pool_host_vm(
+    *,
+    conn: Any,
+    pool_host_id: str,
+    bare_metal_server_id: str | None,
+    lima_instance_name: str | None,
+) -> None:
+    """Destroy a slice pool host's lima VM on its bare-metal box (the slice counterpart of VPS cancel).
+
+    Resolves the box from ``bare_metal_server_id`` and tears down the
+    ``lima_instance_name`` VM via the pool key (POOL_SSH_PRIVATE_KEY). Raises -- so
+    the caller keeps the row and the teardown stays retryable -- when the slice row
+    lacks its lima identifiers or the referenced box no longer exists.
+    """
+    if not bare_metal_server_id or not lima_instance_name:
+        fail_with_json(
+            f"Slice row {pool_host_id} is missing its bare_metal_server_id / lima_instance_name; "
+            "cannot locate the VM to destroy. Pass --skip-vps-cancel to drop the row only.",
+            error_class="UnsafeDelete",
+        )
+    server = fetch_server_by_id(conn, BareMetalServerDbId(bare_metal_server_id))
+    if server is None:
+        fail_with_json(
+            f"Slice row {pool_host_id} references bare_metal_server {bare_metal_server_id}, which no "
+            "longer exists; cannot reach the box. Pass --skip-vps-cancel to drop the row only.",
+            error_class="UnsafeDelete",
+        )
+    destroy_slice_vm(server=server, lima_instance_name=lima_instance_name)
+
+
 @pool.command(name="destroy")
 @click.argument("pool_host_id")
 @click.option(
@@ -793,48 +893,77 @@ def _cancel_pool_host_vps(service_name: str) -> None:
     is_flag=True,
     default=False,
     help=(
-        "Only drop the DB row; do NOT cancel the OVH VPS. Use exclusively when the "
-        "VPS is already gone/cancelled -- otherwise the default path cancels it so "
-        "no billing orphan is left behind."
+        "Only drop the DB row; do NOT tear down the underlying machine (cancel the "
+        "OVH VPS for an ovh_vps row, or destroy the lima VM for a slice row). Use "
+        "exclusively when the machine is already gone -- otherwise the default path "
+        "tears it down so no billing/slot orphan is left behind."
     ),
 )
 def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
-    """Remove a pool_hosts row, cancelling its OVH VPS first (full teardown).
+    """Remove a pool_hosts row, tearing down its underlying machine first (full teardown).
 
-    By default this cancels the underlying OVH VPS (strip per-lease tags +
-    ``deleteAtExpiration=True``) *before* deleting the row, so it leaves the host
-    in the same blank/cancelled/recyclable state a proper release does -- never a
-    stranded, still-billing VPS. Pass ``--skip-vps-cancel`` only when the VPS is
-    already gone. Cancellation needs OVH credentials in the environment (the minds
-    ``pool destroy`` wrapper injects them from Vault).
+    The teardown mirrors the row's backend (just as ``pool create`` branches on
+    ``--backend``): an ``ovh_vps`` row cancels its OVH VPS (strip per-lease tags +
+    ``deleteAtExpiration=True``), while a ``slice`` row destroys its lima VM on the
+    bare-metal box (freeing the slot). Either runs *before* the row is deleted, so a
+    failure keeps the row and the teardown stays retryable -- never a stranded VPS or
+    slice VM. Pass ``--skip-vps-cancel`` only when the machine is already gone.
+    Teardown needs creds in the environment (the minds ``pool destroy`` wrapper
+    injects them from Vault: OVH AK/AS/CK for ovh_vps, POOL_SSH_PRIVATE_KEY for slice).
     """
     resolved_database_url = resolve_pool_database_url(database_url)
     conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status, vps_address FROM pool_hosts WHERE id = %s", (pool_host_id,))
+            cur.execute(
+                "SELECT status, vps_address, backend_kind, bare_metal_server_id, lima_instance_name "
+                "FROM pool_hosts WHERE id = %s",
+                (pool_host_id,),
+            )
             row = cur.fetchone()
             if row is None:
                 fail_with_json(f"No pool_hosts row with id {pool_host_id}", error_class="NotFound")
-            status, vps_address = row
+            status, vps_address, backend_kind, bare_metal_server_id, lima_instance_name = row
             if status != "released" and not force:
                 fail_with_json(
                     f"Row {pool_host_id} is in status '{status}'; pass --force to delete anyway",
                     error_class="UnsafeDelete",
                 )
-        # Cancel the VPS BEFORE deleting the row: if the cancel fails we keep the
-        # row so the teardown stays retryable (no silent orphan).
-        if not skip_vps_cancel:
-            if not vps_address:
-                fail_with_json(
-                    f"Row {pool_host_id} has no vps_address; cannot cancel its VPS. "
-                    "Pass --skip-vps-cancel if the VPS is already gone.",
-                    error_class="UnsafeDelete",
+        # Tear the underlying machine down BEFORE deleting the row: if it fails we
+        # keep the row so the teardown stays retryable (no silent orphan). The
+        # backend dictates how -- mirroring pool create's backend branch.
+        teardown = resolve_underlying_teardown(backend_kind=backend_kind, is_skip_requested=skip_vps_cancel)
+        match teardown:
+            case PoolHostUnderlyingTeardown.SLICE_VM:
+                _destroy_slice_pool_host_vm(
+                    conn=conn,
+                    pool_host_id=pool_host_id,
+                    bare_metal_server_id=bare_metal_server_id,
+                    lima_instance_name=lima_instance_name,
                 )
-            _cancel_pool_host_vps(vps_address)
+            case PoolHostUnderlyingTeardown.OVH_VPS:
+                if not vps_address:
+                    fail_with_json(
+                        f"Row {pool_host_id} has no vps_address; cannot cancel its VPS. "
+                        "Pass --skip-vps-cancel if the VPS is already gone.",
+                        error_class="UnsafeDelete",
+                    )
+                _cancel_pool_host_vps(vps_address)
+            case PoolHostUnderlyingTeardown.NONE:
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         with conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM pool_hosts WHERE id = %s", (pool_host_id,))
     finally:
         conn.close()
-    emit_json({"deleted": True, "pool_host_id": pool_host_id, "vps_cancelled": not skip_vps_cancel})
+    emit_json(
+        {
+            "deleted": True,
+            "pool_host_id": pool_host_id,
+            "backend_kind": backend_kind,
+            "vps_cancelled": teardown == PoolHostUnderlyingTeardown.OVH_VPS,
+            "slice_vm_destroyed": teardown == PoolHostUnderlyingTeardown.SLICE_VM,
+        }
+    )

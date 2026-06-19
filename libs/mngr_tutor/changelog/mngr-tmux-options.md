@@ -1,0 +1,1 @@
+Internal refactor: the tutor's tmux-session-has-clients check now builds the agent's tmux session name via the shared `MngrConfig.agent_session_name` helper instead of hand-rolling the `prefix + name` string, keeping it consistent with mngr's centralized session-name construction. No user-visible behavior change.

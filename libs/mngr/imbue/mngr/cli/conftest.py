@@ -66,6 +66,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         name_style="coolname",
         extra_window=(),
         source=None,
+        adopt_session=(),
         target_path=None,
         transfer=None,
         rsync=None,

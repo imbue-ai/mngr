@@ -1,6 +1,7 @@
 """Unit tests for InteractiveTuiAgent's contract."""
 
 import contextlib
+import re
 from types import SimpleNamespace
 from typing import Any
 from typing import Final
@@ -198,6 +199,27 @@ def test_wait_for_tui_ready_raises_when_indicator_never_appears() -> None:
     agent = _make_recording_agent(pane_content="restored conversation, no prompt yet")
     with pytest.raises(SendMessageError, match="Timeout waiting for TUI to be ready"):
         wait_for_tui_ready(agent, agent.tmux_target, agent.get_tui_ready_indicator(), timeout_seconds=0.2)
+
+
+@pytest.mark.allow_warnings
+def test_wait_for_tui_ready_string_indicator_matches_literally() -> None:
+    """A plain ``str`` indicator is an exact substring -- regex metacharacters are literal.
+
+    The matching mode is chosen by the indicator's type, never by its contents, so
+    the string "a.b" matches the literal "a.b" but not "axb".
+    """
+    present = _make_recording_agent(pane_content="ready: a.b prompt")
+    wait_for_tui_ready(present, present.tmux_target, "a.b", timeout_seconds=0.2)
+
+    absent = _make_recording_agent(pane_content="ready: axb prompt")
+    with pytest.raises(SendMessageError, match="Timeout waiting for TUI to be ready"):
+        wait_for_tui_ready(absent, absent.tmux_target, "a.b", timeout_seconds=0.2)
+
+
+def test_wait_for_tui_ready_pattern_indicator_matches_as_regex() -> None:
+    """A compiled ``re.Pattern`` indicator is matched with ``re.search``."""
+    agent = _make_recording_agent(pane_content="ready: axb prompt")
+    wait_for_tui_ready(agent, agent.tmux_target, re.compile(r"a.b"), timeout_seconds=0.2)
 
 
 def test_send_message_runs_preflight_before_readiness_wait() -> None:

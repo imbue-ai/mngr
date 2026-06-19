@@ -903,10 +903,12 @@ add-paid-email email:
 list-pool-hosts:
     uv run minds pool list
 
-# Destroy a single pool host: cancel its OVH VPS, then drop its pool_hosts row.
+# Destroy a single pool host: tear down its underlying machine, then drop its
+# pool_hosts row. The teardown mirrors the row's backend -- cancel the OVH VPS for
+# an ovh_vps row, or destroy the lima VM (freeing the box slot) for a slice row.
 # Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
 # destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
-# VPS is already gone).
+# underlying machine is already gone).
 #
 #   just destroy-pool-host <pool-host-id>
 #

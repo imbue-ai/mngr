@@ -21,6 +21,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -53,6 +54,11 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     host_id: HostId = Field(description="ID of the host this agent runs on")
     mngr_ctx: MngrContext = Field(frozen=True, repr=False, description="Mngr context")
     agent_config: AgentConfigT = Field(frozen=True, repr=False, description="Agent type config")
+
+    @property
+    def session_name(self) -> str:
+        """The agent's tmux session name (``prefix + name``), via the config's single definition."""
+        return self.mngr_ctx.config.agent_session_name(self.name)
 
     @abstractmethod
     def get_host(self) -> OnlineHostInterface:
@@ -531,15 +537,33 @@ class HasCommonTranscriptMixin(HasTranscriptMixin):
         ...
 
 
-class SupportsLiveOutputMixin:
-    """Marker for agents that publish a live, in-progress view of their output before a turn completes.
+class SupportsLiveOutputMixin(ABC):
+    """Mixin for agents that publish a live, in-progress view of their output before a turn completes.
 
-    A bare marker with no contract of its own -- the concrete surface differs by agent kind:
-    a TUI agent exposes a streaming snapshot file (``HasStreamingSnapshotMixin``), while a
-    headless agent yields incremental stdout chunks (``StreamingHeadlessAgentMixin``). Both
-    inherit this so capability detection can treat "can stream live output" as one capability
-    regardless of how the agent surfaces it.
+    The concrete surface differs by agent kind -- a headless agent captures its
+    stdout (raw text or stream-json) to a file, while a TUI agent's watcher
+    maintains a streaming-snapshot buffer -- but both reduce to the same shape:
+    a host file (:meth:`get_live_output_path`) plus a reader that turns
+    successive reads of it into text deltas (:meth:`make_live_output_reader`).
+    Capability detection treats "can stream live output" as one capability
+    regardless of which surface an agent uses.
+
+    The poll-read-extract loop over that file lives in
+    :func:`imbue.mngr.agents.live_output_tail.tail_live_output`; pull consumers
+    (a headless ``stream_output``) call it directly, while push consumers (the
+    robinhood multi-turn drivers) instead poll the reader themselves,
+    interleaved with their own transcript/lifecycle reads.
     """
+
+    @abstractmethod
+    def get_live_output_path(self) -> Path:
+        """Return the host file this agent publishes its live, in-progress output to."""
+        ...
+
+    @abstractmethod
+    def make_live_output_reader(self) -> LiveOutputReader:
+        """Create a fresh reader that extracts text deltas from this agent's live-output file."""
+        ...
 
 
 class HeadlessAgentMixin(ABC):
@@ -590,24 +614,6 @@ class StreamingHeadlessAgentMixin(SupportsLiveOutputMixin, HeadlessAgentMixin):
         )
 
 
-class HasStreamingSnapshotMixin(SupportsLiveOutputMixin, ABC):
-    """Mixin for agent types that publish a live, in-progress view of assistant text.
-
-    A consuming UI can read the buffer file to show output before a message
-    completes. The agent maintains the file (e.g. a background watcher that
-    periodically captures the rendered pane); this contract exposes where it
-    lives. Lowest-priority capability -- only needed if a UI wants live streaming.
-
-    This is the TUI agent's form of :class:`SupportsLiveOutputMixin`; a headless
-    agent streams the same kind of live output via ``StreamingHeadlessAgentMixin``.
-    """
-
-    @abstractmethod
-    def get_stream_buffer_path(self) -> Path:
-        """Return the path to this agent's response-streaming buffer file."""
-        ...
-
-
 class HasSessionPreservationMixin(ABC):
     """Mixin for agent types that preserve their session/transcript files on destroy.
 
@@ -628,8 +634,8 @@ class HasSessionAdoptionMixin(ABC):
 
     The read-side counterpart to :class:`HasSessionPreservationMixin`: it consumes an existing
     session (a live agent's, a preserved one's, or a config dir's) so a freshly created agent
-    resumes that context. Covers both an explicitly named session (e.g. claude's
-    ``--adopt-session <id>``) and the source agent's session when cloning (``--from <agent>``).
+    resumes that context. Covers both an explicitly named session (the ``--adopt <id>`` create
+    option) and the source agent's session when cloning (``--from <agent>``).
     The agent's ``on_after_provisioning`` calls this, gated by the relevant create options.
     """
 

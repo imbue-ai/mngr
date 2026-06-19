@@ -59,7 +59,7 @@ def _check_file_exists_in_work_dir(
 
 def _check_tmux_session_has_clients(agent_name: AgentName, mngr_ctx: MngrContext) -> bool:
     """Check if the agent's tmux session has at least one attached client."""
-    session_name = f"{mngr_ctx.config.prefix}{agent_name}"
+    session_name = mngr_ctx.config.agent_session_name(agent_name)
     result = subprocess.run(
         ["tmux", "list-clients", "-t", session_name],
         capture_output=True,

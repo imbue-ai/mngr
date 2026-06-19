@@ -87,10 +87,10 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 def test_prevent_inline_imports() -> None:
     # The one allowed inline import is ``from imbue.mngr.main import cli`` inside
-    # ``utils/mngr_caller.py``'s forkserver child target. Importing it at module
+    # ``utils/mngr_caller.py``'s warm-server entry point. Importing it at module
     # scope would pay mngr's multi-second import cost inside the minds backend
-    # process, defeating the entire purpose of the forkserver (which preloads it
-    # out-of-process). See that module's docstring.
+    # process, defeating the entire purpose of the warm process (which imports it
+    # out-of-process, off the request path). See that module's docstring.
     rc.check_inline_imports(_DIR, snapshot(1))
 
 

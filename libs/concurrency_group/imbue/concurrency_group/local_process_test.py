@@ -1,3 +1,5 @@
+import os
+import sys
 import threading
 from pathlib import Path
 from queue import Empty
@@ -26,6 +28,24 @@ def test_run_background_simple_command() -> None:
     assert process.returncode == 0
     assert stdout.strip() == "hello world"
     assert stderr == ""
+
+
+def test_run_background_passes_file_descriptors_to_child() -> None:
+    """``pass_fds`` keeps the given fd open in the exec'd child so it can write through it."""
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_inheritable(write_fd, True)
+        program = f"import os; os.write({write_fd}, b'inherited')"
+        process = run_background([sys.executable, "-c", program], pass_fds=(write_fd,))
+        process.wait(timeout=10.0)
+        assert process.returncode == 0
+    finally:
+        # Drop the parent's copy of the write end so the read below terminates.
+        os.close(write_fd)
+    try:
+        assert os.read(read_fd, 1024) == b"inherited"
+    finally:
+        os.close(read_fd)
 
 
 def test_run_background_with_queue() -> None:
