@@ -42,6 +42,10 @@ def _render_directory_listing(dir_path: str, url_path: str) -> HTMLResponse:
     try:
         items = sorted(os.listdir(dir_path))
     except OSError:
+        # os.listdir can still fail on a path the caller already confirmed is a
+        # directory (e.g. permission denied, or a race that removed it). This is a
+        # debugging demo, so degrade to an empty listing rather than crashing the
+        # request handler -- correctness of the listing is not load-bearing here.
         items = []
 
     # Use absolute links -- the desktop client rewrites them transparently

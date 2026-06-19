@@ -100,7 +100,12 @@ def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
 
         raise TelegramCredentialError("Credential pattern not found in any bundle chunk")
 
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
+        # The three `raise ValueError(...)` above are deliberate "extraction failed"
+        # signals, and urlopen network failures arrive as OSError (urllib's URLError
+        # subclasses it, so listing it separately would be redundant). Either way we
+        # fall back to the public Telegram Web app credentials; the stderr warning is
+        # the loud-failure surface so a broken scrape is still noticed.
         sys.stderr.write(
             f"Warning: could not extract api credentials from Telegram Web bundle ({exc}), using known defaults\n"
         )
@@ -144,19 +149,31 @@ def _try_latchkey_auth_get() -> str | None:
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return None
-
-        creds = json.loads(result.stdout)
-        if creds.get("objectType") != "telegramUser":
-            return None
-
-        dc_id = creds["dcId"]
-        auth_key_hex = creds["authKeyHex"]
-        sys.stderr.write(f"Read credentials from latchkey (user={creds.get('firstName', '?')}, DC={dc_id})\n")
-        return _auth_key_to_string_session(dc_id, auth_key_hex)
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
+    except subprocess.TimeoutExpired:
         return None
+    if result.returncode != 0:
+        return None
+
+    try:
+        creds = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if creds.get("objectType") != "telegramUser":
+        return None
+
+    # A telegramUser record missing these keys is malformed latchkey output, not an
+    # absent credential source. Surface it as our own error instead of swallowing a
+    # KeyError and silently falling through to the next source (which would mislead
+    # the user into thinking they have no stored credentials at all).
+    if "dcId" not in creds or "authKeyHex" not in creds:
+        raise TelegramCredentialError(
+            "latchkey returned a telegramUser record missing 'dcId'/'authKeyHex'; the "
+            "stored credentials are malformed. Re-run 'latchkey auth browser telegram'."
+        )
+    dc_id = creds["dcId"]
+    auth_key_hex = creds["authKeyHex"]
+    sys.stderr.write(f"Read credentials from latchkey (user={creds.get('firstName', '?')}, DC={dc_id})\n")
+    return _auth_key_to_string_session(dc_id, auth_key_hex)
 
 
 def _get_string_session() -> str:
@@ -282,9 +299,15 @@ def create_bot(bot_display_name: str, bot_username: str) -> tuple[str, str]:
 
             bot_token = token_match.group(1)
 
-            # Extract the actual username from the response
+            # Extract the actual username from the response. A successful BotFather
+            # creation always echoes the new bot as a t.me/<username> link, so its
+            # absence means the response format drifted -- fail loudly (like the other
+            # unexpected-response guards above) rather than reporting the requested
+            # username as if BotFather had confirmed it against this token.
             username_match = re.search(r"t\.me/(\w+)", response_text)
-            actual_username = username_match.group(1) if username_match else bot_username
+            if username_match is None:
+                raise BotCreationError(f"Could not extract bot username from BotFather response:\n{response_text}")
+            actual_username = username_match.group(1)
 
     finally:
         client.disconnect()
