@@ -6,7 +6,7 @@
   (e.g. the providers list in pages/Landing.jinja) can reference the same
   surface without copy-pasting the Tailwind utility string. ``.minds-card``
   has no baseline shadow -- non-clickable cards read as flat surfaces; the
-  ``interactive`` prop adds ``hover:shadow-sm`` so clickable cards lift on
+  ``interactive`` prop adds ``hover:shadow-raised`` so clickable cards lift on
   hover.
 
   Props:
@@ -43,7 +43,7 @@
   "default": "p-4",
   "tight": "px-4 py-2",
 }[padding] -%}
-{%- set _interactive_cls = "cursor-pointer transition hover:border-strong hover:shadow-sm" if interactive else "" -%}
+{%- set _interactive_cls = "cursor-pointer transition hover:border-strong hover:shadow-raised" if interactive else "" -%}
 {%- set _anchor_cls = "no-underline text-inherit" if tag == "a" else "" -%}
 {%- set _cls = ["minds-card", _layout_cls, _padding_cls, _interactive_cls, _anchor_cls, extra] | reject("equalto", "") | join(" ") -%}
 {%- if tag == "a" -%}

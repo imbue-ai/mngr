@@ -151,6 +151,18 @@
 }
 
 /*
+ * Elevation -- two box-shadow steps (generate shadow-raised / shadow-overlay),
+ * held by a ratchet. ``raised`` is the subtle hover lift on interactive cards
+ * (the old shadow-sm value). ``overlay`` is the soft floating shadow for
+ * surfaces that sit above the page -- menus, modals, tooltips (Figma's
+ * minds-elevation-1: two 8%-black drop shadows). Mode-independent.
+ */
+@theme {
+  --shadow-raised: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-overlay: 0 1px 1px 0 rgb(0 0 0 / 0.08), 0 3px 12px 0 rgb(0 0 0 / 0.08);
+}
+
+/*
  * Type ramp (Figma). Six semantic roles, each bundling font-size + weight +
  * line-height (and transform / tracking for the section eyebrow) into one
  * utility, so a text element's role is a single class. Sizes reuse Tailwind's

@@ -485,6 +485,32 @@
       <div class="mt-2 type-helper text-secondary font-mono">Tailwind default spacing; padding / margin / gap held to this subset by a ratchet</div>
     </section>
 
+    {# Elevation. Two box-shadow steps (app.css @theme), held by a ratchet.
+       shadow-raised is the interactive-card hover lift (the prior card shadow);
+       shadow-overlay is the soft floating shadow for surfaces above the page --
+       menus / modals / tooltips (Figma minds-elevation-1: two 8%-black drops). #}
+    <section class="mb-12">
+      <h2 class="type-heading text-primary mb-1">Elevation</h2>
+      <p class="type-helper text-secondary mb-4">
+        Two steps. <code>shadow-raised</code> is the hover lift on interactive
+        cards; <code>shadow-overlay</code> is the soft floating shadow for
+        surfaces above the page -- menus, modals, tooltips.
+      </p>
+      <div class="bg-fill-subtle rounded-lg p-8 grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div class="flex flex-col items-center gap-2">
+          <div class="w-full h-16 rounded-lg bg-surface-primary border border-default shadow-raised"></div>
+          <code class="type-helper font-mono text-secondary">shadow-raised</code>
+          <span class="type-helper text-tertiary">interactive card hover</span>
+        </div>
+        <div class="flex flex-col items-center gap-2">
+          <div class="w-full h-16 rounded-lg bg-surface-primary border border-default shadow-overlay"></div>
+          <code class="type-helper font-mono text-secondary">shadow-overlay</code>
+          <span class="type-helper text-tertiary">menus / modals / tooltips</span>
+        </div>
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --shadow-raised / --shadow-overlay</div>
+    </section>
+
     {# Workspace accent picker #}
     <section class="mb-12">
       <h2 class="type-heading text-primary mb-1">Workspace accent</h2>
@@ -494,7 +520,7 @@
         mngr <code>color</code> label). Pick a color; everything below that
         uses <code>--workspace-accent</code> updates live.
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 shadow-sm">
+      <div class="bg-surface-primary border border-default rounded-lg p-4 shadow-raised">
         <div class="flex items-center gap-4">
           <div class="accent-swatch w-12 h-12 rounded-md border border-default shrink-0"></div>
           <div class="flex-1">
@@ -912,7 +938,7 @@
       <div class="mb-6">
         <div class="type-section text-secondary mb-2">Modal (inner card preview)</div>
         <div class="bg-fill-subtle border border-default rounded-lg p-6 flex items-center justify-center">
-          <div class="bg-surface-primary rounded-lg shadow-lg border border-default max-w-sm w-full p-6">
+          <div class="bg-surface-primary rounded-lg shadow-overlay border border-default max-w-sm w-full p-6">
             <h2 class="type-heading text-primary mb-3">Confirm action?</h2>
             <p class="type-body text-primary mb-4">This is what the inner card of a Modal looks like.</p>
             <div class="flex justify-end gap-3">

@@ -1251,6 +1251,25 @@ def test_text_uses_type_roles_not_raw_size_or_medium() -> None:
     )
 
 
+def test_elevation_uses_shadow_roles_not_raw_steps() -> None:
+    """Box-shadow is limited to the two elevation roles -- ``shadow-raised``
+    (interactive-card hover lift) and ``shadow-overlay`` (floating menus /
+    modals / tooltips) -- plus ``shadow-none``. Tailwind's raw shadow steps
+    (``shadow-sm`` ... ``shadow-2xl``, ``shadow-inner``) and arbitrary
+    ``shadow-[..]`` are disallowed. (Inline ``box-shadow:`` in a style attribute
+    -- e.g. the content-frame inset highlight -- is a raw CSS property, not a
+    utility, and is not matched.)"""
+    banned = re.compile(r"\bshadow-(?:2xs|xs|sm|md|lg|xl|2xl|inner)\b|\bshadow-\[[^\]]*\]")
+    offenders: list[str] = []
+    for path in _design_system_source_files():
+        for match in banned.finditer(path.read_text()):
+            offenders.append(f"{path.name}: {match.group(0)}")
+    assert offenders == [], (
+        "Raw box-shadow utilities found. Use shadow-raised / shadow-overlay "
+        f"(or shadow-none): {offenders}"
+    )
+
+
 def test_notice_renders_each_variant() -> None:
     variants_to_class = {
         "info": "bg-info/12",
@@ -1365,7 +1384,7 @@ def test_card_page_default_padding_and_max_width() -> None:
     # Card surface: bg/border/rounded/shadow + p-8 + max-w-[420px] + w-full.
     assert "bg-surface-primary" in html
     assert "rounded-lg" in html
-    assert "shadow-sm" in html
+    assert "shadow-raised" in html
     assert "p-8" in html
     assert "max-w-[420px]" in html
     assert "<p>body</p>" in html
