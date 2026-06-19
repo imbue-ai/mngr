@@ -498,29 +498,39 @@ def _extend_example(dotted_path: str) -> str:
     return expr
 
 
-def build_settings_narrowing_message(detail_lines: Sequence[str], *, example_key_path: str | None = None) -> str:
-    """Build the user-facing settings-narrowing error body shared by config-load and
-    provisioning.
+def suffix_remediation(example_key_path: str | None = None) -> str:
+    """Render the ``__extend`` / ``__assign`` suffix remediation for the config-load surface.
 
-    ``detail_lines`` describe what narrowed -- the config loader names the assigning and
-    dropped-from scopes per key; the claude provision fold lists the dotted key paths.
-    The preamble and the remediation footer (the ``__extend`` / ``__assign`` operators and
-    the ``allow_settings_key_assignment_narrowing`` flag) are identical in both contexts,
-    so they live here rather than being duplicated per caller. ``example_key_path`` (a
-    narrowed dotted path) tailors the ``__extend`` example to the user's actual key so the
-    message shows exactly how to fix *their* config; it falls back to a generic example.
+    ``example_key_path`` (a narrowed dotted path) tailors the example to the user's actual key.
+    The externally-owned ``settings_overrides`` surface uses ``__mngr_merge`` instead (see
+    ``external_settings``); only mngr's own config uses these suffixes.
     """
     example = (
         _extend_example(example_key_path) if example_key_path else 'permissions__extend = {allow__extend = ["..."]}'
     )
+    return (
+        "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
+        f"key in the higher-precedence layer (e.g. `{example}`), "
+        "or `__assign` to replace it intentionally without this error."
+    )
+
+
+def build_settings_narrowing_message(detail_lines: Sequence[str], *, remediation: str) -> str:
+    """Build the user-facing settings-narrowing error body shared by config-load and
+    provisioning.
+
+    ``detail_lines`` describe what narrowed (the config loader names the assigning and
+    dropped-from scopes per key; the provision fold lists the dotted key paths). The preamble
+    and the ``allow_settings_key_assignment_narrowing`` escape hatch are identical in both
+    contexts; the per-key ``remediation`` differs by surface and is rendered by the caller
+    (``suffix_remediation`` for config-load; the ``__mngr_merge`` remediation in
+    ``external_settings`` for the externally-owned ``settings_overrides`` path).
+    """
     return (
         "Settings narrowing detected: a higher-precedence settings layer would assign over "
         "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
         "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
         "To opt into this assign-by-default behavior (and silence this error), set "
         "`allow_settings_key_assignment_narrowing = true` in your mngr config "
-        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
-        "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
-        f"key in the higher-precedence layer (e.g. `{example}`), "
-        "or `__assign` to replace it intentionally without this error."
+        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n" + remediation
     )

@@ -2404,12 +2404,13 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
 # which has no ``settings_overrides`` field).
 
 
-def _write_settings_overrides_narrowing_config(project_dir: Path, *, higher_key: str = "allow") -> None:
+def _write_settings_overrides_narrowing_config(project_dir: Path, *, higher_op: str | None = None) -> None:
     """Project layer sets ``settings_overrides.permissions.allow = ["A"]`` on a
     claude-derived agent type; local layer assigns ``["B"]`` (dropping ``A``).
 
-    ``higher_key`` lets the caller use ``allow__extend`` to opt into additive
-    behavior instead of the bare (narrowing) assign.
+    ``higher_op`` lets the caller add a ``__mngr_merge`` directive declaring
+    ``permissions.allow`` as that op (e.g. ``"extend"``) to opt into additive behavior
+    instead of the bare (narrowing) assign.
     """
     (project_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n\n"
@@ -2417,12 +2418,15 @@ def _write_settings_overrides_narrowing_config(project_dir: Path, *, higher_key:
         "[agent_types.my_claude.settings_overrides.permissions]\n"
         'allow = ["A"]\n'
     )
-    (project_dir / "settings.local.toml").write_text(
+    local = (
         "is_allowed_in_pytest = true\n\n"
         '[agent_types.my_claude]\nparent_type = "claude"\n'
         "[agent_types.my_claude.settings_overrides.permissions]\n"
-        f'{higher_key} = ["B"]\n'
+        'allow = ["B"]\n'
     )
+    if higher_op is not None:
+        local += f'[agent_types.my_claude.settings_overrides.__mngr_merge]\n"permissions.allow" = "{higher_op}"\n'
+    (project_dir / "settings.local.toml").write_text(local)
 
 
 def test_load_config_narrowing_raises_on_settings_overrides_bare_drop(
@@ -2442,7 +2446,7 @@ def test_load_config_narrowing_raises_on_settings_overrides_bare_drop(
     with pytest.raises(ConfigParseError) as exc_info:
         load_config(pm=pm, concurrency_group=cg)
     message = str(exc_info.value)
-    assert "narrowing" in message
+    assert "Settings narrowing detected" in message
     assert "agent_types.my_claude.settings_overrides.permissions" in message
 
 
@@ -2473,10 +2477,11 @@ def test_load_config_settings_overrides_narrowing_allowed_when_opted_in(
 def test_load_config_extend_avoids_settings_overrides_narrowing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
-    """Using ``allow__extend`` inside the local ``settings_overrides`` accumulates
-    onto the project layer's entries rather than narrowing, so no opt-in is needed."""
+    """Declaring ``permissions.allow`` as ``extend`` in the local layer's ``__mngr_merge``
+    map accumulates onto the project layer's entries rather than narrowing, so no opt-in
+    is needed."""
     pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
-    _write_settings_overrides_narrowing_config(project_dir, higher_key="allow__extend")
+    _write_settings_overrides_narrowing_config(project_dir, higher_op="extend")
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
     assert settings_overrides["permissions"]["allow"] == ["A", "B"]
@@ -2485,10 +2490,10 @@ def test_load_config_extend_avoids_settings_overrides_narrowing(
 def test_load_config_assign_avoids_settings_overrides_narrowing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
-    """A local layer's ``permissions__assign`` over the project layer's non-empty
-    ``permissions`` dict suppresses the cross-scope narrowing without any global opt-in
-    -- the per-key replace-without-warning operator. The local value wins wholesale (the
-    project's ``defaultMode`` is intentionally dropped), and no error is raised.
+    """A local layer declaring ``permissions`` as ``assign`` in its ``__mngr_merge`` map
+    suppresses the cross-scope narrowing without any global opt-in -- the per-key
+    replace-without-warning operator. The local value wins wholesale (the project's
+    ``defaultMode`` is intentionally dropped), and no error is raised.
 
     Regression: the deferred ``__assign`` was previously collapsed to a bare assign at
     config-load whenever a lower scope already set the key, so the no-warn intent was lost
@@ -2506,7 +2511,9 @@ def test_load_config_assign_avoids_settings_overrides_narrowing(
         "is_allowed_in_pytest = true\n\n"
         '[agent_types.my_claude]\nparent_type = "claude"\n'
         "[agent_types.my_claude.settings_overrides]\n"
-        'permissions__assign = { allow = ["B"] }\n'
+        'permissions = { allow = ["B"] }\n'
+        "[agent_types.my_claude.settings_overrides.__mngr_merge]\n"
+        '"permissions" = "assign"\n'
     )
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
@@ -2566,18 +2573,20 @@ def test_load_config_settings_overrides_narrowing_error_attributes_both_sides(
 def test_load_config_narrowing_attributes_dropped_from_for_suffixed_lower_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
-    """When the dropped value was set via an operator suffix (here ``__assign``) in a
-    *deferred* settings-patch field, the narrowing's ``dropped_from`` still names that
-    layer. The lower layer's parsed dump carries the suffixed key (``allow__assign``)
-    while the narrowing path is bare (``...allow``), so provenance attribution must
-    normalize the operator suffix to match.
+    """When the dropped value was declared with an operator (here ``assign`` via
+    ``__mngr_merge``) in a *deferred* settings-patch field, the narrowing's ``dropped_from``
+    still names that layer. The lower layer's parsed dump carries the desugared suffixed key
+    (``permissions__assign``) while the narrowing path is bare (``...permissions``), so
+    provenance attribution must normalize the operator suffix to match.
     """
     pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n\n"
         '[agent_types.my_claude]\nparent_type = "claude"\n'
-        "[agent_types.my_claude.settings_overrides.permissions]\n"
-        'allow__assign = ["A"]\n'
+        "[agent_types.my_claude.settings_overrides]\n"
+        'permissions = { allow = ["A"] }\n'
+        "[agent_types.my_claude.settings_overrides.__mngr_merge]\n"
+        '"permissions" = "assign"\n'
     )
     (project_dir / "settings.local.toml").write_text(
         "is_allowed_in_pytest = true\n\n"
@@ -2588,8 +2597,8 @@ def test_load_config_narrowing_attributes_dropped_from_for_suffixed_lower_key(
     with pytest.raises(ConfigParseError) as exc_info:
         load_config(pm=pm, concurrency_group=cg)
     message = str(exc_info.value)
-    assert "settings_overrides.permissions.allow" in message
-    # The dropped value belongs to the project layer, which set it via ``allow__assign``.
+    assert "settings_overrides.permissions" in message
+    # The dropped value belongs to the project layer, which set it via ``permissions__assign``.
     assert "would drop a value from" in message
     assert "mngr config set --scope project" in message
 

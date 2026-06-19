@@ -41,6 +41,7 @@ from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.overlay_merge import build_settings_narrowing_message
+from imbue.mngr.config.overlay_merge import suffix_remediation
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
@@ -527,7 +528,9 @@ def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> Confi
         if violation.dropped_from is not None:
             detail_lines.append(f"      would drop a value from {_describe_source(violation.dropped_from)}")
     example_key_path = violations[0].key_path if violations else None
-    return ConfigParseError(build_settings_narrowing_message(detail_lines, example_key_path=example_key_path))
+    return ConfigParseError(
+        build_settings_narrowing_message(detail_lines, remediation=suffix_remediation(example_key_path))
+    )
 
 
 def resolve_strict_from_env() -> bool:

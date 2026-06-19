@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
+from imbue.mngr.config.external_settings import desugar_settings_overrides
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import InvalidKeyPathError
 from imbue.overlay.errors import OverlayError
@@ -139,7 +140,14 @@ def _resolve_extends(
     a deferred ``__assign`` (``is_deferred_assign_path``) is preserved unconditionally, so
     the no-warn intent survives even when a lower scope already set the key (the only case
     a narrowing could fire).
+
+    At the root of a ``settings_overrides`` subtree, the Claude-compatible ``__mngr_merge``
+    surface is first desugared into the internal suffix form (see
+    ``external_settings.desugar_settings_overrides``); the two passes below then process the
+    resulting suffix keys as on any other deferred path.
     """
+    if _is_settings_overrides_root(path):
+        override = desugar_settings_overrides(override, path)
     check_no_conflicting_assign(override, ".".join(path))
     result: dict[str, Any] = {}
     # First pass (assign-phase): copy bare and ``__assign`` keys, recursing into
@@ -200,7 +208,7 @@ def _resolve_extends(
 #     base ``B``. The ``<name>`` segment is dynamic.
 
 
-def _is_settings_overrides_path(path: tuple[str, ...]) -> bool:
+def is_settings_overrides_path(path: tuple[str, ...]) -> bool:
     """Return True for any path inside an ``agent_types.<name>.settings_overrides`` subtree.
 
     ``<name>`` (path[1]) is a user-chosen agent-type name and matches any value; the
@@ -208,6 +216,15 @@ def _is_settings_overrides_path(path: tuple[str, ...]) -> bool:
     at any depth under it (length > 3).
     """
     return len(path) >= 3 and path[0] == "agent_types" and path[2] == "settings_overrides"
+
+
+def _is_settings_overrides_root(path: tuple[str, ...]) -> bool:
+    """Return True for the ``agent_types.<name>.settings_overrides`` node itself (length 3).
+
+    The ``__mngr_merge`` map lives only at this root (it lands as a top-level key in the
+    Claude ``settings.json``), so the desugar runs here rather than at every nested level.
+    """
+    return len(path) == 3 and is_settings_overrides_path(path)
 
 
 def _is_create_template_option_path(path: tuple[str, ...]) -> bool:
@@ -224,7 +241,7 @@ def is_deferred_extend_path(path: tuple[str, ...]) -> bool:
     ``create_templates.<name>`` (resolved at ``mngr create`` time) and
     ``agent_types.<name>.settings_overrides`` (resolved at provision time).
     """
-    return _is_create_template_option_path(path) or _is_settings_overrides_path(path)
+    return _is_create_template_option_path(path) or is_settings_overrides_path(path)
 
 
 def is_deferred_assign_path(path: tuple[str, ...]) -> bool:
@@ -238,4 +255,4 @@ def is_deferred_assign_path(path: tuple[str, ...]) -> bool:
     consumer (``apply_create_template``) reads only ``__extend``, so a preserved
     ``__assign`` there would surface as a literal option key.
     """
-    return _is_settings_overrides_path(path)
+    return is_settings_overrides_path(path)

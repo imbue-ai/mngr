@@ -40,6 +40,28 @@ When enabled:
     one (its value may be inline JSON, not a file). Put those settings in
     `settings_overrides`, or set `use_env_config_dir=False`.
 
+## Merge intent in `settings_overrides` (`__mngr_merge`)
+
+`settings_overrides` is folded onto a base and lands in the per-agent
+`settings.json` that Claude itself reads, so it cannot use mngr's internal
+`key__extend`/`key__assign` suffixes — Claude would treat `permissions__extend`
+as a junk literal key. (mngr's *own* config, everything outside
+`settings_overrides`, still uses those suffixes.) Instead, declare merge intent in
+a single top-level `__mngr_merge` map of dotted key path -> operator, which vanilla
+Claude silently ignores. A bare key **assigns**, guarded so it errors rather than
+silently dropping a non-empty list/dict/set from the base (the error prints the
+exact `__mngr_merge` patch to add); `"extend"` **merges** onto the base (list
+concat / set union / recursive dict merge), and `"assign"` replaces without the
+narrowing guard. Raw `__extend`/`__assign` suffix keys under `settings_overrides`
+are a hard error pointing here.
+
+```toml
+[agent_types.claude.settings_overrides.permissions]
+allow = ["Bash(npm *)"]
+[agent_types.claude.settings_overrides.__mngr_merge]
+"permissions.allow" = "extend"   # or "assign"
+```
+
 ## Version pinning and auto-updates
 
 Pin the Claude Code version that gets installed, and control its background
