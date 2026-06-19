@@ -1,13 +1,7 @@
 # modal-proxy
 
-Abstraction layer over the [Modal](https://modal.com) SDK for [mngr](../mngr/README.md).
+An abstraction layer over the [Modal](https://modal.com) Python SDK.
 
-This library defines a `ModalInterface` ABC that captures every interaction mngr_modal has with Modal. Three implementations are planned:
+`ModalInterface` is an abstract base class that mirrors the Modal object model (App, Sandbox, Image, Volume, etc.), exposing a focused subset of operations. Modal-specific exceptions are translated into `ModalProxy*` errors at the boundary, so callers never need to import `modal` directly.
 
-1. **DirectModalInterface** -- calls the Modal Python SDK directly (the current behavior, extracted from mngr_modal)
-2. **FakeModalInterface** -- fakes Modal behavior locally (volumes become directories, sandboxes become process groups) for integration testing without remote calls
-3. **RemoteModalInterface** -- proxies calls to a web server, enabling a managed service that translates user credentials into real Modal API calls
-
-## Usage
-
-The `ModalInterface` is intended to be injected into `ModalProviderInstance` (in mngr_modal) rather than having mngr_modal call the Modal SDK directly.
+The provided `DirectModalInterface` implementation wraps the real Modal SDK. Inject a `ModalInterface` instance into your own code rather than calling the Modal SDK directly; this decouples your application from the SDK and makes it straightforward to substitute a fake implementation in tests.

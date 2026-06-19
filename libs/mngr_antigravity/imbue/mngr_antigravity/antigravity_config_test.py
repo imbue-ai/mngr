@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
@@ -136,6 +137,46 @@ def test_build_isolated_settings_seeds_trust_list_from_empty_base() -> None:
     """With an empty base (sync_home_settings=False) the workspace still gets trusted."""
     result = build_isolated_settings({}, {}, ["/tmp/ws"])
     assert result["trustedWorkspaces"] == ["/tmp/ws"]
+
+
+def test_build_isolated_settings_mngr_merge_extends_onto_base() -> None:
+    """A desugared ``__mngr_merge`` extend (the internal suffix form provision passes)
+    merges the override onto the base list rather than replacing it -- parity with
+    mngr_claude's fold."""
+    base = {"permissions": {"allow": ["command(git)"]}}
+    overrides = {"permissions__extend": {"allow__extend": ["command(npm)"]}}
+    result = build_isolated_settings(base, overrides, [])
+    assert result["permissions"]["allow"] == ["command(git)", "command(npm)"]
+
+
+def test_build_isolated_settings_bare_override_narrows_raises_with_mngr_merge_remediation() -> None:
+    """A bare override that narrows raises, surfacing the Claude-compatible ``__mngr_merge``
+    remediation through antigravity's fold, never the internal suffix form. (The exact
+    recursive patch is pinned in external_settings_test.)"""
+    base = {"permissions": {"allow": ["command(git)"]}}
+    overrides = {"permissions": {"allow": ["command(npm)"]}}
+    with pytest.raises(ConfigParseError) as exc_info:
+        build_isolated_settings(base, overrides, [])
+    message = str(exc_info.value)
+    assert "__mngr_merge" in message
+    assert "allow__extend" not in message
+
+
+def test_build_isolated_settings_narrowing_allowed_with_escape_hatch() -> None:
+    """``allow_narrowing`` lets a bare override replace the base aggregate without erroring."""
+    base = {"permissions": {"allow": ["command(git)"]}}
+    overrides = {"permissions": {"allow": ["command(npm)"]}}
+    result = build_isolated_settings(base, overrides, [], allow_narrowing=True)
+    assert result["permissions"] == {"allow": ["command(npm)"]}
+
+
+def test_build_isolated_settings_strips_mngr_merge_key_from_base() -> None:
+    """A ``__mngr_merge`` key in the base (a no-op on the floor, ignored by agy) is dropped
+    so it never leaks into the written settings.json."""
+    base = {"model": "Base", "__mngr_merge": {"model": "extend"}}
+    result = build_isolated_settings(base, {}, [])
+    assert "__mngr_merge" not in result
+    assert result["model"] == "Base"
 
 
 def test_build_onboarding_seed_emits_the_three_nux_keys() -> None:

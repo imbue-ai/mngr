@@ -252,11 +252,12 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    # Run ``mngr message`` (and, over time, other ``mngr`` CLI calls) in children
-    # forked from a pre-warmed forkserver instead of spawning a fresh subprocess
-    # each time, so UI actions like Approve/Deny don't pay the multi-second
-    # interpreter+import startup cost. ``prewarm`` is non-blocking: it pays the
-    # one-time import cost on a background thread, off the request path.
+    # Run ``mngr message`` (and, over time, other ``mngr`` CLI calls) in a
+    # pre-warmed, single-use ``mngr`` process instead of spawning (and importing)
+    # a fresh interpreter each time, so UI actions like Approve/Deny don't pay the
+    # multi-second interpreter+import startup cost. ``prewarm`` is non-blocking:
+    # it spawns the first warm process (which pays the import cost) on a
+    # background thread, off the request path.
     mngr_caller = get_default_mngr_caller()
     mngr_caller.prewarm(root_concurrency_group)
     mngr_message_sender = MngrMessageSender(mngr_caller=mngr_caller, concurrency_group=root_concurrency_group)

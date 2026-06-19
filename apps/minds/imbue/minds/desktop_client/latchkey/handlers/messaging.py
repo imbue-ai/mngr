@@ -60,11 +60,11 @@ class MngrMessageSender(MutableModel):
     event has already been written, so an undelivered nudge is recoverable
     (the agent will eventually wake up on its own).
 
-    Each ``mngr message`` runs through a :class:`MngrCaller`, which executes the
-    CLI in a child forked from a pre-warmed forkserver rather than spawning a
-    brand-new subprocess -- avoiding the multi-second interpreter+import startup
-    cost. Production passes the shared, pre-warmed singleton; tests inject a
-    recording double.
+    Each ``mngr message`` runs through a :class:`MngrCaller`, which hands the CLI
+    to a pre-warmed, single-use ``mngr`` process rather than spawning (and
+    importing) a brand-new interpreter -- avoiding the multi-second
+    interpreter+import startup cost. Production passes the shared, pre-warmed
+    singleton; tests inject a recording double.
     """
 
     mngr_caller: MngrCaller = Field(

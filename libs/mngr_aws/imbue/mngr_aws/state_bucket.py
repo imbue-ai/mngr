@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from contextlib import contextmanager
 from typing import Any
 from typing import Final
@@ -12,12 +13,18 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.data_types import FileType
-from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr.interfaces.volume import Volume
-from imbue.mngr_vps_docker import state_keys
-from imbue.mngr_vps_docker.state_bucket_base import BaseStateBucket
+from imbue.mngr_vps import state_keys
+from imbue.mngr_vps.state_bucket_base import BaseObjectStoreVolume
+from imbue.mngr_vps.state_bucket_base import BaseStateBucket
+from imbue.mngr_vps.state_bucket_base import ObjectStoreEntry
+
+# S3 not-found error codes: a get/head on a missing object/bucket surfaces one of
+# these in the ``ClientError`` response code.
+_S3_NOT_FOUND_CODES: Final[frozenset[str]] = frozenset({"NoSuchKey", "404", "NotFound"})
+
+# S3 ``DeleteObjects`` accepts at most this many keys per request.
+_S3_DELETE_BATCH_SIZE: Final[int] = 1000
 
 # ``us-east-1`` is special-cased by S3: CreateBucket rejects a request that
 # carries a ``LocationConstraint`` of ``us-east-1`` (the legacy default region
@@ -58,12 +65,21 @@ class S3StateBucket(BaseStateBucket):
     def _store_label(self) -> str:
         return f"S3 bucket {self.bucket_name}"
 
+    def _translate_errors(self) -> AbstractContextManager[None]:
+        return _translate_s3_errors(self.bucket_name)
+
+    def _is_not_found(self, error: MngrError) -> bool:
+        return _is_s3_not_found(error)
+
+    @property
+    def _bucket_error_type(self) -> type[MngrError]:
+        return S3StateBucketError
+
     def _make_host_dir_volume(self) -> Volume:
         return S3Volume(session=self.session, region=self.region, bucket_name=self.bucket_name)
 
-    def _prefix_has_objects(self, prefix: str) -> bool:
-        with _translate_s3_errors(self.bucket_name):
-            response = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=prefix, MaxKeys=1)
+    def _prefix_has_any_object(self, prefix: str) -> bool:
+        response = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=prefix, MaxKeys=1)
         return response.get("KeyCount", 0) > 0
 
     def bucket_exists(self) -> bool:
@@ -143,19 +159,11 @@ class S3StateBucket(BaseStateBucket):
         with _translate_s3_errors(self.bucket_name):
             self._s3().put_object(Bucket=self.bucket_name, Key=key, Body=body.encode("utf-8"))
 
-    def _get_object(self, key: str) -> str | None:
-        try:
-            response = self._s3().get_object(Bucket=self.bucket_name, Key=key)
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code in ("NoSuchKey", "404", "NotFound"):
-                return None
-            raise S3StateBucketError(f"Failed to read object {key!r} from bucket {self.bucket_name!r}: {e}") from e
-        return response["Body"].read().decode("utf-8")
+    def _read_object_bytes(self, key: str) -> bytes:
+        return self._s3().get_object(Bucket=self.bucket_name, Key=key)["Body"].read()
 
-    def _delete_object(self, key: str) -> None:
-        with _translate_s3_errors(self.bucket_name):
-            self._s3().delete_object(Bucket=self.bucket_name, Key=key)
+    def _delete_single_object(self, key: str) -> None:
+        self._s3().delete_object(Bucket=self.bucket_name, Key=key)
 
     def _list_keys(self, prefix: str) -> list[str]:
         keys: list[str] = []
@@ -169,10 +177,9 @@ class S3StateBucket(BaseStateBucket):
     def _delete_keys(self, keys: list[str]) -> None:
         if not keys:
             return
-        # S3 DeleteObjects accepts at most 1000 keys per request.
         with _translate_s3_errors(self.bucket_name):
-            for start in range(0, len(keys), 1000):
-                batch = keys[start : start + 1000]
+            for start in range(0, len(keys), _S3_DELETE_BATCH_SIZE):
+                batch = keys[start : start + _S3_DELETE_BATCH_SIZE]
                 response = self._s3().delete_objects(
                     Bucket=self.bucket_name,
                     Delete={"Objects": [{"Key": key} for key in batch]},
@@ -180,14 +187,14 @@ class S3StateBucket(BaseStateBucket):
                 _raise_on_delete_errors(response, self.bucket_name)
 
 
-class S3Volume(BaseVolume):
+class S3Volume(BaseObjectStoreVolume):
     """A ``Volume`` backed by an S3 bucket, for reading a host's offline host_dir.
 
     Maps volume-relative paths to S3 keys under whatever prefix it is
     ``scoped()`` to. Reads use the operator's credentials (the same session as
-    ``S3StateBucket``). S3 has no real directories, so a "directory" is the set
-    of keys sharing a prefix; ``listdir`` synthesizes directory entries from the
-    common prefixes a delimited list returns.
+    ``S3StateBucket``). The shared object-store logic (listing / existence / read
+    / write / delete) lives on ``BaseObjectStoreVolume``; this class supplies only
+    the S3 client + SDK primitives + error seam.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -202,91 +209,71 @@ class S3Volume(BaseVolume):
             self._cached_s3_client = self.session.client("s3", region_name=self.region)
         return self._cached_s3_client
 
-    def listdir(self, path: str) -> list[VolumeFile]:
-        prefix = _as_dir_prefix(path)
-        entries: list[VolumeFile] = []
-        with _translate_s3_errors(self.bucket_name):
-            paginator = self._s3().get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix, Delimiter="/"):
-                # Sub-"directories": each CommonPrefix is one immediate child dir.
-                for common in page.get("CommonPrefixes", []):
-                    child = common["Prefix"][len(prefix) :].rstrip("/")
-                    if child:
-                        entries.append(VolumeFile(path=child, file_type=FileType.DIRECTORY, mtime=0, size=0))
-                # Files directly under the prefix (skip the prefix placeholder key itself).
-                for obj in page.get("Contents", []):
-                    child = obj["Key"][len(prefix) :]
-                    if not child or "/" in child:
-                        continue
-                    entries.append(
-                        VolumeFile(
-                            path=child,
-                            file_type=FileType.FILE,
-                            mtime=int(obj["LastModified"].timestamp()),
-                            size=obj.get("Size", 0),
-                        )
-                    )
-        return entries
+    def _translate_errors(self) -> AbstractContextManager[None]:
+        return _translate_s3_errors(self.bucket_name)
 
-    def path_exists(self, path: str) -> bool:
-        key = path.lstrip("/")
-        # Two probes, because a single list on the bare prefix can return a
-        # lexicographically-earlier sibling (e.g. ``foobar`` when probing dir
-        # ``foo``) that matches neither test. The directory probe lists the
-        # ``foo/`` prefix; the exact-file probe lists the bare key and checks
-        # for an exact match. Mirrors the Azure ``BlobVolume.path_exists``.
-        dir_prefix = _as_dir_prefix(path)
-        with _translate_s3_errors(self.bucket_name):
-            if dir_prefix:
-                directory = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=dir_prefix, MaxKeys=1)
-                if directory.get("KeyCount", 0) > 0:
-                    return True
-            exact = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=key, MaxKeys=1)
-        return any(obj["Key"] == key for obj in exact.get("Contents", []))
+    def _is_not_found(self, error: MngrError) -> bool:
+        return _is_s3_not_found(error)
 
-    def read_file(self, path: str) -> bytes:
-        key = path.lstrip("/")
-        try:
-            response = self._s3().get_object(Bucket=self.bucket_name, Key=key)
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code in ("NoSuchKey", "404", "NotFound"):
-                raise S3StateBucketError(f"File {path!r} does not exist in bucket {self.bucket_name!r}") from e
-            raise S3StateBucketError(f"Failed to read {path!r} from bucket {self.bucket_name!r}: {e}") from e
-        return response["Body"].read()
+    @property
+    def _bucket_error_type(self) -> type[MngrError]:
+        return S3StateBucketError
 
-    def remove_file(self, path: str, *, recursive: bool = False) -> None:
-        if recursive:
-            self.remove_directory(path)
-            return
-        with _translate_s3_errors(self.bucket_name):
-            self._s3().delete_object(Bucket=self.bucket_name, Key=path.lstrip("/"))
+    def _make_missing_file_error(self, path: str) -> MngrError:
+        return S3StateBucketError(f"File {path!r} does not exist in bucket {self.bucket_name!r}")
 
-    def remove_directory(self, path: str) -> None:
-        prefix = _as_dir_prefix(path)
+    def _iter_delimited_entries(self, prefix: str) -> Iterator[ObjectStoreEntry]:
+        paginator = self._s3().get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix, Delimiter="/"):
+            # Sub-"directories": each CommonPrefix is one immediate child dir.
+            for common in page.get("CommonPrefixes", []):
+                yield ObjectStoreEntry(name=common["Prefix"].rstrip("/"), is_directory=True, mtime=0, size=0)
+            # Files directly under the prefix.
+            for obj in page.get("Contents", []):
+                yield ObjectStoreEntry(
+                    name=obj["Key"],
+                    is_directory=False,
+                    mtime=int(obj["LastModified"].timestamp()),
+                    size=obj.get("Size", 0),
+                )
+
+    def _prefix_has_any_object(self, prefix: str) -> bool:
+        response = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=prefix, MaxKeys=1)
+        return response.get("KeyCount", 0) > 0
+
+    def _has_object_at_key(self, key: str) -> bool:
+        response = self._s3().list_objects_v2(Bucket=self.bucket_name, Prefix=key, MaxKeys=1)
+        return any(obj["Key"] == key for obj in response.get("Contents", []))
+
+    def _read_object_bytes(self, key: str) -> bytes:
+        return self._s3().get_object(Bucket=self.bucket_name, Key=key)["Body"].read()
+
+    def _delete_single_object(self, key: str) -> None:
+        self._s3().delete_object(Bucket=self.bucket_name, Key=key)
+
+    def _delete_prefix(self, prefix: str) -> None:
         keys: list[str] = []
-        with _translate_s3_errors(self.bucket_name):
-            paginator = self._s3().get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
-                keys.extend(obj["Key"] for obj in page.get("Contents", []))
-            for start in range(0, len(keys), 1000):
-                batch = keys[start : start + 1000]
-                if batch:
-                    response = self._s3().delete_objects(
-                        Bucket=self.bucket_name, Delete={"Objects": [{"Key": key} for key in batch]}
-                    )
-                    _raise_on_delete_errors(response, self.bucket_name)
+        paginator = self._s3().get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
+            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        for start in range(0, len(keys), _S3_DELETE_BATCH_SIZE):
+            batch = keys[start : start + _S3_DELETE_BATCH_SIZE]
+            if batch:
+                response = self._s3().delete_objects(
+                    Bucket=self.bucket_name, Delete={"Objects": [{"Key": key} for key in batch]}
+                )
+                _raise_on_delete_errors(response, self.bucket_name)
 
-    def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
-        with _translate_s3_errors(self.bucket_name):
-            for path, content in file_contents_by_path.items():
-                self._s3().put_object(Bucket=self.bucket_name, Key=path.lstrip("/"), Body=content)
+    def _write_object(self, key: str, content: bytes) -> None:
+        self._s3().put_object(Bucket=self.bucket_name, Key=key, Body=content)
 
 
-def _as_dir_prefix(path: str) -> str:
-    """Normalize a volume path to an S3 directory prefix (no leading slash, trailing slash)."""
-    cleaned = path.strip("/")
-    return f"{cleaned}/" if cleaned else ""
+def _is_s3_not_found(error: MngrError) -> bool:
+    """Return whether a translated ``S3StateBucketError`` wraps an S3 not-found ``ClientError``."""
+    cause = error.__cause__
+    if not isinstance(cause, ClientError):
+        return False
+    return cause.response.get("Error", {}).get("Code", "") in _S3_NOT_FOUND_CODES
 
 
 @contextmanager

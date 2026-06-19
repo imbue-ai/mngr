@@ -19,10 +19,10 @@ from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 
 @pytest.fixture()
@@ -389,6 +389,25 @@ def test_destroy_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
         expected_params={"InstanceIds": ["i-abc"]},
     )
     client.destroy_instance(VpsInstanceId("i-abc"))
+
+
+def test_set_instance_tags_upserts_via_create_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """set_instance_tags issues CreateTags (an upsert) with the given Resources + Tags.
+
+    This backs the rename re-stamp of the EC2 ``Name`` identity tag offline
+    discovery reads.
+    """
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={
+            "Resources": ["i-abc"],
+            "Tags": [{"Key": "Name", "Value": "mngr-renamed"}],
+        },
+    )
+    client.set_instance_tags(VpsInstanceId("i-abc"), {"Name": "mngr-renamed"})
+    stubber.assert_no_pending_responses()
 
 
 def test_stop_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:

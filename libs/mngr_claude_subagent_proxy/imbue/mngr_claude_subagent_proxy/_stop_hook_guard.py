@@ -22,6 +22,8 @@ from typing import Final
 
 from loguru import logger
 
+from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
+
 PROXY_CHILD_GUARD_PREFIX: Final[str] = '[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; '
 
 # Substrings that mark a hook command as mngr-managed (readiness, credential
@@ -56,6 +58,20 @@ def wrap_with_proxy_child_guard(command: str) -> str:
     return PROXY_CHILD_GUARD_PREFIX + command
 
 
+def is_well_formed_command_entry(cmd_entry: Any) -> bool:
+    """Return True if ``cmd_entry`` is a hooks-schema command entry.
+
+    A command entry is a dict whose ``command`` is a non-empty string -- the
+    innermost shape Claude Code's hooks schema requires. Shared by the
+    Stop/SubagentStop command iterator and the entry-level safety checks so
+    they agree on what counts as a real command.
+    """
+    if not isinstance(cmd_entry, dict):
+        return False
+    command = cmd_entry.get("command")
+    return isinstance(command, str) and bool(command)
+
+
 def iter_user_stop_hook_commands(
     hooks: dict[str, Any],
 ) -> Iterator[tuple[str, dict[str, Any], str]]:
@@ -77,12 +93,9 @@ def iter_user_stop_hook_commands(
             if not isinstance(inner, list):
                 continue
             for cmd_entry in inner:
-                if not isinstance(cmd_entry, dict):
+                if not is_well_formed_command_entry(cmd_entry):
                     continue
-                command = cmd_entry.get("command")
-                if not isinstance(command, str) or not command:
-                    continue
-                yield event_name, cmd_entry, command
+                yield event_name, cmd_entry, cmd_entry["command"]
 
 
 def guard_user_stop_hooks_against_proxy_children(settings: dict[str, Any]) -> bool:
@@ -108,6 +121,21 @@ def guard_user_stop_hooks_against_proxy_children(settings: dict[str, Any]) -> bo
     return changed
 
 
+def guarded_settings_text(data: dict[str, Any], path: Path) -> str | None:
+    """Guard a loaded hooks dict and return the serialized text to write back.
+
+    Wraps each non-mngr Stop/SubagentStop command in ``data`` (mutating it in
+    place), logs the wrapped-hooks line once if anything changed, and returns
+    the serialized JSON to write. Returns None when nothing changed, so the
+    caller can skip the write. The single shared log line lives here so the
+    local-filesystem and host IO shims stay byte-identical.
+    """
+    if not guard_user_stop_hooks_against_proxy_children(data):
+        return None
+    logger.info("Wrapped Stop hooks in {} with MNGR_CLAUDE_SUBAGENT_PROXY_CHILD guard", path)
+    return json.dumps(data, indent=2) + "\n"
+
+
 def guard_stop_hooks_in_file(path: Path) -> None:
     """Apply the proxy-child guard to every Stop/SubagentStop command in a JSON hooks file.
 
@@ -130,11 +158,11 @@ def guard_stop_hooks_in_file(path: Path) -> None:
         return
     if not isinstance(data, dict):
         return
-    if not guard_user_stop_hooks_against_proxy_children(data):
+    text = guarded_settings_text(data, path)
+    if text is None:
         return
-    logger.info("Wrapped Stop hooks in {} with MNGR_CLAUDE_SUBAGENT_PROXY_CHILD guard", path)
     try:
-        path.write_text(json.dumps(data, indent=2) + "\n")
+        path.write_text(text)
     except OSError as e:
         logger.warning("Could not write {} after Stop-hook guard pass: {}", path, e)
 
@@ -152,7 +180,7 @@ def guard_per_agent_plugin_cache(state_dir: Path) -> None:
     Idempotent: ``wrap_with_proxy_child_guard`` no-ops on
     already-wrapped commands.
     """
-    cache_root = state_dir / "plugin" / "claude" / "anthropic" / "plugins"
+    cache_root = get_agent_claude_config_dir(state_dir) / "plugins"
     if not cache_root.is_dir():
         return
     try:

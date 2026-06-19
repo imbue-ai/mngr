@@ -70,28 +70,3 @@ class SubagentProxyPluginConfig(PluginConfig):
         "or deny them with a short skill-pointer reason that directs Claude at "
         "the mngr-proxy skill (DENY).",
     )
-
-    def merge_with(self, override: "PluginConfig") -> "SubagentProxyPluginConfig":
-        """Merge this config with an override config.
-
-        Scalar fields: override wins if not None. Matches the convention
-        established by other plugin configs (see ``RecursivePluginConfig``).
-
-        Accepts the base ``PluginConfig`` type to keep the signature
-        compatible with the parent class. The two branches:
-
-        - If ``override`` is not a ``SubagentProxyPluginConfig``, it can
-          only carry ``enabled``; preserve ``self.mode`` and merge only
-          ``enabled`` from the override.
-        - If ``override`` IS a ``SubagentProxyPluginConfig``, both
-          ``enabled`` and ``mode`` are merged scalar-style (override
-          wins when not None).
-        """
-        if not isinstance(override, SubagentProxyPluginConfig):
-            return SubagentProxyPluginConfig(
-                enabled=override.enabled if override.enabled is not None else self.enabled,
-                mode=self.mode,
-            )
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        merged_mode = override.mode if override.mode is not None else self.mode
-        return SubagentProxyPluginConfig(enabled=merged_enabled, mode=merged_mode)

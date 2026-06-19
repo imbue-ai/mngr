@@ -45,6 +45,7 @@ from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
+from imbue.mngr_vps.errors import ManagedResourcesExistError
 
 _ACTIVE_STATES = ["pending", "running", "stopping", "stopped"]
 
@@ -200,7 +201,7 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
     )
     ec2_stubber.activate()
     try:
-        with pytest.raises(click.ClickException) as exc_info:
+        with pytest.raises(ManagedResourcesExistError) as exc_info:
             _perform_cleanup(client)
         # The refusal must name the blocking instance so the operator knows what to destroy.
         assert "i-abc123" in str(exc_info.value)
@@ -247,7 +248,7 @@ def test_refuse_cleanup_if_instances_exist_aborts_before_teardown() -> None:
         bucket.write_host_record_json(HostId.generate(), "{}")
         ec2_stubber.activate()
         try:
-            with pytest.raises(click.ClickException, match="Refusing"):
+            with pytest.raises(ManagedResourcesExistError, match="Refusing"):
                 _refuse_cleanup_if_instances_exist(client)
             ec2_stubber.assert_no_pending_responses()
         finally:

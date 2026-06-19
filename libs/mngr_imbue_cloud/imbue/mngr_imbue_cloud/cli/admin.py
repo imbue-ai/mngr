@@ -66,7 +66,7 @@ from imbue.mngr_ovh.iam_tags import delete_tag
 from imbue.mngr_ovh.iam_tags import get_vps_resource
 from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
 from imbue.mngr_ovh.iam_tags import vps_urn_for
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 _CONTAINER_SSH_PORT: Final[int] = 2222
 
@@ -185,7 +185,7 @@ def build_extra_tags_env_value(tags: tuple[str, ...]) -> str:
     Each entry must already be a ``KEY=VALUE`` string (validated client-side
     before we ever construct the env var so a typo'd ``--tag foo`` aborts the
     bake with a usage error instead of crashing inside mngr).
-    ``mngr_vps_docker.build_vps_tags`` and ``mngr_ovh.iam_tags.parse_extra_tags_env``
+    ``mngr_vps.build_vps_tags`` and ``mngr_ovh.iam_tags.parse_extra_tags_env``
     both consume the comma-separated form.
     """
     for entry in tags:

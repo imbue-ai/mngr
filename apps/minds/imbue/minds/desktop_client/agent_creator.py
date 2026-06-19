@@ -474,7 +474,7 @@ def _rsync_worktree_over_clone(
 
     Thin wrapper around :func:`imbue.mngr.utils.git_utils.rsync_worktree_over_clone`
     that owns the per-call ``rsync-worktree`` child CG. The shared helper
-    is also what ``mngr_vps_docker`` uses for its docker-build-context
+    is also what ``mngr_vps`` uses for its docker-build-context
     assembly, so the two paths can't drift again.
     """
     cg = _make_child_cg("rsync-worktree", parent_cg)
