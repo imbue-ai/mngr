@@ -12,7 +12,7 @@
 #}
 <Base title="Manage Accounts">
   <PageContainer>
-    <h1 class="text-xl font-semibold text-primary leading-tight mb-5">Manage Accounts</h1>
+    <h1 class="text-xl font-semibold text-primary leading-tight mb-16">Manage Accounts</h1>
 
     {% if accounts %}
       {% for acct in accounts %}
@@ -22,7 +22,7 @@
             <div class="font-medium">
               {{ acct.email }}
               {% if not acct_enabled %}
-                <StatusBadge variant="warn" size="xs" extra="ml-2" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</StatusBadge>
+                <StatusBadge variant="warn" size="xs" extra="ml-8" title="Session was rejected by the server. Sign in again to re-enable.">Signed out</StatusBadge>
               {% endif %}
             </div>
             <div class="text-xs text-tertiary">
@@ -30,7 +30,7 @@
               {% if acct.user_id | string == default_account_id %} &middot; Default{% endif %}
             </div>
           </div>
-          <div class="flex gap-2">
+          <div class="flex gap-8">
             {% if not acct_enabled %}
               <ButtonLink href="/auth/login" variant="primary">Sign in again</ButtonLink>
             {% endif %}
@@ -40,7 +40,7 @@
                 <ButtonSubmit variant="secondary">Set default</ButtonSubmit>
               </form>
             {% else %}
-              <span class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm bg-fill-subtle text-primary border border-default opacity-60 cursor-default">Default</span>
+              <span class="inline-flex items-center justify-center px-12 py-8 rounded-md font-medium text-sm bg-fill-subtle text-primary border border-default opacity-60 cursor-default">Default</span>
             {% endif %}
             <form method="POST" action={{ "/accounts/" ~ acct.user_id ~ "/logout" }}>
               <ButtonSubmit variant="danger">Log out</ButtonSubmit>
@@ -52,9 +52,9 @@
       <p class="text-secondary">No accounts logged in.</p>
     {% endif %}
 
-    <div class="mt-4">
+    <div class="mt-16">
       <ButtonLink href="/auth/login" variant="primary">Add account</ButtonLink>
     </div>
-    <div class="mt-4"><Link href="/">&larr; Back to projects</Link></div>
+    <div class="mt-16"><Link href="/">&larr; Back to projects</Link></div>
   </PageContainer>
 </Base>

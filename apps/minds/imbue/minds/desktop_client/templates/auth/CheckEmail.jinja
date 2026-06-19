@@ -42,15 +42,15 @@
 {% endset %}
 <CardPage title="Check your email" scripts={{ _scripts }}>
   <div class="text-center">
-    <h1 class="text-2xl font-semibold text-primary mb-2">Check your email</h1>
-    <p class="text-secondary mb-3">We sent a verification link to <strong>{{ email }}</strong></p>
-    <p class="text-sm text-secondary mb-5">
+    <h1 class="text-2xl font-semibold text-primary mb-8">Check your email</h1>
+    <p class="text-secondary mb-12">We sent a verification link to <strong>{{ email }}</strong></p>
+    <p class="text-sm text-secondary mb-16">
       Click the link in the email to verify your account, then come back here.
     </p>
     <Notice variant="info" id="status-msg">Waiting for verification...</Notice>
     <Notice variant="success" id="success-msg" class="hidden">Email verified. Redirecting...</Notice>
-    <Button variant="primary" size="lg" block id="resend-btn" extra="mt-4">Resend verification email</Button>
-    <div class="text-center mt-3 text-sm text-secondary">
+    <Button variant="primary" size="lg" block id="resend-btn" extra="mt-16">Resend verification email</Button>
+    <div class="text-center mt-12 text-sm text-secondary">
       <Link href="/">Go to home</Link>
     </div>
   </div>

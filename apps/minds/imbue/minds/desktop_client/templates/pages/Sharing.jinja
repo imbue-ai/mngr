@@ -25,45 +25,45 @@
     {% else %}
 
       <div id="sharing-editor">
-        <p id="loading-state" class="text-secondary py-4">Loading...</p>
+        <p id="loading-state" class="text-secondary py-16">Loading...</p>
       </div>
 
       <div id="editor-content" class="hidden">
-        <div id="url-section" class="hidden mb-4">
-          <p class="font-medium mb-1">Shared URL</p>
-          <div id="url-provisioning" class="hidden flex gap-2 items-center text-sm text-secondary my-2">
+        <div id="url-section" class="hidden mb-16">
+          <p class="font-medium mb-4">Shared URL</p>
+          <div id="url-provisioning" class="hidden flex gap-8 items-center text-sm text-secondary my-8">
             <Spinner size="sm" />
             <span>Provisioning share&hellip;</span>
           </div>
           <div id="url-ready" class="hidden">
-            <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 my-2">
+            <div class="flex gap-8 items-center bg-fill-subtle border border-default rounded-md px-12 py-8 my-8">
               <input type="text" id="share-url" readonly
                      class="flex-1 bg-transparent border-0 text-sm text-primary font-mono outline-none"
                      onclick="this.select()">
               <Button variant="secondary" id="copy-btn" onclick="copyUrl()">Copy</Button>
             </div>
-            <p id="url-fallback-note" class="hidden text-xs text-tertiary mt-1">
+            <p id="url-fallback-note" class="hidden text-xs text-tertiary mt-4">
               This link may take a moment to become reachable.
             </p>
           </div>
         </div>
 
-        <h2 class="text-sm font-medium text-secondary mt-6 mb-3">Access List</h2>
+        <h2 class="text-sm font-medium text-secondary mt-24 mb-12">Access List</h2>
         <div id="email-list"></div>
-        <div class="flex gap-2 items-center mt-2">
+        <div class="flex gap-8 items-center mt-8">
           <TextInput type="email" name="new_email" id="new-email" placeholder="Add email address" extra="flex-1"
                      onkeydown="if (event.key === 'Enter') { event.preventDefault(); addEmail(); }" />
           <Button variant="secondary" onclick="addEmail()">Add</Button>
         </div>
 
-        <div class="flex gap-2 mt-5 justify-between" id="action-buttons">
-          <div class="flex gap-2">
+        <div class="flex gap-8 mt-16 justify-between" id="action-buttons">
+          <div class="flex gap-8">
             <ButtonLink href={{ "/workspace/" ~ agent_id ~ "/settings" }} variant="secondary">Cancel</ButtonLink>
             <Button variant="danger" id="disable-btn" onclick="submitDisable()" extra="hidden">Disable Sharing</Button>
           </div>
           <Button variant="success" id="action-btn" onclick="submitUpdate()">Update</Button>
         </div>
-        <div id="submit-spinner" class="hidden py-4">
+        <div id="submit-spinner" class="hidden py-16">
           <span class="text-secondary">Saving changes...</span>
         </div>
       </div>

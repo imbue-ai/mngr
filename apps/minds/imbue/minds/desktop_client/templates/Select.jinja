@@ -3,14 +3,14 @@
   Styled <select>. Matches the accent focus ring used across the app.
   Children should be a sequence of <option> elements; the caller owns
   per-option selected/disabled state. Usage:
-    <Select name="launch_mode" id="launch_mode" width="w-48">
+    <Select name="launch_mode" id="launch_mode" width="w-192">
       {% for mode in launch_modes %}
         <option value="{{ mode.value }}" {% if mode.value == selected %}selected{% endif %}>{{ mode.value | lower }}</option>
       {% endfor %}
     </Select>
 
   ``width`` is a Tailwind width utility (default ``w-full``); pass
-  ``w-48`` etc. when the select sits beside a label in a justify-between
+  ``w-192`` etc. when the select sits beside a label in a justify-between
   row.
 
   Any HTML attribute (id=, disabled, data-*) flows through via JinjaX's

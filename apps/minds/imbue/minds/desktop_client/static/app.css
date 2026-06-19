@@ -127,6 +127,19 @@
 }
 
 /*
+ * Spacing scale -- re-based so the utility number reads as PIXELS. Tailwind
+ * computes every spacing / sizing utility as calc(var(--spacing) * N); setting
+ * --spacing to 1px makes p-2 = 2px, py-64 = 64px (vs the stock 0.25rem, where
+ * p-4 = 16px). The padding / margin / gap scale is 2/4/6/8/12/16/24/32/48/64
+ * px (a ratchet holds it); width / height / inset stay free px for layout.
+ * NOTE: this intentionally diverges from Tailwind's documented scale -- here
+ * p-4 is 4px, not 16px -- so lean on this styleguide rather than upstream docs.
+ */
+@theme {
+  --spacing: 1px;
+}
+
+/*
  * Corner-radius scale -- four steps (px), held by a ratchet alongside the
  * built-in rounded-full / rounded-none. Round-down snap from the old values:
  * sm 4->2, md 6->4, lg stays 8, and the old 12px (cards / modals / xl) folds
@@ -272,7 +285,7 @@ html {
  * via DOM methods after toggling the share state), so factoring the
  * recipe into one CSS class keeps the two sides from drifting.
  * Tailwind equivalents:
- *   bg-fill-subtle rounded-md px-1.5 py-0.5 font-mono text-[0.95em]
+ *   bg-fill-subtle rounded-md px-6 py-2 font-mono text-[0.95em]
  */
 .code-pill {
   background: var(--c-fill-subtle);
@@ -291,7 +304,7 @@ html {
 .opt {
   display: flex;
   gap: 12px;
-  padding: 13px 14px;
+  padding: 12px;
   border: 1px solid var(--c-border-subtle);
   border-radius: var(--radius-lg);
   cursor: pointer;

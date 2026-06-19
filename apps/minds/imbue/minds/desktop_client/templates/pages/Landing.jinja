@@ -42,16 +42,16 @@
       if (!badge) return;
       if (status === 'stuck') {
         badge.textContent = 'Server not responding';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-warning/15 text-warning';
+        badge.className = 'landing-health-badge inline-flex items-center px-8 py-2 rounded-md text-sm font-medium bg-warning/15 text-warning';
       } else if (status === 'restarting') {
         badge.textContent = 'Restarting...';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-warning/15 text-warning';
+        badge.className = 'landing-health-badge inline-flex items-center px-8 py-2 rounded-md text-sm font-medium bg-warning/15 text-warning';
       } else if (status === 'restart_failed') {
         badge.textContent = 'Restart failed';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-warning/15 text-warning';
+        badge.className = 'landing-health-badge inline-flex items-center px-8 py-2 rounded-md text-sm font-medium bg-warning/15 text-warning';
       } else {
         badge.textContent = '';
-        badge.className = 'landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium';
+        badge.className = 'landing-health-badge hidden inline-flex items-center px-8 py-2 rounded-md text-sm font-medium';
       }
     }
 
@@ -131,7 +131,7 @@
         else if (state === 'STOPPING') { text = 'Stopping…'; tone = 'bg-warning/15 text-warning'; }
         else if (state === 'STARTING') { text = 'Starting…'; tone = 'bg-warning/15 text-warning'; }
         badge.textContent = text;
-        badge.className = 'landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium ' + tone;
+        badge.className = 'landing-mind-state-badge inline-flex items-center px-8 py-2 rounded-md text-sm font-medium ' + tone;
         // Inline display again (the base class is inline-flex, so a .hidden
         // class wouldn't hide the empty RUNNING-state badge).
         badge.style.display = text ? '' : 'none';
@@ -292,7 +292,7 @@
         // handle the tight padding + flex layout. Keep this string in
         // sync with Card.jinja's class output when extending the
         // primitive.
-        row.className = 'minds-card flex items-center gap-1.5 px-4 py-2.5';
+        row.className = 'minds-card flex items-center gap-6 px-16 py-8';
         row.dataset.providerName = entry.name;
 
         var nameEl = document.createElement('span');
@@ -308,7 +308,7 @@
         }
 
         var badge = document.createElement('span');
-        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ' + badgeClassForStatus(entry.status);
+        badge.className = 'inline-flex items-center px-8 py-2 rounded-md text-xs font-medium ' + badgeClassForStatus(entry.status);
         badge.textContent = badgeLabelForStatus(entry.status);
         row.appendChild(badge);
 
@@ -329,7 +329,7 @@
         var isPending = pendingClickedAt && (!lastFullSnapshotAt || pendingClickedAt > snapshotAt);
 
         var btn = document.createElement('button');
-        btn.className = 'px-2 py-1 text-xs rounded-md border border-default bg-surface-primary hover:bg-fill-hover text-primary';
+        btn.className = 'px-8 py-4 text-xs rounded-md border border-default bg-surface-primary hover:bg-fill-hover text-primary';
         if (isPending) {
           btn.disabled = true;
           btn.textContent = 'Waiting…';
@@ -379,7 +379,7 @@
       });
     })();
 
-    var BACKUP_BADGE_BASE = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ';
+    var BACKUP_BADGE_BASE = 'landing-backup-badge inline-flex items-center px-8 py-2 rounded-md text-xs font-medium ';
     var BACKUP_RECENT_CREATE_MS = 75 * 60 * 1000;
     var BACKUP_CHECKING_TEXT = 'Checking backups…';
 
@@ -430,7 +430,7 @@
       link.setAttribute('data-exporting', '1');
       link.style.pointerEvents = 'none';
       var original = link.textContent;
-      link.innerHTML = '<span class="spinner spinner-accent inline-block w-3 h-3 align-middle"></span> exporting…';
+      link.innerHTML = '<span class="spinner spinner-accent inline-block w-12 h-12 align-middle"></span> exporting…';
       function restore(text) {
         link.textContent = text;
         link.style.pointerEvents = '';
@@ -471,7 +471,7 @@
       document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
         if (badge.textContent === BACKUP_CHECKING_TEXT) {
           badge.textContent = '';
-          badge.className = 'landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium';
+          badge.className = 'landing-backup-badge hidden inline-flex items-center px-8 py-2 rounded-md text-xs font-medium';
         }
       });
     }
@@ -552,12 +552,12 @@
 <Base title="Projects" scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids %}
-      <div class="flex items-center justify-between mb-5" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
+      <div class="flex items-center justify-between mb-16" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
         <h1 class="text-xl font-semibold text-primary">Projects</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
 
-      <div class="flex flex-col gap-1.5">
+      <div class="flex flex-col gap-6">
         {% for agent_id in agent_ids %}
           {% set destroying_status = destroying_status_by_agent_id.get(agent_id | string) %}
           {# Precompute row-local strings so the Card invocation stays readable.
@@ -578,9 +578,9 @@
                   extra="accent-spine relative overflow-hidden"
                   :href="destroying_href"
                   :style="accent_style">
-              <span class="flex-1 font-medium text-secondary pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="flex-1 font-medium text-secondary pl-4">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               {% if destroying_status == 'running' %}
-                <StatusBadge extra="gap-2">
+                <StatusBadge extra="gap-8">
                   <Spinner size="sm" />
                   Destroying...
                 </StatusBadge>
@@ -596,15 +596,15 @@
                   :data-default-href="goto_href"
                   :data-mind-name="agent_names.get(agent_id | string, agent_id)"
                   onclick="window.landingRowClick(event, this)">
-              <span class="flex-1 font-medium text-primary pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="flex-1 font-medium text-primary pl-4">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               {% set provider_label = agent_providers.get(agent_id | string, "") %}
               {% if provider_label %}
-                <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-fill-subtle text-secondary">{{ provider_label }}</span>
+                <span class="landing-provider-badge inline-flex items-center px-8 py-2 rounded-md text-xs font-medium bg-fill-subtle text-secondary">{{ provider_label }}</span>
               {% endif %}
-              <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
+              <span class="landing-backup-badge hidden inline-flex items-center px-8 py-2 rounded-md text-xs font-medium"></span>
               <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
-              <span class="landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium" style="display:none"></span>
-              <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium"></span>
+              <span class="landing-mind-state-badge inline-flex items-center px-8 py-2 rounded-md text-sm font-medium" style="display:none"></span>
+              <span class="landing-health-badge hidden inline-flex items-center px-8 py-2 rounded-md text-sm font-medium"></span>
               {% if supports_shutdown %}
                 {# Shutdown-capable (docker/lima) minds get container Start/Stop
                    instead of the recovery-only Restart button; JS toggles which is shown.
@@ -658,8 +658,8 @@
         </div>
         <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
-        <div class="text-center py-12">
-          <p class="text-tertiary mb-6">No projects yet</p>
+        <div class="text-center py-48">
+          <p class="text-tertiary mb-24">No projects yet</p>
           <ButtonLink href="/create" variant="primary">Create</ButtonLink>
         </div>
       {% endif %}
@@ -669,20 +669,20 @@
        providers_state event. Collapsed by default to a one-line summary
        ("X providers enabled (N errors)" + chevron); user clicks the
        summary to expand into the full list + freshness counters. #}
-    <section class="mt-10 pt-6 border-t border-default" data-providers-panel hidden>
+    <section class="mt-32 pt-24 border-t border-default" data-providers-panel hidden>
       <button type="button" data-providers-toggle
               class="w-full flex items-center justify-between text-left text-sm text-primary hover:text-primary bg-transparent border-0 cursor-pointer p-0">
         <span data-providers-summary>0 providers enabled</span>
-        <span data-providers-chevron class="text-tertiary ml-2">&#9656;</span>
+        <span data-providers-chevron class="text-tertiary ml-8">&#9656;</span>
       </button>
-      <div data-providers-details class="mt-3" hidden>
-        <div class="flex items-center justify-end mb-3">
-          <div class="text-xs text-secondary flex gap-4">
+      <div data-providers-details class="mt-12" hidden>
+        <div class="flex items-center justify-end mb-12">
+          <div class="text-xs text-secondary flex gap-16">
             <span>last event <span data-providers-last-event>&mdash;</span></span>
             <span>last snapshot <span data-providers-last-snapshot>&mdash;</span></span>
           </div>
         </div>
-        <div class="flex flex-col gap-1.5" data-providers-list></div>
+        <div class="flex flex-col gap-6" data-providers-list></div>
       </div>
     </section>
   </PageContainer>

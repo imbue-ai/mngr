@@ -11,10 +11,10 @@
   <span class="opt-radio"></span>
   <div class="opt-body">
     <span class="block text-sm font-medium text-primary">{{ title }}</span>
-    <span class="opt-desc block text-[12.5px] text-secondary leading-snug mt-0.5">{{ desc }}</span>
+    <span class="opt-desc block text-[12.5px] text-secondary leading-snug mt-2">{{ desc }}</span>
     {% if editable %}
-      <div class="opt-edit mt-2">
-        <textarea class="opt-text w-full px-3 py-2 text-[13px] rounded-md border border-default bg-surface-primary text-primary outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/40 leading-snug"
+      <div class="opt-edit mt-8">
+        <textarea class="opt-text w-full px-12 py-8 text-[13px] rounded-md border border-default bg-surface-primary text-primary outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/40 leading-snug"
                   rows="{{ rows }}" placeholder="{{ placeholder }}">{{ preset }}</textarea>
       </div>
     {% endif %}

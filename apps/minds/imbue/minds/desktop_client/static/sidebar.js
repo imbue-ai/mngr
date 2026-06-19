@@ -57,7 +57,7 @@
     keys.forEach(function (key, keyIdx) {
       if (keyIdx > 0 || keys.length > 1) {
         var header = document.createElement('div');
-        header.className = 'px-2 pt-2 pb-1 text-[10px] text-tertiary uppercase tracking-wider';
+        header.className = 'px-8 pt-8 pb-4 text-[10px] text-tertiary uppercase tracking-wider';
         header.textContent = key === 'Private' ? 'Private' : key;
         container.appendChild(header);
       }

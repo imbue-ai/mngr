@@ -599,7 +599,7 @@
          beneath is no-drag while the modal is open). The close button
          is opted back out via inline no-drag so its click is not
          eaten by the drag handler. #}
-      <div class="grid grid-cols-3 items-center px-2 h-[38px] border-b border-default"
+      <div class="grid grid-cols-3 items-center px-8 h-[38px] border-b border-default"
            style="-webkit-app-region: drag;">
         <div></div>
         <h1 class="text-sm font-semibold text-primary uppercase tracking-wider leading-none text-center">Requests</h1>
@@ -607,8 +607,8 @@
                 id="inbox-close-btn"
                 onclick="closeInbox()"
                 style="-webkit-app-region: no-drag;"
-                class="justify-self-end inline-flex items-center justify-center w-6 h-6 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover transition-colors cursor-pointer">
-          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" class="w-4 h-4">
+                class="justify-self-end inline-flex items-center justify-center w-24 h-24 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover transition-colors cursor-pointer">
+          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" class="w-16 h-16">
             <path fill-rule="evenodd" clip-rule="evenodd"
                   d="M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94l4.72-4.72a.75.75 0 1 1 1.06 1.06L11.06 10l4.72 4.72a.75.75 0 1 1-1.06 1.06L10 11.06l-4.72 4.72a.75.75 0 0 1-1.06-1.06L8.94 10 4.22 5.28a.75.75 0 0 1 0-1.06Z" />
           </svg>
@@ -619,12 +619,12 @@
            pinned auto-open footer at the bottom. The footer's horizontal
            alignment flips based on ``#inbox-body.is-empty`` (centered
            when empty, left-aligned otherwise). #}
-        <div id="inbox-left-column" class="flex flex-col w-72 border-r border-default bg-fill-subtle">
+        <div id="inbox-left-column" class="flex flex-col w-288 border-r border-default bg-fill-subtle">
           <div id="inbox-list" class="flex-1 overflow-y-auto">
             <InboxList :cards="cards" :selected_id="selected_id" />
           </div>
-          <div id="inbox-list-footer" class="border-t border-default px-3 py-2 flex items-center">
-            <label class="text-xs text-secondary cursor-pointer flex items-center gap-1.5 leading-none">
+          <div id="inbox-list-footer" class="border-t border-default px-12 py-8 flex items-center">
+            <label class="text-xs text-secondary cursor-pointer flex items-center gap-6 leading-none">
               <input type="checkbox" id="inbox-auto-open"
                      {% if auto_open %}checked{% endif %}
                      onchange="onAutoOpenToggle(event)">
@@ -632,7 +632,7 @@
             </label>
           </div>
         </div>
-        <div id="inbox-detail" class="flex-1 overflow-y-auto p-6 sm:p-7">
+        <div id="inbox-detail" class="flex-1 overflow-y-auto p-24 sm:p-24">
           {{ detail_html|safe }}
         </div>
       </div>

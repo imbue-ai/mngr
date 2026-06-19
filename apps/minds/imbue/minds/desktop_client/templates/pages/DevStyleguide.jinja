@@ -12,12 +12,12 @@
 <script src="/_static/dev_styleguide.js" defer></script>
 {% endset %}
 <Base title="Minds Styleguide" scripts={{ _scripts }}>
-  <div class="max-w-5xl mx-auto px-8 py-10">
+  <div class="max-w-5xl mx-auto px-32 py-32">
 
-    <header class="mb-10 flex items-start justify-between gap-4">
+    <header class="mb-32 flex items-start justify-between gap-16">
       <div>
         <h1 class="text-2xl font-semibold text-primary">Minds Styleguide</h1>
-        <p class="text-sm text-secondary mt-1">
+        <p class="text-sm text-secondary mt-4">
           Tokens are in
           <code class="text-primary">apps/minds/imbue/minds/desktop_client/static/app.css</code>.
         </p>
@@ -26,22 +26,22 @@
          localStorage (wired in dev_styleguide.js); every minds page honors it
          via Base.jinja's pre-paint script. #}
       <button id="styleguide-theme-toggle" type="button"
-              class="shrink-0 px-3 py-2 rounded-md text-sm font-medium border border-strong bg-surface-primary text-primary hover:bg-fill-subtle cursor-pointer">
+              class="shrink-0 px-12 py-8 rounded-md text-sm font-medium border border-strong bg-surface-primary text-primary hover:bg-fill-subtle cursor-pointer">
         Switch to dark
       </button>
     </header>
 
     {# Tokens #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Tokens</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Tokens</h2>
+      <p class="text-xs text-secondary mb-16">
         CSS custom properties declared on <code>:root</code> in
         <code>static/app.css</code>.
       </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-12">
         <div data-token="--shadow-seam"
-             class="flex items-center gap-3 bg-surface-primary border border-default rounded-lg p-3 shadow-sm">
-          <div class="w-10 h-10 rounded-md bg-surface-primary shrink-0"
+             class="flex items-center gap-12 bg-surface-primary border border-default rounded-lg p-12 shadow-sm">
+          <div class="w-40 h-40 rounded-md bg-surface-primary shrink-0"
                style="box-shadow: var(--shadow-seam);"></div>
           <div class="min-w-0 flex-1">
             <div class="text-xs font-mono text-primary truncate">--shadow-seam</div>
@@ -54,37 +54,37 @@
     {# Type ramp + text-color tokens. These are conventions enforced by
        sweep rather than CSS tokens; documenting them here is the source
        of truth for new templates. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Type ramp</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Type ramp</h2>
+      <p class="text-xs text-secondary mb-16">
         Heading hierarchy and body text. Every heading is
         ``font-semibold text-primary``; the only axis is size. Body and
         captions use ``text-sm`` / ``text-xs``.
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+      <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-col gap-12">
         <div>
           <p class="text-3xl font-bold text-primary">Splash heading</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-3xl font-bold -- one-off, Welcome only</p>
+          <p class="text-[11px] text-secondary font-mono mt-2">text-3xl font-bold -- one-off, Welcome only</p>
         </div>
         <div>
           <p class="text-2xl font-semibold text-primary">Big page heading (h1)</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-2xl font-semibold -- auth pages, Sharing, DevStyleguide, PermissionsHeader</p>
+          <p class="text-[11px] text-secondary font-mono mt-2">text-2xl font-semibold -- auth pages, Sharing, DevStyleguide, PermissionsHeader</p>
         </div>
         <div>
           <p class="text-xl font-semibold text-primary">Standard page heading (h1)</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, InboxUnavailable, WorkspaceSettings, Accounts</p>
+          <p class="text-[11px] text-secondary font-mono mt-2">text-xl font-semibold -- Landing, Login, AuthError, Destroying, InboxUnavailable, WorkspaceSettings, Accounts</p>
         </div>
         <div>
           <p class="text-lg font-semibold text-primary">Section / modal heading (h2)</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-lg font-semibold -- Creating step questions, modal dialogs, DevStyleguide section headers</p>
+          <p class="text-[11px] text-secondary font-mono mt-2">text-lg font-semibold -- Creating step questions, modal dialogs, DevStyleguide section headers</p>
         </div>
         <div>
           <p class="text-sm text-primary">Default body text. Readable paragraph on a card.</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-sm -- default body</p>
+          <p class="text-[11px] text-secondary font-mono mt-2">text-sm -- default body</p>
         </div>
         <div>
           <p class="text-xs text-secondary">Caption / secondary text. Goes under headings and beside controls.</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-xs -- secondary / caption</p>
+          <p class="text-[11px] text-secondary font-mono mt-2">text-xs -- secondary / caption</p>
         </div>
       </div>
     </section>
@@ -96,46 +96,46 @@
        by side (the right card is scoped `.dark`); use the header toggle to flip
        the whole app. data-token marks each --color-* token for the
        templates_test.py drift guard. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Text color tokens</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Text color tokens</h2>
+      <p class="text-xs text-secondary mb-16">
         Semantic, themeable text colors (<code>app.css</code>).
         <code>text-primary</code> / <code>-secondary</code> / <code>-tertiary</code>
         for text on the current surface; <code>text-inverse-*</code> for text on
         an inverted surface. Pure black / white with alpha; values flip
         light&harr;dark.
       </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-16">
 
         {# Light (scoped via `.light` so it stays light even when the whole
            app is toggled to dark) #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
-          <div class="light rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
-            <div class="flex flex-col gap-2">
-              <div data-token="--color-primary" class="flex items-baseline justify-between gap-3">
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Light</div>
+          <div class="light rounded-lg border border-default bg-surface-primary p-16 flex flex-col gap-16">
+            <div class="flex flex-col gap-8">
+              <div data-token="--color-primary" class="flex items-baseline justify-between gap-12">
                 <span class="text-primary text-sm font-medium">Primary</span>
                 <code class="text-secondary text-[11px] font-mono">text-primary</code>
               </div>
-              <div data-token="--color-secondary" class="flex items-baseline justify-between gap-3">
+              <div data-token="--color-secondary" class="flex items-baseline justify-between gap-12">
                 <span class="text-secondary text-sm font-medium">Secondary</span>
                 <code class="text-secondary text-[11px] font-mono">text-secondary</code>
               </div>
-              <div data-token="--color-tertiary" class="flex items-baseline justify-between gap-3">
+              <div data-token="--color-tertiary" class="flex items-baseline justify-between gap-12">
                 <span class="text-tertiary text-sm font-medium">Tertiary</span>
                 <code class="text-secondary text-[11px] font-mono">text-tertiary</code>
               </div>
             </div>
-            <div class="rounded-md bg-surface-inverse p-3 flex flex-col gap-2">
-              <div data-token="--color-inverse-primary" class="flex items-baseline justify-between gap-3">
+            <div class="rounded-md bg-surface-inverse p-12 flex flex-col gap-8">
+              <div data-token="--color-inverse-primary" class="flex items-baseline justify-between gap-12">
                 <span class="text-inverse-primary text-sm font-medium">Inverse primary</span>
                 <code class="text-inverse-secondary text-[11px] font-mono">text-inverse-primary</code>
               </div>
-              <div data-token="--color-inverse-secondary" class="flex items-baseline justify-between gap-3">
+              <div data-token="--color-inverse-secondary" class="flex items-baseline justify-between gap-12">
                 <span class="text-inverse-secondary text-sm font-medium">Inverse secondary</span>
                 <code class="text-inverse-secondary text-[11px] font-mono">text-inverse-secondary</code>
               </div>
-              <div data-token="--color-inverse-tertiary" class="flex items-baseline justify-between gap-3">
+              <div data-token="--color-inverse-tertiary" class="flex items-baseline justify-between gap-12">
                 <span class="text-inverse-tertiary text-sm font-medium">Inverse tertiary</span>
                 <code class="text-inverse-secondary text-[11px] font-mono">text-inverse-tertiary</code>
               </div>
@@ -145,32 +145,32 @@
 
         {# Dark (scoped via `.dark` on the card) #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
-          <div class="dark rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
-            <div class="flex flex-col gap-2">
-              <div class="flex items-baseline justify-between gap-3">
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Dark</div>
+          <div class="dark rounded-lg border border-default bg-surface-primary p-16 flex flex-col gap-16">
+            <div class="flex flex-col gap-8">
+              <div class="flex items-baseline justify-between gap-12">
                 <span class="text-primary text-sm font-medium">Primary</span>
                 <code class="text-secondary text-[11px] font-mono">text-primary</code>
               </div>
-              <div class="flex items-baseline justify-between gap-3">
+              <div class="flex items-baseline justify-between gap-12">
                 <span class="text-secondary text-sm font-medium">Secondary</span>
                 <code class="text-secondary text-[11px] font-mono">text-secondary</code>
               </div>
-              <div class="flex items-baseline justify-between gap-3">
+              <div class="flex items-baseline justify-between gap-12">
                 <span class="text-tertiary text-sm font-medium">Tertiary</span>
                 <code class="text-secondary text-[11px] font-mono">text-tertiary</code>
               </div>
             </div>
-            <div class="rounded-md bg-surface-inverse p-3 flex flex-col gap-2">
-              <div class="flex items-baseline justify-between gap-3">
+            <div class="rounded-md bg-surface-inverse p-12 flex flex-col gap-8">
+              <div class="flex items-baseline justify-between gap-12">
                 <span class="text-inverse-primary text-sm font-medium">Inverse primary</span>
                 <code class="text-inverse-secondary text-[11px] font-mono">text-inverse-primary</code>
               </div>
-              <div class="flex items-baseline justify-between gap-3">
+              <div class="flex items-baseline justify-between gap-12">
                 <span class="text-inverse-secondary text-sm font-medium">Inverse secondary</span>
                 <code class="text-inverse-secondary text-[11px] font-mono">text-inverse-secondary</code>
               </div>
-              <div class="flex items-baseline justify-between gap-3">
+              <div class="flex items-baseline justify-between gap-12">
                 <span class="text-inverse-tertiary text-sm font-medium">Inverse tertiary</span>
                 <code class="text-inverse-secondary text-[11px] font-mono">text-inverse-tertiary</code>
               </div>
@@ -179,37 +179,37 @@
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-primary / -secondary / -tertiary (+ -inverse-*)</div>
+      <div class="mt-8 text-[11px] text-secondary font-mono">app.css :: --color-primary / -secondary / -tertiary (+ -inverse-*)</div>
     </section>
 
     {# Border tokens. Themeable borders: subtle / default / strong (Figma
        10/16/25% alpha), pure black in light and pure white in dark, same
        alphas both modes. Shown in both modes (right card scoped `.dark`);
        data-token marks each --color-* token for the drift guard. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Border tokens</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Border tokens</h2>
+      <p class="text-xs text-secondary mb-16">
         Themeable borders (<code>app.css</code>): <code>border-subtle</code>
         (faint dividers), <code>border-default</code> (standard card / input
         border), <code>border-strong</code> (emphasis). Black in light, white in
         dark, same alpha steps.
       </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-16">
 
         {# Light #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
-          <div class="light rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-3 gap-3">
-            <div data-token="--color-subtle" class="flex flex-col items-center gap-2">
-              <div class="w-full h-12 rounded-md border border-subtle"></div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Light</div>
+          <div class="light rounded-lg border border-default bg-surface-primary p-16 grid grid-cols-3 gap-12">
+            <div data-token="--color-subtle" class="flex flex-col items-center gap-8">
+              <div class="w-full h-48 rounded-md border border-subtle"></div>
               <code class="text-[11px] font-mono text-secondary">border-subtle</code>
             </div>
-            <div data-token="--color-default" class="flex flex-col items-center gap-2">
-              <div class="w-full h-12 rounded-md border border-default"></div>
+            <div data-token="--color-default" class="flex flex-col items-center gap-8">
+              <div class="w-full h-48 rounded-md border border-default"></div>
               <code class="text-[11px] font-mono text-secondary">border-default</code>
             </div>
-            <div data-token="--color-strong" class="flex flex-col items-center gap-2">
-              <div class="w-full h-12 rounded-md border border-strong"></div>
+            <div data-token="--color-strong" class="flex flex-col items-center gap-8">
+              <div class="w-full h-48 rounded-md border border-strong"></div>
               <code class="text-[11px] font-mono text-secondary">border-strong</code>
             </div>
           </div>
@@ -217,25 +217,25 @@
 
         {# Dark (scoped via `.dark`) #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
-          <div class="dark rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-3 gap-3">
-            <div class="flex flex-col items-center gap-2">
-              <div class="w-full h-12 rounded-md border border-subtle"></div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Dark</div>
+          <div class="dark rounded-lg border border-default bg-surface-primary p-16 grid grid-cols-3 gap-12">
+            <div class="flex flex-col items-center gap-8">
+              <div class="w-full h-48 rounded-md border border-subtle"></div>
               <code class="text-[11px] font-mono text-secondary">border-subtle</code>
             </div>
-            <div class="flex flex-col items-center gap-2">
-              <div class="w-full h-12 rounded-md border border-default"></div>
+            <div class="flex flex-col items-center gap-8">
+              <div class="w-full h-48 rounded-md border border-default"></div>
               <code class="text-[11px] font-mono text-secondary">border-default</code>
             </div>
-            <div class="flex flex-col items-center gap-2">
-              <div class="w-full h-12 rounded-md border border-strong"></div>
+            <div class="flex flex-col items-center gap-8">
+              <div class="w-full h-48 rounded-md border border-strong"></div>
               <code class="text-[11px] font-mono text-secondary">border-strong</code>
             </div>
           </div>
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-subtle / -default / -strong (border-*)</div>
+      <div class="mt-8 text-[11px] text-secondary font-mono">app.css :: --color-subtle / -default / -strong (border-*)</div>
     </section>
 
     {# Surface & fill tokens. Surfaces are solid backgrounds (primary/inverse
@@ -243,48 +243,48 @@
        resting/state tints over a surface (selected dropped). Both modes; the
        panels themselves use bg-surface-primary + border-default. data-token
        marks each --color-* token for the drift guard. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Surface &amp; fill tokens</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Surface &amp; fill tokens</h2>
+      <p class="text-xs text-secondary mb-16">
         Surfaces (<code>bg-surface-primary</code> / <code>-inverse</code> /
         <code>-overlay</code>) are solid backgrounds; primary &amp; inverse
         mirror (white&harr;black), overlay is the inverse color at 20%. Fills
         (<code>bg-fill-subtle</code> / <code>-hover</code> / <code>-active</code>)
         are translucent tints over a surface.
       </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-16">
 
         {# Light #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
-          <div class="light bg-surface-primary border border-default rounded-lg p-4">
-            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Surfaces</div>
-            <div class="grid grid-cols-3 gap-3 mb-4">
-              <div data-token="--color-surface-primary" class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-surface-primary border border-default"></div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Light</div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-16">
+            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-6">Surfaces</div>
+            <div class="grid grid-cols-3 gap-12 mb-16">
+              <div data-token="--color-surface-primary" class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-surface-primary border border-default"></div>
                 <code class="text-[11px] font-mono text-secondary">primary</code>
               </div>
-              <div data-token="--color-surface-inverse" class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-surface-inverse"></div>
+              <div data-token="--color-surface-inverse" class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-surface-inverse"></div>
                 <code class="text-[11px] font-mono text-secondary">inverse</code>
               </div>
-              <div data-token="--color-surface-overlay" class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-surface-overlay"></div>
+              <div data-token="--color-surface-overlay" class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-surface-overlay"></div>
                 <code class="text-[11px] font-mono text-secondary">overlay</code>
               </div>
             </div>
-            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Fills</div>
-            <div class="grid grid-cols-3 gap-3">
-              <div data-token="--color-fill-subtle" class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-fill-subtle border border-subtle"></div>
+            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-6">Fills</div>
+            <div class="grid grid-cols-3 gap-12">
+              <div data-token="--color-fill-subtle" class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-fill-subtle border border-subtle"></div>
                 <code class="text-[11px] font-mono text-secondary">subtle</code>
               </div>
-              <div data-token="--color-fill-hover" class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-fill-hover border border-subtle"></div>
+              <div data-token="--color-fill-hover" class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-fill-hover border border-subtle"></div>
                 <code class="text-[11px] font-mono text-secondary">hover</code>
               </div>
-              <div data-token="--color-fill-active" class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-fill-active border border-subtle"></div>
+              <div data-token="--color-fill-active" class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-fill-active border border-subtle"></div>
                 <code class="text-[11px] font-mono text-secondary">active</code>
               </div>
             </div>
@@ -293,35 +293,35 @@
 
         {# Dark (scoped via `.dark`) #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
-          <div class="dark bg-surface-primary border border-default rounded-lg p-4">
-            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Surfaces</div>
-            <div class="grid grid-cols-3 gap-3 mb-4">
-              <div class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-surface-primary border border-default"></div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Dark</div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-16">
+            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-6">Surfaces</div>
+            <div class="grid grid-cols-3 gap-12 mb-16">
+              <div class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-surface-primary border border-default"></div>
                 <code class="text-[11px] font-mono text-secondary">primary</code>
               </div>
-              <div class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-surface-inverse"></div>
+              <div class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-surface-inverse"></div>
                 <code class="text-[11px] font-mono text-secondary">inverse</code>
               </div>
-              <div class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-surface-overlay"></div>
+              <div class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-surface-overlay"></div>
                 <code class="text-[11px] font-mono text-secondary">overlay</code>
               </div>
             </div>
-            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Fills</div>
-            <div class="grid grid-cols-3 gap-3">
-              <div class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-fill-subtle border border-subtle"></div>
+            <div class="text-[10px] uppercase tracking-wide text-tertiary mb-6">Fills</div>
+            <div class="grid grid-cols-3 gap-12">
+              <div class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-fill-subtle border border-subtle"></div>
                 <code class="text-[11px] font-mono text-secondary">subtle</code>
               </div>
-              <div class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-fill-hover border border-subtle"></div>
+              <div class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-fill-hover border border-subtle"></div>
                 <code class="text-[11px] font-mono text-secondary">hover</code>
               </div>
-              <div class="flex flex-col items-center gap-1.5">
-                <div class="w-full h-12 rounded-md bg-fill-active border border-subtle"></div>
+              <div class="flex flex-col items-center gap-6">
+                <div class="w-full h-48 rounded-md bg-fill-active border border-subtle"></div>
                 <code class="text-[11px] font-mono text-secondary">active</code>
               </div>
             </div>
@@ -329,108 +329,108 @@
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
+      <div class="mt-8 text-[11px] text-secondary font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
     </section>
 
     {# Status / feedback tokens. One solid hue per semantic (Figma),
        mode-independent; notice / badge backgrounds are derived with an
        opacity modifier (bg-success/12 etc.). data-token marks each
        --color-* for the drift guard. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Status / feedback tokens</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Status / feedback tokens</h2>
+      <p class="text-xs text-secondary mb-16">
         One solid hue per semantic (<code>important</code> / <code>success</code>
         / <code>warning</code> / <code>info</code>). Same in both modes; notice /
         badge tints are derived via an opacity modifier (e.g.
         <code>bg-success/12 border-success/30 text-success</code>).
       </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-16">
 
         {# Light #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
-          <div class="light bg-surface-primary border border-default rounded-lg p-4">
-            <div class="grid grid-cols-4 gap-2 mb-4">
-              <div data-token="--color-important" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
-              <div data-token="--color-success" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="text-[10px] font-mono text-secondary">success</code></div>
-              <div data-token="--color-warning" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="text-[10px] font-mono text-secondary">warning</code></div>
-              <div data-token="--color-info" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="text-[10px] font-mono text-secondary">info</code></div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Light</div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-16">
+            <div class="grid grid-cols-4 gap-8 mb-16">
+              <div data-token="--color-important" class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
+              <div data-token="--color-success" class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-success"></div><code class="text-[10px] font-mono text-secondary">success</code></div>
+              <div data-token="--color-warning" class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-warning"></div><code class="text-[10px] font-mono text-secondary">warning</code></div>
+              <div data-token="--color-info" class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-info"></div><code class="text-[10px] font-mono text-secondary">info</code></div>
             </div>
-            <div class="flex flex-col gap-2">
-              <div class="rounded-md border border-success/30 bg-success/12 text-success px-3 py-2 text-sm">Success notice (hue + opacity)</div>
-              <div class="rounded-md border border-important/30 bg-important/12 text-important px-3 py-2 text-sm">Error notice (important)</div>
+            <div class="flex flex-col gap-8">
+              <div class="rounded-md border border-success/30 bg-success/12 text-success px-12 py-8 text-sm">Success notice (hue + opacity)</div>
+              <div class="rounded-md border border-important/30 bg-important/12 text-important px-12 py-8 text-sm">Error notice (important)</div>
             </div>
           </div>
         </div>
 
         {# Dark #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
-          <div class="dark bg-surface-primary border border-default rounded-lg p-4">
-            <div class="grid grid-cols-4 gap-2 mb-4">
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="text-[10px] font-mono text-secondary">success</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="text-[10px] font-mono text-secondary">warning</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="text-[10px] font-mono text-secondary">info</code></div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Dark</div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-16">
+            <div class="grid grid-cols-4 gap-8 mb-16">
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-success"></div><code class="text-[10px] font-mono text-secondary">success</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-warning"></div><code class="text-[10px] font-mono text-secondary">warning</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-info"></div><code class="text-[10px] font-mono text-secondary">info</code></div>
             </div>
-            <div class="flex flex-col gap-2">
-              <div class="rounded-md border border-success/30 bg-success/12 text-success px-3 py-2 text-sm">Success notice (hue + opacity)</div>
-              <div class="rounded-md border border-important/30 bg-important/12 text-important px-3 py-2 text-sm">Error notice (important)</div>
+            <div class="flex flex-col gap-8">
+              <div class="rounded-md border border-success/30 bg-success/12 text-success px-12 py-8 text-sm">Success notice (hue + opacity)</div>
+              <div class="rounded-md border border-important/30 bg-important/12 text-important px-12 py-8 text-sm">Error notice (important)</div>
             </div>
           </div>
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-important / -success / -warning / -info</div>
+      <div class="mt-8 text-[11px] text-secondary font-mono">app.css :: --color-important / -success / -warning / -info</div>
     </section>
 
     {# Accent / interactive token. One mode-independent blue -- the system
        accent -- behind links, selected states, focus rings and progress.
        Solid for selection/progress, derived tints/rings via /opacity.
        data-token marks --color-accent for the drift guard. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Accent / interactive token</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Accent / interactive token</h2>
+      <p class="text-xs text-secondary mb-16">
         One <code>accent</code> hue (a WCAG-AA blue), same in both modes, behind
         links, selected states, focus rings and progress. Solid for
         selection / progress (<code>bg-accent</code>, <code>border-accent</code>);
         lighter rings and tints derive via an opacity modifier (e.g.
         <code>ring-accent/40</code>, <code>bg-accent/15</code>).
       </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-16">
 
         {# Light #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
-          <div class="light bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
-            <div class="grid grid-cols-4 gap-2">
-              <div data-token="--color-accent" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="text-[10px] font-mono text-secondary">accent</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/40"></div><code class="text-[10px] font-mono text-secondary">/40</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/15"></div><code class="text-[10px] font-mono text-secondary">/15</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md border border-accent"></div><code class="text-[10px] font-mono text-secondary">border</code></div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Light</div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-16 flex flex-col gap-12">
+            <div class="grid grid-cols-4 gap-8">
+              <div data-token="--color-accent" class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-accent"></div><code class="text-[10px] font-mono text-secondary">accent</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-accent/40"></div><code class="text-[10px] font-mono text-secondary">/40</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-accent/15"></div><code class="text-[10px] font-mono text-secondary">/15</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md border border-accent"></div><code class="text-[10px] font-mono text-secondary">border</code></div>
             </div>
             <a href="#" class="text-accent hover:underline text-sm">A text link (text-accent)</a>
-            <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
+            <div class="h-6 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
           </div>
         </div>
 
         {# Dark #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
-          <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
-            <div class="grid grid-cols-4 gap-2">
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="text-[10px] font-mono text-secondary">accent</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/40"></div><code class="text-[10px] font-mono text-secondary">/40</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/15"></div><code class="text-[10px] font-mono text-secondary">/15</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md border border-accent"></div><code class="text-[10px] font-mono text-secondary">border</code></div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-8">Dark</div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-16 flex flex-col gap-12">
+            <div class="grid grid-cols-4 gap-8">
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-accent"></div><code class="text-[10px] font-mono text-secondary">accent</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-accent/40"></div><code class="text-[10px] font-mono text-secondary">/40</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md bg-accent/15"></div><code class="text-[10px] font-mono text-secondary">/15</code></div>
+              <div class="flex flex-col items-center gap-6"><div class="w-full h-40 rounded-md border border-accent"></div><code class="text-[10px] font-mono text-secondary">border</code></div>
             </div>
             <a href="#" class="text-accent hover:underline text-sm">A text link (text-accent)</a>
-            <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
+            <div class="h-6 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
           </div>
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-accent (links, selection, focus rings, progress)</div>
+      <div class="mt-8 text-[11px] text-secondary font-mono">app.css :: --color-accent (links, selection, focus rings, progress)</div>
     </section>
 
     {# Corner-radius scale. Four steps (2/4/8/16 px) defined in app.css
@@ -440,56 +440,80 @@
        which keeps a structural ``rounded-[12px]`` -- that 12px matches
        Electron's ``CONTENT_CORNER_RADIUS`` and the OS window's outer rounding,
        so both browser-mode iframe and Electron WebContentsView nest the same. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Corner radius</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Corner radius</h2>
+      <p class="text-xs text-secondary mb-16">
         Four steps (2 / 4 / 8 / 16 px) plus <code>rounded-full</code>; each
         plays one role. <code>rounded-xl</code> (16px) is reserved for the
         largest surfaces.
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
+      <div class="bg-surface-primary border border-default rounded-lg p-16 grid grid-cols-2 sm:grid-cols-5 gap-16">
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-sm"></div>
-          <code class="text-[11px] font-mono text-secondary mt-1">rounded-sm (2px)</code>
+          <div class="w-64 h-64 bg-fill-active border border-strong rounded-sm"></div>
+          <code class="text-[11px] font-mono text-secondary mt-4">rounded-sm (2px)</code>
           <span class="text-[11px] text-secondary">subtle accents, tiny badges</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-md"></div>
-          <code class="text-[11px] font-mono text-secondary mt-1">rounded-md (4px)</code>
+          <div class="w-64 h-64 bg-fill-active border border-strong rounded-md"></div>
+          <code class="text-[11px] font-mono text-secondary mt-4">rounded-md (4px)</code>
           <span class="text-[11px] text-secondary">buttons, badges, swatches</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-lg"></div>
-          <code class="text-[11px] font-mono text-secondary mt-1">rounded-lg (8px)</code>
+          <div class="w-64 h-64 bg-fill-active border border-strong rounded-lg"></div>
+          <code class="text-[11px] font-mono text-secondary mt-4">rounded-lg (8px)</code>
           <span class="text-[11px] text-secondary">inputs, cards, modals, panels, log boxes</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-xl"></div>
-          <code class="text-[11px] font-mono text-secondary mt-1">rounded-xl (16px)</code>
+          <div class="w-64 h-64 bg-fill-active border border-strong rounded-xl"></div>
+          <code class="text-[11px] font-mono text-secondary mt-4">rounded-xl (16px)</code>
           <span class="text-[11px] text-secondary">reserved -- largest surfaces</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-full"></div>
-          <code class="text-[11px] font-mono text-secondary mt-1">rounded-full</code>
+          <div class="w-64 h-64 bg-fill-active border border-strong rounded-full"></div>
+          <code class="text-[11px] font-mono text-secondary mt-4">rounded-full</code>
           <span class="text-[11px] text-secondary">pills, dots, spinner outline</span>
         </div>
       </div>
     </section>
 
+    {# Spacing scale. --spacing is re-based to 1px (app.css) so a utility's
+       number IS its pixel value: p-2 = 2px, py-64 = 64px. Padding / margin /
+       gap use this ten-step scale; a ratchet holds it. Width / height / inset
+       stay free px for layout. The demo bars use inline width (loop-built
+       w-<n> classes wouldn't be picked up by the static scanner). #}
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Spacing scale</h2>
+      <p class="text-xs text-secondary mb-16">
+        <code>--spacing</code> is re-based to 1px, so the utility number is the
+        pixel value: <code>p-2</code> = 2px, <code>py-64</code> = 64px (not the
+        stock <code>0.25rem</code> step where <code>p-4</code> = 16px). Ten steps
+        for padding / margin / gap: 2 / 4 / 6 / 8 / 12 / 16 / 24 / 32 / 48 / 64.
+      </p>
+      <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-col gap-8">
+        {% for _n in [2, 4, 6, 8, 12, 16, 24, 32, 48, 64] %}
+        <div class="flex items-center gap-12">
+          <code class="text-[11px] font-mono text-secondary w-48 shrink-0">{{ _n }}px</code>
+          <div class="h-8 rounded-sm bg-accent" style="width: {{ _n }}px;"></div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="mt-8 text-[11px] text-secondary font-mono">app.css :: --spacing (p-* / m-* / gap-* read as px)</div>
+    </section>
+
     {# Workspace accent picker #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Workspace accent</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Workspace accent</h2>
+      <p class="text-xs text-secondary mb-16">
         Per-workspace identity color: a user-picked <code>#rrggbb</code> hex
         (10-swatch palette + custom hex in workspace settings, stored as an
         mngr <code>color</code> label). Pick a color; everything below that
         uses <code>--workspace-accent</code> updates live.
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 shadow-sm">
-        <div class="flex items-center gap-4">
-          <div class="accent-swatch w-12 h-12 rounded-md border border-default shrink-0"></div>
+      <div class="bg-surface-primary border border-default rounded-lg p-16 shadow-sm">
+        <div class="flex items-center gap-16">
+          <div class="accent-swatch w-48 h-48 rounded-md border border-default shrink-0"></div>
           <div class="flex-1">
-            <label for="styleguide-accent-color" class="block text-xs text-secondary mb-1">
+            <label for="styleguide-accent-color" class="block text-xs text-secondary mb-4">
               accent hex
             </label>
             <input id="styleguide-accent-color" type="color" value="#0b292b">
@@ -502,28 +526,28 @@
          color pickers (settings + create form) compose. aria-checked drives
          the blue selection ring via app.css; the create page additionally
          narrows the rim to 1px via its own picker-scoped override. #}
-      <div class="mt-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Color swatches</div>
-        <div class="flex items-center gap-2" role="radiogroup" aria-label="Color swatch demo, settings size">
+      <div class="mt-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Color swatches</div>
+        <div class="flex items-center gap-8" role="radiogroup" aria-label="Color swatch demo, settings size">
           <ColorSwatch hex="#0b292b" name="confusion" selected size="md" />
           <ColorSwatch hex="#9fbbd3" name="peace" size="md" />
           <ColorSwatch hex="#cecd0c" name="energy" size="md" />
           <ColorSwatch hex="#fcefd4" name="clarity" size="md" />
           <ColorSwatch hex="#492222" name="courage" size="md" disabled />
         </div>
-        <div class="flex items-center gap-2 mt-2" role="radiogroup" aria-label="Color swatch demo, create-form size">
+        <div class="flex items-center gap-8 mt-8" role="radiogroup" aria-label="Color swatch demo, create-form size">
           <ColorSwatch hex="#0b292b" name="confusion" selected size="sm" />
           <ColorSwatch hex="#9fbbd3" name="peace" size="sm" />
           <ColorSwatch hex="#cecd0c" name="energy" size="sm" />
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + app.css :: .color-swatch</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + app.css :: .color-swatch</div>
       </div>
     </section>
 
     {# Pattern catalog #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Patterns</h2>
-      <p class="text-xs text-secondary mb-4">
+    <section class="mb-48">
+      <h2 class="text-lg font-semibold text-primary mb-4">Patterns</h2>
+      <p class="text-xs text-secondary mb-16">
         Common chrome and workspace UI patterns. Source files linked under
         each example.
       </p>
@@ -533,46 +557,46 @@
          foreground from it in pure CSS (lch relative color), so the same
          TitlebarButton glyphs + page title read correctly on a dark workspace
          color and a light one alike -- exactly as chrome.js paints them. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Titlebar buttons (self-theming)</div>
-        <div class="flex flex-col gap-2">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Titlebar buttons (self-theming)</div>
+        <div class="flex flex-col gap-8">
           {% for _bg in ['#0b292b', '#cecd0c'] %}
-          <div class="titlebar-surface rounded-lg overflow-hidden border border-default h-[38px] flex items-center select-none px-1"
+          <div class="titlebar-surface rounded-lg overflow-hidden border border-default h-[38px] flex items-center select-none px-4"
                style="--titlebar-bg: {{ _bg }}; background-color: var(--titlebar-bg);">
-            <div class="flex gap-0.5">
+            <div class="flex gap-2">
               <TitlebarButton title="Projects"><Icon24 name="menu" /></TitlebarButton>
               <TitlebarButton title="Home"><Icon24 name="home" /></TitlebarButton>
               <TitlebarButton title="Back"><Icon24 name="back" /></TitlebarButton>
               <TitlebarButton title="Forward"><Icon24 name="forward" /></TitlebarButton>
             </div>
-            <div class="flex-1 flex items-center justify-center px-2 min-w-0">
+            <div class="flex-1 flex items-center justify-center px-8 min-w-0">
               <span class="text-primary text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
             </div>
             <TitlebarButton title="Requests" extra="relative"><Icon24 name="messages" /></TitlebarButton>
           </div>
           {% endfor %}
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- contrast derived from --titlebar-bg via lch</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- contrast derived from --titlebar-bg via lch</div>
       </div>
 
       {# Notification badge #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Notification badge</div>
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Notification badge</div>
         <div class="titlebar-surface rounded-lg overflow-hidden border border-default"
              style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
-          <div class="h-[38px] flex items-center justify-end px-1">
+          <div class="h-[38px] flex items-center justify-end px-4">
             <TitlebarButton title="Requests" extra="relative">
               <Icon24 name="messages" />
-              <span class="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-important"></span>
+              <span class="absolute top-2 right-2 w-8 h-8 rounded-full bg-important"></span>
             </TitlebarButton>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">templates/pages/Chrome.jinja :: #requests-badge</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">templates/pages/Chrome.jinja :: #requests-badge</div>
       </div>
 
       {# Window controls (only rendered on non-mac in real chrome) #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Window controls</div>
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Window controls</div>
         <div class="titlebar-surface rounded-lg overflow-hidden border border-default"
              style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
           <div class="h-[38px] flex items-center justify-end">
@@ -581,10 +605,10 @@
             <TitlebarButton variant="control" tone="danger" title="Close"><Icon12 name="close" /></TitlebarButton>
           </div>
         </div>
-        <p class="mt-1 text-[11px] text-secondary">
+        <p class="mt-4 text-[11px] text-secondary">
           Only rendered on non-mac platforms in real chrome (macOS has native traffic lights).
         </p>
-        <div class="mt-0.5 text-[11px] text-secondary font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
+        <div class="mt-2 text-[11px] text-secondary font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
       </div>
 
       {# Sidebar items. The sidebar is a floating menu (shared modal
@@ -593,68 +617,68 @@
          styleguide renders its samples through that exact builder (see
          dev_styleguide.js) so this catalog can't drift from the live menu.
          The empty container below is filled in on load. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Sidebar items</div>
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Sidebar items</div>
         <div id="styleguide-sidebar-rows"
-             class="dark w-[280px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-subtle bg-surface-primary overflow-hidden"></div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
+             class="dark w-[280px] flex flex-col gap-2 p-4 rounded-[10px] border border-subtle bg-surface-primary overflow-hidden"></div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
       </div>
 
       {# Accent spine #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Accent spine</div>
-        <div class="accent-spine relative flex items-center gap-3 bg-surface-primary border border-default rounded-lg px-4 py-3.5 overflow-hidden">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Accent spine</div>
+        <div class="accent-spine relative flex items-center gap-12 bg-surface-primary border border-default rounded-lg px-16 py-12 overflow-hidden">
           <div class="text-sm text-primary">Card with workspace accent stripe on the left edge.</div>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from app.css</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from app.css</div>
       </div>
 
       {# Focus ring -- the accent ring shared by TextInput, Select, Textarea via INPUT_BASE #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Form controls (TextInput / Select / Textarea)</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Form controls (TextInput / Select / Textarea)</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-col gap-12">
           <TextInput name="styleguide-accent-input" placeholder="TextInput -- click to focus" />
-          <div class="flex items-center gap-2">
-            <Select name="styleguide-select" width="w-48">
+          <div class="flex items-center gap-8">
+            <Select name="styleguide-select" width="w-192">
               <option>Option A</option>
               <option>Option B</option>
               <option>Option C</option>
             </Select>
-            <span class="text-xs text-secondary">Select width="w-48"</span>
+            <span class="text-xs text-secondary">Select width="w-192"</span>
           </div>
-          <Textarea name="styleguide-textarea" rows="3" extra="font-mono" :value="'shared focus ring\\nshared border\\nshared px-3 py-2.5'" />
+          <Textarea name="styleguide-textarea" rows="3" extra="font-mono" :value="'shared focus ring\\nshared border\\nshared px-12 py-8'" />
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-accent focus:ring-2 focus:ring-accent/40)</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-accent focus:ring-2 focus:ring-accent/40)</div>
       </div>
 
       {# Shadow seam #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Shadow seam</div>
-        <div class="bg-fill-subtle p-6 rounded-lg">
-          <div class="bg-surface-primary rounded-md p-4 text-sm text-primary"
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Shadow seam</div>
+        <div class="bg-fill-subtle p-24 rounded-lg">
+          <div class="bg-surface-primary rounded-md p-16 text-sm text-primary"
                style="box-shadow: var(--shadow-seam);">
             Below the titlebar, separating chrome from workspace content.
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">app.css :: --shadow-seam</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">app.css :: --shadow-seam</div>
       </div>
 
       {# Spinner #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Spinner</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-6">
-          <div class="flex items-center gap-3">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Spinner</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex items-center gap-24">
+          <div class="flex items-center gap-12">
             <Spinner size="sm" />
             <Spinner size="md" />
             <Spinner size="lg" />
           </div>
-          <div class="flex items-center gap-3 pl-6 border-l border-default">
+          <div class="flex items-center gap-12 pl-24 border-l border-default">
             <Spinner size="sm" tone="accent" />
             <Spinner size="md" tone="accent" />
             <Spinner size="lg" tone="accent" />
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">app.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">app.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
       </div>
 
       {# Icons -- 24x24 lucide-style stroke icons + 12x12 chrome glyphs.
@@ -662,115 +686,115 @@
          because they are multi-color and don't share the stroke shell.
          The 20x20 filled icons (DialogCloseButton X, Latchkey check)
          stay inline next to their use sites. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Icons -- 24x24 (Icon24)</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4 text-primary">
-          <div class="flex flex-col items-center gap-1 w-16">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Icons -- 24x24 (Icon24)</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-wrap items-center gap-16 text-primary">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="menu" />
             <code class="text-[11px] font-mono text-secondary">menu</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="home" />
             <code class="text-[11px] font-mono text-secondary">home</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="back" />
             <code class="text-[11px] font-mono text-secondary">back</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="forward" />
             <code class="text-[11px] font-mono text-secondary">forward</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="messages" />
             <code class="text-[11px] font-mono text-secondary">messages</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="restart" />
             <code class="text-[11px] font-mono text-secondary">restart</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="settings" />
             <code class="text-[11px] font-mono text-secondary">settings</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="external" />
             <code class="text-[11px] font-mono text-secondary">external</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon24 name="arrow-up-right" />
             <code class="text-[11px] font-mono text-secondary">arrow-up-right</code>
           </div>
         </div>
-        <p class="mt-1 text-[11px] text-secondary">
+        <p class="mt-4 text-[11px] text-secondary">
           Stroke icons inherit color from the parent via
-          ``currentColor``. Sizes: ``sm`` (w-3.5), ``md`` (w-4, default),
-          ``lg`` (w-5).
+          ``currentColor``. Sizes: ``sm`` (w-14), ``md`` (w-16, default),
+          ``lg`` (w-20).
         </p>
-        <div class="mt-0.5 text-[11px] text-secondary font-mono">Icon24.jinja :: ICONS_24 in templates.py</div>
+        <div class="mt-2 text-[11px] text-secondary font-mono">Icon24.jinja :: ICONS_24 in templates.py</div>
       </div>
 
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Icons -- 12x12 chrome glyphs (Icon12)</div>
-        <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-4 text-secondary">
-          <div class="flex flex-col items-center gap-1 w-16">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Icons -- 12x12 chrome glyphs (Icon12)</div>
+        <div class="dark bg-surface-primary border border-default rounded-lg p-16 flex items-center gap-16 text-secondary">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon12 name="minimize" />
             <code class="text-[11px] font-mono text-tertiary">minimize</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon12 name="maximize" />
             <code class="text-[11px] font-mono text-tertiary">maximize</code>
           </div>
-          <div class="flex flex-col items-center gap-1 w-16">
+          <div class="flex flex-col items-center gap-4 w-64">
             <Icon12 name="close" />
             <code class="text-[11px] font-mono text-tertiary">close</code>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">Icon12.jinja :: ICONS_12 in templates.py (used only inside TitlebarButton variant="control")</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">Icon12.jinja :: ICONS_12 in templates.py (used only inside TitlebarButton variant="control")</div>
       </div>
 
       {# Buttons #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Buttons -- variants</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-2">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Buttons -- variants</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-wrap items-center gap-8">
           <Button variant="primary">Primary</Button>
           <Button variant="secondary">Secondary</Button>
           <Button variant="danger">Danger</Button>
           <Button variant="success">Success</Button>
           <Button variant="ghost">Ghost</Button>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">Button.jinja :: variant=...</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">Button.jinja :: variant=...</div>
       </div>
 
       {# Button sizes #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Buttons -- sizes</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
-          <div class="flex flex-wrap items-center gap-2">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Buttons -- sizes</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-col gap-12">
+          <div class="flex flex-wrap items-center gap-8">
             <Button variant="primary" size="md">Default (md)</Button>
             <Button variant="primary" size="lg">Large (lg, prominent CTA)</Button>
             <Button variant="ghost" size="icon" title="Settings" aria-label="Settings"><Icon24 name="settings" /></Button>
           </div>
           <Button variant="primary" size="lg" block>Block (w-full, used for auth CTAs)</Button>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">Button.jinja :: size=md|lg|icon, block=true</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">Button.jinja :: size=md|lg|icon, block=true</div>
       </div>
 
       {# Inline links. Use the Link component for real navigations -- it
          picks up the ``text-accent hover:underline`` recipe with an
          optional ``weight="medium"`` for prominent auth-flow affordances. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Links</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Links</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-wrap items-center gap-16">
           <Link href="#">Back to projects</Link>
           <Link href="#" weight="medium">Sign in</Link>
           <Link href="#" extra="text-xs">Forgot password</Link>
         </div>
-        <p class="mt-1 text-[11px] text-secondary">
+        <p class="mt-4 text-[11px] text-secondary">
           ``weight="medium"`` is the auth-flow tab-switch / back-link
           treatment. Size overrides (``text-xs`` etc.) go through ``extra``.
         </p>
-        <div class="mt-0.5 text-[11px] text-secondary font-mono">Link.jinja</div>
+        <div class="mt-2 text-[11px] text-secondary font-mono">Link.jinja</div>
       </div>
 
       {# Link-styled buttons -- the recurring pattern for inline
@@ -780,9 +804,9 @@
          Button primitive's surface stays small. Prefer the Link component
          over this pattern when the affordance is a real navigation --
          keyboard focus and accessibility are cleaner on a plain anchor. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Buttons -- link style (via extra=)</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Buttons -- link style (via extra=)</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-wrap items-center gap-16">
           <Button variant="ghost"
                   extra="!p-0 !bg-transparent !text-xs !font-normal !text-accent hover:!bg-transparent hover:underline">
             Configure&hellip;
@@ -792,28 +816,28 @@
             Continue without an account
           </Button>
         </div>
-        <p class="mt-1 text-[11px] text-secondary">
+        <p class="mt-4 text-[11px] text-secondary">
           For text-link toggles use a ghost Button with ``extra=&quot;!p-0 !bg-transparent !text-xs !font-normal !text-accent hover:!bg-transparent hover:underline&quot;``. The ``!`` prefix is load-bearing -- without it, the Button's base ``font-medium text-sm`` and the ghost variant's ``text-primary`` win and the toggle reads as a heavy button rather than a link.
         </p>
-        <div class="mt-0.5 text-[11px] text-secondary font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
+        <div class="mt-2 text-[11px] text-secondary font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
       </div>
 
       {# Notices #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Notices</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Notices</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16">
           <Notice variant="info">Heads up: informational message.</Notice>
           <Notice variant="warn">Careful: something may need attention.</Notice>
           <Notice variant="success">All set: action completed.</Notice>
           <Notice variant="error">Failed: something went wrong.</Notice>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">Notice.jinja</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">Notice.jinja</div>
       </div>
 
       {# Cards #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Cards</div>
-        <div class="flex flex-col gap-2">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Cards</div>
+        <div class="flex flex-col gap-8">
           <Card>
             <span class="text-sm text-primary">Default block card -- caller arranges children.</span>
           </Card>
@@ -832,51 +856,51 @@
             <span class="text-xs text-secondary">click anywhere</span>
           </Card>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">Card.jinja :: .minds-card from app.css</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">Card.jinja :: .minds-card from app.css</div>
       </div>
 
       {# Page container #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Page container</div>
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Page container</div>
         <div class="bg-fill-subtle border border-default rounded-lg">
           <PageContainer>
-            <div class="bg-surface-primary border border-default rounded-md p-3 text-sm text-primary">
+            <div class="bg-surface-primary border border-default rounded-md p-12 text-sm text-primary">
               Centered, max-width body wrapper used by most page templates.
             </div>
           </PageContainer>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">PageContainer.jinja</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">PageContainer.jinja</div>
       </div>
 
       {# Opt (onboarding option card) #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Opt (onboarding option)</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-2.5">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Opt (onboarding option)</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-col gap-8">
           <Opt val="example-a" title="Example option" desc="Non-editable selectable card." />
           <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
           <Opt val="example-c" title="Editable" desc="Expands a textarea when selected." editable preset="prefilled text" placeholder="placeholder text" />
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">Opt.jinja (.opt / .opt-selected from app.css)</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">Opt.jinja (.opt / .opt-selected from app.css)</div>
       </div>
 
       {# OAuth icons #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">OAuth icons</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-6">
-          <span class="inline-flex items-center gap-2 text-sm text-primary">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">OAuth icons</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex items-center gap-24">
+          <span class="inline-flex items-center gap-8 text-sm text-primary">
             <auth.OauthIcon provider="google" /> Google
           </span>
-          <span class="inline-flex items-center gap-2 text-sm text-primary">
+          <span class="inline-flex items-center gap-8 text-sm text-primary">
             <auth.OauthIcon provider="github" /> GitHub
           </span>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">auth/OauthIcon.jinja</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">auth/OauthIcon.jinja</div>
       </div>
 
       {# Status badges #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Status badges</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-3">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Status badges</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 flex flex-wrap items-center gap-12">
           <StatusBadge>Neutral</StatusBadge>
           <StatusBadge variant="success">Done</StatusBadge>
           <StatusBadge variant="error">Failed</StatusBadge>
@@ -884,46 +908,46 @@
           <StatusBadge variant="info">Info</StatusBadge>
           <StatusBadge variant="warn" size="xs">Tiny</StatusBadge>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">StatusBadge.jinja</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">StatusBadge.jinja</div>
       </div>
 
       {# Section header #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Section header</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Section header</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16">
           <SectionHeader>Plain</SectionHeader>
-          <p class="text-sm text-primary mb-2">Content under the plain header.</p>
+          <p class="text-sm text-primary mb-8">Content under the plain header.</p>
           <SectionHeader divider>With divider</SectionHeader>
           <p class="text-sm text-primary">Content under the divider header.</p>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">SectionHeader.jinja</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">SectionHeader.jinja</div>
       </div>
 
       {# Dialog close button #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Dialog close button</div>
-        <div class="bg-surface-primary border border-default rounded-lg p-4 relative h-16">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Dialog close button</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-16 relative h-64">
           <DialogCloseButton onclick="void(0)" />
           <p class="text-sm text-secondary">Top-right X used by overlay dialogs.</p>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">DialogCloseButton.jinja</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">DialogCloseButton.jinja</div>
       </div>
 
       {# Modal -- styleguide only shows the *inside* of the modal because
          the real wrapper occupies the whole viewport. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Modal (inner card preview)</div>
-        <div class="bg-fill-subtle border border-default rounded-lg p-6 flex items-center justify-center">
-          <div class="bg-surface-primary rounded-lg shadow-lg border border-default max-w-sm w-full p-6">
-            <h2 class="text-lg font-semibold text-primary mb-3">Confirm action?</h2>
-            <p class="text-sm text-primary mb-4">This is what the inner card of a Modal looks like.</p>
-            <div class="flex justify-end gap-3">
+      <div class="mb-24">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-8">Modal (inner card preview)</div>
+        <div class="bg-fill-subtle border border-default rounded-lg p-24 flex items-center justify-center">
+          <div class="bg-surface-primary rounded-lg shadow-lg border border-default max-w-sm w-full p-24">
+            <h2 class="text-lg font-semibold text-primary mb-12">Confirm action?</h2>
+            <p class="text-sm text-primary mb-16">This is what the inner card of a Modal looks like.</p>
+            <div class="flex justify-end gap-12">
               <Button variant="secondary">Cancel</Button>
               <Button variant="danger">Confirm</Button>
             </div>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-secondary font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
+        <div class="mt-4 text-[11px] text-secondary font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
       </div>
 
     </section>

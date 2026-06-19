@@ -499,7 +499,7 @@ def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
     than baked into a server template.
 
     Trigger rect (72, 0, 32, 28) is roughly the macOS sidebar-toggle
-    button (traffic-light-shifted titlebar with a w-8 h-7 button). A
+    button (traffic-light-shifted titlebar with a w-32 h-28 button). A
     non-default offset (0, 8) is passed here to prove the value flows
     through: the menu anchors at left=72+0=72, top=0+28+8=36."""
     html = render_sidebar_page(
@@ -829,21 +829,21 @@ def test_button_submit_has_form_attribute_when_passed() -> None:
 
 def test_button_default_size_uses_md_geometry() -> None:
     html = CATALOG.render("Button", variant="primary", _content="X")
-    # md size = px-3.5 py-2 rounded-md font-medium text-sm
-    assert "px-3.5" in html
-    assert "py-2" in html
+    # md size = px-12 py-8 rounded-md font-medium text-sm
+    assert "px-12" in html
+    assert "py-8" in html
     assert "rounded-md" in html
     assert "font-medium" in html
     assert "text-sm" in html
     # Should not pick up lg-specific classes
-    assert "py-3" not in html
+    assert "py-12" not in html
     assert "rounded-lg" not in html
     assert "font-semibold" not in html
 
 
 def test_button_size_lg_uses_block_cta_geometry() -> None:
     html = CATALOG.render("Button", variant="primary", size="lg", block=True, _content="Sign in")
-    assert "py-3" in html
+    assert "py-12" in html
     assert "rounded-lg" in html
     assert "font-semibold" in html
     assert "text-base" in html
@@ -852,10 +852,10 @@ def test_button_size_lg_uses_block_cta_geometry() -> None:
 
 def test_button_size_icon_uses_square_padding() -> None:
     html = CATALOG.render("Button", variant="ghost", size="icon", _content="<svg/>")
-    assert "p-1.5" in html
+    assert "p-6" in html
     # No horizontal/vertical padding mismatch (only one padding utility)
-    assert "px-3.5" not in html
-    assert "py-2 " not in html and not html.rstrip().endswith("py-2")
+    assert "px-12" not in html
+    assert "py-8 " not in html and not html.rstrip().endswith("py-8")
 
 
 def test_button_passes_through_arbitrary_attrs() -> None:
@@ -897,31 +897,31 @@ def test_color_swatch_unselected_and_small_and_disabled() -> None:
     html = CATALOG.render("ColorSwatch", hex="#cecd0c", name="energy", selected=False, size="sm", disabled=True)
     assert 'aria-checked="false"' in html
     # sm size geometry (create form).
-    assert "w-6" in html
-    assert "h-6" in html
+    assert "w-24" in html
+    assert "h-24" in html
     assert "disabled" in html
 
 
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
-    # nav variant => w-8 h-7 rounded-md, default tone => plain foreground
+    # nav variant => w-32 h-28 rounded-md, default tone => plain foreground
     # tokens (text-secondary + hover:text-primary + hover:bg-fill-hover),
     # re-based per-workspace by the .titlebar-surface scope in app.css.
-    assert "w-8" in html
-    assert "h-7" in html
+    assert "w-32" in html
+    assert "h-28" in html
     assert "rounded-md" in html
     assert "text-secondary" in html
     assert "hover:bg-fill-hover" in html
     # The danger tone modifier should NOT be present on the default tone.
     assert "titlebar-btn-danger" not in html
     # Window-control geometry should NOT bleed into nav
-    assert "w-9" not in html
+    assert "w-36" not in html
     assert "h-[38px]" not in html
 
 
 def test_titlebar_button_control_variant_renders_window_control_geometry() -> None:
     html = CATALOG.render("TitlebarButton", variant="control", _content="<svg/>")
-    assert "w-9" in html
+    assert "w-36" in html
     assert "h-[38px]" in html
     assert "rounded-none" in html
 
@@ -1161,30 +1161,30 @@ def test_card_renders_default_slot() -> None:
     # the class name rather than the underlying Tailwind utilities.
     assert "minds-card" in html
     # Default padding is "default" -> p-4.
-    assert "p-4" in html
+    assert "p-16" in html
 
 
 def test_card_row_spread_layout_adds_justify_between() -> None:
     html = CATALOG.render("Card", layout="row-spread", _content="x")
     assert "justify-between" in html
     assert "items-center" in html
-    assert "gap-1.5" in html
+    assert "gap-6" in html
 
 
 def test_card_row_layout_omits_justify_between() -> None:
     html = CATALOG.render("Card", layout="row", _content="x")
     assert "items-center" in html
     assert "justify-between" not in html
-    # Row children sit at a tight gap-1.5 (6px), not the old gap-3.
-    assert "gap-1.5" in html
-    assert "gap-3" not in html
+    # Row children sit at a tight gap-6 (6px), not the old gap-3.
+    assert "gap-6" in html
+    assert "gap-12" not in html
 
 
 def test_card_tight_padding_uses_px4_py25() -> None:
     html = CATALOG.render("Card", padding="tight", _content="x")
-    assert "px-4" in html
-    assert "py-2.5" in html
-    assert "p-4 " not in html and not html.rstrip().endswith("p-4")
+    assert "px-16" in html
+    assert "py-8" in html
+    assert "p-16 " not in html and not html.rstrip().endswith("p-16")
 
 
 def test_card_tag_anchor_renders_anchor_with_href() -> None:
@@ -1213,7 +1213,7 @@ def test_form_label_default_is_block_with_mb_1_5() -> None:
     html = CATALOG.render("FormLabel", target="email", _content="Email")
     assert 'for="email"' in html
     assert "block" in html
-    assert "mb-1.5" in html
+    assert "mb-6" in html
     assert "text-sm" in html
     assert "font-medium" in html
     assert "text-primary" in html
@@ -1224,7 +1224,7 @@ def test_form_label_inline_drops_block_and_mb() -> None:
     # Inline layout: no block / mb classes (the parent flex row handles
     # spacing), but the shared color and weight tokens remain.
     assert "block" not in html
-    assert "mb-1.5" not in html
+    assert "mb-6" not in html
     assert "text-sm" in html
     assert "font-medium" in html
 
@@ -1253,11 +1253,11 @@ def test_oauth_button_github_uses_github_label_and_glyph() -> None:
 
 def test_card_page_default_padding_and_max_width() -> None:
     html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
-    # Card surface: bg/border/rounded/shadow + p-10 + max-w-[420px] + w-full.
+    # Card surface: bg/border/rounded/shadow + p-32 + max-w-[420px] + w-full.
     assert "bg-surface-primary" in html
     assert "rounded-lg" in html
     assert "shadow-sm" in html
-    assert "p-10" in html
+    assert "p-32" in html
     assert "max-w-[420px]" in html
     assert "<p>body</p>" in html
     # The body is flex-centered around the card.
@@ -1266,8 +1266,8 @@ def test_card_page_default_padding_and_max_width() -> None:
 
 def test_card_page_form_padding_uses_p6() -> None:
     html = CATALOG.render("CardPage", title="x", padding="form", max_width="max-w-[520px]", _content="x")
-    assert "p-6" in html
-    assert "p-10" not in html
+    assert "p-24" in html
+    assert "p-32" not in html
     assert "max-w-[520px]" in html
 
 
@@ -1280,14 +1280,14 @@ def test_icon24_renders_with_stroke_shell_and_default_size() -> None:
     assert 'stroke="currentColor"' in html
     assert 'stroke-width="2"' in html
     assert 'aria-hidden="true"' in html
-    # Default size = md = w-4 h-4.
-    assert "w-4 h-4" in html
+    # Default size = md = w-16 h-4.
+    assert "w-16 h-16" in html
     # Path data from the catalog flows through unescaped.
     assert '<path d="M3 12L12 3l9 9"/>' in html
 
 
 def test_icon24_size_axis() -> None:
-    for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
+    for size, css_class in (("sm", "w-14 h-14"), ("md", "w-16 h-16"), ("lg", "w-20 h-20")):
         html = CATALOG.render("Icon24", name="home", size=size)
         assert css_class in html
 
@@ -1314,14 +1314,14 @@ def test_icon24_renders_menu() -> None:
 def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:
     html = CATALOG.render("Icon12", name="close")
     assert 'viewBox="0 0 12 12"' in html
-    assert "w-3 h-3" in html
+    assert "w-12 h-12" in html
     # Two lines forming the X.
     assert '<line x1="2" y1="2" x2="10" y2="10"/>' in html
     assert '<line x1="10" y1="2" x2="2" y2="10"/>' in html
 
 
 def test_spinner_renders_for_each_size() -> None:
-    for size, css_class in (("sm", "w-3.5"), ("md", "w-[18px]"), ("lg", "w-8")):
+    for size, css_class in (("sm", "w-14"), ("md", "w-[18px]"), ("lg", "w-32")):
         html = CATALOG.render("Spinner", size=size)
         assert 'class="spinner' in html
         assert css_class in html
@@ -1418,8 +1418,8 @@ def test_select_renders_with_option_children_and_focus_ring() -> None:
 
 
 def test_select_honors_width_prop() -> None:
-    html = CATALOG.render("Select", name="x", width="w-48", _content="")
-    assert "w-48" in html
+    html = CATALOG.render("Select", name="x", width="w-192", _content="")
+    assert "w-192" in html
     # Default w-full should be replaced, not added alongside.
     assert " w-full " not in html
 
@@ -1469,7 +1469,7 @@ def test_section_header_plain_has_no_divider_classes() -> None:
     html = CATALOG.render("SectionHeader", _content="Account")
     assert "Account" in html
     assert "border-t" not in html
-    assert "mt-8" not in html
+    assert "mt-32" not in html
 
 
 def test_section_header_divider_renders_top_border() -> None:
@@ -1477,8 +1477,8 @@ def test_section_header_divider_renders_top_border() -> None:
     assert "Sharing" in html
     assert "border-t" in html
     assert "border-default" in html
-    assert "mt-8" in html
-    assert "pt-5" in html
+    assert "mt-32" in html
+    assert "pt-16" in html
 
 
 def test_dialog_close_button_renders_x_svg_and_onclick() -> None:

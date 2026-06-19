@@ -31,12 +31,12 @@
     btn.type = 'button';
     // 24x24 hit area for easy clicking; the glyph keeps its own (smaller)
     // size via sizeClass and is centered inside the button.
-    btn.className = 'sidebar-row-icon flex items-center justify-center w-6 h-6 bg-transparent border-none cursor-pointer text-secondary rounded-md hover:text-primary hover:bg-fill-hover';
+    btn.className = 'sidebar-row-icon flex items-center justify-center w-24 h-24 bg-transparent border-none cursor-pointer text-secondary rounded-md hover:text-primary hover:bg-fill-hover';
     btn.title = title;
     btn.tabIndex = -1;
     btn.setAttribute(dataAttr, agentId);
     btn.innerHTML =
-      '<svg class="' + (sizeClass || 'w-4 h-4') + '" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+      '<svg class="' + (sizeClass || 'w-16 h-16') + '" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
       'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + pathSvg + '</svg>';
     return btn;
   }
@@ -58,9 +58,9 @@
 
   function buildSettingsBtn(agentId) {
     // Smaller glyph than the open-in-new arrow (Figma node 560-5111): a
-    // w-3.5 (14px) gear vs the arrow's default w-4 (16px), both centered in
+    // w-14 (14px) gear vs the arrow's default w-16 (16px), both centered in
     // the shared 24x24 button, so the gear reads as a lighter secondary action.
-    return buildIconButton('Workspace settings', SETTINGS_PATH, 'data-open-settings', agentId, 'w-3.5 h-3.5');
+    return buildIconButton('Workspace settings', SETTINGS_PATH, 'data-open-settings', agentId, 'w-14 h-14');
   }
 
   function buildRow(workspace, options) {
@@ -72,12 +72,12 @@
     // ``gap``, keeping this element positioning-free and composable.
     var row = document.createElement('div');
     row.className =
-      'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-primary'
+      'sidebar-item group flex items-center gap-8 h-32 px-8 rounded-md cursor-pointer text-[13px] text-primary'
       + (isCurrent ? ' is-current bg-fill-active' : ' hover:bg-fill-hover');
     row.setAttribute('data-agent-id', workspace.id);
 
     var dot = document.createElement('span');
-    dot.className = 'sidebar-dot w-2.5 h-2.5 rounded-full shrink-0';
+    dot.className = 'sidebar-dot w-10 h-10 rounded-full shrink-0';
     row.appendChild(dot);
 
     var label = document.createElement('span');
@@ -90,7 +90,7 @@
     if (workspace.is_stale) {
       row.classList.add('is-stale');
       var staleDot = document.createElement('span');
-      staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-warning/80 shrink-0';
+      staleDot.className = 'sidebar-stale-dot inline-block w-6 h-6 rounded-full bg-warning/80 shrink-0';
       staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
       row.appendChild(staleDot);
     }
