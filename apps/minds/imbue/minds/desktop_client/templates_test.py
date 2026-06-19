@@ -1199,7 +1199,7 @@ def test_spacing_utilities_stay_on_scale() -> None:
     10px) fails here; snap it to the nearest step or, if it is a deliberate
     layout dimension, use width / height / inset instead (those are free and not
     scanned)."""
-    alt = "|".join(sorted((re.escape(p) for p in _SPACING_PREFIXES), key=len, reverse=True))
+    alt = "|".join(sorted((re.escape(p) for p in _SPACING_PREFIXES), key=lambda s: len(s), reverse=True))
     token = re.compile(r"(?<![\w-])-?(" + alt + r")-([0-9]+(?:\.[0-9]+)?)(?![\w./\[])")
     offenders: list[str] = []
     for path in _design_system_source_files():
