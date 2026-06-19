@@ -63,3 +63,11 @@ Constrained the spacing scale to a fixed subset of Tailwind's native steps. `--s
 - The styleguide gains a "Spacing scale" section listing the allowed steps and their px values.
 
 Added two guard tests that hold the scales: padding / margin / gap must use the constrained spacing steps, and corner radius must use `rounded-sm/-md/-lg/-xl` / `-full` / `-none` (no `rounded-2xl`/`-3xl`/`-xs`, no arbitrary `rounded-[..]` except the documented content-frame `rounded-[12px]`). Both scan the authored source while skipping SVG path data. The radius guard caught the floating workspace menu's `rounded-[10px]`, now snapped to `rounded-lg` (8px).
+
+Added the type ramp (Figma): six semantic roles defined as `@utility` in `app.css`, each bundling font-size + weight + line-height (and uppercase + tracking for the section eyebrow), so a text element's role is a single class. Color stays orthogonal -- compose with `text-primary` / `-secondary` / `-tertiary`.
+
+- `type-heading-lg` 24/bold, `type-heading` 18/semibold, `type-label` 14/semibold, `type-body` 14/regular, `type-helper` 12/regular, `type-section` 12/semibold/all-caps. Sizes reuse Tailwind's native steps (24/18/14/12 = text-2xl/lg/sm/xs).
+
+- Migrated every content-text site to a role (strict four sizes): 20px headings collapse to `type-heading` (18), the Welcome 30px splash to `type-heading-lg` (24), and 10/11/13px captions to `type-helper` (12) / `type-body` (14). `font-medium` is dropped app-wide (the ramp is 400/600) -- block roles bundle their weight and inline emphasis is now `font-semibold`. Components (FormLabel, SectionHeader, StatusBadge, Button + inputs, ...), pages, and JS-built DOM all use the roles; the ghost-Button "link" recipe uses `!type-helper`.
+
+- The styleguide gains a "Type ramp" section demoing the six roles. A guard test keeps content text on the roles: no raw font-size utilities or `font-medium` in the authored source (SVG path data skipped); inline `font-normal` / `font-semibold` / `font-bold` stay allowed.
