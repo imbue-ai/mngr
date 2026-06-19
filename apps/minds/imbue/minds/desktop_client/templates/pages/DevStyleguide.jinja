@@ -16,36 +16,36 @@
 
     <header class="mb-10 flex items-start justify-between gap-4">
       <div>
-        <h1 class="text-2xl font-semibold text-zinc-900">Minds Styleguide</h1>
-        <p class="text-sm text-zinc-500 mt-1">
+        <h1 class="text-2xl font-semibold text-primary">Minds Styleguide</h1>
+        <p class="text-sm text-secondary mt-1">
           Tokens are in
-          <code class="text-zinc-700">apps/minds/imbue/minds/desktop_client/static/app.css</code>.
+          <code class="text-primary">apps/minds/imbue/minds/desktop_client/static/app.css</code>.
         </p>
       </div>
       {# Dev-only light/dark toggle. Flips `.dark` on <html> + persists to
          localStorage (wired in dev_styleguide.js); every minds page honors it
          via Base.jinja's pre-paint script. #}
       <button id="styleguide-theme-toggle" type="button"
-              class="shrink-0 px-3 py-2 rounded-md text-sm font-medium border border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-100 cursor-pointer">
+              class="shrink-0 px-3 py-2 rounded-md text-sm font-medium border border-strong bg-surface-primary text-primary hover:bg-fill-subtle cursor-pointer">
         Switch to dark
       </button>
     </header>
 
     {# Tokens #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Tokens</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Tokens</h2>
+      <p class="text-xs text-secondary mb-4">
         CSS custom properties declared on <code>:root</code> in
         <code>static/app.css</code>.
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <div data-token="--shadow-seam"
-             class="flex items-center gap-3 bg-white border border-zinc-200 rounded-lg p-3 shadow-sm">
-          <div class="w-10 h-10 rounded-md bg-white shrink-0"
+             class="flex items-center gap-3 bg-surface-primary border border-default rounded-lg p-3 shadow-sm">
+          <div class="w-10 h-10 rounded-md bg-surface-primary shrink-0"
                style="box-shadow: var(--shadow-seam);"></div>
           <div class="min-w-0 flex-1">
-            <div class="text-xs font-mono text-zinc-900 truncate">--shadow-seam</div>
-            <div class="text-[11px] font-mono text-zinc-500 truncate">0 4px 10px -6px rgba(0, 0, 0, 0.35)</div>
+            <div class="text-xs font-mono text-primary truncate">--shadow-seam</div>
+            <div class="text-[11px] font-mono text-secondary truncate">0 4px 10px -6px rgba(0, 0, 0, 0.35)</div>
           </div>
         </div>
       </div>
@@ -55,51 +55,50 @@
        sweep rather than CSS tokens; documenting them here is the source
        of truth for new templates. #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Type ramp</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Type ramp</h2>
+      <p class="text-xs text-secondary mb-4">
         Heading hierarchy and body text. Every heading is
-        ``font-semibold text-zinc-900``; the only axis is size. Body and
+        ``font-semibold text-primary``; the only axis is size. Body and
         captions use ``text-sm`` / ``text-xs``.
       </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-3">
+      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
         <div>
-          <p class="text-3xl font-bold text-zinc-900">Splash heading</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-3xl font-bold -- one-off, Welcome only</p>
+          <p class="text-3xl font-bold text-primary">Splash heading</p>
+          <p class="text-[11px] text-secondary font-mono mt-0.5">text-3xl font-bold -- one-off, Welcome only</p>
         </div>
         <div>
-          <p class="text-2xl font-semibold text-zinc-900">Big page heading (h1)</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-2xl font-semibold -- auth pages, Sharing, DevStyleguide, PermissionsHeader</p>
+          <p class="text-2xl font-semibold text-primary">Big page heading (h1)</p>
+          <p class="text-[11px] text-secondary font-mono mt-0.5">text-2xl font-semibold -- auth pages, Sharing, DevStyleguide, PermissionsHeader</p>
         </div>
         <div>
-          <p class="text-xl font-semibold text-zinc-900">Standard page heading (h1)</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, InboxUnavailable, WorkspaceSettings, Accounts</p>
+          <p class="text-xl font-semibold text-primary">Standard page heading (h1)</p>
+          <p class="text-[11px] text-secondary font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, InboxUnavailable, WorkspaceSettings, Accounts</p>
         </div>
         <div>
-          <p class="text-lg font-semibold text-zinc-900">Section / modal heading (h2)</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-lg font-semibold -- Creating step questions, modal dialogs, DevStyleguide section headers</p>
+          <p class="text-lg font-semibold text-primary">Section / modal heading (h2)</p>
+          <p class="text-[11px] text-secondary font-mono mt-0.5">text-lg font-semibold -- Creating step questions, modal dialogs, DevStyleguide section headers</p>
         </div>
         <div>
-          <p class="text-sm text-zinc-700">Default body text. Readable paragraph on a card.</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-sm -- default body</p>
+          <p class="text-sm text-primary">Default body text. Readable paragraph on a card.</p>
+          <p class="text-[11px] text-secondary font-mono mt-0.5">text-sm -- default body</p>
         </div>
         <div>
-          <p class="text-xs text-zinc-500">Caption / secondary text. Goes under headings and beside controls.</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-xs -- secondary / caption</p>
+          <p class="text-xs text-secondary">Caption / secondary text. Goes under headings and beside controls.</p>
+          <p class="text-[11px] text-secondary font-mono mt-0.5">text-xs -- secondary / caption</p>
         </div>
       </div>
     </section>
 
-    {# Text color tokens (Stage 1). The semantic, themeable text ramp that
-       replaces the raw zinc text utilities documented in the legacy section
-       below. Pure black/white at three alpha steps; regular text contrasts
-       the surface, inverse contrasts an inverted surface; both swap
-       black<->white between modes. Shown in both modes side by side (the
-       right card is scoped `.dark`); use the header toggle to flip the whole
-       app. data-token marks each --color-* token for the templates_test.py
-       drift guard. #}
+    {# Text color tokens. The semantic, themeable text ramp that replaced the
+       raw zinc text utilities across the app. Pure black/white at three alpha
+       steps; regular text contrasts the surface, inverse contrasts an inverted
+       surface; both swap black<->white between modes. Shown in both modes side
+       by side (the right card is scoped `.dark`); use the header toggle to flip
+       the whole app. data-token marks each --color-* token for the
+       templates_test.py drift guard. #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Text color tokens</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Text color tokens</h2>
+      <p class="text-xs text-secondary mb-4">
         Semantic, themeable text colors (<code>app.css</code>).
         <code>text-primary</code> / <code>-secondary</code> / <code>-tertiary</code>
         for text on the current surface; <code>text-inverse-*</code> for text on
@@ -111,8 +110,8 @@
         {# Light (scoped via `.light` so it stays light even when the whole
            app is toggled to dark) #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
-          <div class="light rounded-lg border border-zinc-200 bg-white p-4 flex flex-col gap-4">
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
+          <div class="light rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
             <div class="flex flex-col gap-2">
               <div data-token="--color-primary" class="flex items-baseline justify-between gap-3">
                 <span class="text-primary text-sm font-medium">Primary</span>
@@ -127,7 +126,7 @@
                 <code class="text-secondary text-[11px] font-mono">text-tertiary</code>
               </div>
             </div>
-            <div class="rounded-md bg-zinc-900 p-3 flex flex-col gap-2">
+            <div class="rounded-md bg-surface-inverse p-3 flex flex-col gap-2">
               <div data-token="--color-inverse-primary" class="flex items-baseline justify-between gap-3">
                 <span class="text-inverse-primary text-sm font-medium">Inverse primary</span>
                 <code class="text-inverse-secondary text-[11px] font-mono">text-inverse-primary</code>
@@ -144,11 +143,10 @@
           </div>
         </div>
 
-        {# Dark (scoped via `.dark` on the card; bg hardcoded until surface
-           tokens exist) #}
+        {# Dark (scoped via `.dark` on the card) #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
-          <div class="dark rounded-lg border border-white/10 p-4 flex flex-col gap-4" style="background-color: #18181b;">
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
+          <div class="dark rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
             <div class="flex flex-col gap-2">
               <div class="flex items-baseline justify-between gap-3">
                 <span class="text-primary text-sm font-medium">Primary</span>
@@ -163,7 +161,7 @@
                 <code class="text-secondary text-[11px] font-mono">text-tertiary</code>
               </div>
             </div>
-            <div class="rounded-md bg-white p-3 flex flex-col gap-2">
+            <div class="rounded-md bg-surface-inverse p-3 flex flex-col gap-2">
               <div class="flex items-baseline justify-between gap-3">
                 <span class="text-inverse-primary text-sm font-medium">Inverse primary</span>
                 <code class="text-inverse-secondary text-[11px] font-mono">text-inverse-primary</code>
@@ -181,7 +179,7 @@
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-primary / -secondary / -tertiary (+ -inverse-*)</div>
+      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-primary / -secondary / -tertiary (+ -inverse-*)</div>
     </section>
 
     {# Border tokens. Themeable borders: subtle / default / strong (Figma
@@ -189,8 +187,8 @@
        alphas both modes. Shown in both modes (right card scoped `.dark`);
        data-token marks each --color-* token for the drift guard. #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Border tokens</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Border tokens</h2>
+      <p class="text-xs text-secondary mb-4">
         Themeable borders (<code>app.css</code>): <code>border-subtle</code>
         (faint dividers), <code>border-default</code> (standard card / input
         border), <code>border-strong</code> (emphasis). Black in light, white in
@@ -200,8 +198,8 @@
 
         {# Light #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
-          <div class="light rounded-lg border border-zinc-200 bg-white p-4 grid grid-cols-3 gap-3">
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
+          <div class="light rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-3 gap-3">
             <div data-token="--color-subtle" class="flex flex-col items-center gap-2">
               <div class="w-full h-12 rounded-md border border-subtle"></div>
               <code class="text-[11px] font-mono text-secondary">border-subtle</code>
@@ -217,10 +215,10 @@
           </div>
         </div>
 
-        {# Dark (scoped via `.dark`; bg hardcoded until surface tokens exist) #}
+        {# Dark (scoped via `.dark`) #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
-          <div class="dark rounded-lg border border-white/10 p-4 grid grid-cols-3 gap-3" style="background-color: #18181b;">
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
+          <div class="dark rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-3 gap-3">
             <div class="flex flex-col items-center gap-2">
               <div class="w-full h-12 rounded-md border border-subtle"></div>
               <code class="text-[11px] font-mono text-secondary">border-subtle</code>
@@ -237,7 +235,7 @@
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-subtle / -default / -strong (border-*)</div>
+      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-subtle / -default / -strong (border-*)</div>
     </section>
 
     {# Surface & fill tokens. Surfaces are solid backgrounds (primary/inverse
@@ -246,8 +244,8 @@
        panels themselves use bg-surface-primary + border-default. data-token
        marks each --color-* token for the drift guard. #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Surface &amp; fill tokens</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Surface &amp; fill tokens</h2>
+      <p class="text-xs text-secondary mb-4">
         Surfaces (<code>bg-surface-primary</code> / <code>-inverse</code> /
         <code>-overlay</code>) are solid backgrounds; primary &amp; inverse
         mirror (white&harr;black), overlay is the inverse color at 20%. Fills
@@ -258,7 +256,7 @@
 
         {# Light #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
           <div class="light bg-surface-primary border border-default rounded-lg p-4">
             <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Surfaces</div>
             <div class="grid grid-cols-3 gap-3 mb-4">
@@ -295,7 +293,7 @@
 
         {# Dark (scoped via `.dark`) #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
           <div class="dark bg-surface-primary border border-default rounded-lg p-4">
             <div class="text-[10px] uppercase tracking-wide text-tertiary mb-1.5">Surfaces</div>
             <div class="grid grid-cols-3 gap-3 mb-4">
@@ -331,7 +329,7 @@
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
+      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
     </section>
 
     {# Status / feedback tokens. One solid hue per semantic (Figma),
@@ -339,8 +337,8 @@
        opacity modifier (bg-success/12 etc.). data-token marks each
        --color-* for the drift guard. #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Status / feedback tokens</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Status / feedback tokens</h2>
+      <p class="text-xs text-secondary mb-4">
         One solid hue per semantic (<code>important</code> / <code>success</code>
         / <code>warning</code> / <code>info</code>). Same in both modes; notice /
         badge tints are derived via an opacity modifier (e.g.
@@ -350,7 +348,7 @@
 
         {# Light #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
           <div class="light bg-surface-primary border border-default rounded-lg p-4">
             <div class="grid grid-cols-4 gap-2 mb-4">
               <div data-token="--color-important" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
@@ -367,7 +365,7 @@
 
         {# Dark #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
           <div class="dark bg-surface-primary border border-default rounded-lg p-4">
             <div class="grid grid-cols-4 gap-2 mb-4">
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
@@ -383,7 +381,7 @@
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-important / -success / -warning / -info</div>
+      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-important / -success / -warning / -info</div>
     </section>
 
     {# Accent / interactive token. One mode-independent blue -- the system
@@ -391,8 +389,8 @@
        Solid for selection/progress, derived tints/rings via /opacity.
        data-token marks --color-accent for the drift guard. #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Accent / interactive token</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Accent / interactive token</h2>
+      <p class="text-xs text-secondary mb-4">
         One <code>accent</code> hue (a WCAG-AA blue), same in both modes, behind
         links, selected states, focus rings and progress. Solid for
         selection / progress (<code>bg-accent</code>, <code>border-accent</code>);
@@ -403,7 +401,7 @@
 
         {# Light #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Light</div>
           <div class="light bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
             <div class="grid grid-cols-4 gap-2">
               <div data-token="--color-accent" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="text-[10px] font-mono text-secondary">accent</code></div>
@@ -418,7 +416,7 @@
 
         {# Dark #}
         <div>
-          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
+          <div class="text-[11px] uppercase tracking-wide text-secondary mb-2">Dark</div>
           <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
             <div class="grid grid-cols-4 gap-2">
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="text-[10px] font-mono text-secondary">accent</code></div>
@@ -432,46 +430,7 @@
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-accent (links, selection, focus rings, progress)</div>
-    </section>
-
-    {# Text-color ramp (LEGACY -- superseded by the token section above; kept
-       until the call sites migrate off raw zinc). Five roles, five shades.
-       Banished: text-zinc-600 (consolidated into 500 or 700 depending on
-       role) and text-zinc-100 (folded into text-zinc-200 for on-dark text). #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Text colors (legacy zinc)</h2>
-      <p class="text-xs text-zinc-500 mb-4">
-        Legacy raw-zinc ramp, being replaced by the Text color tokens above as
-        call sites migrate. Five distinct zinc shades, one role each.
-      </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-2.5">
-        <div class="flex items-baseline gap-3">
-          <span class="text-zinc-900 text-sm font-medium w-40 shrink-0">Primary text</span>
-          <code class="text-[11px] font-mono text-zinc-500 shrink-0">text-zinc-900</code>
-          <span class="text-zinc-500 text-xs">headings, emphasized body, labels for form fields</span>
-        </div>
-        <div class="flex items-baseline gap-3">
-          <span class="text-zinc-700 text-sm font-medium w-40 shrink-0">Body</span>
-          <code class="text-[11px] font-mono text-zinc-500 shrink-0">text-zinc-700</code>
-          <span class="text-zinc-500 text-xs">readable paragraph text on a card; ghost button label</span>
-        </div>
-        <div class="flex items-baseline gap-3">
-          <span class="text-zinc-500 text-sm font-medium w-40 shrink-0">Secondary / label</span>
-          <code class="text-[11px] font-mono text-zinc-500 shrink-0">text-zinc-500</code>
-          <span class="text-zinc-500 text-xs">captions, section labels, "loading..." spinners</span>
-        </div>
-        <div class="flex items-baseline gap-3">
-          <span class="text-zinc-400 text-sm font-medium w-40 shrink-0">Muted / tertiary</span>
-          <code class="text-[11px] font-mono text-zinc-500 shrink-0">text-zinc-400</code>
-          <span class="text-zinc-500 text-xs">placeholder-feel; tertiary buttons that lift on hover</span>
-        </div>
-        <div class="bg-zinc-900 rounded-md p-2 flex items-baseline gap-3">
-          <span class="text-zinc-200 text-sm font-medium w-40 shrink-0">On dark</span>
-          <code class="text-[11px] font-mono text-zinc-400 shrink-0">text-zinc-200</code>
-          <span class="text-zinc-400 text-xs">title bar / sidebar text on dark chrome</span>
-        </div>
-      </div>
+      <div class="mt-2 text-[11px] text-secondary font-mono">app.css :: --color-accent (links, selection, focus rings, progress)</div>
     </section>
 
     {# Corner-radius ramp. Bare ``rounded`` (Tailwind v3 default = 4px,
@@ -485,60 +444,60 @@
        it stays on the ramp so future heavier surfaces can reach for it
        without re-deriving the step. #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Corner radius</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Corner radius</h2>
+      <p class="text-xs text-secondary mb-4">
         Five steps; each plays one role. Prefer the explicit ``rounded-md``
         over bare ``rounded`` so call sites are grep-able for radius
         rather than for the no-suffix shorthand.
       </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
+      <div class="bg-surface-primary border border-default rounded-lg p-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-md"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-md (4px)</code>
-          <span class="text-[11px] text-zinc-500">buttons, badges, swatches</span>
+          <div class="w-16 h-16 bg-fill-active border border-strong rounded-md"></div>
+          <code class="text-[11px] font-mono text-secondary mt-1">rounded-md (4px)</code>
+          <span class="text-[11px] text-secondary">buttons, badges, swatches</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-lg"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-lg (8px)</code>
-          <span class="text-[11px] text-zinc-500">inputs (lg radius), large-CTA buttons</span>
+          <div class="w-16 h-16 bg-fill-active border border-strong rounded-lg"></div>
+          <code class="text-[11px] font-mono text-secondary mt-1">rounded-lg (8px)</code>
+          <span class="text-[11px] text-secondary">inputs (lg radius), large-CTA buttons</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-xl"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-xl (12px)</code>
-          <span class="text-[11px] text-zinc-500">cards, modal / dialog chrome, chrome content tuck-under (Chrome.jinja)</span>
+          <div class="w-16 h-16 bg-fill-active border border-strong rounded-xl"></div>
+          <code class="text-[11px] font-mono text-secondary mt-1">rounded-xl (12px)</code>
+          <span class="text-[11px] text-secondary">cards, modal / dialog chrome, chrome content tuck-under (Chrome.jinja)</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-2xl"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-2xl (16px)</code>
-          <span class="text-[11px] text-zinc-500">unused (reserved on ramp)</span>
+          <div class="w-16 h-16 bg-fill-active border border-strong rounded-2xl"></div>
+          <code class="text-[11px] font-mono text-secondary mt-1">rounded-2xl (16px)</code>
+          <span class="text-[11px] text-secondary">unused (reserved on ramp)</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-full"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-full</code>
-          <span class="text-[11px] text-zinc-500">pills, dots, spinner outline</span>
+          <div class="w-16 h-16 bg-fill-active border border-strong rounded-full"></div>
+          <code class="text-[11px] font-mono text-secondary mt-1">rounded-full</code>
+          <span class="text-[11px] text-secondary">pills, dots, spinner outline</span>
         </div>
       </div>
     </section>
 
     {# Workspace accent picker #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Workspace accent</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Workspace accent</h2>
+      <p class="text-xs text-secondary mb-4">
         Per-workspace identity color: a user-picked <code>#rrggbb</code> hex
         (10-swatch palette + custom hex in workspace settings, stored as an
         mngr <code>color</code> label). Pick a color; everything below that
         uses <code>--workspace-accent</code> updates live.
       </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 shadow-sm">
+      <div class="bg-surface-primary border border-default rounded-lg p-4 shadow-sm">
         <div class="flex items-center gap-4">
-          <div class="accent-swatch w-12 h-12 rounded-md border border-zinc-200 shrink-0"></div>
+          <div class="accent-swatch w-12 h-12 rounded-md border border-default shrink-0"></div>
           <div class="flex-1">
-            <label for="styleguide-accent-color" class="block text-xs text-zinc-500 mb-1">
+            <label for="styleguide-accent-color" class="block text-xs text-secondary mb-1">
               accent hex
             </label>
             <input id="styleguide-accent-color" type="color" value="#0b292b">
           </div>
-          <code id="styleguide-accent-value" class="text-xs text-zinc-700"></code>
+          <code id="styleguide-accent-value" class="text-xs text-primary"></code>
         </div>
       </div>
 
@@ -547,7 +506,7 @@
          the blue selection ring via app.css; the create page additionally
          narrows the rim to 1px via its own picker-scoped override. #}
       <div class="mt-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Color swatches</div>
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Color swatches</div>
         <div class="flex items-center gap-2" role="radiogroup" aria-label="Color swatch demo, settings size">
           <ColorSwatch hex="#0b292b" name="confusion" selected size="md" />
           <ColorSwatch hex="#9fbbd3" name="peace" size="md" />
@@ -560,14 +519,14 @@
           <ColorSwatch hex="#9fbbd3" name="peace" size="sm" />
           <ColorSwatch hex="#cecd0c" name="energy" size="sm" />
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + app.css :: .color-swatch</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + app.css :: .color-swatch</div>
       </div>
     </section>
 
     {# Pattern catalog #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Patterns</h2>
-      <p class="text-xs text-zinc-500 mb-4">
+      <h2 class="text-lg font-semibold text-primary mb-1">Patterns</h2>
+      <p class="text-xs text-secondary mb-4">
         Common chrome and workspace UI patterns. Source files linked under
         each example.
       </p>
@@ -578,10 +537,10 @@
          TitlebarButton glyphs + page title read correctly on a dark workspace
          color and a light one alike -- exactly as chrome.js paints them. #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons (self-theming)</div>
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Titlebar buttons (self-theming)</div>
         <div class="flex flex-col gap-2">
           {% for _bg in ['#0b292b', '#cecd0c'] %}
-          <div class="titlebar-surface rounded-lg overflow-hidden border border-zinc-200 h-[38px] flex items-center select-none px-1"
+          <div class="titlebar-surface rounded-lg overflow-hidden border border-default h-[38px] flex items-center select-none px-1"
                style="--titlebar-bg: {{ _bg }}; background-color: var(--titlebar-bg);">
             <div class="flex gap-0.5">
               <TitlebarButton title="Projects"><Icon24 name="menu" /></TitlebarButton>
@@ -596,13 +555,13 @@
           </div>
           {% endfor %}
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- contrast derived from --titlebar-bg via lch</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- contrast derived from --titlebar-bg via lch</div>
       </div>
 
       {# Notification badge #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Notification badge</div>
-        <div class="titlebar-surface rounded-lg overflow-hidden border border-zinc-200"
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Notification badge</div>
+        <div class="titlebar-surface rounded-lg overflow-hidden border border-default"
              style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
           <div class="h-[38px] flex items-center justify-end px-1">
             <TitlebarButton title="Requests" extra="relative">
@@ -611,13 +570,13 @@
             </TitlebarButton>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/pages/Chrome.jinja :: #requests-badge</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">templates/pages/Chrome.jinja :: #requests-badge</div>
       </div>
 
       {# Window controls (only rendered on non-mac in real chrome) #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Window controls</div>
-        <div class="titlebar-surface rounded-lg overflow-hidden border border-zinc-200"
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Window controls</div>
+        <div class="titlebar-surface rounded-lg overflow-hidden border border-default"
              style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
           <div class="h-[38px] flex items-center justify-end">
             <TitlebarButton variant="control" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
@@ -625,10 +584,10 @@
             <TitlebarButton variant="control" tone="danger" title="Close"><Icon12 name="close" /></TitlebarButton>
           </div>
         </div>
-        <p class="mt-1 text-[11px] text-zinc-500">
+        <p class="mt-1 text-[11px] text-secondary">
           Only rendered on non-mac platforms in real chrome (macOS has native traffic lights).
         </p>
-        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
+        <div class="mt-0.5 text-[11px] text-secondary font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
       </div>
 
       {# Sidebar items. The sidebar is a floating menu (shared modal
@@ -638,25 +597,25 @@
          dev_styleguide.js) so this catalog can't drift from the live menu.
          The empty container below is filled in on load. #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Sidebar items</div>
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Sidebar items</div>
         <div id="styleguide-sidebar-rows"
              class="dark w-[280px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-subtle bg-surface-primary overflow-hidden"></div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
       </div>
 
       {# Accent spine #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Accent spine</div>
-        <div class="accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 overflow-hidden">
-          <div class="text-sm text-zinc-700">Card with workspace accent stripe on the left edge.</div>
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Accent spine</div>
+        <div class="accent-spine relative flex items-center gap-3 bg-surface-primary border border-default rounded-xl px-4 py-3.5 overflow-hidden">
+          <div class="text-sm text-primary">Card with workspace accent stripe on the left edge.</div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from app.css</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from app.css</div>
       </div>
 
       {# Focus ring -- the accent ring shared by TextInput, Select, Textarea via INPUT_BASE #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Form controls (TextInput / Select / Textarea)</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-3">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Form controls (TextInput / Select / Textarea)</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
           <TextInput name="styleguide-accent-input" placeholder="TextInput -- click to focus" />
           <div class="flex items-center gap-2">
             <Select name="styleguide-select" width="w-48">
@@ -664,41 +623,41 @@
               <option>Option B</option>
               <option>Option C</option>
             </Select>
-            <span class="text-xs text-zinc-500">Select width="w-48"</span>
+            <span class="text-xs text-secondary">Select width="w-48"</span>
           </div>
           <Textarea name="styleguide-textarea" rows="3" extra="font-mono" :value="'shared focus ring\\nshared border\\nshared px-3 py-2.5'" />
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-accent focus:ring-2 focus:ring-accent/40)</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-accent focus:ring-2 focus:ring-accent/40)</div>
       </div>
 
       {# Shadow seam #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Shadow seam</div>
-        <div class="bg-zinc-50 p-6 rounded-lg">
-          <div class="bg-white rounded-md p-4 text-sm text-zinc-700"
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Shadow seam</div>
+        <div class="bg-fill-subtle p-6 rounded-lg">
+          <div class="bg-surface-primary rounded-md p-4 text-sm text-primary"
                style="box-shadow: var(--shadow-seam);">
             Below the titlebar, separating chrome from workspace content.
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">app.css :: --shadow-seam</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">app.css :: --shadow-seam</div>
       </div>
 
       {# Spinner #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Spinner</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex items-center gap-6">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Spinner</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-6">
           <div class="flex items-center gap-3">
             <Spinner size="sm" />
             <Spinner size="md" />
             <Spinner size="lg" />
           </div>
-          <div class="flex items-center gap-3 pl-6 border-l border-zinc-200">
+          <div class="flex items-center gap-3 pl-6 border-l border-default">
             <Spinner size="sm" tone="accent" />
             <Spinner size="md" tone="accent" />
             <Spinner size="lg" tone="accent" />
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">app.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">app.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
       </div>
 
       {# Icons -- 24x24 lucide-style stroke icons + 12x12 chrome glyphs.
@@ -707,89 +666,89 @@
          The 20x20 filled icons (DialogCloseButton X, Latchkey check)
          stay inline next to their use sites. #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Icons -- 24x24 (Icon24)</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4 text-zinc-700">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Icons -- 24x24 (Icon24)</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4 text-primary">
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="menu" />
-            <code class="text-[11px] font-mono text-zinc-500">menu</code>
+            <code class="text-[11px] font-mono text-secondary">menu</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="home" />
-            <code class="text-[11px] font-mono text-zinc-500">home</code>
+            <code class="text-[11px] font-mono text-secondary">home</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="back" />
-            <code class="text-[11px] font-mono text-zinc-500">back</code>
+            <code class="text-[11px] font-mono text-secondary">back</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="forward" />
-            <code class="text-[11px] font-mono text-zinc-500">forward</code>
+            <code class="text-[11px] font-mono text-secondary">forward</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="messages" />
-            <code class="text-[11px] font-mono text-zinc-500">messages</code>
+            <code class="text-[11px] font-mono text-secondary">messages</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="restart" />
-            <code class="text-[11px] font-mono text-zinc-500">restart</code>
+            <code class="text-[11px] font-mono text-secondary">restart</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="settings" />
-            <code class="text-[11px] font-mono text-zinc-500">settings</code>
+            <code class="text-[11px] font-mono text-secondary">settings</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="external" />
-            <code class="text-[11px] font-mono text-zinc-500">external</code>
+            <code class="text-[11px] font-mono text-secondary">external</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon24 name="arrow-up-right" />
-            <code class="text-[11px] font-mono text-zinc-500">arrow-up-right</code>
+            <code class="text-[11px] font-mono text-secondary">arrow-up-right</code>
           </div>
         </div>
-        <p class="mt-1 text-[11px] text-zinc-500">
+        <p class="mt-1 text-[11px] text-secondary">
           Stroke icons inherit color from the parent via
           ``currentColor``. Sizes: ``sm`` (w-3.5), ``md`` (w-4, default),
           ``lg`` (w-5).
         </p>
-        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Icon24.jinja :: ICONS_24 in templates.py</div>
+        <div class="mt-0.5 text-[11px] text-secondary font-mono">Icon24.jinja :: ICONS_24 in templates.py</div>
       </div>
 
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Icons -- 12x12 chrome glyphs (Icon12)</div>
-        <div class="bg-zinc-900 border border-zinc-200 rounded-lg p-4 flex items-center gap-4 text-zinc-200">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Icons -- 12x12 chrome glyphs (Icon12)</div>
+        <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-4 text-secondary">
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon12 name="minimize" />
-            <code class="text-[11px] font-mono text-zinc-400">minimize</code>
+            <code class="text-[11px] font-mono text-tertiary">minimize</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon12 name="maximize" />
-            <code class="text-[11px] font-mono text-zinc-400">maximize</code>
+            <code class="text-[11px] font-mono text-tertiary">maximize</code>
           </div>
           <div class="flex flex-col items-center gap-1 w-16">
             <Icon12 name="close" />
-            <code class="text-[11px] font-mono text-zinc-400">close</code>
+            <code class="text-[11px] font-mono text-tertiary">close</code>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Icon12.jinja :: ICONS_12 in templates.py (used only inside TitlebarButton variant="control")</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">Icon12.jinja :: ICONS_12 in templates.py (used only inside TitlebarButton variant="control")</div>
       </div>
 
       {# Buttons #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- variants</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-2">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Buttons -- variants</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-2">
           <Button variant="primary">Primary</Button>
           <Button variant="secondary">Secondary</Button>
           <Button variant="danger">Danger</Button>
           <Button variant="success">Success</Button>
           <Button variant="ghost">Ghost</Button>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Button.jinja :: variant=...</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">Button.jinja :: variant=...</div>
       </div>
 
       {# Button sizes #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- sizes</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-3">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Buttons -- sizes</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
           <div class="flex flex-wrap items-center gap-2">
             <Button variant="primary" size="md">Default (md)</Button>
             <Button variant="primary" size="lg">Large (lg, prominent CTA)</Button>
@@ -797,24 +756,24 @@
           </div>
           <Button variant="primary" size="lg" block>Block (w-full, used for auth CTAs)</Button>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Button.jinja :: size=md|lg|icon, block=true</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">Button.jinja :: size=md|lg|icon, block=true</div>
       </div>
 
       {# Inline links. Use the Link component for real navigations -- it
          picks up the ``text-accent hover:underline`` recipe with an
          optional ``weight="medium"`` for prominent auth-flow affordances. #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Links</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Links</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4">
           <Link href="#">Back to projects</Link>
           <Link href="#" weight="medium">Sign in</Link>
           <Link href="#" extra="text-xs">Forgot password</Link>
         </div>
-        <p class="mt-1 text-[11px] text-zinc-500">
+        <p class="mt-1 text-[11px] text-secondary">
           ``weight="medium"`` is the auth-flow tab-switch / back-link
           treatment. Size overrides (``text-xs`` etc.) go through ``extra``.
         </p>
-        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Link.jinja</div>
+        <div class="mt-0.5 text-[11px] text-secondary font-mono">Link.jinja</div>
       </div>
 
       {# Link-styled buttons -- the recurring pattern for inline
@@ -825,102 +784,102 @@
          over this pattern when the affordance is a real navigation --
          keyboard focus and accessibility are cleaner on a plain anchor. #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- link style (via extra=)</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Buttons -- link style (via extra=)</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4">
           <Button variant="ghost"
                   extra="!p-0 !bg-transparent !text-xs !font-normal !text-accent hover:!bg-transparent hover:underline">
             Configure&hellip;
           </Button>
           <Button variant="ghost"
-                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-zinc-400 hover:!bg-transparent hover:!text-zinc-700 hover:underline">
+                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
             Continue without an account
           </Button>
         </div>
-        <p class="mt-1 text-[11px] text-zinc-500">
+        <p class="mt-1 text-[11px] text-secondary">
           For text-link toggles use a ghost Button with ``extra=&quot;!p-0 !bg-transparent !text-xs !font-normal !text-accent hover:!bg-transparent hover:underline&quot;``. The ``!`` prefix is load-bearing -- without it, the Button's base ``font-medium text-sm`` and the ghost variant's ``text-primary`` win and the toggle reads as a heavy button rather than a link.
         </p>
-        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
+        <div class="mt-0.5 text-[11px] text-secondary font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
       </div>
 
       {# Notices #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Notices</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Notices</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4">
           <Notice variant="info">Heads up: informational message.</Notice>
           <Notice variant="warn">Careful: something may need attention.</Notice>
           <Notice variant="success">All set: action completed.</Notice>
           <Notice variant="error">Failed: something went wrong.</Notice>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Notice.jinja</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">Notice.jinja</div>
       </div>
 
       {# Cards #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Cards</div>
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Cards</div>
         <div class="flex flex-col gap-2">
           <Card>
-            <span class="text-sm text-zinc-700">Default block card -- caller arranges children.</span>
+            <span class="text-sm text-primary">Default block card -- caller arranges children.</span>
           </Card>
           <Card layout="row-spread">
-            <span class="font-medium text-zinc-700">my-service</span>
+            <span class="font-medium text-primary">my-service</span>
             <Button variant="secondary">Manage</Button>
           </Card>
           <Card layout="row" padding="tight">
-            <span class="font-medium text-zinc-700">provider</span>
-            <span class="text-xs text-zinc-500">backend</span>
+            <span class="font-medium text-primary">provider</span>
+            <span class="text-xs text-secondary">backend</span>
             <span class="flex-1"></span>
             <Button variant="secondary">Disable</Button>
           </Card>
           <Card tag="a" href="#" layout="row" interactive>
-            <span class="flex-1 font-medium text-zinc-900">Interactive card (tag=&quot;a&quot;)</span>
-            <span class="text-xs text-zinc-500">click anywhere</span>
+            <span class="flex-1 font-medium text-primary">Interactive card (tag=&quot;a&quot;)</span>
+            <span class="text-xs text-secondary">click anywhere</span>
           </Card>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Card.jinja :: .minds-card from app.css</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">Card.jinja :: .minds-card from app.css</div>
       </div>
 
       {# Page container #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Page container</div>
-        <div class="bg-zinc-100 border border-zinc-200 rounded-lg">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Page container</div>
+        <div class="bg-fill-subtle border border-default rounded-lg">
           <PageContainer>
-            <div class="bg-white border border-zinc-200 rounded-md p-3 text-sm text-zinc-700">
+            <div class="bg-surface-primary border border-default rounded-md p-3 text-sm text-primary">
               Centered, max-width body wrapper used by most page templates.
             </div>
           </PageContainer>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">PageContainer.jinja</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">PageContainer.jinja</div>
       </div>
 
       {# Opt (onboarding option card) #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Opt (onboarding option)</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-2.5">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Opt (onboarding option)</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-2.5">
           <Opt val="example-a" title="Example option" desc="Non-editable selectable card." />
           <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
           <Opt val="example-c" title="Editable" desc="Expands a textarea when selected." editable preset="prefilled text" placeholder="placeholder text" />
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Opt.jinja (.opt / .opt-selected from app.css)</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">Opt.jinja (.opt / .opt-selected from app.css)</div>
       </div>
 
       {# OAuth icons #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">OAuth icons</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex items-center gap-6">
-          <span class="inline-flex items-center gap-2 text-sm text-zinc-700">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">OAuth icons</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-6">
+          <span class="inline-flex items-center gap-2 text-sm text-primary">
             <auth.OauthIcon provider="google" /> Google
           </span>
-          <span class="inline-flex items-center gap-2 text-sm text-zinc-700">
+          <span class="inline-flex items-center gap-2 text-sm text-primary">
             <auth.OauthIcon provider="github" /> GitHub
           </span>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">auth/OauthIcon.jinja</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">auth/OauthIcon.jinja</div>
       </div>
 
       {# Status badges #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Status badges</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-3">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Status badges</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-3">
           <StatusBadge>Neutral</StatusBadge>
           <StatusBadge variant="success">Done</StatusBadge>
           <StatusBadge variant="error">Failed</StatusBadge>
@@ -928,46 +887,46 @@
           <StatusBadge variant="info">Info</StatusBadge>
           <StatusBadge variant="warn" size="xs">Tiny</StatusBadge>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">StatusBadge.jinja</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">StatusBadge.jinja</div>
       </div>
 
       {# Section header #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Section header</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Section header</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4">
           <SectionHeader>Plain</SectionHeader>
-          <p class="text-sm text-zinc-700 mb-2">Content under the plain header.</p>
+          <p class="text-sm text-primary mb-2">Content under the plain header.</p>
           <SectionHeader divider>With divider</SectionHeader>
-          <p class="text-sm text-zinc-700">Content under the divider header.</p>
+          <p class="text-sm text-primary">Content under the divider header.</p>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">SectionHeader.jinja</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">SectionHeader.jinja</div>
       </div>
 
       {# Dialog close button #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Dialog close button</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 relative h-16">
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Dialog close button</div>
+        <div class="bg-surface-primary border border-default rounded-lg p-4 relative h-16">
           <DialogCloseButton onclick="void(0)" />
-          <p class="text-sm text-zinc-500">Top-right X used by overlay dialogs.</p>
+          <p class="text-sm text-secondary">Top-right X used by overlay dialogs.</p>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">DialogCloseButton.jinja</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">DialogCloseButton.jinja</div>
       </div>
 
       {# Modal -- styleguide only shows the *inside* of the modal because
          the real wrapper occupies the whole viewport. #}
       <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Modal (inner card preview)</div>
-        <div class="bg-zinc-100 border border-zinc-200 rounded-lg p-6 flex items-center justify-center">
-          <div class="bg-white rounded-xl shadow-lg border border-zinc-200 max-w-sm w-full p-6">
-            <h2 class="text-lg font-semibold text-zinc-900 mb-3">Confirm action?</h2>
-            <p class="text-sm text-zinc-700 mb-4">This is what the inner card of a Modal looks like.</p>
+        <div class="text-xs uppercase tracking-wide text-secondary mb-2">Modal (inner card preview)</div>
+        <div class="bg-fill-subtle border border-default rounded-lg p-6 flex items-center justify-center">
+          <div class="bg-surface-primary rounded-xl shadow-lg border border-default max-w-sm w-full p-6">
+            <h2 class="text-lg font-semibold text-primary mb-3">Confirm action?</h2>
+            <p class="text-sm text-primary mb-4">This is what the inner card of a Modal looks like.</p>
             <div class="flex justify-end gap-3">
               <Button variant="secondary">Cancel</Button>
               <Button variant="danger">Confirm</Button>
             </div>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
+        <div class="mt-1 text-[11px] text-secondary font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
       </div>
 
     </section>
