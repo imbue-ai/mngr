@@ -21,6 +21,9 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
+from pydantic import SecretStr
+
+from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
 
@@ -29,6 +32,7 @@ def spawn_detached_latchkey_ensure_browser(
     latchkey_binary: str,
     log_path: Path,
     latchkey_directory: Path | None = None,
+    encryption_key: SecretStr | None = None,
 ) -> int:
     """Start a detached ``latchkey ensure-browser`` and return its PID.
 
@@ -44,12 +48,21 @@ def spawn_detached_latchkey_ensure_browser(
     is supplied, ``LATCHKEY_DIRECTORY`` is set in the child's environment so
     the browser configuration lands in the shared minds-managed directory
     instead of falling back to ``~/.latchkey``.
+
+    ``encryption_key`` is injected as ``LATCHKEY_ENCRYPTION_KEY`` so the
+    detached child never falls through to Latchkey's startup key-resolution
+    against the system keychain. Latchkey resolves (and migrates) its
+    encryption key on every non-gateway CLI invocation -- including
+    ``ensure-browser``, which does not otherwise touch credentials -- so
+    without this var set, macOS would pop a keychain access dialog on every
+    spawn.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     if latchkey_directory is not None:
         latchkey_directory.mkdir(parents=True, exist_ok=True)
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    inject_encryption_key_into_env(env, encryption_key)
 
     log_file = log_path.open("ab")
     try:
