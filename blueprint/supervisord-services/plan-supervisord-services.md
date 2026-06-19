@@ -1,11 +1,13 @@
-# Supervisord-managed services + real background services agent
+# Supervisord-managed services
 
 > All changes land in the `forever-claude-template` repo (worked on under `.external_worktrees/forever-claude-template`). No `mngr` / `mngr_claude` / `minds` changes are anticipated, though a few may surface during implementation.
+
+> **Revision (post-implementation):** the "real background services agent" idea was dropped. The `system-services` agent stays on `sleep infinity` (window 0 never runs claude) -- a live window-0 agent the user could close would tear down the tmux session and supervisord with it, killing every service. The supervisord migration is unaffected; only the window-0 `command` and its `agent_args` system prompt were left as-is. The sections below are updated to match; routing error messages to a dedicated background agent can be revisited safely later.
 
 ## Overview
 
 - Replace the hand-rolled "bootstrap service manager" (a partial supervisord reimplementation that runs each service in its own `svc-<name>` tmux window) with real **supervisord**.
-- Turn the `system-services` "agent" into an actual background Claude agent: drop the `sleep infinity` that currently neuters window 0, and give it a system prompt describing that it will receive error notifications to handle directly or delegate to worker agents.
+- Keep the `system-services` agent's window 0 on `sleep infinity` (it never runs claude). (An earlier draft turned it into a live background Claude agent; reverted -- a window-0 agent the user could close would tear down supervisord and all services.)
 - Keep the "bootstrap" entry point: `uv run bootstrap` still runs first-boot setup, then `exec`s supervisord in the foreground (consistent across docker, lima, and all VPS/cloud providers).
 - Author services directly in a versioned supervisord config (delete `services.toml` entirely; no custom format or translation layer); logs are container-local and supervisord-rotated, not backed up.
 - Update every skill/doc/scaffolder that encodes the old `services.toml` + `svc-` tmux-window model (notably `edit-services` and `build-web-service`).
@@ -14,7 +16,7 @@
 
 - On boot, `uv run bootstrap` (extra_window) runs first-boot init (git config, runtime worktree, `CLAUDE_CONFIG_DIR` host-env write, backup config, initial chat agent), then hands off to supervisord which starts all services.
 - Services run as supervisord programs (not tmux windows). Long-lived daemons (`system_interface`, `web`, `cloudflared`, `app-watcher`, `runtime-backup`, `host-backup`, `terminal`) restart automatically on exit; `deferred-install` runs once and does not restart.
-- The `system-services` agent's window 0 now runs a real, idle Claude agent (with the background-services system prompt) instead of a sleeping shell. It still has the same name/id, still anchors the workspace, and the host still never auto-shuts-down. The separate first-boot chat agent still gets `/welcome`.
+- The `system-services` agent's window 0 stays a sleeping shell (`sleep infinity`), unchanged from before. It anchors the workspace, the host still never auto-shuts-down, and the separate first-boot chat agent still gets `/welcome`.
 - Editing services means editing the supervisord config and running `supervisorctl reread && supervisorctl update` (and `supervisorctl restart <name>` for a plain bounce); supervisord no longer watches a file for changes. `supervisorctl` works even though supervisord is launched via `exec` in the foreground.
 - Each service writes separate container-local stdout/stderr log files (supervisord-rotated). These are not committed to git or backed up.
 - New web services created via `build-web-service` are registered as supervisord programs; the skill's verify/troubleshoot steps read supervisord logs / `supervisorctl status` instead of `tmux capture-pane -t svc-<name>`.
@@ -25,8 +27,8 @@
 
 ### Core mechanism
 - `.mngr/settings.toml`:
-  - `[agent_types.main]` — remove the `command = "sleep infinity && claude"` override so it falls back to the default `claude`.
-  - `[create_templates.main]` — add an inline `--append-system-prompt` via `agent_args` (matching the existing `worker` template pattern); trim `extra_window` to remove `telegram`, `git_auth_setup`, and `terminal` (terminal becomes a supervisord service), leaving `bootstrap`.
+  - `[agent_types.main]` — keep the `command = "sleep infinity && claude"` override (window 0 never runs claude).
+  - `[create_templates.main]` — trim `extra_window` to remove `telegram`, `git_auth_setup`, and `terminal` (terminal becomes a supervisord service), leaving `bootstrap`. (No `agent_args` system prompt — the live-agent idea was dropped.)
 - Delete `services.toml`.
 - Add a versioned supervisord config at the repo root defining every service (the 7 long-lived daemons with always-restart, `deferred-install` as a one-shot), plus the `[unix_http_server]` / `[supervisorctl]` / `[supervisord]` / `[rpcinterface]` sections; supervisord's own pidfile/socket/main-log and per-service logs live under container-local paths.
 - `libs/bootstrap/` — rewrite the bootstrap program: keep all first-boot init, remove all service-management logic (reconcile, mtime watch, restart/exit detection, `svc-` window handling), add the `git config` step that replaces `git_auth_setup`, and `exec` the system `supervisord` in the foreground. Update its `README.md`, replace `manager_test.py`'s service-management tests with tests for the new setup + launch behavior, and keep the `bootstrap` / `uv run bootstrap` entry point.
