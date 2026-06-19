@@ -328,8 +328,9 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "leaves your Claude config alone and you are responsible for interactive `claude` setup (trust dialogs, "
         "onboarding, credentials) ahead of time, but credentials stay in sync (which is what Claude "
         "subscriptions on macOS need). Only meaningful for local hosts: a non-local agent always uses an "
-        "isolated config dir, so setting this to False on a remote agent is rejected. When False, other "
-        "sync/override/auto-dismiss fields on this config are silently ignored.",
+        "isolated config dir (the user's config and keychain live on the local machine), so this flag is "
+        "ignored for remote agents. When False (and local), other sync/override/auto-dismiss fields on this "
+        "config are silently ignored.",
     )
     streaming_snapshot_interval_seconds: float = Field(
         default=0.0,
@@ -1522,14 +1523,27 @@ class ClaudeCoreAgent(
         ``$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/`` that replaces
         ``~/.claude/`` for this agent.
 
-        When ``isolate_local_config_dir=False``: resolve to the value of
-        ``$CLAUDE_CONFIG_DIR`` (the user's shared config dir), so multiple
-        agents share a single directory. When the env var is unset, falls
-        back to ``~/.claude/`` so the agent uses claude's own default.
+        In shared mode (local host + ``isolate_local_config_dir=False``):
+        resolve to the value of ``$CLAUDE_CONFIG_DIR`` (the user's shared config
+        dir), so multiple agents share a single directory. When the env var is
+        unset, falls back to ``~/.claude/`` so the agent uses claude's own
+        default.
         """
-        if not self.agent_config.isolate_local_config_dir:
-            return resolve_shared_claude_config_dir()
-        return self._get_agent_dir() / _AGENT_CLAUDE_CONFIG_RELPATH
+        if self._is_isolated_config_dir():
+            return self._get_agent_dir() / _AGENT_CLAUDE_CONFIG_RELPATH
+        return resolve_shared_claude_config_dir()
+
+    def _is_isolated_config_dir(self) -> bool:
+        """Whether this agent uses a per-agent (isolated) Claude config dir.
+
+        ``isolate_local_config_dir`` only governs LOCAL agents. Remote agents
+        always use an isolated per-agent config dir regardless of the flag: the
+        user's ``$CLAUDE_CONFIG_DIR`` / keychain live on the local machine and
+        are not reachable on the remote host, so there is nothing to share. This
+        is why the flag carries ``local`` in its name -- it is ignored when the
+        host is not local.
+        """
+        return self.agent_config.isolate_local_config_dir or not self.host.is_local
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
@@ -1559,7 +1573,7 @@ class ClaudeCoreAgent(
         """
         config = self.agent_config
         env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
-        if config.isolate_local_config_dir:
+        if self._is_isolated_config_dir():
             env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
             if is_self_update_disabled(config.update_policy, is_unattended=not host.is_local):
                 env_vars.setdefault("DISABLE_AUTOUPDATER", "1")
@@ -1898,7 +1912,7 @@ class ClaudeCoreAgent(
         # them to the actual ~/.claude/ path now, so all downstream code
         # can assume paths use ~/.claude/ as the prefix. Skipped in shared
         # mode because we don't want to rewrite the user's persistent config.
-        if config.isolate_local_config_dir:
+        if self._is_isolated_config_dir():
             _resolve_plugins_dir_sentinel(host)
 
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
@@ -1941,7 +1955,7 @@ class ClaudeCoreAgent(
 
             # no matter what, *always* dismiss the cost popup, it's pointless.
             # Skipped in shared mode -- mngr never writes to the user's config.
-            if config.isolate_local_config_dir:
+            if self._is_isolated_config_dir():
                 acknowledge_cost_threshold(find_user_claude_config())
 
             # Transfer plugin data from source agent before config setup (if cloning via --from).
@@ -1952,7 +1966,7 @@ class ClaudeCoreAgent(
 
             # Set up per-agent config directory (skipped in shared mode -- the
             # shared $CLAUDE_CONFIG_DIR is the user's responsibility to populate).
-            if config.isolate_local_config_dir:
+            if self._is_isolated_config_dir():
                 self._setup_per_agent_config_dir(host, options, mngr_ctx)
 
             # Configure readiness hooks (for both local and remote hosts)
@@ -2003,7 +2017,7 @@ class ClaudeCoreAgent(
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
         preserve_agent_state(
-            _claude_preserved_items(is_shared_config=not self.agent_config.isolate_local_config_dir), self, host
+            _claude_preserved_items(is_shared_config=not self._is_isolated_config_dir()), self, host
         )
 
     def is_unattended_enabled(self) -> bool:
@@ -2064,7 +2078,7 @@ class ClaudeCoreAgent(
         if self.agent_config.preserve_sessions_on_destroy:
             self.preserve_session_state(host)
 
-        if not self.agent_config.isolate_local_config_dir:
+        if not self._is_isolated_config_dir():
             # Shared-config mode: mngr never wrote per-agent keychain entries or
             # ~/.claude.json trust markers, so there is nothing to clean up. Any
             # keychain delete here would target the user's own credentials.
@@ -2337,25 +2351,22 @@ class ClaudeAgent(
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
 
-        In shared mode (``isolate_local_config_dir=False``): enforce local-only,
-        and skip the dialog-dismissal validation entirely (user is responsible
-        for their own config; mngr makes no writes to it).
+        ``isolate_local_config_dir`` only governs local agents; remote agents
+        always use a per-agent isolated config dir regardless of the flag, so no
+        local-only validation is needed here. In shared mode (local +
+        ``isolate_local_config_dir=False``) the dialog-dismissal validation is
+        skipped entirely -- the user is responsible for their own config and
+        mngr makes no writes to it.
         """
         config = self.agent_config
 
-        if not config.isolate_local_config_dir:
-            if not host.is_local:
-                raise UserInputError(
-                    "isolate_local_config_dir=False is only supported for local hosts; "
-                    "this agent targets a non-local host. Set isolate_local_config_dir=True "
-                    "(the default) or move the agent to a local host."
-                )
         # Validate dialogs for non-interactive local runs so we fail early with
-        # a clear message. Skip when auto_dismiss_dialogs is True because
-        # provision() will auto-dismiss all dialogs in that case. Skip entirely
-        # in shared mode because mngr does not write to the user's config.
-        elif (
+        # a clear message. Skip in shared mode (mngr does not write to the user's
+        # config), when auto_dismiss_dialogs is True (provision() auto-dismisses),
+        # and for remote hosts (no local user config to validate).
+        if (
             host.is_local
+            and self._is_isolated_config_dir()
             and not mngr_ctx.is_interactive
             and not mngr_ctx.is_auto_approve
             and not config.auto_dismiss_dialogs
@@ -2367,10 +2378,6 @@ class ClaudeAgent(
             else:
                 trust_path = self.work_dir
             check_claude_dialogs_dismissed(find_user_claude_config(), trust_path)
-        else:
-            # Remote-host non-shared, or interactive/auto-approve local, or
-            # auto_dismiss_dialogs=True: provision() handles dialog setup.
-            pass
         if not config.check_installation:
             logger.debug("Skipped claude installation check (check_installation=False)")
             return

@@ -20,8 +20,9 @@ isolate_local_config_dir = false
 
 When isolation is disabled (shared mode):
 
-- Only local hosts are supported. A non-local agent always uses an isolated
-  config dir, so `isolate_local_config_dir = false` on a remote agent is rejected.
+- Only affects local hosts. A non-local agent always uses an isolated config dir
+  (the user's config and keychain live on the local machine), so the flag is
+  ignored for remote agents rather than rejected.
 - `CLAUDE_CONFIG_DIR` resolves to the user's shared dir (`$CLAUDE_CONFIG_DIR`, or
   `~/.claude` when unset) and is injected into the agent environment so claude
   reads the user's real config.

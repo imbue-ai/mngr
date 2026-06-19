@@ -1973,29 +1973,75 @@ def test_on_before_provisioning_shared_mode_succeeds_without_dialog_checks(
     assert not config_path.exists()
 
 
-def test_on_before_provisioning_shared_mode_raises_for_remote_host(
-    local_provider: LocalProviderInstance,
+def _make_remote_claude_agent(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    agent_config: ClaudeAgentConfig,
+) -> tuple[ClaudeAgent, OnlineHostInterface]:
+    """Construct a ClaudeAgent bound to a (fake) remote host."""
+    remote_host = cast(OnlineHostInterface, FakeHost(is_local=False, host_dir=tmp_path / "remote_host_dir"))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-remote-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=HostId("host-0000000000000000000000000000beef"),
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=agent_config,
+        host=remote_host,
+    )
+    return agent, remote_host
+
+
+def test_on_before_provisioning_remote_ignores_shared_flag(
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Shared mode (isolate_local_config_dir=False) is local-only; remote host raises UserInputError."""
+    """isolate_local_config_dir is local-only: a remote agent with the flag set to False
+    must NOT raise (remote agents always use an isolated per-agent config dir)."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
-    agent, _ = make_claude_agent(
-        local_provider,
+    agent, remote_host = _make_remote_claude_agent(
         tmp_path,
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
-    remote_host = cast(
-        OnlineHostInterface,
-        FakeHost(is_local=False, host_dir=tmp_path / "remote_host_dir"),
-    )
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    with pytest.raises(UserInputError, match="local hosts"):
-        agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
+    # Must not raise -- the flag is simply ignored for remote hosts.
+    agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # ...and the agent uses an isolated per-agent config dir, not the local shared dir.
+    assert agent._is_isolated_config_dir() is True
+    assert agent.get_claude_config_dir() == agent._get_agent_dir() / "plugin" / "claude" / "anthropic"
+
+
+def test_remote_agent_modify_env_vars_uses_isolated_dir_despite_shared_flag(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote agent with isolate_local_config_dir=False still gets CLAUDE_CONFIG_DIR and
+    ORIGINAL_CLAUDE_CONFIG_DIR pointing at its isolated per-agent config dir."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    agent, remote_host = _make_remote_claude_agent(
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(remote_host, env_vars)
+
+    per_agent_dir = agent._get_agent_dir() / "plugin" / "claude" / "anthropic"
+    assert env_vars["CLAUDE_CONFIG_DIR"] == str(per_agent_dir)
+    # Remote agents are isolated, so ORIGINAL_CLAUDE_CONFIG_DIR is set (unlike local shared mode).
+    assert "ORIGINAL_CLAUDE_CONFIG_DIR" in env_vars
 
 
 def test_on_before_provisioning_shared_mode_passes_when_env_unset(
