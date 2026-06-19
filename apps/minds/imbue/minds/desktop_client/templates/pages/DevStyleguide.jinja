@@ -1,10 +1,12 @@
 {#def #}
 {#
   Dev styleguide: hand-authored inventory of design tokens and UI patterns.
-  Mounted at /_dev/styleguide. Always visible (no tier gate). Each swatch
-  declares its token via data-token="--<name>"; the templates_test.py
-  ratchet cross-checks this set against the :root declarations in
-  static/app.css and fails if either side drifts.
+  Mounted at /_dev/styleguide. Always visible (no tier gate). Each color
+  swatch declares its token via data-token="--color-<name>"; the
+  templates_test.py drift guard cross-checks this set against the @theme
+  color tokens in static/app.css and fails if either side drifts. The scale
+  ramps (type, radius, spacing, elevation) are each held by their own guard
+  test instead of data-token swatches.
 #}
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
