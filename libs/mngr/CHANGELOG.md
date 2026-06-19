@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Shared `AgentUpdatePolicy` (`AUTO` / `ASK` / `NEVER`) used by agent plugins to govern an agent CLI's self-updater. Default is `NEVER` (block self-update); attended agents that implement an interactive update flow default to `ASK`; unattended agents always default to `NEVER`.
+
+- Added: Shared `verify_pinned_cli_version` installation helper so agent plugins can verify an installed CLI matches a pinned version. Matches the pin verbatim against the `--version` banner (no version scheme assumed, so pre-release/four-component pins work), errors on a confirmed mismatch, and skips when the CLI reports no version.
+
+- Added: `[tmux]` configuration section. `tmux.attach_args` inserts extra client flags before the `attach` subcommand (e.g. `["-CC"]` for iTerm2 control mode), `tmux.additional_config_path` sources an extra tmux config file into every mngr session, and `tmux.primary_window_name` (default `agent`) names the agent's primary window and targets it by name instead of the literal `:0` — so mngr works regardless of the user's tmux `base-index`. mngr self-heals in-flight sessions that pre-date the change.
+
+### Fixed
+
+- Fixed: `mngr plugin list` mislabeled opt-in plugins (e.g. `claude_subagent_proxy`) as `enabled=true` when they were actually blocked. Reported state now reflects the plugin's real block state, and `config.disabled_plugins` faithfully includes opt-in plugins that are disabled by default.
+
+- Fixed: `mngr transcript` failing with "Unknown agent type" for config-defined agent subtypes (a custom `[agent_types.X]` with a `parent_type`). The command now resolves the type through its parent chain like every other command.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

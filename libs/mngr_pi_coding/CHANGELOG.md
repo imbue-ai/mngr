@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `version` field on the pi agent type that pins the installed pi CLI. Installation runs `npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed pi matches, erroring on a mismatch.
+
+- Added: `update_policy` field that governs pi's startup version check. `NEVER` sets `PI_SKIP_VERSION_CHECK=1` so pi does not phone home to compare against the latest release; `AUTO` leaves the check enabled; `ASK` behaves like `AUTO`. Default is `NEVER`.
+
 ## [v0.1.14] - 2026-06-18
 
 ### Added

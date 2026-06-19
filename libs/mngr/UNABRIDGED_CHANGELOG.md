@@ -4,6 +4,40 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-18
+
+Added a shared `AgentUpdatePolicy` (`AUTO` / `ASK` / `NEVER`) used by the agent plugins to govern an agent CLI's self-updater. When unset, the default is `NEVER` (block self-update) so a managed agent stays on its installed version, except an *attended* agent that implements an interactive update flow, which defaults to `ASK`; unattended agents always default to `NEVER`.
+
+Added a shared `verify_pinned_cli_version` installation helper so agent plugins can verify an installed CLI matches a pinned version (needed because installation is skipped when the binary is already present). It matches the user's pinned string verbatim against the `--version` banner (no version scheme assumed, so pre-release/four-component pins work), errors on a confirmed mismatch, and skips when the CLI reports no version.
+
+Clarified `non_issues.md`: the `is_`-prefix exemption and the missing-`Field()`/description exemption apply specifically to CLI command functions and CLI-options data classes (e.g. `ListCliOptions`) that mirror user-facing click options. Internal boolean fields on non-CLI data classes should still use the `is_` prefix. Also fixed a typo in that file ("duplicated" -> "duplicate").
+
+Fixed `mngr plugin list` mislabeling opt-in plugins (e.g. `claude_subagent_proxy`) as `enabled=true` when they are actually blocked.
+
+The reported `enabled` state now reflects the plugin's real block state: opt-in plugins that were not explicitly enabled show `enabled=false`, while a plugin enabled via `[plugins.<name>] enabled = true` still shows `enabled=true`.
+
+Underlying this, `config.disabled_plugins` now faithfully includes opt-in plugins that are disabled by default, so every consumer of that field (not just the plugin list) sees the correct effective disabled set. This is suppressed under `MNGR_LOAD_ALL_PLUGINS`, matching plugin-manager startup, so doc/tooling runs still load every plugin.
+
+Added a `[tmux]` configuration section for customizing the tmux sessions mngr runs agents in:
+
+- `tmux.attach_args` -- extra tmux client flags inserted before the `attach` subcommand when connecting to an agent (`tmux <attach_args> attach ...`). The motivating case is `["-CC"]` for iTerm2 control mode (native tabs/windows); `-u` / `-2` also work. Applies to both local and remote (SSH) agents.
+- `tmux.additional_config_path` -- an extra tmux config file sourced into every mngr session. Unlike the auto-generated `~/.mngr/tmux.conf`, this file is never overwritten, so it is a stable place for mngr-session-specific tmux config.
+- `tmux.primary_window_name` (default `agent`) -- mngr now names the agent's primary window and targets it by name instead of the literal `:0` index, so mngr works regardless of the user's tmux `base-index` setting.
+
+Agents that were already running before this change have an unnamed primary window that name-based targeting would miss. mngr now self-heals these in-flight sessions: the first time it inspects such an agent, it renames the session's existing primary window to `tmux.primary_window_name`, so lifecycle detection, messaging, capture, attach, and ttyd keep working across the upgrade.
+
+See `docs/tmux_users.md` for usage.
+
+Fixed `mngr transcript` failing with "Unknown agent type" for config-defined agent subtypes (a custom `[agent_types.X]` with a `parent_type`, e.g. `parent_type = "claude"`). The command now resolves the type through its parent chain (like every other command) instead of a flat class-registry lookup, so it recognizes such subtypes and reads the parent's transcript.
+
+Removed `TagLimitExceededError`: it existed only to flag the EC2 50-tag ceiling for the AWS provider's offline tag mirror, which this PR replaces with the S3 state bucket.
+
+Regenerated the `mngr aws` / `mngr azure` CLI doc pages to cover the state-bucket setup these commands now perform (the providers' state-bucket feature is described in the `mngr_aws` / `mngr_azure` changelogs).
+
+Added shared operator-command output helpers in `mngr.cli.output_helpers`, used by the `mngr aws` / `mngr azure` / `mngr gcp` prepare/cleanup commands: `emit_operator_result(event_name, parts, output_format)` renders a sequence of `OperatorResultPart`s -- each pairing a structured-data fragment with its human line, built via `OperatorResultPart.shown(human, **data)` or `shown_if(present, human, **data)` -- as JSON / JSONL / human in one place, plus a `write_event_line` primitive for the shared `{"event": <type>, ...payload}` JSONL shape.
+
+Test-only: raised the per-test timeout on the tmux lifecycle tests `test_start_restart_running_agent` / `test_start_restart_stopped_agent` from the default 10s to 30s (they run several sequential tmux create/stop/restart operations that can exceed 10s on a loaded CI runner).
+
 ## 2026-06-17
 
 Added a code-derived agent capability registry: a description of which agent types have which capabilities, where each capability declares how its presence is detected (a class mixin via `issubclass`, a `waiting_reason` field generator, a plugin hookimpl, or a sibling usage plugin).

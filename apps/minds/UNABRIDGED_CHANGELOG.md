@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-18
+
+Closed a remaining `agent_creator_test` timeout-flake gap. A separate change raised the shared `_wait_until_finished` poll deadline to 30s to match the creation tests' `@pytest.mark.timeout(30)`, but `test_start_creation_api_key_ai_without_key_fails_with_clear_message` (a fourth caller of the helper) carried no per-test timeout and so was still governed by the global 10s pytest-timeout -- which would pre-empt the 30s poll under heavy parallel CI load. It now carries `@pytest.mark.timeout(30)` like its siblings. Test-only change.
+
+Stabilized the minds agent-creator litellm-key tests under offload CI contention: the `_wait_until_finished` poll deadline was raised from 10s to 30s. It only caps a poll that returns the instant creation reaches a terminal state, so passing tests are unaffected; it just stops heavy test setup under CI load from tripping a spurious timeout (matching the `@pytest.mark.timeout(30)` already on those tests).
+
 ## 2026-06-17
 
 Reworked how workspace accent colors interact with the minds app shell:

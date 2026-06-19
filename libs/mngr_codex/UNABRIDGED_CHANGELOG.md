@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-18
+
+Added a `version` field to the codex agent type that pins the installed codex CLI: installation runs `npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches, erroring on a mismatch. A pin also suppresses the provision-time update check (`update_policy` is ignored), since updating would defeat the pin. codex's own blocking startup update prompt remains disabled as before.
+
+Codex agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting. (The behavior comes from the shared base agent; the codex lifecycle test was updated to name its primary window accordingly.)
+
 ## 2026-06-17
 
 The agent now declares the `HasSessionPreservationMixin` capability mixin: its `on_destroy` session-preservation step was extracted into a `preserve_session_state` method, so preserving session/transcript files on destroy is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact. Behavior is unchanged.

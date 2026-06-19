@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-18
+
+GCP's offline host/agent store now holds the *full* host record instead of a lossy field subset: a stopped GCE instance's `mngr list` / `mngr start` reconstructs the complete record (config, IP, host keys), matching the AWS/Azure behavior, rather than the previous minimal label-only reconstruction. The full `VpsDockerHostRecord` JSON is stored in the `mngr-host-state` instance-metadata value and each agent record in a single `mngr-agent-<id>` metadata value, replacing the per-field `mngr-agent-<id>-<name|type|labels>` layout and the `mngr-created-at`-label reconstruction. GCE instance metadata is large and permissive enough (256 KB per value, 512 KB per instance) to hold these records, so GCP needs no separate object-storage bucket.
+
+GCP's offline store is now exposed through the same `HostStateStore` interface as the AWS/Azure object-storage buckets (a `_GceMetadataHostStateStore`), so its offline read/write/discovery paths are shared with the other providers.
+
 ## 2026-06-17
 
 Added native GCE stop/start lifecycle (idle-pause + resume) for GCP hosts: `mngr stop` now stops the GCE instance (preserving the boot disk so a paused agent costs only disk storage) and `mngr start` resumes it, reading back the fresh external IP and rebinding known_hosts. Stopped instances stay discoverable -- their host name and per-agent records are mirrored into instance metadata, and labels carry the host id / created-at -- so `mngr list` and `mngr start <agent>` keep working while a host is TERMINATED or mid-stop. An in-container idle watcher self-stops the instance via a host-side systemd path/service unit.

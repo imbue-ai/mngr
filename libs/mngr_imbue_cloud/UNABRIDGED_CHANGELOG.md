@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-18
+
+`mngr imbue_cloud admin pool list` (and the `minds pool list` wrapper) now emits every `pool_hosts` column. It previously printed a hand-maintained 10-column subset that omitted `region`, `backend_kind`, and the slice identifiers (`bare_metal_server_id`, `lima_instance_name`, `lima_disk_name`), as well as `host_name`, `vps_instance_id`, and the SSH ports -- so a baked slice host showed up looking like a region-less OVH VPS. The SELECT and the emitted JSON keys are now both driven by a single column list, with a regression test asserting it stays in lockstep with the schema.
+
+Agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting.
+
 ## 2026-06-17
 
 `mngr imbue_cloud admin pool destroy` is now backend-aware, mirroring the `--backend` branch in `pool create`. Previously it only knew the OVH-VPS teardown path: cancel the OVH VPS, then drop the row. Run against a bare-metal `slice` row it would try to cancel a non-existent OVH VPS (404) and, with `--skip-vps-cancel`, drop the row while leaving the slice's lima VM running on the box -- stranding a slot indefinitely (no cron reaps slice-VM orphans; only a subsequent bake does).

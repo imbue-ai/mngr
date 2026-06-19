@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-18
+
+Replaced the VM tag mirror with a required Azure Blob **state bucket** (a private Storage account + container) as the offline store for Azure hosts. A deallocated VM's offline host/agent records (so `mngr list` / `mngr start` / `mngr event` work while it is stopped) now live in the bucket instead of `mngr-agent-<id>-*` VM tags. This removes the tag mirror's silent 256-char `labels` drop and lets a stopped VM's *full* host record (config, IP, host keys) be reconstructed rather than a lossy subset. The bucket is **required**, with no VM-tag fallback: mngr raises an actionable error pointing at `mngr azure prepare` when it is absent -- on the `mngr create` / `mngr label` write path as well as on offline reads -- and transient Blob errors on a mirror read/write propagate.
+
+- `mngr azure prepare` creates a private Storage account + Blob container ("state bucket") that holds the full host record and per-agent records, written by the mngr host machine using the operator's own `DefaultAzureCredential` (no storage keys; the operator needs `Storage Blob Data Contributor` on the account plus the account create/delete permission). The account name defaults to a deterministic `mngrst<hash>` (override with `state_storage_account_name` in `[providers.azure]`); the container is `mngr-state`. The bucket is prepare's primary job: a missing storage permission or any create failure fails the command.
+
+- `mngr azure prepare` now also grants **the operator's own principal** (the user or service principal running `prepare`) the `Storage Blob Data Contributor` role scoped to just the state account. Azure splits control plane from data plane -- creating the account (or holding Owner/Contributor) does not include data-plane blob access -- so without this grant the operator's offline reads/writes (`mngr list` / `mngr start` on a deallocated host) failed with `AuthorizationPermissionMismatch`. The operator principal is resolved from the `oid` claim of a management-scope token (no Microsoft Graph dependency); the grant needs `Microsoft.Authorization/roleAssignments/write` and fails prepare if denied -- with an actionable error (the account was already created) telling the operator to grant the role out of band, or re-run `prepare` as a principal that can assign roles, rather than just the bare `AuthorizationFailed` message. It grants only the prepare-runner: other operators need their own grant (re-run `prepare` as them, or assign the role out of band). AWS and GCP are unaffected (their offline stores have no control/data-plane split). Fixes a bug surfaced by the Azure provider release test (stop-host -> start offline reconstruct).
+
+- `mngr azure cleanup` deletes the account (and, with the new `--force` flag, its leftover orphaned state -- otherwise it refuses to delete a non-empty account).
+
+Added an offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled` provider config field): a deallocated VM's `host_dir` is readable without SSH, so `mngr event` / `mngr transcript` work against a stopped agent.
+
+- Capture is **operator-driven** -- it needs no VM managed identity. At `mngr stop`, mngr (already SSH-connected and holding the bucket credentials) reads the VM's `host_dir` off the box and uploads it to the bucket's `hosts/<host_id>/host_dir/` prefix with the operator's own credentials (the operator's `Storage Blob Data Contributor` role on the state account, granted by `prepare`). So `mngr azure prepare` provisions no host-dir managed identity, VM create attaches none, and `cleanup` deletes none. Offline reads serve `host_dir` back from the bucket.
+
+- Limitation: capture happens only at `mngr stop`. A VM that idle-self-deallocates (or crashes) is **not** captured -- its offline `host_dir` then reflects its last `mngr stop` (or is empty if never stopped that way); the state *records* are unaffected (always operator-written). An empty `host_dir` prefix reads as no volume. Set `is_offline_host_dir_enabled = false` to disable the capture entirely.
+
+Test-only: added unit coverage for the host-identity raise-on-failure paths (provisioning and cleanup) via a `delete_error` failure-injection seam on the managed-identity fake.
+
+Follow-up cleanup: removed the now-orphaned `AzureVpsClient.add_tags` / `AzureVpsClient.remove_tags` client methods (and their unit tests). They only ever existed to push per-agent records into VM tags for the old tag mirror, which the state bucket replaces; nothing reachable called them.
+
 ## 2026-06-17
 
 Added a VM-level stop/start lifecycle for Azure hosts. `mngr stop` now **deallocates** the VM (`AzureVpsClient.deallocate_instance`) -- which actually halts compute billing, unlike an OS-level shutdown that leaves the VM "Stopped (not deallocated)" still billing -- preserving the OS disk so a paused agent costs only disk storage; `mngr start` re-allocates it (`start_instance`). The public IP is static, so it (and the SSH host keys) survive the stop, and resume needs no known_hosts rebind.

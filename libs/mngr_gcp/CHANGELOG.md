@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: GCP's offline host/agent store now holds the *full* host record instead of a lossy field subset — a stopped GCE instance's `mngr list` / `mngr start` reconstructs the complete record (config, IP, host keys), matching AWS/Azure behavior. The full `VpsDockerHostRecord` JSON is stored in the `mngr-host-state` instance-metadata value and each agent record in a single `mngr-agent-<id>` metadata value, replacing the per-field `mngr-agent-<id>-<name|type|labels>` layout and the `mngr-created-at`-label reconstruction. GCE instance metadata is large enough (256 KB per value, 512 KB per instance) so GCP needs no separate object-storage bucket. The offline store is exposed through the same `HostStateStore` interface as the AWS/Azure object-storage buckets.
+
 ## [v0.1.2] - 2026-06-18
 
 ### Added

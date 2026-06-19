@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `update_policy` field on the antigravity agent type that governs agy's background self-updater. `NEVER` sets `AGY_CLI_DISABLE_AUTO_UPDATE=true` so the installed build stays put; `AUTO` leaves the self-updater enabled; `ASK` behaves like `AUTO`. Default is `NEVER`. agy has no version-pinning capability (Google's installer always installs the latest build), so the default freezes whatever build was installed.
+
 ## [v0.1.8] - 2026-06-18
 
 ### Added

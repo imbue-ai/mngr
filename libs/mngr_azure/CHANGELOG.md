@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Required Azure Blob **state bucket** (a private Storage account + container) as the offline store for Azure hosts. A deallocated VM's full host record (config, IP, host keys) and per-agent records now live in the bucket instead of `mngr-agent-<id>-*` VM tags, removing the tag mirror's silent 256-char `labels` drop. `mngr azure prepare` creates the account + container (account name defaults to `mngrst<hash>`, override with `state_storage_account_name`) and grants the operator's own principal the `Storage Blob Data Contributor` role scoped to the state account, so offline reads/writes work. The bucket is required (no VM-tag fallback) and mngr raises an actionable error pointing at `mngr azure prepare` when it is absent. `mngr azure cleanup` deletes the account and refuses a non-empty one unless `--force` is passed.
+
+- Added: Offline `host_dir`, on by default (new `is_offline_host_dir_enabled` provider config field). At `mngr stop`, the operator-driven capture uploads the VM's `host_dir` to the bucket with the operator's own credentials so `mngr event` / `mngr transcript` work against a stopped agent. A VM that idle-self-deallocates (or crashes) is not captured.
+
+### Removed
+
+- Removed: `AzureVpsClient.add_tags` / `AzureVpsClient.remove_tags` (and their unit tests). They only ever existed to push per-agent records into VM tags for the old tag mirror, which the state bucket replaces.
+
 ## [v0.1.1] - 2026-06-18
 
 ### Added
