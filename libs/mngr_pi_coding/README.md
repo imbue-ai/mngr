@@ -27,24 +27,13 @@ plugin shares into each agent).
 
 ## What you get
 
-- **Per-agent isolation.** Each agent gets its own pi config dir via
-  `PI_CODING_AGENT_DIR` (`$MNGR_AGENT_STATE_DIR/plugin/pi_coding/`), so settings,
-  sessions, and state never collide. Your `~/.pi/agent/` `auth.json`, `settings.json`,
-  and resource dirs (`skills`, `prompts`, `extensions`, `themes`, `agents`) are
-  shared in (symlinked locally, copied to remote hosts). `auth.json` is symlinked,
-  so a `/login` or token refresh in any agent propagates to the rest. (`agents`
-  carries subagent definitions, so an installed subagent extension works under
-  mngr -- pi ships no built-in subagents.)
-- **RUNNING vs WAITING.** `mngr list` shows whether the agent is mid-turn or idle,
-  and stays correct when the agent runs a nested `pi` via its bash tool.
-- **Transcripts.** `mngr transcript my-agent` renders the conversation. A raw pi
-  message stream is also captured under the agent state dir.
+- **Per-agent isolation.** Each agent gets its own pi config dir, so settings,
+  sessions, and state never collide. Your `~/.pi/agent/` auth and settings are
+  shared in, so a `/login` or token refresh in any agent propagates to the rest.
+- **RUNNING vs WAITING.** `mngr list` shows whether the agent is mid-turn or idle.
+- **Transcripts.** `mngr transcript my-agent` renders the conversation.
 - **Resume.** `mngr stop` then `mngr start` continues the same pi session with full
   context.
-
-These are powered by a small mngr-owned pi extension that the plugin provisions and
-loads with `pi -e`; pi has no shell-hook surface, so its TypeScript extension API is
-the lever for lifecycle, readiness, and transcript signalling.
 
 ## Configuration
 
@@ -64,17 +53,21 @@ mngr create my-agent my_pi
 
 Tunables on the `pi-coding` agent type:
 
+<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Setting | Default | Description |
 |---|---|---|
-| `command` | `pi` | The pi command to run. |
-| `sync_auth` | `true` | Share `~/.pi/agent/auth.json` into the per-agent dir. |
-| `sync_home_settings` | `true` | Share `settings.json` and resource dirs into the per-agent dir. |
-| `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). |
-| `version` | unset | Pin the pi version to install (`npm install -g @earendil-works/pi-coding-agent@<version>`); provisioning verifies the installed pi matches and errors on a mismatch. Default installs latest. |
-| `update_policy` | unset | Govern pi's startup version check: `NEVER` sets `PI_SKIP_VERSION_CHECK=1`, `AUTO` leaves it on, `ASK` behaves like `AUTO`. Unset resolves to `NEVER` (check disabled); set `AUTO` to re-enable it. |
-| `resume_session` | `true` | Resume this agent's pi session on start, so stop/start keeps context. |
-| `emit_common_transcript` | `true` | Emit the transcript `mngr transcript` reads. |
+| `command` | `pi` | Command to run the pi coding agent. |
+| `sync_home_settings` | `true` | Share settings.json and resource dirs from ~/.pi/agent/ into the per-agent config dir. |
+| `sync_auth` | `true` | Share ~/.pi/agent/auth.json into the per-agent config dir. |
+| `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present. |
+| `version` | unset | Pin the pi CLI version to install (e.g., '1.2.3'). When set, installation runs `npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed pi matches, erroring on a mismatch. When None (the default), installs the latest version. |
+| `update_policy` | unset | How to handle pi's startup version check. NEVER sets PI_SKIP_VERSION_CHECK=1 in the agent environment so pi does not phone home to compare against the latest release; AUTO leaves the check enabled. ASK has no interactive flow for pi and behaves like AUTO. When unset (the default), resolves to NEVER (check disabled) -- set AUTO to leave pi's startup version check enabled. (pi only notifies about updates -- it never self-replaces -- so this governs the startup check, not a background update.) |
+| `auto_allow_permissions` | `true` | pi runs every tool without an approval prompt, so it always operates unattended; setting this to False is an error because pi cannot enforce a deny. |
+| `resume_session` | `true` | Resume this agent's pi session on start, so stop/start keeps context. Safe on first start (pi starts fresh when there is no recorded session yet). |
+| `emit_common_transcript` | `true` | Emit the transcript `mngr transcript` reads. The raw pi transcript is always captured; this gates only the common-envelope conversion. |
 | `emit_raw_transcript` | `true` | Capture the raw pi message stream. |
-| `auto_dismiss_dialogs` | `false` | Trust the workspace without prompting (suppress pi's "Trust project folder?" dialog). Also implied by `mngr create --yes`. |
+| `auto_dismiss_dialogs` | `false` | Trust the workspace without prompting, suppressing pi's 'Trust project folder?' dialog. When set, mngr launches pi with `--approve` so pi auto-trusts the project folder for the run. Also implied by `mngr create --yes`. When False and the source repo is not already trusted, mngr prompts interactively and refuses to run non-interactively. |
+| `preserve_on_destroy` | `true` | When destroying this agent, first copy its transcripts and resumable session store to <local_host_dir>/preserved/ so they survive. Set to False to discard them. |
+<!-- END GENERATED CONFIG TABLE -->
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md) for more details.

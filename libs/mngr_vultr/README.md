@@ -18,7 +18,7 @@ api_key = "YOUR_VULTR_API_KEY"
 
 ```bash
 mngr create my-agent --provider vultr
-mngr create my-agent --provider vultr -b --region=sjc -b --plan=vc2-2c-4gb
+mngr create my-agent --provider vultr -b --vultr-region=sjc -b --vultr-plan=vc2-2c-4gb
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent
@@ -30,16 +30,12 @@ mngr destroy my-agent
 
 These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 
+<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
-|-------|---------|-------------|
-| `api_key` | `None` (falls back to `VULTR_API_KEY` env var) | Vultr API key |
+|---|---|---|
+| `backend` | `vultr` | Provider backend (always 'vultr' for this type) |
+| `api_key` | `None` | Vultr API key. Falls back to VULTR_API_KEY env var. |
 | `default_region` | `ewr` | Default Vultr region |
 | `default_plan` | `vc2-2c-4gb` | Default Vultr plan |
-| `default_os_id` | 2136 | Default Vultr OS ID (Debian 12 x64) |
-
-## Implementation details
-
-- Uses raw HTTP calls to the Vultr API v2 (`https://api.vultr.com/v2`), no third-party SDK
-- VPS instances are tagged with `mngr-provider=<name>` and `mngr-host-id=<id>` for discovery
-- SSH keys are uploaded to the Vultr SSH key store and referenced by ID during instance creation
-- Discovery works by listing all Vultr instances with matching tags, then SSH-ing to each VPS to read host records from the state volume
+| `default_os_id` | `2136` | Default Vultr OS ID (Debian 12 x64) |
+<!-- END GENERATED CONFIG TABLE -->

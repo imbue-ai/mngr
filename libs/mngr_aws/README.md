@@ -2,15 +2,13 @@
 
 AWS provider backend plugin for mngr. Runs agents in Docker containers on Amazon EC2 instances.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps` machinery underneath it is well-tested, but AWS-specific defaults may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental**. The shared `mngr_vps` machinery underneath it is well-tested, but AWS-specific defaults may change. Treat the security defaults (see "AWS-specific configuration") as a starting point: review the security group, AMI choice, and `auto_shutdown_seconds` before pointing this at production resources.
 
 See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
-Credentials are resolved exclusively via boto3's default chain — they are
-deliberately not configurable in `mngr.toml` (matching the Modal provider
-convention). Any of the following works:
+Credentials are resolved via boto3's default chain; they are not configurable in `mngr.toml`. Any of the following works:
 
 - Environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`)
 - Named profile: `AWS_PROFILE=my-profile`
@@ -23,17 +21,16 @@ backend = "aws"
 
 default_region = "us-east-1"
 default_instance_type = "t3.small"  # EC2 instance type
-# default_ami_id = "ami-..."        # optional; falls back to the pinned per-region default when unset
+# default_ami_id = "ami-..."        # optional override; defaults to the pinned per-region AMI
 
-# Optional networking
-# security_group defaults to auto-create with name 'mngr-aws'. To override:
+# Optional networking. security_group defaults to auto-create with name 'mngr-aws'.
+# To override:
 # [providers.aws.security_group]
 # kind = "existing"
 # id = "sg-..."
 # subnet_id = "subnet-..."          # default-VPC subnet if unset
-# Inbound CIDRs for tcp/22 and the container SSH port on the auto-created
-# security group. Default ['0.0.0.0/0'] matches Vultr/OVH defaults in this
-# monorepo (no managed firewall); tighten for production.
+# Inbound CIDRs for tcp/22 and the container SSH port. Default ['0.0.0.0/0'];
+# tighten for production.
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional EBS sizing
@@ -43,10 +40,7 @@ root_volume_type = "gp3"
 
 ### Multiple regions
 
-Each provider instance is bound to a single region (the underlying
-`AwsVpsClient` is built with a single boto3 client at construction time).
-To work across regions, configure one instance per region and pick the
-right one at create time:
+Each provider instance is bound to a single region. To work across regions, configure one instance per region and pick the right one at create time:
 
 ```toml
 [providers.aws-east]
@@ -79,31 +73,36 @@ mngr start my-agent
 mngr destroy my-agent
 ```
 
+Stopped agents stay listed and resumable with `mngr start`; a paused agent costs only EBS storage. An idle agent stops its own instance to save cost.
+
 ## AWS-specific configuration
 
 These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 
+<!-- BEGIN GENERATED CONFIG TABLE (scripts/make_cli_docs.py) -->
 | Field | Default | Description |
-|-------|---------|-------------|
-| `default_region` | `us-east-1` | AWS region for new instances. |
-| `default_instance_type` | `t3.small` | EC2 instance type. Surfaced to users as `--aws-instance-type=` build arg (not `--aws-plan=`) to match AWS's native terminology. |
-| `default_ami_id` | `None` | Explicit AMI override. When unset, the pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) for the chosen region is used. |
-| `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |
-| `subnet_id` | `None` | Optional explicit subnet. |
-| `vpc_id` | `None` | Scopes auto-SG lookup. |
-| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Default matches Vultr/OVH default reachability in this repo (no provider-managed firewall). A warning is logged at provision time when the effective range includes `0.0.0.0/0`; tighten for production (e.g. `("203.0.113.4/32",)`). Empty tuple means "add no ingress" — the SG is unreachable from outside its VPC, also warned. |
-| `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
-| `root_volume_size_gb` | `30` | Root EBS volume size. |
-| `root_volume_type` | `gp3` | Root EBS volume type. |
+|---|---|---|
+| `backend` | `aws` | Provider backend (always 'aws' for this type) |
+| `default_region` | `us-east-1` | Default AWS region. |
+| `default_instance_type` | `t3.small` | EC2 instance type. Surfaced as the `--aws-instance-type=` build arg. |
+| `default_ami_id` | `None` (pinned Debian 12 amd64 per region) | Default AMI ID. When None, the pinned per-region default (DEFAULT_AMI_BY_REGION) is consulted for the chosen region. |
+| `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. The auto-create path consults allowed_ssh_cidrs. |
+| `subnet_id` | `None` | Subnet ID. When None, EC2 picks the default-VPC subnet for the AZ. |
+| `vpc_id` | `None` | VPC ID. Only used to scope auto-created security group lookups. |
+| `root_volume_size_gb` | `30` | Size of the root EBS volume in GB. |
+| `root_volume_type` | `gp3` | EBS volume type for the root volume. |
 | `iam_instance_profile` | `None` | Optional IAM instance profile name attached to launched instances. |
-| `state_bucket_name` | `None` | Name of the S3 bucket holding mngr control-plane state (host record + agent records) for offline reads. When `None`, derived as `mngr-state-<account_id>-<region>`. The bucket is the sole offline store (created by `mngr aws prepare`); without it, a stopped host cannot be listed or resumed and offline reads raise an error pointing at `prepare`. |
-| `is_offline_host_dir_enabled` | `True` | Offline `host_dir`: makes a stopped host's `host_dir` readable without starting it. When on (and a state bucket is present), mngr captures `host_dir` operator-side at `mngr stop` (reads it off the box over SSH and uploads it to the bucket with your own credentials -- no instance IAM identity), and a stopped host's `host_dir` is read back from the bucket (so `mngr event` / `mngr transcript` work offline). A host that idle-self-poweroffs isn't captured (only `mngr stop` captures). Set `False` to disable the capture entirely. |
-| `terminate_on_shutdown` | `false` | EC2 `InstanceInitiatedShutdownBehavior` on an OS shutdown. `false` → `stop` (resumable via `mngr start`, EBS preserved); `true` → `terminate` (ephemeral / self-cleaning). |
-| `auto_shutdown_seconds` | `None` | When set, cloud-init schedules `shutdown -P` so the OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts, with a floor of 1 minute). Whether that stops or terminates the instance is governed by `terminate_on_shutdown` (default `stop`, i.e. resumable). A hard max-lifetime cap, distinct from the activity-based `default_idle_timeout`. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
+| `state_bucket_name` | `None` (auto-derived) | S3 bucket where mngr stores a stopped instance's state so it is readable without starting the instance. When None, named 'mngr-state-<account_id>-<region>'. The bucket is required infrastructure (run `mngr aws prepare`); there is no tag fallback. |
+| `is_offline_host_dir_enabled` | `true` | When on (default), a stopped instance's host_dir is readable without starting it, so `mngr event` / `mngr transcript` / `mngr file` work against it. `mngr aws prepare` sets up the access it needs. Set False to turn it off. |
+| `terminate_on_shutdown` | `false` | EC2 shutdown behavior (InstanceInitiatedShutdownBehavior) on an OS shutdown. False keeps the instance stoppable and resumable via `mngr start` (EBS preserved); True terminates it (ephemeral / self-cleaning). |
+| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDR blocks allowed on tcp/22 and the container SSH port in the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own, or () for no ingress (no rule is created, so the instance is unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replaced, not merged, across config layers. |
+| `associate_public_ip` | `true` | Assign a public IPv4 address to the instance. Required for the current mngr-from-developer-laptop SSH access model. For a more secure deployment, set to False and run mngr from a bastion inside the network. |
+| `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |
+<!-- END GENERATED CONFIG TABLE -->
 
 ## One-time setup: `mngr aws prepare`
 
-Run this once, with credentials that can create security groups, before any developer attempts `mngr create --provider aws`:
+Run this once per region, with credentials that can create security groups, before any developer runs `mngr create --provider aws`:
 
 ```bash
 mngr aws prepare --region us-east-1
@@ -111,33 +110,17 @@ mngr aws prepare --region us-east-1
 mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
 ```
 
-`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It additionally creates (idempotently) a private, encrypted S3 **state bucket** that holds mngr's control-plane state -- the full host record and per-agent records -- so a stopped instance's state is readable offline without SSH. The bucket is **required** infrastructure and the sole offline store, named `mngr-state-<account_id>-<region>` by default (override with `state_bucket_name` on the provider config). Creating the bucket is `prepare`'s primary job: if the key lacks the S3 / `sts:GetCallerIdentity` permissions, or the bucket name cannot be resolved, `prepare` **fails** (it does not fall back to a security-group-only prepare).
-
-`prepare` sets up only the security group + state bucket. The offline `host_dir` feature (on by default; see `is_offline_host_dir_enabled`) needs **no IAM identity** -- `host_dir` is captured operator-side at `mngr stop` (mngr reads it off the box and uploads it to the bucket with your own credentials), so the instance never needs to write the bucket itself.
-
-```bash
-mngr aws prepare --region us-east-1   # creates the security group + state bucket; fails if S3/STS is denied
-```
-
-It is **read-only-first**: it issues a `DescribeSecurityGroups` call, and when the security group already exists with the required SSH ingress, it returns without any write call. This means a re-run on an already-prepared region succeeds even with a key that only has `ec2:DescribeSecurityGroups` (so callers -- e.g. minds' auto-prepare -- can safely run it before every create regardless of the key's privileges). The write permissions are needed only when something is actually missing:
-
-- `ec2:DescribeSecurityGroups` (always)
-- `ec2:CreateSecurityGroup` (only when the group does not exist)
-- `ec2:AuthorizeSecurityGroupIngress` (only when a required ingress rule is missing)
-
-After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG-mutating permissions. This split lets you give devs restricted creds while keeping the privileged SG setup behind an admin one-shot.
+`prepare` creates (or reuses) the `mngr-aws` security group in the region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It also idempotently creates a private, encrypted S3 **state bucket** (`mngr-state-<account_id>-<region>` by default; override with `state_bucket_name`) that holds mngr's control-plane state so stopped instances stay listable and resumable offline. The bucket is **required** infrastructure and is `prepare`'s primary job: if the key lacks the S3 / `sts:GetCallerIdentity` permissions, `prepare` fails rather than doing security-group-only setup. The security-group step is read-only when the group already exists with the required ingress.
 
 ## Teardown: `mngr aws cleanup`
 
-`mngr aws cleanup` is the inverse of `prepare`: it deletes the `mngr-aws` security group so the region returns to its pre-`prepare` state (useful when retiring a provider or testing the first-run experience).
+`mngr aws cleanup` deletes the `mngr-aws` security group and the S3 state bucket, returning the region to its pre-`prepare` state.
 
 ```bash
 mngr aws cleanup --region us-east-1
 ```
 
-It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group is already gone. It needs only `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
-
-`cleanup` also deletes the S3 state bucket. Because the instance check above has already passed, any state left in the bucket is **orphaned** offline state (from hosts that are no longer running instances), so `cleanup` **refuses** to delete a non-empty bucket rather than silently dropping records you may still want -- pass `--force` to delete the bucket and its remaining state.
+It refuses (deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It also refuses to delete the state bucket while it still holds offline host state (orphaned records from hosts that no longer exist as instances); pass `--force` to delete it anyway. It is idempotent.
 
 ## Required IAM permissions
 
@@ -149,25 +132,26 @@ ec2:StopInstances, ec2:StartInstances,
 ec2:CreateTags, ec2:DeleteTags,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
-ec2:DescribeImages
+ec2:DescribeImages,
+s3:PutObject, s3:GetObject, s3:DeleteObject, s3:ListBucket
 ```
 
-`iam:PassRole` is needed at create only when the optional operator-supplied `iam_instance_profile` is set (to attach it to the instance). Offline `host_dir` needs no `iam:*` action -- it is captured operator-side at `mngr stop`, not pushed by an instance identity.
+The S3 actions mirror state into the bucket `prepare` created (the bucket must already exist). No `iam:*` actions are required by default; `iam:PassRole` is needed only if you set `iam_instance_profile`. Offline `host_dir` capture needs no extra IAM -- it is uploaded operator-side at `mngr stop` with your own credentials.
 
-For `mngr aws prepare` (one-time admin setup; in addition to the above for convenience):
-
-```
-ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress
-```
-
-The S3 state bucket setup additionally uses `sts:GetCallerIdentity` (to derive the bucket name) and `s3:CreateBucket`, `s3:PutBucketPublicAccessBlock`, `s3:PutEncryptionConfiguration`, `s3:PutBucketTagging`, `s3:ListBucket`. These are **required**: the bucket is `prepare`'s primary job, so missing them fails the command. The per-host `mngr create` path uses `s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` / `s3:ListBucket` to mirror state (the bucket must already exist).
-
-Offline `host_dir` needs no extra IAM: it is captured operator-side at `mngr stop` (mngr uploads `host_dir` to the bucket with the operator's own credentials -- the same `s3:PutObject` etc. above), so there is no instance identity to provision and no `iam:*` action involved.
-
-For `mngr aws cleanup` (teardown; in addition to the per-host path's `DescribeInstances` / `DescribeSecurityGroups`):
+For `mngr aws prepare` (one-time admin setup), additionally:
 
 ```
-ec2:DeleteSecurityGroup
+ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress,
+sts:GetCallerIdentity,
+s3:CreateBucket, s3:PutBucketPublicAccessBlock,
+s3:PutEncryptionConfiguration, s3:PutBucketTagging, s3:ListBucket
+```
+
+For `mngr aws cleanup` (teardown), additionally:
+
+```
+ec2:DeleteSecurityGroup,
+s3:ListBucket, s3:DeleteObject, s3:DeleteBucket
 ```
 
 Deleting the S3 state bucket additionally uses `s3:ListBucket`, `s3:DeleteObject`, and `s3:DeleteBucket`.
@@ -199,22 +183,6 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
   just test libs/mngr_aws/imbue/mngr_aws/test_release_aws.py
 ```
 
-Three layers of damage control limit leaks from killed-mid-run tests:
+## Limitations
 
-1. Every test's `finally` calls `mngr destroy --force`.
-2. A `pytest_sessionfinish` hook in `imbue/mngr_aws/conftest.py` scans for any test-tagged EC2 instance older than 1 hour at session end, force-terminates leaks, and fails the session.
-3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.aws] auto_shutdown_seconds = 3600` and `terminate_on_shutdown = true`. This propagates to cloud-init as `shutdown -P +60` on every test instance; combined with `InstanceInitiatedShutdownBehavior=terminate` (from `terminate_on_shutdown = true`), the instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs. (The one resumable-idle-stop test overrides `terminate_on_shutdown = false` so its idle poweroff stops, not terminates, the instance — it relies on the session-end leak scanner to reap any leak.)
-
-Production code enforces this: `AwsProvider._validate_provider_args_for_create` refuses to launch an EC2 instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_seconds` is configured (positive). Mirrors the pattern used by `mngr_modal.backend._create_environment`. Independently, `AwsVpsClient.create_instance` tags every pytest-launched instance with `mngr-pytest-launched=true` (constant `AWS_PYTEST_LAUNCHED_TAG`); the conftest session-end scanner filters on that tag, so leaked test instances are found regardless of the agent / host name shape.
-
-## Future improvements
-
-Tagged `[future]` items are deferred but tracked so the user-facing surface in this README is honest about what does not yet exist:
-
-- `[future]` `mngr aws ami` subcommand that builds and registers a Debian + Docker + deps-baked AMI. Bypasses the ~60-90s cloud-init bootstrap on every create.
-- `[future]` mngr-published public AMIs (so users skip the build step entirely). Requires us to commit to a publishing cadence.
-- `[future]` GPU AMI automation: the Debian 12 AMIs in `DEFAULT_AMI_BY_REGION` have no CUDA / NVIDIA drivers / nvidia-container-toolkit. Pairs naturally with `mngr aws ami` above.
-- `[future]` Optional EIP allocation for stable public addressing across stops/starts. ~$3.60/month per idle EIP.
-- `[future]` Auto SSM Parameter Store lookup for current Debian AMIs per region (so the pinned map in `config.py` doesn't drift).
-- `[future]` Multi-container per EC2 instance packing.
-- `[future]` Auto-cleanup of the `mngr-aws` security group on the final `destroy` of a region.
+- No host snapshot workflow: restore from a fresh `mngr create` rather than rehydrating a killed host.

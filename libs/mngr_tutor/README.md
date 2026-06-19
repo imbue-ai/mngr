@@ -25,13 +25,7 @@ Learn to create, use, and manage your first agent locally:
 - Stop and restart the agent
 - Destroy the agent when finished
 
-### Remote Agents on Modal (WIP)
-
-Learn to launch and manage agents on Modal's cloud infrastructure:
-
-- Create a remote agent with `--in modal`
-- Work with the remote agent
-- Stop, restart, and destroy
+A lesson on remote agents on Modal (`--in modal`) is in progress and not yet available.
 
 ## Tips
 

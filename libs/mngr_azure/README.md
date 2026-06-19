@@ -2,34 +2,27 @@
 
 Azure provider backend plugin for mngr. Runs agents in Docker containers on Azure Virtual Machines.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
+> This plugin is **experimental**. The shared `mngr_vps` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration") as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
 
 See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
-Credentials are resolved exclusively via Azure's `DefaultAzureCredential` — they
-are deliberately not configurable in `mngr.toml` (matching the Modal / AWS / GCP
-provider convention). Any of the following works:
+Credentials are resolved via Azure's `DefaultAzureCredential`; they are not configurable in `mngr.toml`. Any of the following works:
 
-- `az login` (developer laptop) — the credential transparently uses your Azure CLI session
+- `az login` (developer laptop) — uses your Azure CLI session
 - Service principal env vars: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET` (CI)
 - A managed identity (when running on an Azure VM / Container App)
 
-The subscription is resolved automatically from your `az` login — after `az login`
-(and optionally `az account set --subscription <id>`), `--provider azure` works
-with **no config at all**, the same way the GCP provider uses your active gcloud
-project. Resolution order: `providers.azure.subscription_id` in config >
-`AZURE_SUBSCRIPTION_ID` env var > the Azure CLI's active subscription.
+The subscription is resolved automatically from your `az` login, so after `az login` (and optionally `az account set --subscription <id>`), `--provider azure` works with no config at all. Resolution order: `providers.azure.subscription_id` > `AZURE_SUBSCRIPTION_ID` env var > the Azure CLI's active subscription.
 
-So a `[providers.azure]` block is entirely optional. Configure one only to pin a
-non-default subscription or override defaults:
+A `[providers.azure]` block is optional. Configure one only to pin a non-default subscription or override defaults:
 
 ```toml
 [providers.azure]
 backend = "azure"
 
-subscription_id = "00000000-0000-0000-0000-000000000000"  # optional; defaults to your `az` active subscription
+subscription_id = "00000000-0000-0000-0000-000000000000"  # optional
 default_region = "westus"
 default_vm_size = "Standard_B2s"            # 2 vCPU / 4GB; B-series is quota-friendly on new subs
 
@@ -43,12 +36,9 @@ nsg_name = "mngr-nsg"
 # 'mngrst<hash>' from subscription + resource group). 3-24 lowercase alphanumeric.
 state_storage_account_name = "mngrstmyteam"
 
-# Inbound CIDRs for tcp/22 and the container SSH port on the NSG. Defaults to
-# the wide-open '0.0.0.0/0' (fail-open, matching the AWS / GCP providers; a
-# warning is logged -- tighten for production). SSH auth is key-only (passwords
-# disabled), so 0.0.0.0/0 exposes the port but not a usable login. Use a tight
-# range like ['203.0.113.4/32'], or [] for no SSH allow rule (the NSG default
-# deny then leaves instances unreachable from outside the vnet).
+# Inbound CIDRs for tcp/22 and the container SSH port. Default '0.0.0.0/0'
+# (a warning is logged; tighten for production). SSH auth is key-only, so an
+# open NSG exposes the port but not a usable login. Use [] for no SSH allow rule.
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional OS disk sizing
@@ -58,38 +48,15 @@ os_disk_type = "StandardSSD_LRS"
 
 ## One-time setup: `mngr azure prepare`
 
-Azure nests every resource in a *resource group*, and a fresh subscription has no
-default vnet. `mngr azure prepare` does the one-time privileged setup: it
-registers the `Microsoft.Compute` / `Microsoft.Network` / `Microsoft.Storage`
-resource providers and creates the resource group, vnet, subnet, and NSG (tagged
-`managed-by=mngr`). It also creates a private **state storage account + Blob
-container** (the "state bucket"; see "Offline state storage account" below) that
-holds mngr's control-plane state. After it succeeds, `mngr create --provider
-azure` needs only VM/NIC/IP-create permissions, not the network-management
-permissions that build the vnet/subnet/NSG — it just resolves the existing subnet,
-so you can run it with limited credentials.
+Azure nests every resource in a *resource group*, and a fresh subscription has no default vnet. `mngr azure prepare` does the one-time privileged setup: it registers the required resource providers and creates the resource group, vnet, subnet, and NSG (tagged `managed-by=mngr`). It also creates the private **state storage account** that holds offline control-plane state (see "Offline state storage account" below) and creates a least-privilege custom role assigned per-VM so idle agents can deallocate themselves to halt billing; if you lack permission to assign roles, the role step is skipped with a warning and idle self-deallocate is disabled (`mngr stop` still halts billing). After `prepare` succeeds, `mngr create --provider azure` needs only VM/NIC/IP-create permissions, so you can run it with limited credentials.
 
 ```bash
 mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
 ```
 
-Like AWS and GCP, `prepare` is fail-open: with no `--allowed-ssh-cidr` it falls
-back to the provider config's `allowed_ssh_cidrs` (default `0.0.0.0/0`, open to
-the internet) and logs a warning prompting you to tighten it. SSH auth is
-key-only (passwords disabled), so an open NSG exposes the port but not a usable
-login. Setting `allowed_ssh_cidrs = []` opts out entirely: the NSG is created
-with no SSH allow rule, so its default-deny leaves instances unreachable from
-outside the vnet.
+With no `--allowed-ssh-cidr`, `prepare` falls back to the config's `allowed_ssh_cidrs` (default `0.0.0.0/0`) and logs a warning prompting you to tighten it. SSH auth is key-only, so an open NSG exposes the port but not a usable login. Setting `allowed_ssh_cidrs = []` creates no SSH allow rule, leaving instances unreachable from outside the vnet. Idempotent — re-running is a no-op when everything already exists.
 
-Idempotent — re-running is a no-op when everything already exists.
-
-`prepare` and `cleanup` read their defaults from your `[providers.<name>]`
-settings.toml block, selected with `--provider` (default `azure`), so the
-resource group / vnet / subnet / NSG land with the same names the runtime `mngr
-create --provider <name>` path will resolve. CLI flags override the resolved
-config, which in turn overrides class defaults. For example, with a
-`[providers.azure-west]` block pinning `default_region = "westus"`,
-`resource_group = "mngr-westus"`, and `allowed_ssh_cidrs = ["203.0.113.4/32"]`:
+`prepare` and `cleanup` read their defaults from the `[providers.<name>]` block selected with `--provider` (default `azure`), and CLI flags override that. For example, with a `[providers.azure-west]` block pinning a region, resource group, and CIDRs:
 
 ```bash
 mngr azure prepare --provider azure-west   # uses that block's region / RG / CIDRs, no flags needed
@@ -97,15 +64,7 @@ mngr azure prepare --provider azure-west   # uses that block's region / RG / CID
 
 ### Teardown: `mngr azure cleanup`
 
-The safe inverse of `prepare`. Deletes the mngr-owned resource group (cascading
-its vnet/subnet/NSG), but **refuses** while any mngr-managed VM still exists in
-the group (destroy those first with `mngr destroy <agent>`), and only deletes a
-group it owns (tagged `managed-by=mngr`). It also deletes the state storage
-account; because the VM check above has already passed, any remaining state is
-**orphaned** offline state (from hosts no longer running as VMs), so it
-**refuses** to delete a non-empty account rather than silently dropping records
-you may still want -- pass `--force` to delete the account and its
-remaining state. Idempotent.
+The safe inverse of `prepare`. Deletes the mngr-owned resource group (and its vnet/subnet/NSG), but **refuses** while any mngr-managed VM still exists in the group, and only deletes a group it owns (tagged `managed-by=mngr`). It also deletes the state storage account; since the VM check has passed, any remaining state is orphaned offline state, so cleanup **refuses** to delete a non-empty account unless you pass `--force`. Idempotent.
 
 ```bash
 mngr azure cleanup
@@ -113,84 +72,17 @@ mngr azure cleanup
 
 ### Offline state storage account
 
-`mngr azure prepare` creates a private Azure Storage account and a `mngr-state`
-Blob container holding mngr's control-plane state — the full host record and the
-per-agent records — keyed by host id. The mngr host machine writes these with
-**your own Azure credentials** (no keys stored on the box) whenever it writes
-state (on create and on stop), so a **deallocated** VM's full state is readable
-without SSH. This is the sole offline store: the previous VM-tag mirror has been
-removed (it silently dropped per-agent `labels` larger than the 256-char Azure
-tag value limit and could only reconstruct a lossy subset of the host record).
+`mngr azure prepare` creates a private Azure Storage account and a `mngr-state` Blob container holding mngr's control-plane state (the host record and per-agent records) keyed by host id. The mngr host writes these with your own Azure credentials on create and on stop, so a **deallocated** VM's state is readable without SSH; this is the only offline store. The account name defaults to a derived `mngrst<hash>` (override with `state_storage_account_name`); the container is always `mngr-state`.
 
-The storage-account name defaults to a deterministic `mngrst<hash>` derived from
-your subscription + resource group (storage-account names are globally unique,
-3–24 lowercase alphanumeric); override it with `state_storage_account_name` in
-`[providers.azure]`. The container is always `mngr-state`.
+Blob data-plane access uses AAD, so reading/writing state needs the **`Storage Blob Data Contributor`** role on the account, which Azure does *not* grant to the account creator automatically. `mngr azure prepare` therefore also grants this role to your own principal (needs `Microsoft.Authorization/roleAssignments/write`, i.e. Owner or User Access Administrator). Each additional operator needs the same grant (re-run `prepare` as them). The account is **required** infrastructure with no fallback: a missing storage permission fails `prepare`, and when the account is absent mngr raises an actionable error pointing at `mngr azure prepare` on both the write and offline-read paths.
 
-Blob data-plane access uses AAD (the same `DefaultAzureCredential` the provider
-already uses), so to read/write host state you need the **`Storage Blob Data
-Contributor`** role on the state storage account, in addition to the
-storage-account create/delete permission `prepare`/`cleanup` use
-(`Microsoft.Storage/storageAccounts/write` + `delete`). Azure splits the control
-plane from the data plane: **creating** the storage account (or holding
-Owner/Contributor on it) does **not** grant data-plane blob access, so the
-account creator is not auto-authorized to read the state blobs. To avoid an
-`AuthorizationPermissionMismatch` on every offline read, `mngr azure prepare`
-therefore also grants **your own principal** (the user or service principal that
-runs `prepare`) the `Storage Blob Data Contributor` role scoped to just the state
-account — this needs `Microsoft.Authorization/roleAssignments/write` (Owner or
-User Access Administrator). Note this grants only the principal that runs
-`prepare`: in a multi-operator setup, each other operator needs the same grant
-(re-run `prepare` as them, or assign their principal the role out of band). The state account is
-**required** infrastructure, with no VM-tag fallback: creating it is `prepare`'s
-primary job, so a missing storage permission (or any account/container create
-failure) **fails** the command rather than continuing with a network-only
-prepare. Once provisioned, when it is absent mngr raises an actionable error
-pointing at `mngr azure prepare` -- on the `mngr create` / `mngr label` write path
-as well as on offline reads -- and a transient Blob error on a mirror read or
-write propagates rather than being swallowed.
+### Offline `host_dir` capture
 
-### Offline `host_dir` (on by default)
-
-A deallocated VM's `host_dir` is also readable without SSH, so `mngr event` /
-`mngr transcript` work against a stopped agent. Capture is **operator-driven**:
-when `is_offline_host_dir_enabled` is on (the default) and the state bucket
-exists, at `mngr stop` mngr (already SSH-connected and holding the bucket
-credentials) reads the VM's `host_dir` off the box and uploads it to the state
-container's `hosts/<host_id>/host_dir/` prefix with **your own** credentials --
-the same ones that write the state records. There is **no on-box sync daemon and
-no managed identity**; the only data-plane access involved is the operator's own
-`Storage Blob Data Contributor` role on the state account (granted by `prepare`,
-see above). A stopped VM's `host_dir` is then read back from the bucket. Set
-`is_offline_host_dir_enabled = false` in `[providers.azure]` to disable the
-capture (offline host metadata still works via the bucket).
-
-So `prepare` provisions no VM identity for `host_dir`:
-
-```bash
-mngr azure prepare   # creates the network + state account (and grants you blob-data access); no host-dir identity
-```
-
-**Limitation:** capture happens only at `mngr stop`. A VM that idle-self-deallocates
-(or crashes) is **not** captured, because no operator is involved at that moment
-and (by design) the VM holds no bucket credentials; its offline `host_dir` then
-reflects its last `mngr stop` (or is empty if it was never stopped that way). An
-empty `host_dir` prefix reads as no volume. The state *records* are unaffected
-(always operator-written).
-
-### Quota note
-
-New pay-as-you-go subscriptions start with **low or zero vCPU quota** per region
-and per VM family. The default `Standard_B2s` (B-series) is the family most
-likely to have nonzero quota; if `mngr create` fails with a quota error, request
-an increase in the Azure portal (Subscriptions → Usage + quotas) or pick a region
-with available quota (`az vm list-usage --location westus -o table`).
+When `is_offline_host_dir_enabled` is on (the default) and the state account exists, `mngr stop` reads the VM's `host_dir` off the box and uploads it to the state container with your own credentials, so `mngr event` / `mngr transcript` / `mngr file` work against a stopped agent. There is no on-box sync daemon or VM identity for this. Capture happens **only at `mngr stop`**: a VM that idle-self-deallocates or crashes is not captured (its offline `host_dir` reflects its last `mngr stop`, or is empty). Set `is_offline_host_dir_enabled = false` to disable the capture (offline host metadata still works via the account).
 
 ## Multiple regions
 
-Each provider instance is bound to a single region (and resource group). To work
-across regions, configure one instance per region and pick the right one at
-create time:
+Each provider instance is bound to a single region (and resource group). To work across regions, configure one instance per region and pick the right one at create time:
 
 ```toml
 [providers.azure-west]
@@ -296,20 +188,6 @@ size has no capacity in the region right now; pick another size with
 
 ## Auto-shutdown and cost safety
 
-Two independent mechanisms:
+## Limitations
 
-- **Idle self-deallocate** (the primary, cost-parity path): an idle agent
-  deallocates its own VM via its managed identity (see "How it works"), genuinely
-  halting compute billing — even if the orchestrating `mngr` process is gone.
-  Requires the operator to have granted the role assignment (otherwise it is
-  disabled and only `mngr stop` halts billing — an in-VM OS shutdown does not).
-- **`auto_shutdown_seconds`** schedules cloud-init `shutdown -P +N` as a coarse
-  time cap. **Caveat (Azure specific):** this OS-level shutdown alone leaves the VM
-  "Stopped (not deallocated)", which still bills for compute. For test isolation
-  the real backstop is the session-end orphan scanner in `conftest.py`, which
-  force-deletes any VM tagged `mngr-pytest-launched` older than the TTL.
-
-## Future improvements
-
-- Custom-image baking (skip the per-create cloud-init Docker install).
-- Azure Resource Graph for cross-region listing.
+- No host snapshot workflow: restore from a fresh `mngr create` rather than rehydrating a killed host.
