@@ -19,8 +19,8 @@ from imbue.mngr.cli.config import _flatten_config
 from imbue.mngr.cli.config import _format_value_for_display
 from imbue.mngr.cli.config import _get_existing_isolation_setting
 from imbue.mngr.cli.config import _get_nested_value
-from imbue.mngr.cli.config import _wizard_claude_config_isolation
 from imbue.mngr.cli.config import _unset_nested_value
+from imbue.mngr.cli.config import _wizard_claude_config_isolation
 from imbue.mngr.cli.config import config
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import OutputOptions

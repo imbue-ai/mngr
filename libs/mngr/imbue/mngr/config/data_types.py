@@ -454,6 +454,19 @@ class AgentTypeConfig(FrozenModel):
             return split_cli_args_string(value) if value else ()
         return tuple(value)
 
+    @classmethod
+    def migrate_legacy_config_fields(cls, raw_config: dict[str, Any]) -> dict[str, Any]:
+        """Translate deprecated/renamed field names in a raw config block.
+
+        The config loader calls this before validating field names, so a config
+        written for an older version of the agent-type plugin keeps loading
+        instead of being rejected as having unknown fields. The base
+        implementation is a no-op; subclasses override it to map their own
+        renamed fields. Must return a dict (a new one if it changes anything);
+        the input must not be mutated.
+        """
+        return raw_config
+
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 

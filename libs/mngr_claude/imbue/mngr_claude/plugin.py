@@ -2033,9 +2033,7 @@ class ClaudeCoreAgent(
         return self.work_dir
 
     def preserve_session_state(self, host: OnlineHostInterface) -> None:
-        preserve_agent_state(
-            _claude_preserved_items(is_shared_config=not self._is_isolated_config_dir()), self, host
-        )
+        preserve_agent_state(_claude_preserved_items(is_shared_config=not self._is_isolated_config_dir()), self, host)
 
     def is_unattended_enabled(self) -> bool:
         return self.agent_config.auto_allow_permissions
