@@ -1557,18 +1557,18 @@ class ImbueCloudProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         snapshot_id: SnapshotId | None = None,
     ) -> Host:
-        """Start the previously-stopped docker container, re-bootstrap its SSH, and return the Host.
+        """Start the previously-stopped docker container, relaunch its sshd, and return the Host.
 
         A bare ``docker start`` is not enough to bring a leased mind back: the
         in-container sshd is launched via ``docker exec`` (the container's CMD is
-        just a sleep), so it does not survive the stop; and the per-host
-        authorized key and the container host key may not have persisted either.
-        Without re-establishing all three, the subsequent ``mngr start`` SSH into
-        the container fails and the mind is left dead and UI-unrecoverable. So,
-        over the outer root SSH (which works independently of the container's
-        sshd), we relaunch sshd, re-seed the per-host authorized key, wait for
-        sshd, and re-record the served host key -- mirroring what the local
-        docker and vps_docker providers already do on restart.
+        just a sleep), so the sshd *process* does not survive the stop. The
+        container filesystem -- including the per-host authorized key and the
+        served host key -- is preserved across a ``docker stop``/``docker
+        start``, so only sshd needs re-establishing; without it the subsequent
+        ``mngr start`` SSH into the container hangs until timeout and the mind is
+        left dead and UI-unrecoverable. So, over the outer root SSH (which works
+        independently of the container's sshd), we relaunch sshd and wait for it
+        to accept connections.
         """
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)

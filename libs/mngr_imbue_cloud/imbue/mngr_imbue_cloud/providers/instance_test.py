@@ -33,6 +33,7 @@ from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
 from imbue.mngr_imbue_cloud.providers.instance import _resolve_fast_path_attributes
+from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
 
 
 def test_resolve_fast_path_attributes_canonicalizes_remote_url_and_keeps_branch() -> None:
@@ -220,11 +221,13 @@ def test_release_lease_on_failure_does_not_release_on_success() -> None:
 # =============================================================================
 # Restart routing + re-bootstrap: a stopped leased container must (1) resolve
 # via get_host to an OFFLINE host so ensure_host_started routes ``mngr start``
-# through start_host, and (2) have start_host re-bootstrap its SSH (relaunch
-# sshd, re-seed the per-host authorized key, then reconcile the served host
-# key) over the outer root SSH, not just ``docker start``. Without (1),
-# start_host is never reached; without (2), the container comes back with no
-# sshd. Either way a stopped leased mind is left unrecoverable.
+# through start_host, and (2) have start_host relaunch the container's sshd over
+# the outer root SSH, not just ``docker start``. The container filesystem (the
+# per-host authorized key and the served host key) survives a docker stop/start,
+# so only sshd -- a process launched via ``docker exec``, never the entrypoint --
+# must be relaunched. Without (1), start_host is never reached; without (2), the
+# container comes back with no sshd. Either way a stopped leased mind is left
+# unrecoverable.
 # =============================================================================
 
 
@@ -258,10 +261,12 @@ class _StubOuter(MutableModel):
         # to a concrete container so the caller proceeds.
         if command.startswith("docker ps "):
             return CommandResult(stdout=f"{_RESTART_CONTAINER_ID}\n", stderr="", success=True)
-        # ``docker inspect --format '{{.State.Running}}'`` drives get_host's
-        # online/offline decision.
+        # ``docker inspect --format '{{.State.Status}}'`` drives get_host's
+        # online/offline decision (via ``is_running_container_state``), so the
+        # canned output must be a container status string, not a boolean.
         if command.startswith("docker inspect"):
-            return CommandResult(stdout=f"{str(self.container_running).lower()}\n", stderr="", success=True)
+            status = RUNNING_CONTAINER_STATE if self.container_running else "exited"
+            return CommandResult(stdout=f"{status}\n", stderr="", success=True)
         return CommandResult(stdout="", stderr="", success=True)
 
 
@@ -389,18 +394,18 @@ def test_get_host_returns_online_host_when_container_running(tmp_path: Path, tem
 
 
 def test_start_host_rebootstraps_container_ssh(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    """start_host must relaunch sshd, re-seed the authorized key, wait, then re-scan the host key.
+    """start_host must ``docker start`` the container, relaunch its sshd, wait, then return the host.
 
     Regression test: a bare ``docker start`` is not enough because the
     in-container sshd is launched via ``docker exec`` (not the entrypoint), so a
     restarted leased container comes back with no sshd and the subsequent
-    ``mngr start`` SSH fails, leaving the mind unrecoverable.
+    ``mngr start`` SSH fails, leaving the mind unrecoverable. The container
+    filesystem (the per-host authorized key and the served host key) survives the
+    stop/start, so neither an authorized-keys re-seed nor a host-key re-scan is
+    needed -- only the sshd process must be relaunched.
     """
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    # The per-host public key must be on disk for the authorized_keys re-seed.
-    public_key = "ssh-ed25519 AAAApublic per-host-key"
-    (tmp_path / "ssh_key.pub").write_text(public_key + "\n")
     outer = _StubOuter()
     built = ImbueCloudHost.model_construct()
     provider = _make_provider(lease, outer, tmp_path, built, temp_mngr_ctx)
@@ -410,14 +415,14 @@ def test_start_host_rebootstraps_container_ssh(tmp_path: Path, temp_mngr_ctx: Mn
     commands = outer.recorded_commands
     start_index = _index_of(commands, f"docker start {_RESTART_CONTAINER_ID}")
     sshd_index = _index_of(commands, "/usr/sbin/sshd -D")
-    authorized_keys_index = _index_of(commands, "authorized_keys")
 
-    # The container is started before sshd is relaunched, and the per-host key is
-    # re-seeded -- carrying the actual public key from disk.
+    # The container is started before its sshd is relaunched.
     assert start_index < sshd_index
-    assert public_key in commands[authorized_keys_index]
-    # sshd is relaunched and the key re-seeded BEFORE we wait for / re-scan sshd.
+    # We wait for sshd to come back, but neither re-seed authorized_keys nor
+    # re-scan the host key -- both persist in the container filesystem across a
+    # docker stop/start.
     assert provider._waited_for == [lease.vps_address]
-    assert provider._rescanned == [(lease.vps_address, lease.container_ssh_port)]
+    assert provider._rescanned == []
+    assert not any("authorized_keys" in command for command in commands)
     # The returned host is the rebuilt host object (start_host completed).
     assert result is built
