@@ -177,8 +177,8 @@ class _WarmMngrProcess(MutableModel):
         self.connection.close()
         try:
             self.running_process.terminate(force_kill_seconds=_TERMINATE_FORCE_KILL_SECONDS)
-        except TimeoutExpired:
-            logger.warning("Timed out force-killing a warm mngr process")
+        except TimeoutExpired as exc:
+            logger.opt(exception=exc).error("Timed out force-killing a warm mngr process")
 
 
 class MngrCaller(MutableModel):
