@@ -34,4 +34,6 @@ Added themeable surface + fill tokens (next category): surfaces `bg-surface-prim
 
 With surfaces tokenized, dark mode now renders correctly across page/cards/text/borders/buttons. (Light mode is unchanged.)
 
-Added status / feedback tokens (Figma): `important` / `success` / `warning` / `info` (one solid hue each, mode-independent) + `focus-ring`. Notice / badge backgrounds derive from a single hue via an opacity modifier (e.g. `bg-success/12 border-success/30 text-success`), which adapts to the surface in both modes. Stood up in the styleguide; call-site migration (notices, badges, danger/success buttons, focus rings) follows. Link / selection blue is intentionally out of scope (not part of the status set).
+Added status / feedback tokens (Figma): `important` / `success` / `warning` / `info` (one solid hue each, mode-independent) + `focus-ring`. Notice / badge backgrounds derive from a single hue via an opacity modifier (e.g. `bg-success/12 border-success/30 text-success`), which adapts to the surface in both modes.
+
+- Migrated the status call sites: Notice and StatusBadge variants, inline status text/boxes, the danger button (`bg-important/10 text-important`), and status pills now use the tokens; the solid success button is `bg-success` with fixed white text. Focus rings (inputs, color swatches) now use `focus-ring`. Link / selection blue is intentionally left as-is (not part of the status set).

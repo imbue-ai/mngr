@@ -90,7 +90,7 @@
     if (workspace.is_stale) {
       row.classList.add('is-stale');
       var staleDot = document.createElement('span');
-      staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0';
+      staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-warning/80 shrink-0';
       staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
       row.appendChild(staleDot);
     }

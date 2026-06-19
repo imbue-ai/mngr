@@ -25,10 +25,10 @@
         '<span class="text-primary">Running...</span>';
     } else if (status === 'failed') {
       statusContainer.innerHTML =
-        '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-red-100 text-red-800">Failed</span>';
+        '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-important/15 text-important">Failed</span>';
     } else if (status === 'done') {
       statusContainer.innerHTML =
-        '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-emerald-100 text-emerald-800">Done. Redirecting...</span>';
+        '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-success/15 text-success">Done. Redirecting...</span>';
     }
   }
 

@@ -271,7 +271,7 @@
             if (d.status === 'DONE') {
               clearInterval(interval);
               tgBtn.textContent = 'Telegram active';
-              tgBtn.classList.add('text-emerald-700');
+              tgBtn.classList.add('text-success');
             } else if (d.status === 'FAILED') {
               clearInterval(interval);
               tgBtn.textContent = 'Setup failed';

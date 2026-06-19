@@ -55,8 +55,8 @@
     var base = 'flex items-center justify-between px-3 py-2 border rounded-md my-1 ';
     var rowCls = {
       existing: 'bg-surface-primary border-default',
-      added:    'bg-emerald-50 border-emerald-200',
-      removed:  'bg-red-50 border-red-200 line-through',
+      added:    'bg-success/12 border-success/30',
+      removed:  'bg-important/12 border-important/30 line-through',
     }[variant];
     var row = document.createElement('div');
     row.className = base + rowCls;
@@ -64,7 +64,7 @@
     var left = document.createElement('span');
     if (variant === 'added' || variant === 'removed') {
       var prefix = document.createElement('span');
-      prefix.className = 'font-semibold mr-1.5 ' + (variant === 'added' ? 'text-emerald-600' : 'text-red-600');
+      prefix.className = 'font-semibold mr-1.5 ' + (variant === 'added' ? 'text-success' : 'text-important');
       prefix.textContent = variant === 'added' ? '+' : '−';
       left.appendChild(prefix);
     }
@@ -177,7 +177,7 @@
     if (existing) existing.remove();
     var box = document.createElement('div');
     box.id = 'sharing-error';
-    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-red-50 border border-red-200 text-sm text-red-800';
+    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-important/12 border border-important/30 text-sm text-important';
     box.textContent = message;
     var actions = document.getElementById('action-buttons');
     actions.parentNode.insertBefore(box, actions);
@@ -333,7 +333,7 @@
     .catch(function (err) {
       var state = document.getElementById('loading-state');
       state.textContent = 'Failed to load sharing status: ' + err.message;
-      state.className = 'text-red-600 py-4';
+      state.className = 'text-important py-4';
       document.getElementById('editor-content').classList.remove('hidden');
       added = proposedEmails.slice();
       renderACL();

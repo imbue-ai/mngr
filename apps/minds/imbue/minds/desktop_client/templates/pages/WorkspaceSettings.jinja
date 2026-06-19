@@ -109,7 +109,7 @@
                  size="8"
                  {% if is_stale %}disabled{% endif %}>
         </div>
-        <p id="color-error" class="hidden text-sm text-red-600 mt-2" role="alert"></p>
+        <p id="color-error" class="hidden text-sm text-important mt-2" role="alert"></p>
       </div>
 
       <SectionHeader divider>Account</SectionHeader>
@@ -149,7 +149,7 @@
       {% if telegram_state %}
         <SectionHeader divider>Telegram</SectionHeader>
         {% if telegram_state == 'active' %}
-          <p class="text-emerald-700">Telegram is active for this workspace.</p>
+          <p class="text-success">Telegram is active for this workspace.</p>
         {% elif telegram_state == 'pending' %}
           <Button variant="primary" id="tg-btn">Setup Telegram</Button>
         {% endif %}
@@ -158,7 +158,7 @@
       <SectionHeader divider>Danger zone</SectionHeader>
       <p class="text-sm text-secondary mb-3">Permanently destroy this project and release any associated resources.</p>
       <Button variant="danger" id="destroy-btn">Destroy project</Button>
-      <p id="destroy-error" class="hidden text-sm text-red-600 mt-2"></p>
+      <p id="destroy-error" class="hidden text-sm text-important mt-2"></p>
 
       <Modal id="destroy-dialog">
         <h2 class="text-lg font-semibold text-primary mb-3">Destroy project?</h2>

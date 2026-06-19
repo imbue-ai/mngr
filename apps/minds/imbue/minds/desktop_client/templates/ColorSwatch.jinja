@@ -24,7 +24,7 @@
     disabled  -- when true, renders the button disabled (stale workspace).
 #}
 {%- set _sizes = {"md": "w-[34px] h-[34px]", "sm": "w-6 h-6"} -%}
-{%- set _cls = "color-swatch " ~ _sizes[size] ~ " rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 disabled:opacity-40" -%}
+{%- set _cls = "color-swatch " ~ _sizes[size] ~ " rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring/60 disabled:opacity-40" -%}
 <button type="button"
         role="radio"
         class="{{ _cls }}"

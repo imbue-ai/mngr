@@ -810,8 +810,8 @@ def test_button_renders_each_variant_class_set() -> None:
     variants_to_class = {
         "primary": "bg-surface-inverse",
         "secondary": "bg-fill-subtle",
-        "danger": "bg-red-50",
-        "success": "bg-emerald-800",
+        "danger": "bg-important/10",
+        "success": "bg-success",
         "ghost": "bg-transparent",
     }
     for variant, css_class in variants_to_class.items():
@@ -1168,10 +1168,10 @@ def test_no_legacy_oklch_accents_remain_in_templates_or_static() -> None:
 
 def test_notice_renders_each_variant() -> None:
     variants_to_class = {
-        "info": "bg-blue-50",
-        "warn": "bg-amber-50",
-        "success": "bg-emerald-50",
-        "error": "bg-red-50",
+        "info": "bg-info/12",
+        "warn": "bg-warning/12",
+        "success": "bg-success/12",
+        "error": "bg-important/12",
     }
     for variant, css_class in variants_to_class.items():
         html = CATALOG.render("Notice", variant=variant, _content="msg")
@@ -1437,7 +1437,7 @@ def test_select_renders_with_option_children_and_focus_ring() -> None:
     assert 'name="launch_mode"' in html
     assert '<option value="LIMA">lima</option>' in html
     # Inherits the shared INPUT_BASE focus ring.
-    assert "focus:border-blue-600" in html
+    assert "focus:border-focus-ring" in html
     assert "focus:ring-2" in html
     # Default width is w-full.
     assert "w-full" in html
@@ -1488,7 +1488,7 @@ def test_textarea_renders_value_in_content_with_shared_shell() -> None:
     assert 'rows="6"' in html
     assert "line1\nline2" in html
     assert "font-mono" in html
-    assert "focus:border-blue-600" in html
+    assert "focus:border-focus-ring" in html
 
 
 def test_section_header_plain_has_no_divider_classes() -> None:
@@ -1539,10 +1539,10 @@ def test_modal_card_extra_appends_to_inner_card_classes() -> None:
 def test_status_badge_renders_each_variant_class_set() -> None:
     variants_to_class = {
         "neutral": "bg-fill-subtle",
-        "success": "bg-emerald-100",
-        "error": "bg-red-100",
-        "warn": "bg-amber-100",
-        "info": "bg-blue-100",
+        "success": "bg-success/15",
+        "error": "bg-important/15",
+        "warn": "bg-warning/15",
+        "info": "bg-info/15",
     }
     for variant, css_class in variants_to_class.items():
         html = CATALOG.render("StatusBadge", variant=variant, _content="x")

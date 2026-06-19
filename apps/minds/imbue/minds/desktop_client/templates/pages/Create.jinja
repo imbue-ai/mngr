@@ -303,7 +303,7 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+          <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-warning text-right">imbue_cloud requires a selected account.</p>
           <p id="aws-credentials-note" class="hidden mt-1 text-xs text-tertiary">
             AWS credentials are read from this machine's environment
             (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>,
@@ -322,7 +322,7 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+          <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-warning text-right">imbue_cloud requires a selected account.</p>
           <div id="api-key-row" class="mt-2 hidden">
             <FormLabel target="anthropic_api_key">Anthropic API key</FormLabel>
             <TextInput name="anthropic_api_key" :value="anthropic_api_key" placeholder="sk-ant-..." id="anthropic_api_key" type="password" />
@@ -339,7 +339,7 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+          <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-warning text-right">imbue_cloud requires a selected account.</p>
 
           <div id="backup-api-key-row" class="mt-2 hidden">
             <FormLabel target="backup_api_key_env">restic environment</FormLabel>

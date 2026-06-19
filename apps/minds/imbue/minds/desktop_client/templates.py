@@ -65,8 +65,8 @@ _BTN_SIZES: Final[Mapping[str, str]] = {
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "primary": "bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-90",
     "secondary": "bg-fill-subtle text-primary border border-default hover:bg-fill-hover",
-    "danger": "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
-    "success": "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
+    "danger": "bg-important/10 text-important border border-important/25 hover:bg-important/20",
+    "success": "bg-success text-white border border-transparent hover:opacity-90",
     "ghost": "bg-transparent text-primary border border-transparent hover:bg-fill-hover hover:text-primary",
 }
 
@@ -77,7 +77,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # are NOT included here -- each component sets its own.
 _INPUT_BASE: Final[str] = (
     "px-3 py-2.5 text-sm border border-strong bg-surface-primary text-primary "
-    "outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
+    "outline-none transition focus:border-focus-ring focus:ring-2 focus:ring-focus-ring/40"
 )
 
 # Inner SVG path data for the lucide-style 24x24 stroke icons. The

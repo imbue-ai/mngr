@@ -42,13 +42,13 @@
       if (!badge) return;
       if (status === 'stuck') {
         badge.textContent = 'Server not responding';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-warning/15 text-warning';
       } else if (status === 'restarting') {
         badge.textContent = 'Restarting...';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-warning/15 text-warning';
       } else if (status === 'restart_failed') {
         badge.textContent = 'Restart failed';
-        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-warning/15 text-warning';
       } else {
         badge.textContent = '';
         badge.className = 'landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium';
@@ -128,8 +128,8 @@
         var tone = 'bg-fill-subtle text-primary';
         if (state === 'STOPPED') { text = 'Stopped'; tone = 'bg-fill-subtle text-primary'; }
         else if (state === 'UNKNOWN') { text = 'Status unknown'; tone = 'bg-fill-subtle text-secondary'; }
-        else if (state === 'STOPPING') { text = 'Stopping…'; tone = 'bg-amber-100 text-amber-800'; }
-        else if (state === 'STARTING') { text = 'Starting…'; tone = 'bg-amber-100 text-amber-800'; }
+        else if (state === 'STOPPING') { text = 'Stopping…'; tone = 'bg-warning/15 text-warning'; }
+        else if (state === 'STARTING') { text = 'Starting…'; tone = 'bg-warning/15 text-warning'; }
         badge.textContent = text;
         badge.className = 'landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium ' + tone;
         // Inline display again (the base class is inline-flex, so a .hidden
@@ -241,8 +241,8 @@
     setInterval(tickFreshness, 1000);
 
     function badgeClassForStatus(status) {
-      if (status === 'ok') return 'bg-emerald-100 text-emerald-800';
-      if (status === 'error') return 'bg-red-100 text-red-800';
+      if (status === 'ok') return 'bg-success/15 text-success';
+      if (status === 'error') return 'bg-important/15 text-important';
       if (status === 'disabled') return 'bg-fill-subtle text-primary';
       return 'bg-fill-subtle text-primary';
     }
@@ -394,9 +394,9 @@
       if (state === 'BACKING_UP') {
         text = 'Backing up…'; tone = 'bg-blue-100 text-blue-800';
       } else if (state === 'BACKED_UP') {
-        text = 'Backed up ' + relativeAgo(status.last_success_at); tone = 'bg-emerald-100 text-emerald-800';
+        text = 'Backed up ' + relativeAgo(status.last_success_at); tone = 'bg-success/15 text-success';
       } else if (state === 'NEVER') {
-        text = 'Backup pending'; tone = 'bg-amber-100 text-amber-800';
+        text = 'Backup pending'; tone = 'bg-warning/15 text-warning';
       } else if (state === 'UNKNOWN') {
         text = 'Backup status unknown'; tone = 'bg-fill-subtle text-secondary';
       } else {

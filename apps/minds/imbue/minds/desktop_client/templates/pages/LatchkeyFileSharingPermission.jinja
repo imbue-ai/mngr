@@ -37,11 +37,11 @@
     <div class="flex items-center gap-2 mb-1.5">
       <FormLabel inline target="file-sharing-path-input">Path to share</FormLabel>
       {% if access == 'WRITE' %}
-        <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+        <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-warning/12 text-warning border border-warning/30">
           {{ access_human_label }}
         </span>
       {% else %}
-        <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+        <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-success/12 text-success border border-success/30">
           {{ access_human_label }}
         </span>
       {% endif %}
@@ -59,7 +59,7 @@
                oninput="window.updateApproveState && window.updateApproveState()" />
     {# Shown by the inbox shell only when the field holds a non-empty path
        that is outside the shared roots. #}
-    <p id="file-sharing-path-hint" class="hidden mt-1.5 text-xs text-amber-700">
+    <p id="file-sharing-path-hint" class="hidden mt-1.5 text-xs text-warning">
       This path isn't inside a folder Minds can share (your home folder or the system
       temporary folder), so it can't be shared. Pick a path under one of those instead.
     </p>
