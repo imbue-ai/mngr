@@ -106,7 +106,7 @@ def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
 
 
 def _read_live_listing_from_vps(
-    outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+    outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str, window_name: str
 ) -> dict[str, Any]:
     """Run the outer listing script on the VPS and return the parsed live listing.
 
@@ -114,7 +114,9 @@ def _read_live_listing_from_vps(
     for a stopped container, from a ``docker cp``-extracted copy), so agents
     created *inside* the container are discovered.
     """
-    script = build_outer_listing_collection_script(str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID)
+    script = build_outer_listing_collection_script(
+        str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID, window_name=window_name
+    )
     result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
     if not result.success:
         raise MngrError(
@@ -213,9 +215,9 @@ class DockerRealizer(SnapshotCapableRealizer):
         return host_id, record
 
     def read_live_listing(
-        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str, window_name: str
     ) -> tuple[list[dict[str, Any]], bool]:
-        parsed = _read_live_listing_from_vps(outer, host_id, host_dir, prefix)
+        parsed = _read_live_listing_from_vps(outer, host_id, host_dir, prefix, window_name)
         return extract_agent_data_from_parsed_listing(parsed), is_running_container_state(
             parsed.get("container_state")
         )

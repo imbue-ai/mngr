@@ -1741,7 +1741,11 @@ class VpsProvider(BaseProviderInstance):
                 # cache-fallback branch.
                 try:
                     live_agent_data, is_running = realizer.read_live_listing(
-                        outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
+                        outer,
+                        host_id,
+                        str(self.host_dir),
+                        self.mngr_ctx.config.prefix,
+                        self.mngr_ctx.config.tmux.primary_window_name,
                     )
                 except MngrError as listing_exc:
                     logger.warning(

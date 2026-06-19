@@ -104,12 +104,14 @@ class BareRealizer(HostRealizer):
         return HostId(record.certified_host_data.host_id), record
 
     def read_live_listing(
-        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str, window_name: str
     ) -> tuple[list[dict[str, Any]], bool]:
         # The agent's host_dir is on the VM, so the inner listing script runs
         # directly on the outer -- no container indirection. Reaching the VM at
         # all means the agent (the VM) is running.
-        raw = self._run_listing_script(outer, build_listing_collection_script(host_dir, prefix), timeout_seconds=60.0)
+        raw = self._run_listing_script(
+            outer, build_listing_collection_script(host_dir, prefix, window_name), timeout_seconds=60.0
+        )
         parsed = parse_listing_collection_output(raw)
         return extract_agent_data_from_parsed_listing(parsed), True
 
