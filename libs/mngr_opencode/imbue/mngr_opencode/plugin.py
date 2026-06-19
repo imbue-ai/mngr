@@ -210,7 +210,7 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
     cli_args: tuple[str, ...] = Field(
         default=(),
-        description="Additional CLI arguments forwarded to the opencode attach (TUI) client.",
+        description="Extra arguments forwarded to the opencode attach (TUI) client.",
     )
     # config_overrides mirrors mngr_antigravity's settings_overrides: a free-form
     # blob merged last into the per-agent opencode.json. Covers ``model``
@@ -218,8 +218,8 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # "allow", "rm -rf *": "deny"}, "edit": "ask", ...}), ``small_model``, etc.
     config_overrides: dict[str, Any] = Field(
         default_factory=dict,
-        description="Key-value overrides merged last into the per-agent opencode.json. "
-        'Common keys: model ("provider/model"), permission ({"bash": {...}, "edit": "ask"}). '
+        description="Key/value blob merged last into the per-agent opencode.json "
+        "(e.g. model, the permission policy block). "
         'Example: {"model": "anthropic/claude-sonnet-4-5", "permission": {"bash": {"rm -rf *": "deny"}}}.',
     )
     # sync_global_config mirrors mngr_antigravity's sync_home_settings: when True
@@ -228,8 +228,8 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # the base is an empty config.
     sync_global_config: bool = Field(
         default=True,
-        description="Whether to base the per-agent opencode.json on a copy of the user's real "
-        "~/.config/opencode/opencode.json (True, default) or start from an empty base (False).",
+        description="Base the per-agent opencode.json on a copy of the user's "
+        "~/.config/opencode/opencode.json, or start from an empty base.",
     )
     # symlink_auth mirrors mngr_antigravity's symlink_oauth_token. With the
     # default (symlink), the per-agent auth.json symlinks to the shared
@@ -237,16 +237,16 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # agents (and refreshes propagate). Copy mode (False) gives full isolation.
     symlink_auth: bool = Field(
         default=True,
-        description="Symlink (True, default) each per-agent auth.json to the shared "
-        "~/.local/share/opencode/auth.json, so one agent's login authenticates all agents. "
-        "Copy (False) for full isolation (no sharing).",
+        description="Symlink the per-agent auth.json to the shared "
+        "~/.local/share/opencode/auth.json, so one login authenticates all agents. "
+        "Set False for full isolation.",
     )
     # auto_allow_permissions injects a wildcard ``permission`` allow into the
     # per-agent opencode.json (auto-approve every action not explicitly denied) --
     # the config analog of OpenCode's ``run --dangerously-skip-permissions``.
     auto_allow_permissions: bool = Field(
         default=False,
-        description="When True, auto-approve every action not explicitly denied "
+        description="Auto-approve everything not explicitly denied "
         "(injects a wildcard allow into the opencode.json permission block).",
     )
     check_installation: bool = Field(
@@ -274,7 +274,7 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # plugin); only the converter is gated by this flag.
     emit_common_transcript: bool = Field(
         default=True,
-        description="When True, emit a common-schema transcript that `mngr transcript` reads.",
+        description="Emit the common transcript that `mngr transcript` reads.",
     )
     preserve_on_destroy: bool = Field(
         default=True,

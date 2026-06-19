@@ -9,7 +9,7 @@ from paramiko.pkey import PKey
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps.errors import VpsProvisioningError
 
 _SSH_CONNECT_BACKOFF_SECONDS: float = 5.0
 _SSH_CONNECT_BANNER_TIMEOUT_SECONDS: float = 30.0
@@ -145,7 +145,7 @@ def bootstrap_root_authorized_keys_via_user(
     in the ``docker`` group, so it can bootstrap root login itself.
 
     mngr operates as root everywhere downstream (the base
-    ``VpsDockerProvider`` opens its outer SSH sessions as ``root``,
+    ``VpsProvider`` opens its outer SSH sessions as ``root``,
     ``docker_over_ssh`` shells out as ``root``, etc.), so this helper
     bridges the OVH-default and the mngr expectation by sudo-copying
     the authorized_keys file into root's home before any other code
@@ -280,7 +280,7 @@ def _connect_with_retry(
 def _load_private_key(private_key_path: Path) -> paramiko.PKey:
     """Load an SSH private key by trying each supported key type in turn.
 
-    The base ``VpsDockerProvider`` produces SSH keypairs via
+    The base ``VpsProvider`` produces SSH keypairs via
     ``ssh_utils.load_or_create_ssh_keypair`` -> ``generate_ssh_keypair``,
     which currently returns an **RSA** key in TraditionalOpenSSL PEM
     format. paramiko's per-class ``from_private_key_file`` constructors

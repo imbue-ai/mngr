@@ -1,0 +1,1 @@
+Registered the new `overlay` workspace library in the root `pyproject.toml`: added it as a `[tool.uv.sources]` workspace source, and added `--cov=imbue.overlay` to the shared coverage flags so the library is measured in the offload combined-coverage gate (and the `test_top_level_cov_flags_are_union_of_subproject_cov_flags` meta-ratchet stays satisfied).

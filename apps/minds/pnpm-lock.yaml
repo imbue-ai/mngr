@@ -12,8 +12,8 @@ importers:
         specifier: ^1.6.0
         version: 1.6.4
       latchkey:
-        specifier: ^2.16.1
-        version: 2.16.1
+        specifier: ^2.17.1
+        version: 2.17.1
     devDependencies:
       '@playwright/test':
         specifier: 1.60.0
@@ -286,8 +286,8 @@ packages:
     resolution: {integrity: sha512-RE815I4arJFtt+FVeU1Tgp9/Xvecacji8w/V6XtXsWWH/wz/eNkNbhb+ny/+PlVZjV0rxQpRSQKNKE3lcktHEA==}
     engines: {node: '>=10.10.0'}
 
-  '@imbue-ai/detent@1.6.0':
-    resolution: {integrity: sha512-J9PbI8t1Ito6sUsu6zzOHX8CYDwHqi+rlZROqFZ2u5Z+8twD105XcVrZe8RYZ7keEFIS2jtkKye7gBpYSS2cEg==}
+  '@imbue-ai/detent@1.7.0':
+    resolution: {integrity: sha512-QKZnwk8afkLI27gB3YhyfPqVUkXJwEr/ijUIduvV8NnCHDxZcOPqou6c/MOrdKkASBKbRhQCkxAmb3lIjJqZWw==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -1895,8 +1895,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@2.16.1:
-    resolution: {integrity: sha512-X/4MHhEIerwhXJlxSW6OVAu8Vpx7iB2OkrgfnI+5ta/GffPi2ASDp/FcPZ+cefH7dCaGFWm7wNzYf9nOZtK9RA==}
+  latchkey@2.17.1:
+    resolution: {integrity: sha512-r/QJfARRCP4peJjNdTZ5abDw9hV+wxxvWYbCVijlgbIzRutb004LWLolOCxDRVnQFmgYAyOmtdO8KPX1FBM6dg==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -3187,7 +3187,7 @@ snapshots:
 
   '@humanwhocodes/momoa@2.0.4': {}
 
-  '@imbue-ai/detent@1.6.0':
+  '@imbue-ai/detent@1.7.0':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       commander: 14.0.3
@@ -4964,9 +4964,9 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@2.16.1:
+  latchkey@2.17.1:
     dependencies:
-      '@imbue-ai/detent': 1.6.0
+      '@imbue-ai/detent': 1.7.0
       '@napi-rs/keyring': 1.2.0
       commander: 12.1.0
       playwright: 1.60.0

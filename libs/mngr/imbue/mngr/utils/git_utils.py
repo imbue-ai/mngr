@@ -125,7 +125,7 @@ def rsync_worktree_over_clone(
     gitlink file), but it only ships *committed* files. Callers that
     rely on uncommitted edits being in the build context (e.g. the
     minds desktop client's ``--mngr-source``-equivalent path, and
-    ``mngr_vps_docker``'s docker-build-context assembly) need to
+    ``mngr_vps``'s docker-build-context assembly) need to
     overlay the worktree's working tree on top of the clone to recover
     them.
 

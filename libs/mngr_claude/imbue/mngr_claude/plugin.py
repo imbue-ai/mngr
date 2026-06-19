@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Annotated
 from typing import Any
 from typing import Callable
 from typing import ClassVar
@@ -39,9 +40,6 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
-from imbue.mngr.api.git import GitignoreStatus
-from imbue.mngr.api.git import check_path_gitignore_status
-from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
@@ -52,6 +50,8 @@ from imbue.mngr.api.preservation import require_unique_match
 from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.external_settings import apply_settings_patch
+from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -62,6 +62,7 @@ from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
+from imbue.mngr.hosts.host import write_json_dict_via_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
@@ -94,6 +95,7 @@ from imbue.mngr_claude import resources as _claude_resources
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import ClaudeOnboardingNotCompletedError
+from imbue.mngr_claude.claude_config import MANAGED_SETTINGS_RELATIVE_PATH
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
@@ -106,12 +108,15 @@ from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_claude_config
+from imbue.mngr_claude.claude_config import fold_hook_configs
+from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
+from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
 from imbue.mngr_claude.claude_config import get_claude_config_dir
+from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import is_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import is_onboarding_completed
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
-from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
@@ -152,8 +157,9 @@ depending on the build machine's home directory path.
 # <agent_state_dir>/plugin/claude/anthropic/ (the per-agent replacement for ~/.claude/),
 # with session JSONLs filed under its projects/ subdir. Both live local mngr agents and
 # preserved agents mirror this layout, so --adopt can resolve a session ID against
-# either.
-_AGENT_CLAUDE_CONFIG_RELPATH: Final[Path] = Path("plugin") / "claude" / "anthropic"
+# either. Derived from the single-source ``get_agent_claude_config_dir`` (passing an empty
+# base yields the agent-relative subpath) so this layout never drifts from it.
+_AGENT_CLAUDE_CONFIG_RELPATH: Final[Path] = get_agent_claude_config_dir(Path())
 _AGENT_CLAUDE_PROJECTS_RELPATH: Final[Path] = _AGENT_CLAUDE_CONFIG_RELPATH / "projects"
 
 
@@ -302,10 +308,13 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="When True, adds a PermissionRequest hook that auto-allows all permission dialogs. "
         "This means Claude Code will never pause for permission approval.",
     )
-    settings_overrides: dict[str, Any] = Field(
+    settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
-        description="Key-value overrides merged into settings.json at provisioning time. "
-        "Example: {'model': 'opus[1m]', 'fastMode': True}.",
+        description="A patch merged onto your home Claude settings at provisioning. A bare key assigns "
+        "(narrowing-checked); to merge onto the base instead (or replace without the narrowing check), "
+        'declare the key in a top-level `__mngr_merge` map -- `__mngr_merge = {"permissions.allow" = '
+        '"extend"}` -- which vanilla Claude Code ignores. The `__extend`/`__assign` leaf suffixes are '
+        "not accepted here (they would leak into settings.json as junk Claude keys). See mngr's config README.",
     )
     emit_common_transcript: bool = Field(
         default=True,
@@ -322,10 +331,10 @@ class ClaudeAgentConfig(AgentTypeConfig):
     use_env_config_dir: bool = Field(
         default=False,
         description="When True, share the user's $CLAUDE_CONFIG_DIR across all claude agents instead of "
-        "provisioning a per-agent config dir. Local hosts only; $CLAUDE_CONFIG_DIR must be set. "
-        "When set, mngr never writes to the user's Claude config; the user is responsible for "
-        "interactive `claude` setup (trust dialogs, onboarding, credentials) ahead of time. "
-        "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode.",
+        "provisioning a per-agent config dir (local hosts only; $CLAUDE_CONFIG_DIR must be set). mngr "
+        "makes no writes to the user's config, and other sync/override/auto-dismiss fields are ignored. "
+        "See the imbue-mngr-claude README for the setup requirements and reduced-support limitations "
+        "(including the `--settings` collision).",
     )
     streaming_snapshot_interval_seconds: float = Field(
         default=0.0,
@@ -335,6 +344,33 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer. When <= 0 (the default), the watcher is "
         "not provisioned or run.",
     )
+
+
+def build_mngr_hook_configs(config: ClaudeAgentConfig, *, is_unattended: bool) -> list[dict[str, Any]]:
+    """Build the list of mngr hook configs to fold into a Claude settings file.
+
+    Always includes the readiness hooks. Adds the macOS keychain credential-sync
+    hook when ``sync_credentials_on_login`` is set (on macOS), and the permission
+    auto-allow hook when the agent runs unattended. The caller passes
+    ``is_unattended`` from the ``HasUnattendedModeMixin`` contract
+    (``is_unattended_enabled``) so the gate cannot drift from that contract; the
+    agent-less deploy path passes the equivalent config field directly.
+    """
+    hook_configs = [build_readiness_hooks_config()]
+    if config.sync_credentials_on_login and is_macos():
+        hook_configs.append(build_credential_sync_hooks_config())
+    if is_unattended:
+        hook_configs.append(build_permission_auto_allow_hooks_config())
+    return hook_configs
+
+
+def _has_settings_flag(args: Sequence[str]) -> bool:
+    """True if ``args`` contains a claude ``--settings`` flag (``--settings X`` or ``--settings=X``).
+
+    Detection only looks at the flag token, so it works for both the quote-retaining
+    ``cli_args`` tokens and the raw ``agent_args`` argv.
+    """
+    return any(arg == "--settings" or arg.startswith("--settings=") for arg in args)
 
 
 class ProvisioningContext(FrozenModel):
@@ -410,6 +446,14 @@ Agent config dirs follow the pattern: <agent_state_dir>/plugin/claude/anthropic/
 Finding this segment in an installPath means the plugin was installed inside
 an mngr agent rather than in the user's persistent ~/.claude/ directory.
 """
+
+# The ``--settings`` flag passed to claude at launch (see ``assemble_command``),
+# pointing at the per-agent managed settings file via the runtime
+# $MNGR_AGENT_STATE_DIR. Loading mngr's hooks this way keeps them out of the
+# project's settings.local.json. See ``get_managed_settings_path``.
+_MANAGED_SETTINGS_SHELL_PATH: Final[str] = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MANAGED_SETTINGS_RELATIVE_PATH)}"
+MANAGED_SETTINGS_LAUNCH_ARG: Final[str] = f'--settings "{_MANAGED_SETTINGS_SHELL_PATH}"'
+
 
 _PLUGINS_DIR_MARKER: Final[str] = "/plugins/"
 """Generic marker for extracting relative plugin paths.
@@ -508,24 +552,42 @@ def _build_settings_json(
     config: ClaudeAgentConfig,
     ctx: ProvisioningContext,
     sync_local: bool,
+    *,
+    is_unattended: bool = False,
+    allow_narrowing: bool = False,
 ) -> str:
     """Build settings.json content for per-agent config dirs.
 
-    Uses the local file as a base when sync_local is True and the file exists,
-    otherwise uses generated defaults. Applies context-dependent flags
-    (e.g. skipDangerousModePermissionPrompt for unattended) and user overrides.
+    Builds the provision base ``B`` (home settings.json or generated defaults + context
+    flags + mngr's own hooks), then folds the user's ``settings_overrides`` patch onto it
+    via ``apply_settings_patch`` (see that function for the fold semantics and the narrowing
+    guard, gated by ``allow_narrowing``).
+
+    The hooks land in the config-dir ``settings.json`` (the "user" layer Claude reads from
+    ``$CLAUDE_CONFIG_DIR``) rather than a managed ``--settings`` file, so a user's own
+    ``--settings`` passes through and Claude layers it natively.
     """
     source = source_claude_dir / "settings.json"
     if sync_local and source.exists():
         try:
             data: dict[str, Any] = json.loads(source.read_text())
+            base_description = f"your home Claude settings ({source})"
         except json.JSONDecodeError:
             logger.warning("Corrupt settings.json at {}, using defaults", source)
             data = _generate_claude_home_settings()
+            base_description = "mngr's generated Claude settings defaults"
     else:
         data = _generate_claude_home_settings()
+        base_description = "mngr's generated Claude settings defaults"
+    # Flags are flat scalars, so a shallow update is correct here.
     data.update(compute_settings_json_flags(ctx))
-    data.update(config.settings_overrides)
+
+    # Fold in mngr's own hooks (concatenated into the hook event lists by
+    # merge_hooks_config), then fold the user's settings_overrides patch onto that base.
+    data = fold_hook_configs(data, build_mngr_hook_configs(config, is_unattended=is_unattended))
+    data = apply_settings_patch(
+        data, config.settings_overrides, allow_narrowing=allow_narrowing, base_description=base_description
+    )
     return json.dumps(data, indent=2) + "\n"
 
 
@@ -797,14 +859,12 @@ def _prompt_user_for_onboarding_completion() -> bool:
 def _claude_json_has_primary_api_key() -> bool:
     """Check if ~/.claude.json contains a non-empty primaryApiKey."""
     claude_json_path = find_user_claude_config()
-    if not claude_json_path.exists():
-        return False
     try:
-        config_data = json.loads(claude_json_path.read_text())
-        return bool(config_data.get("primaryApiKey"))
+        config_data = read_claude_config(claude_json_path)
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Could not read claude config at {}: {}", claude_json_path, e)
         return False
+    return bool(config_data.get("primaryApiKey"))
 
 
 def _read_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGroup) -> str | None:
@@ -1216,7 +1276,7 @@ def _provision_stream_snapshot_script(
     provision_scripts_to_commands_dir(
         host, agent_state_dir, {_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: script}, concurrency_group
     )
-    interval_path = agent_state_dir / "plugin" / "claude" / "stream_interval"
+    interval_path = get_agent_claude_plugin_dir(agent_state_dir) / "stream_interval"
     host.write_file(interval_path, f"{interval_seconds}\n".encode(), "0644")
 
 
@@ -1271,46 +1331,6 @@ def _has_api_credentials_available(
             return True
 
     return False
-
-
-def _check_settings_local_gitignored(
-    host: OnlineHostInterface,
-    repo_path: Path,
-    require_repo_rule: bool = False,
-) -> None:
-    """Verify .claude/settings.local.json is gitignored in the given repo path.
-
-    When .claude is a symlink, resolves it and checks the resolved path against
-    .gitignore instead (e.g. .agents/settings.local.json if .claude -> .agents).
-
-    Raises PluginMngrError if the file is not gitignored. Silently returns
-    if the path is not a git repository or if the .claude symlink target is
-    outside the repo (since git won't track it).
-
-    When require_repo_rule is True, also verifies that the ignore rule comes
-    from the repository itself (not the user's global gitignore). This is
-    important for preflight checks: a global gitignore entry won't exist on
-    remote hosts, so the provisioning check would fail after expensive host
-    creation.
-    """
-    settings_subpath = Path(".claude") / "settings.local.json"
-    if require_repo_rule:
-        status, settings_relative = check_path_repo_gitignore_status(host, repo_path, settings_subpath)
-    else:
-        status, settings_relative = check_path_gitignore_status(host, repo_path, settings_subpath)
-    if status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED):
-        return
-    if status is GitignoreStatus.NOT_IGNORED:
-        raise PluginMngrError(
-            f"'{settings_relative}' is not gitignored in {repo_path}.\n"
-            "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
-            f"Add '{settings_relative}' to your .gitignore and try again."
-        )
-    raise PluginMngrError(
-        f"'{settings_relative}' is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
-        "Remote hosts don't have your global gitignore, so this will fail during provisioning.\n"
-        f"Add '{settings_relative}' to your repository's .gitignore and try again."
-    )
 
 
 class DialogIndicator(FrozenModel, ABC):
@@ -1463,26 +1483,6 @@ class ClaudeCoreAgent(
             )
         }
 
-    @classmethod
-    def preflight_check(
-        cls,
-        source_host: OnlineHostInterface,
-        source_path: Path,
-        agent_options: CreateAgentOptions,
-        agent_config: AgentTypeConfig,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """Validate that .claude/settings.local.json is gitignored in the source repo.
-
-        mngr writes readiness hooks to this file during provisioning. If it's not
-        gitignored, it would appear as an unstaged change. Checking early avoids
-        wasting time on host creation and work_dir setup before surfacing this error.
-
-        Uses require_repo_rule=True so that rules only in the user's global
-        gitignore are rejected -- remote hosts won't have the global config.
-        """
-        _check_settings_local_gitignored(source_host, source_path, require_repo_rule=True)
-
     def get_claude_config_dir(self) -> Path:
         """Return the Claude config directory for this agent.
 
@@ -1497,7 +1497,7 @@ class ClaudeCoreAgent(
         """
         if self.agent_config.use_env_config_dir:
             return resolve_shared_claude_config_dir()
-        return self._get_agent_dir() / _AGENT_CLAUDE_CONFIG_RELPATH
+        return get_agent_claude_config_dir(self._get_agent_dir())
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
@@ -1588,73 +1588,47 @@ class ClaudeCoreAgent(
 
         return transfers
 
-    def _configure_agent_hooks(self, host: OnlineHostInterface) -> None:
-        """Configure Claude hooks in the agent's work_dir.
+    def _configure_agent_hooks(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        """Write mngr's hooks (and the user's settings_overrides) to the managed settings file.
 
-        Writes hooks to .claude/settings.local.json in the agent's work_dir:
-        - Readiness hooks that signal when Claude is actively processing by
-          creating/removing an 'active' file in the agent's state directory.
-        - On macOS with sync_credentials_on_login enabled, a
-          Notification:auth_success hook that propagates keychain credentials
-          to all per-agent entries after login.
+        This is the ``use_env_config_dir``-mode channel only. In that mode there
+        is no per-agent config dir to bake hooks into, so mngr loads them at
+        launch via ``claude --settings`` (see ``assemble_command``) from a file
+        it owns under the agent state dir -- not the project's
+        ``.claude/settings.local.json``, which plain ``claude`` also reads (see
+        ``get_managed_settings_path``). Overwritten fresh each provision, so it
+        never accumulates stale hooks.
 
-        When auto_allow_permissions is True, also adds a hook that auto-allows
-        all permission dialogs so Claude never pauses for approval.
+        In normal mode the same content is baked into the per-agent config-dir
+        ``settings.json`` by ``_build_settings_json`` instead; this method is not
+        called.
 
-        Skips if hooks already exist.
+        Always writes the readiness hooks (which mark the agent active/idle via
+        files in its state dir). Adds the macOS keychain-sync hook when
+        sync_credentials_on_login is set, and the permission auto-allow hook when
+        unattended. Then folds the user's ``settings_overrides`` patch onto that,
+        so the managed file is the single ``--settings`` overlay Claude layers
+        (highest precedence) over the user's shared config -- the base for the
+        fold is mngr's hooks (not the shared config, which Claude layers itself),
+        so narrowing here only guards against an override dropping mngr's hooks.
         """
-        # Future improvement: use `claude --settings <path>` to load hooks from
-        # outside the worktree (e.g. the agent state dir), eliminating the need
-        # to write to .claude/settings.local.json and check that it's gitignored.
-        settings_relative = Path(".claude") / "settings.local.json"
-        settings_path = self.work_dir / settings_relative
+        # The always-on readiness hooks, plus the optional credential-sync (macOS) and
+        # permission auto-allow hooks, with the user's settings_overrides folded on top.
+        settings = fold_hook_configs(
+            {}, build_mngr_hook_configs(self.agent_config, is_unattended=self.is_unattended_enabled())
+        )
+        settings = apply_settings_patch(
+            settings,
+            self.agent_config.settings_overrides,
+            allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
+            base_description="mngr's managed Claude hooks",
+        )
 
-        # Check gitignore. During create(), preflight_check already verified
-        # this on the source; this check runs on the destination as a defense
-        # in depth.
-        _check_settings_local_gitignored(host, self.work_dir, require_repo_rule=False)
-
-        hooks_config = build_readiness_hooks_config()
-
-        # Read existing settings if present
-        existing_settings: dict[str, Any] = {}
-        try:
-            content = host.read_text_file(settings_path)
-            existing_settings = json.loads(content)
-        except FileNotFoundError:
-            pass
-
-        # Merge readiness hooks, checking for duplicates
-        is_changed = False
-        merged = merge_hooks_config(existing_settings, hooks_config)
-
-        # Conditionally add credential sync hooks (macOS only)
-        if self.agent_config.sync_credentials_on_login and is_macos():
-            credential_hooks = build_credential_sync_hooks_config()
-            merged_with_creds = merge_hooks_config(merged or existing_settings, credential_hooks)
-            if merged_with_creds is not None:
-                merged = merged_with_creds
-
-        if merged is None:
-            logger.debug("Readiness hooks already configured in {}", settings_path)
-            merged = existing_settings
-        else:
-            is_changed = True
-
-        # Merge permission auto-allow hooks if configured (driven by the unattended contract)
-        if self.is_unattended_enabled():
-            permission_hooks = build_permission_auto_allow_hooks_config()
-            merged_with_permissions = merge_hooks_config(merged, permission_hooks)
-            if merged_with_permissions is not None:
-                merged = merged_with_permissions
-                is_changed = True
-
-        if not is_changed:
-            return
-
-        # Write the merged settings
+        settings_path = get_managed_settings_path(self._get_agent_dir())
+        # The plugin/claude/ parent may not exist yet (in use_env_config_dir
+        # mode the per-agent config dir is not provisioned), so create it.
         with log_span("Configuring agent hooks in {}", settings_path):
-            host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+            write_json_dict_via_host(host, settings_path, settings, make_parent=True)
 
     def _dismiss_start_dialogs(
         self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext
@@ -1746,7 +1720,14 @@ class ClaudeCoreAgent(
         # approval missed the key and claude blocked on the custom-key TUI prompt.
         approve_api_key_for_claude(claude_json_data, host=host, options=options)
 
-        settings_json = _build_settings_json(source_claude_dir, config, ctx, sync_local=config.sync_home_settings)
+        settings_json = _build_settings_json(
+            source_claude_dir,
+            config,
+            ctx,
+            sync_local=config.sync_home_settings,
+            is_unattended=self.is_unattended_enabled(),
+            allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
+        )
 
         generated_files: dict[Path, str] = {
             Path("settings.json"): settings_json,
@@ -1882,8 +1863,12 @@ class ClaudeCoreAgent(
             if not config.use_env_config_dir:
                 self._setup_per_agent_config_dir(host, options, mngr_ctx)
 
-            # Configure readiness hooks (for both local and remote hosts)
-            self._configure_agent_hooks(host)
+            # Configure mngr's hooks. In normal mode they are baked into the
+            # per-agent config-dir settings.json by _setup_per_agent_config_dir
+            # (-> _build_settings_json) above. In use_env_config_dir mode there is
+            # no per-agent config dir, so write the managed --settings file instead.
+            if config.use_env_config_dir:
+                self._configure_agent_hooks(host, mngr_ctx)
 
             # should be done by now, just wanted to do in parallel for latency reasons
             provision_backgroun_script_thread.join(60.0)
@@ -2095,7 +2080,7 @@ class ClaudeAgent(
         the last complete assistant message; the remaining lines are the
         in-progress assistant text reverse-mapped to markdown.
         """
-        return self._get_agent_dir() / "plugin" / "claude" / "stream_buffer"
+        return get_agent_claude_plugin_dir(self._get_agent_dir()) / "stream_buffer"
 
     def make_live_output_reader(self) -> LiveOutputReader:
         """Diff successive stream_buffer snapshots into incremental assistant-text deltas."""
@@ -2202,7 +2187,14 @@ class ClaudeAgent(
         # Build the additional arguments (cli_args from config + agent_args from CLI).
         # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
         # before being spliced into this shell-evaluated command (see ``quote_agent_args``).
-        all_extra_args = self.agent_config.cli_args + quote_agent_args(agent_args)
+        # A user ``--settings`` passes through verbatim: in normal mode mngr injects no
+        # ``--settings`` of its own (its hooks live in the config-dir settings.json, which
+        # Claude layers under the user's command-line ``--settings``), so there is nothing
+        # to collide with. In use_env_config_dir mode mngr does inject its own ``--settings``
+        # (see ``mngr_settings_arg`` below); a user ``--settings`` then collides with it
+        # (Claude is last-wins) -- the accepted, documented limitation of that mode.
+        cli_args = self.agent_config.cli_args
+        all_extra_args = cli_args + quote_agent_args(agent_args)
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
@@ -2222,8 +2214,12 @@ class ClaudeAgent(
         # the end of assemble_command would spawn a fresh `claude --session-id
         # <agent_uuid>` without surfacing any error -- so an adopted session
         # would appear to do nothing.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
-        create_cmd = f"{base} --session-id {agent_uuid}"
+        # mngr injects its own --settings only in use_env_config_dir mode (the managed
+        # hooks file). In normal mode the hooks are baked into the config-dir settings.json,
+        # so mngr adds no --settings here.
+        mngr_settings_arg = f" {MANAGED_SETTINGS_LAUNCH_ARG}" if self.agent_config.use_env_config_dir else ""
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base}{mngr_settings_arg} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        create_cmd = f"{base}{mngr_settings_arg} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present
         if args_str:
@@ -2273,6 +2269,18 @@ class ClaudeAgent(
                     "use_env_config_dir=True is only supported for local hosts; "
                     "this agent targets a non-local host. Disable use_env_config_dir "
                     "or move the agent to a local host."
+                )
+            # mngr injects its own `--settings` (the managed hooks file) in this mode, which
+            # would collide with a user-supplied `--settings` (Claude is last-wins). mngr
+            # can't reliably merge them -- a `--settings` value may be inline JSON, not a
+            # file -- so fail fast and point at the supported alternatives.
+            if _has_settings_flag(config.cli_args) or _has_settings_flag(options.agent_args):
+                raise UserInputError(
+                    "use_env_config_dir=True passes mngr's own `--settings` to claude (to load its "
+                    "hooks), which collides with the `--settings` you supplied via cli_args/agent_args. "
+                    "Put those settings in the agent type's `settings_overrides`, "
+                    "or set use_env_config_dir=False so mngr provisions a per-agent config dir and claude "
+                    "layers your `--settings` natively."
                 )
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip when auto_dismiss_dialogs is True because
@@ -2738,9 +2746,16 @@ def get_files_for_deploy(
     deploy_ctx = ProvisioningContext(is_unattended=True, copy_project_config_from=None)
     deploy_config = ClaudeAgentConfig()
 
-    # settings.json always ships (generated, not a direct copy)
+    # settings.json always ships (generated, not a direct copy). There is no agent
+    # instance here, so the unattended gate reads the config field directly -- the
+    # field-based equivalent of Claude's is_unattended_enabled().
     files[Path("~/.claude/settings.json")] = _build_settings_json(
-        local_claude_dir, deploy_config, deploy_ctx, sync_local=include_user_settings
+        local_claude_dir,
+        deploy_config,
+        deploy_ctx,
+        sync_local=include_user_settings,
+        is_unattended=deploy_config.auto_allow_permissions,
+        allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
     )
 
     # Always ship .claude.json to $HOME/.claude/ in the deploy image.

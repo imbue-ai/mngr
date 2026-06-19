@@ -52,7 +52,7 @@ def test_register_provider_backend_returns_tuple() -> None:
 # -- F1 invariant -------------------------------------------------------------
 #
 # Constructing a full ``OvhProvider`` for a behaviour-level test is
-# expensive (it inherits from ``VpsDockerProvider`` which inherits from
+# expensive (it inherits from ``VpsProvider`` which inherits from
 # ``BaseProviderInstance`` and pulls in ``MngrContext`` etc.). The
 # parsing-failure path itself is already exhaustively covered by
 # ``iam_tags_test.py::test_parse_extra_tags_env_*``. What F1 added is a

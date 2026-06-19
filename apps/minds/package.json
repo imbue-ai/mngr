@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.16.1"
+    "latchkey": "^2.17.1"
   },
   "devDependencies": {
     "@tailwindcss/cli": "4.2.1",

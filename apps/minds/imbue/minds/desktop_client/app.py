@@ -339,6 +339,14 @@ async def _managed_lifespan(
             # (which uses read=None timeout and otherwise blocks forever
             # waiting for the gateway to push the next request).
             permission_requests_consumer.stop()
+        # Terminate the idle pre-warmed ``mngr`` process (if any) before
+        # draining the root concurrency group. It is blocked reading its
+        # socket for the next request and never exits on its own, so leaving
+        # it for the CG drain below would wait out the full shutdown timeout
+        # and surface a "strand did not finish in time" warning on every clean
+        # exit -- the same reasoning as the consumers above. ``stop`` SIGTERMs
+        # it so the drain sees it already finished.
+        get_default_mngr_caller().stop()
         # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
         # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
         # a detached tunnel-setup task) to finish.

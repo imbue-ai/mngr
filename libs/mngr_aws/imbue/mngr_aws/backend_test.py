@@ -32,11 +32,14 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
-from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.bare_realizer import BareRealizer
+from imbue.mngr_vps.docker_realizer import DockerRealizer
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
+from imbue.mngr_vps.host_store import VpsHostConfig
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -368,7 +371,11 @@ def test_discover_surfaces_stopped_instance_but_offline_read_raises_without_buck
 
 
 def test_offline_discovered_host_from_instance_yields_stopped_host(temp_mngr_ctx: MngrContext) -> None:
-    """A stopped instance with ``mngr-host-id`` + ``Name`` tags yields a STOPPED DiscoveredHost with that name."""
+    """A stopped instance with ``mngr-host-id`` + ``Name`` tags yields a STOPPED DiscoveredHost with that name.
+
+    Exercises the shared ``OfflineCapableVpsProvider._offline_discovered_host_from_instance``
+    default through AWS's ``_host_name_tag_key()`` hook (``Name``).
+    """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     instance = _normalized_instance({"mngr-host-id": str(host_id), "Name": "mngr-myhost"})
@@ -429,7 +436,7 @@ def _seed_state_store_bucket(provider: AwsProvider, *, record_json: str | None =
 
 def _stopped_host_record_json(host_id: HostId, *, vps_ssh_key_id: str) -> str:
     """A mirrored stopped-host record carrying the per-host SSH key id to clean up on destroy."""
-    return VpsDockerHostRecord(
+    return VpsHostRecord(
         certified_host_data=CertifiedHostData(
             host_id=str(host_id),
             host_name="myhost",
@@ -458,7 +465,7 @@ def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx
     """Destroying a STOPPED host terminates its EC2 instance and removes its external state.
 
     The base SSH/volume teardown raises ``HostNotFoundError`` for a stopped host
-    (no reachable vps_ip), so ``OfflineCapableVpsDockerProvider.destroy_host`` must
+    (no reachable vps_ip), so ``OfflineCapableVpsProvider.destroy_host`` must
     fall back to the offline path: resolve the instance by its ``mngr-host-id`` tag,
     terminate it, and delete the mirrored state. This is the fix for the leak where
     ``mngr destroy`` of a stopped host left the instance running.
@@ -561,7 +568,7 @@ def test_destroy_host_offline_dispatch_ignores_stale_cached_record_with_vps_ip(t
     )
     # Seed the warm cache with a reachable-looking record (vps_ip + config set), as
     # an in-process ``mngr stop`` leaves it; the dispatch must still go offline.
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+    provider._host_record_cache[host_id] = VpsHostRecord(
         certified_host_data=CertifiedHostData(
             host_id=str(host_id),
             host_name="myhost",
@@ -605,7 +612,7 @@ def _reachable_provider_with_record(temp_mngr_ctx: MngrContext, host_id: HostId)
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+    provider._host_record_cache[host_id] = VpsHostRecord(
         certified_host_data=certified,
         vps_ip="1.2.3.4",
         config=VpsHostConfig(
@@ -663,6 +670,22 @@ def test_persist_agent_data_does_not_bypass_on_volume_store_for_running_host(tem
 def _normalized_instance(tag_pairs: dict[str, str]) -> dict:
     """A normalized instance dict (``{"id", "tags": ["k=v", ...]}``) for offline-discovery helper tests."""
     return {"id": "i-1", "tags": [f"{k}={v}" for k, v in tag_pairs.items()]}
+
+
+def test_realizer_for_instance_reads_bare_marker_from_ec2_tags(temp_mngr_ctx: MngrContext) -> None:
+    """An EC2 bare host (tag ``mngr-isolation=none``) resolves to the BARE realizer.
+
+    AWS stamps the placement marker as a plain EC2 tag, read back in the normalized
+    ``key=value`` list. The provider config defaults to CONTAINER, but the host's own
+    placement marker selects the bare realizer -- the fix that makes a bare host
+    discoverable/reachable without re-specifying isolation at connect time.
+    """
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
+    bare = _normalized_instance({"mngr-host-id": "h-1", ISOLATION_TAG_KEY: "none"})
+    assert isinstance(provider._realizer_for_instance(bare), BareRealizer)
+    # An untagged (pre-marker) instance defaults to the container realizer.
+    legacy = _normalized_instance({"mngr-host-id": "h-2"})
+    assert isinstance(provider._realizer_for_instance(legacy), DockerRealizer)
 
 
 def test_validate_provider_args_under_pytest_raises_when_unset(
@@ -830,8 +853,8 @@ def test_build_provider_instance_does_not_touch_ami_resolution(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     config = AwsProviderConfig(
         backend=AWS_BACKEND_NAME,
-        default_ami_id="",
-        default_ami_by_region={},
+        default_region="ap-south-1",
+        default_ami_id=None,
     )
     name = ProviderInstanceName("aws-test")
 
@@ -859,8 +882,8 @@ def test_create_vps_instance_raises_mngr_error_when_no_ami_configured(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     config = AwsProviderConfig(
         backend=AWS_BACKEND_NAME,
-        default_ami_id="",
-        default_ami_by_region={},
+        default_region="ap-south-1",
+        default_ami_id=None,
     )
     name = ProviderInstanceName("aws-test")
     provider = AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)

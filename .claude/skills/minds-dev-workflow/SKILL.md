@@ -138,6 +138,20 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 | `just deploy [--yes-i-mean-<tier>]` | Run `minds env deploy` on the activated env. For dev envs: provisions Modal env / Neon / SuperTokens + deploys both Modal apps + writes `~/.minds-<env>/{client.toml,secrets.toml}`. For tier deploys: pushes Vault secrets to Modal + deploys both Modal apps, no local state written. |
 | `just sync-vendor-mngr <fct-path>` | One-shot: snapshot mngr HEAD into FCT's vendor/mngr/ via `git archive` and commit in FCT. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
 
+### Vault (for pool / slice bakes)
+
+Pool/slice bakes (`minds pool create`, `just bake-pool-host-{dev,prod}`, `just bake-slice-{dev,prod}`) read secrets from Vault (the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.). Two things to know:
+
+- **Login is interactive.** Run `vault login -method=oidc` once per session (browser OIDC); the token lands at `~/.vault-token`.
+- **`VAULT_ADDR` / `VAULT_NAMESPACE` are usually NOT set in a non-interactive shell.** The minds wrappers (`minds pool ...` and the `bake-*` recipes) apply the imbue HCP defaults automatically via `apps/minds/imbue/minds/envs/vault_reader.py`, so they "just work" with only the token -- **prefer them**. If you run a **raw** `vault` or `mngr imbue_cloud admin ...` command, a bare `vault` defaults to `https://127.0.0.1:8200` and fails with "connection refused" -- that is a missing address, **NOT** "logged out" (don't ask the operator to re-login, and don't ask them for `VAULT_ADDR`). Export the defaults first:
+
+  ```bash
+  export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+  export VAULT_NAMESPACE=admin
+  ```
+
+  Single source of truth: `_DEFAULT_VAULT_ADDR` / `_DEFAULT_VAULT_NAMESPACE` in `vault_reader.py` -- read them from there in case they drift.
+
 ### Env vars `just minds-start` sets
 
 `MINDS_ROOT_NAME` / `MNGR_HOST_DIR` / `MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` come from `minds env activate <name>` in your shell -- `minds-start` requires them to be set and refuses otherwise. Beyond those:

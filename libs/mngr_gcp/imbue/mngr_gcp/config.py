@@ -12,7 +12,8 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
 from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_gcp.state_bucket import GcsStateBucket
+from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 
 # OAuth scope granting full access to all Google Cloud Platform APIs. Only
 # applied when ``service_account_email`` is set (attaching a service account to
@@ -75,7 +76,7 @@ def get_gcloud_compute_zone(concurrency_group: ConcurrencyGroup) -> str | None:
     return zone or None
 
 
-class GcpProviderConfig(VpsDockerProviderConfig):
+class GcpProviderConfig(OfflineCapableVpsProviderConfig):
     """Configuration for the GCP Compute Engine VPS Docker provider.
 
     Credentials are deliberately not stored in this config. Google
@@ -94,68 +95,54 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         default=ProviderBackendName("gcp"),
         description="Provider backend (always 'gcp' for this type)",
     )
-    project_id: str = Field(
-        default="",
+    project_id: str | None = Field(
+        default=None,
         description=(
-            "GCP project ID for new instances. A plain identifier, not a credential (ADC supplies "
-            "the actual credentials). When left empty, the project is taken from Application Default "
-            "Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env "
-            "var); set it explicitly to pin a specific project."
+            "GCP project ID (a plain identifier, not a credential). When unset, the project is "
+            "taken from Application Default Credentials (the active 'gcloud config set project' or the "
+            "GOOGLE_CLOUD_PROJECT env var); set it explicitly to pin a specific project."
         ),
     )
     default_region: str | None = Field(
         default=None,
         description=(
-            "Default GCE region (e.g., 'us-west1'). Used only to validate the resolved zone. When "
-            "unset, the region is derived from the resolved zone, so it never needs to be set "
-            "explicitly; set it to assert a region and catch a mismatched default_zone typo."
+            "GCE region (e.g., 'us-west1'). Used only to validate the resolved zone; when unset, "
+            "derived from the resolved zone. Set it to catch a mismatched default_zone typo."
         ),
     )
     default_zone: str | None = Field(
         default=None,
         description=(
-            "Default GCE zone (GCE VMs are zonal, e.g. 'us-west1-a'). When unset, the zone is taken "
-            "from the active 'gcloud config get compute/zone' if the gcloud CLI is available, "
-            "otherwise it falls back to 'us-west1-a'; set it explicitly to pin a zone. Must lie in "
-            "default_region when both are set explicitly."
+            "Zone for new instances (GCE VMs are zonal). When unset, taken from the active "
+            "'gcloud config get compute/zone'. Must lie in default_region when both are set explicitly."
         ),
     )
     default_machine_type: str = Field(
         default="e2-small",
-        description="Default GCE machine type (e.g., 'e2-small' for ~2 vCPU, 2GB RAM).",
+        description="GCE machine type.",
     )
     default_source_image: str = Field(
         default=DEFAULT_GCE_IMAGE,
         description=(
-            "GCE VM boot-disk image (not the base ``default_image``, which is the Docker container "
-            "image). Global family string (no per-region map). Defaults to Debian 12."
+            "GCE VM boot-disk image (distinct from the base default_image, the Docker container "
+            "image run inside the VM)."
         ),
     )
     boot_disk_size_gb: int = Field(
         default=30,
-        description="Size of the boot persistent disk in GB.",
+        description="Boot disk size in GB.",
     )
     boot_disk_type: str = Field(
         default="pd-balanced",
-        description="Boot disk type (e.g., 'pd-balanced', 'pd-ssd', 'pd-standard').",
+        description="Boot disk type.",
     )
     network: str = Field(
         default="default",
-        description="VPC network name for the instance NIC and the firewall rule `mngr gcp prepare` creates.",
+        description="VPC network for the instance NIC and firewall rule.",
     )
     subnetwork: str | None = Field(
         default=None,
-        description="Subnetwork name. Required for custom-mode VPCs; None lets GCE pick for auto-mode networks.",
-    )
-    allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=("0.0.0.0/0",),
-        description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the firewall rule "
-            "`mngr gcp prepare` creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ['203.0.113.4/32'] to "
-            "restrict to your own IP, or [] for no ingress (no firewall rule is created and the "
-            "instance is unreachable from outside its VPC). A warning is logged when the effective "
-            "range is 0.0.0.0/0 or empty."
-        ),
+        description="Optional explicit subnetwork (required for custom-mode VPCs); None lets GCE pick for auto-mode networks.",
     )
     firewall_name: str = Field(
         default="mngr-gcp-ssh",
@@ -163,31 +150,44 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     )
     firewall_target_tag: str = Field(
         default="mngr-ssh",
-        description=(
-            "Network tag bound to the firewall rule `mngr gcp prepare` creates. Every instance is tagged with it so "
-            "the rule targets only mngr-managed VMs (GCE firewalls are network-scoped + tag-targeted, "
-            "not per-instance like an EC2 security group)."
-        ),
+        description="Network tag bound to the firewall rule; every instance is tagged with it.",
     )
     associate_external_ip: bool = Field(
         default=True,
         description=(
-            "Assign an ephemeral external IPv4 address to the instance. Required for the current "
-            "mngr-from-developer-laptop SSH access model. For a more secure deployment, set to False "
+            "Assign an ephemeral external IPv4 to instances. Required for the current "
+            "mngr-from-developer-laptop SSH access model; for a more secure deployment, set to False "
             "and run mngr from a bastion inside the VPC."
         ),
     )
     service_account_email: str | None = Field(
         default=None,
         description=(
-            "Optional service account email attached to launched instances. A plain identifier. When "
-            "None, the field is omitted from the create request, so GCE applies its normal default "
-            "for an unspecified service account."
+            "Optional service account email attached to launched instances. When None, GCE applies "
+            "its normal default for an unspecified service account."
         ),
     )
     service_account_scopes: tuple[str, ...] = Field(
         default=DEFAULT_SERVICE_ACCOUNT_SCOPES,
         description="OAuth scopes for the attached service account (only used when service_account_email is set).",
+    )
+    state_bucket_name: str | None = Field(
+        default=None,
+        description=(
+            "GCS bucket where mngr stores a stopped instance's offline host_dir mirror so it is "
+            "readable without starting the instance. When None, named 'mngr-state-<project_id>'. The "
+            "bucket is provisioned by `mngr gcp prepare` and only used when "
+            "`is_offline_host_dir_enabled` is on; the host + agent records still live in GCE "
+            "instance metadata regardless."
+        ),
+    )
+    is_offline_host_dir_enabled: bool = Field(
+        default=True,
+        description=(
+            "When on (default), a stopped instance's host_dir is readable without starting it, so "
+            "`mngr event` / `mngr transcript` / `mngr file` work against it. `mngr gcp prepare` sets "
+            "up the GCS bucket it needs. Set False to turn it off."
+        ),
     )
 
     def get_credentials_and_resolved_project(self) -> tuple[Credentials, str | None]:
@@ -286,3 +286,42 @@ class GcpProviderConfig(VpsDockerProviderConfig):
                 "Check default_zone / default_region (or the active 'gcloud config get compute/zone')."
             )
         return zone, region
+
+    def resolve_state_bucket_region(self, zone: str) -> str:
+        """Return the region the GCS state bucket should live in.
+
+        Explicit ``default_region`` wins; otherwise the region is derived from
+        the resolved zone (GCE zones are ``<region>-<suffix>``). Used by both
+        the operator CLI (``mngr gcp prepare`` / ``cleanup``) and the runtime
+        provider so they pin the bucket to the same region.
+        """
+        return self.default_region or zone.rsplit("-", 1)[0]
+
+    def resolve_state_bucket_name(self, project_id: str) -> str:
+        """Return the effective state-bucket name.
+
+        ``state_bucket_name`` wins when set. Otherwise derive
+        ``mngr-state-<project_id>``. GCS bucket names are globally unique but
+        scoped per project, and a GCP project id is already DNS-valid lowercase,
+        so the derived name is anchored on the project alone (no extra hash is
+        needed). Always derivable: unlike AWS, which needs an STS call to learn
+        the account id, the project id is known at config-resolution time.
+        """
+        if self.state_bucket_name:
+            return self.state_bucket_name
+        return f"mngr-state-{project_id}"
+
+    def build_state_bucket(self, credentials: Credentials, project_id: str, region: str) -> GcsStateBucket:
+        """Build a ``GcsStateBucket`` from this config + the resolved credentials / project / region.
+
+        The bucket name is always derivable, so this never returns None -- the
+        provider gates on whether the bucket actually *exists* (i.e. whether
+        ``mngr gcp prepare`` created it), not on whether a name can be built.
+        Mirrors ``AzureProviderConfig.build_state_bucket``.
+        """
+        return GcsStateBucket(
+            credentials=credentials,
+            project_id=project_id,
+            region=region,
+            bucket_name=self.resolve_state_bucket_name(project_id),
+        )

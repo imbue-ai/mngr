@@ -13,7 +13,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
-from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps.config import PublicIpVpsProviderConfig
 
 # Storage-account names are globally unique, 3-24 chars, lowercase alphanumeric
 # only (no hyphens). The derived name is ``mngrst<hash>`` where ``<hash>`` is a
@@ -31,7 +31,7 @@ AZURE_MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
 
 # Default marketplace image: Debian 12 (gen2), matching the Debian-12 default of
 # the other mngr providers (aws / gcp / ovh / vultr). Debian's Azure image runs
-# cloud-init with the Azure datasource, so the shared ``mngr_vps_docker``
+# cloud-init with the Azure datasource, so the shared ``mngr_vps``
 # cloud-init flow (Docker install, SSH host-key injection, mngr bootstrap) works
 # unchanged. The four-part publisher/offer/sku/version URN is configurable for
 # users who want a different distro or a custom image; ``test_release_azure``
@@ -116,7 +116,7 @@ def read_az_cli_default_subscription() -> str | None:
     return None
 
 
-class AzureProviderConfig(VpsDockerProviderConfig):
+class AzureProviderConfig(PublicIpVpsProviderConfig):
     """Configuration for the Azure Virtual Machines VPS Docker provider.
 
     Credentials are deliberately not stored in this config. Azure's
@@ -186,23 +186,6 @@ class AzureProviderConfig(VpsDockerProviderConfig):
     os_disk_type: str = Field(
         default="StandardSSD_LRS",
         description="OS managed-disk storage account type (e.g. 'StandardSSD_LRS', 'Premium_LRS', 'Standard_LRS').",
-    )
-    allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=("0.0.0.0/0",),
-        description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the NSG `mngr azure "
-            "prepare` creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ['203.0.113.4/32'] to "
-            "restrict to your own IP, or [] for no SSH ingress (the NSG is created with no allow rule, "
-            "so its default deny leaves instances unreachable from outside the vnet). A warning is logged "
-            "when the effective range is 0.0.0.0/0 or empty."
-        ),
-    )
-    associate_public_ip: bool = Field(
-        default=True,
-        description=(
-            "Assign a public IPv4 address to the VM. Required for the current "
-            "mngr-from-developer-laptop SSH access model."
-        ),
     )
     state_storage_account_name: str | None = Field(
         default=None,

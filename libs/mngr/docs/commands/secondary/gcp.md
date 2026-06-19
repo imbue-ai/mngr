@@ -63,6 +63,7 @@ mngr gcp cleanup [OPTIONS]
 | `--project` | text | GCP project ID. Defaults to the resolved provider config's project_id (or the gcloud/ADC default). | None |
 | `--firewall-name` | text | Firewall rule name to delete. Defaults to the resolved provider config's firewall_name. | None |
 | `--network` | text | VPC network the rule applies to (part of its identity). Defaults to the resolved provider config's network. | None |
+| `--force` | boolean | Also delete the GCS state bucket when it still holds offline host state left over from hosts that no longer exist as instances (otherwise cleanup refuses to delete a non-empty bucket). | `False` |
 
 ## Common
 

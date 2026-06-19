@@ -20,7 +20,7 @@ dependencies = [
     "imbue-mngr-forward",
     "imbue-mngr-latchkey",
     "imbue-mngr-ovh",
-    "imbue-mngr-vps-docker",
+    "imbue-mngr-vps",
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
@@ -54,7 +54,7 @@ imbue-mngr-aws = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-ovh = { workspace = true }
-imbue-mngr-vps-docker = { workspace = true }
+imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }
 
 # Force-include the compiled Tailwind stylesheet for the desktop client. It is

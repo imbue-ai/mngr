@@ -868,7 +868,7 @@ class AntigravityAgent(
             ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
         host_home, host_uname = self._resolve_host_home_and_os(host)
         self._ensure_source_repo_trusted(host, host_home, mngr_ctx)
-        self._provision_agy_home(host, host_home, host_uname)
+        self._provision_agy_home(host, host_home, host_uname, mngr_ctx)
         with mngr_ctx.concurrency_group.make_concurrency_group("antigravity_provisioning") as concurrency_group:
             provision_raw_transcript_scripts(
                 self,
@@ -902,7 +902,9 @@ class AntigravityAgent(
                 concurrency_group,
             )
 
-    def _provision_agy_home(self, host: OnlineHostInterface, host_home: Path, host_uname: str) -> None:
+    def _provision_agy_home(
+        self, host: OnlineHostInterface, host_home: Path, host_uname: str, mngr_ctx: MngrContext
+    ) -> None:
         """Write the mngr-owned per-agent ``$HOME`` tree (idempotent each provision).
 
         Provisions the oauth token, settings.json (including the mngr-owned
@@ -929,6 +931,7 @@ class AntigravityAgent(
             base_settings,
             self.agent_config.settings_overrides,
             [self._get_agy_workspace_symlink_path()],
+            allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
         )
         # The agy statusLine must be mngr's: RUNNING/WAITING detection and
         # message-submission confirmation both depend on statusline.sh running, and
