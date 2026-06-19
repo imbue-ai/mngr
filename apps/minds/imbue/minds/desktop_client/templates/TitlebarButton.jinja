@@ -18,7 +18,9 @@
                    on platforms where minds draws its own frame.
                    ``w-9 h-[38px]``, square corners (matches the OS).
     tone
-      "default" -- accent-aware hover via ``.titlebar-btn``.
+      "default" -- no extra class; the foreground + hover come from the
+                   shared ``_btn_base`` tokens above (re-based per-workspace
+                   by the ``.titlebar-surface`` scope in app.css).
       "danger"  -- close-button-only red hover regardless of accent
                    (``.titlebar-btn-danger``); use on the close control
                    to mirror native Windows / Linux behavior.
