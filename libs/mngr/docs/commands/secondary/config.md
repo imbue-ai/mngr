@@ -317,6 +317,18 @@ $ mngr config extend work_dir_extra_paths '{".venv": "SHARE"}'
 
 ## mngr config assign
 
+Assign a value, replacing the base without the narrowing guard.
+
+Writes a ``KEY__assign`` entry into the TOML file. Like a bare
+``mngr config set``, the value replaces whatever lower-precedence layers provided -- but
+``__assign`` suppresses the narrowing guard, so it will not error when the replacement
+drops a non-empty list/dict/set from a lower layer. Use it when you intend to replace an
+aggregate wholesale.
+
+On a ``settings_overrides`` path the suffix is not written (Claude would not understand
+it); instead the value is written bare plus a ``__mngr_merge`` ``assign`` directive. For
+consistency, ``mngr config set KEY__assign VALUE`` routes through this same code path.
+
 **Usage:**
 
 ```text
@@ -338,12 +350,22 @@ mngr config assign [OPTIONS] KEY VALUE
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
+| `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--scope` | choice (`user` &#x7C; `project` &#x7C; `local`) | Config scope: user (~/.mngr/profiles/<profile_id>/), project (.mngr/), or local (.mngr/settings.local.toml) | `project` |
+
+
+## Examples
+
+**Replace a custom agent type's allow-list (no narrowing error)**
+
+```bash
+$ mngr config assign agent_types.write-plus.settings_overrides.permissions.allow '["Read", "Edit"]'
+```
 
 ## mngr config unset
 

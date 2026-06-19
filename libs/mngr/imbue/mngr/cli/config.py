@@ -37,7 +37,6 @@ from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.errors import ConfigNotFoundError
-from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
@@ -46,7 +45,6 @@ from imbue.mngr.utils.model_schema import walk_model_fields
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
-from imbue.overlay.errors import OverlayError
 from imbue.overlay.operators import ASSIGN_SUFFIX
 from imbue.overlay.operators import EXTEND_SUFFIX
 from imbue.overlay.operators import is_assign_key
@@ -536,14 +534,10 @@ def _emit_key_not_found(key: str, output_opts: OutputOptions) -> None:
 @add_common_options
 @click.pass_context
 def config_set(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
-    try:
-        _config_set_impl(ctx, key, value, **kwargs)
-    except (OverlayError, ConfigParseError) as e:
-        logger.error("Invalid configuration: {}", e)
-        ctx.exit(1)
-    except AbortError as e:
-        logger.error("Aborted: {}", e.message)
-        ctx.exit(1)
+    # No local error handling: a ConfigParseError / UserInputError (the overlay wraps
+    # OverlayError into ConfigParseError) is a MngrError rendered by the central CLI handler,
+    # and an AbortError is by design a BaseException that propagates to the top level.
+    _config_set_impl(ctx, key, value, **kwargs)
 
 
 def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
@@ -664,14 +658,7 @@ def _config_merge_op_impl(ctx: click.Context, key: str, value: str, *, op: str, 
 @click.pass_context
 def config_extend(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
     """Write a ``key__extend`` entry that appends to / merges with the base."""
-    try:
-        _config_merge_op_impl(ctx, key, value, op="extend", **kwargs)
-    except (OverlayError, ConfigParseError) as e:
-        logger.error("Invalid configuration: {}", e)
-        ctx.exit(1)
-    except AbortError as e:
-        logger.error("Aborted: {}", e.message)
-        ctx.exit(1)
+    _config_merge_op_impl(ctx, key, value, op="extend", **kwargs)
 
 
 @config.command(name="assign")
@@ -688,14 +675,7 @@ def config_extend(ctx: click.Context, key: str, value: str, **kwargs: Any) -> No
 @click.pass_context
 def config_assign(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
     """Write a ``key__assign`` entry that replaces the base without the narrowing guard."""
-    try:
-        _config_merge_op_impl(ctx, key, value, op="assign", **kwargs)
-    except (OverlayError, ConfigParseError) as e:
-        logger.error("Invalid configuration: {}", e)
-        ctx.exit(1)
-    except AbortError as e:
-        logger.error("Aborted: {}", e.message)
-        ctx.exit(1)
+    _config_merge_op_impl(ctx, key, value, op="assign", **kwargs)
 
 
 def _emit_config_merge_op_result(
@@ -1270,6 +1250,32 @@ routes through this same code path.""",
     ),
 ).register()
 add_pager_help_option(config_extend)
+
+CommandHelpMetadata(
+    key="config.assign",
+    one_line_description="Assign a value, replacing the base without the narrowing guard",
+    synopsis="mngr config assign KEY VALUE [OPTIONS]",
+    description="""Writes a ``KEY__assign`` entry into the TOML file. Like a bare
+``mngr config set``, the value replaces whatever lower-precedence layers provided -- but
+``__assign`` suppresses the narrowing guard, so it will not error when the replacement
+drops a non-empty list/dict/set from a lower layer. Use it when you intend to replace an
+aggregate wholesale.
+
+On a ``settings_overrides`` path the suffix is not written (Claude would not understand
+it); instead the value is written bare plus a ``__mngr_merge`` ``assign`` directive. For
+consistency, ``mngr config set KEY__assign VALUE`` routes through this same code path.""",
+    examples=(
+        (
+            "Replace a custom agent type's allow-list (no narrowing error)",
+            'mngr config assign agent_types.write-plus.settings_overrides.permissions.allow \'["Read", "Edit"]\'',
+        ),
+    ),
+    see_also=(
+        ("config extend", "Extend a list/dict/set value (appends/merges instead of replacing)"),
+        ("config set", "Assign a value with the narrowing guard"),
+    ),
+).register()
+add_pager_help_option(config_assign)
 
 CommandHelpMetadata(
     key="config.unset",

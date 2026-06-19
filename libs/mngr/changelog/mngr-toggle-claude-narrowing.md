@@ -14,3 +14,5 @@ A bare key still assigns with the narrowing guard; the narrowing error now print
 New `mngr config assign <key> <value>` command, mirroring `mngr config extend`: it writes a `key__assign` entry (replace without the narrowing guard), or -- on a `settings_overrides` path -- a `__mngr_merge` `assign` directive. `mngr config set key__assign <value>` routes to it, and `mngr config get` resolves the `__assign` form.
 
 A settings key that contains a literal dot (e.g. an MCP server name like `my.server`) cannot be targeted by a dotted `__mngr_merge` path: such a directive errors as dangling and the auto-remediation skips it rather than mis-advising.
+
+`mngr config set` / `extend` / `assign` now let configuration errors render through the central CLI error handler (a `ConfigParseError` is a `MngrError`) instead of a local catch, so an invalid value prints e.g. `Error: Unknown configuration fields: ['provider']` rather than an `Invalid configuration: ...` line.

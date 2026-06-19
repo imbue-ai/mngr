@@ -292,7 +292,9 @@ def test_config_set_rejects_unknown_top_level_field(
         obj=plugin_manager,
     )
     assert result.exit_code == 1
-    assert "Invalid configuration" in result.output
+    # The ConfigParseError is a MngrError, rendered cleanly by the central CLI handler.
+    assert "Unknown configuration fields" in result.output
+    assert "provider" in result.output
 
     # Verify the file was NOT created/modified
     config_path = temp_git_repo / f".{mngr_test_root_name}" / "settings.toml"
