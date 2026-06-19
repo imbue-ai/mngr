@@ -1140,6 +1140,81 @@ def test_no_legacy_oklch_accents_remain_in_templates_or_static() -> None:
     assert offenders == []
 
 
+# -- Design-system scale guards --
+#
+# app.css re-bases --spacing to 1px, so a spacing utility's number is its
+# pixel value (p-2 = 2px). Padding / margin / gap are constrained to a fixed
+# px scale; radius is constrained to four named steps. These guards scan the
+# authored source (templates / static / templates.py, never the generated
+# app.min.css) and fail if an off-scale value is introduced.
+
+_SPACING_SCALE_PX: Final[frozenset[int]] = frozenset({0, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64})
+# Only padding / margin / gap follow the scale; width / height / inset are
+# free layout dimensions and are intentionally NOT scanned.
+_SPACING_PREFIXES: Final[tuple[str, ...]] = (
+    "p", "px", "py", "pt", "pr", "pb", "pl", "ps", "pe",
+    "m", "mx", "my", "mt", "mr", "mb", "ml", "ms", "me",
+    "gap", "gap-x", "gap-y", "space-x", "space-y",
+)
+
+
+def _strip_svg_path_data(text: str) -> str:
+    """Remove SVG ``d="..."`` path attributes so their command+coord runs
+    (``h-4``, ``m-2``, ``v6`` ...) are not misread as spacing utilities."""
+    text = re.sub(r'(?<![\w-])d="[^"]*"', "", text)
+    return re.sub(r"(?<![\w-])d='[^']*'", "", text)
+
+
+def _design_system_source_files() -> list[Path]:
+    client_root = Path(_templates_module.__file__).resolve().parent
+    files = [
+        path
+        for directory in (client_root / "templates", client_root / "static")
+        for path in sorted(directory.rglob("*"))
+        if path.suffix in (".jinja", ".js") and path.name != "app.min.css"
+    ]
+    files.append(client_root / "templates.py")
+    return files
+
+
+def test_spacing_utilities_stay_on_scale() -> None:
+    """Padding / margin / gap utilities must use the px spacing scale
+    (0 / 2 / 4 / 6 / 8 / 12 / 16 / 24 / 32 / 48 / 64). A new off-scale value
+    (e.g. ``py-10``) fails here; snap it to the nearest step or, if it is a
+    deliberate layout dimension, use width / height / inset instead (those are
+    free px and not scanned)."""
+    alt = "|".join(sorted((re.escape(p) for p in _SPACING_PREFIXES), key=len, reverse=True))
+    token = re.compile(r"(?<![\w-])-?(" + alt + r")-([0-9]+(?:\.[0-9]+)?)(?![\w./\[])")
+    offenders: list[str] = []
+    for path in _design_system_source_files():
+        text = _strip_svg_path_data(path.read_text())
+        for match in token.finditer(text):
+            if float(match.group(2)) not in _SPACING_SCALE_PX:
+                offenders.append(f"{path.name}: {match.group(0)}")
+    assert offenders == [], (
+        "Off-scale padding/margin/gap utilities found. The spacing scale is "
+        "2/4/6/8/12/16/24/32/48/64 px (--spacing is 1px, so the number is the "
+        f"pixel value). Snap to the nearest step: {offenders}"
+    )
+
+
+def test_radius_utilities_stay_on_scale() -> None:
+    """Corner radius is limited to ``rounded-sm`` / ``-md`` / ``-lg`` / ``-xl``
+    (2/4/8/16 px) plus ``rounded-full`` / ``rounded-none``. The old
+    ``rounded-2xl`` / ``-3xl`` / ``-xs`` steps and arbitrary ``rounded-[..]``
+    values are disallowed -- the sole exception is the chrome content frame's
+    structural ``rounded-[12px]`` (matches Electron's CONTENT_CORNER_RADIUS)."""
+    disallowed = re.compile(r"\brounded-(?:2xl|3xl|4xl|xs)\b|\brounded-\[(?!12px\])[^\]]*\]")
+    offenders: list[str] = []
+    for path in _design_system_source_files():
+        for match in disallowed.finditer(path.read_text()):
+            offenders.append(f"{path.name}: {match.group(0)}")
+    assert offenders == [], (
+        "Disallowed corner-radius utilities found. Use rounded-sm/-md/-lg/-xl "
+        f"(2/4/8/16 px) or rounded-full/-none: {offenders}"
+    )
+
+
 def test_notice_renders_each_variant() -> None:
     variants_to_class = {
         "info": "bg-info/12",
